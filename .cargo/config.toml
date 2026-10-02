@@ -1,0 +1,8 @@
+# frac-rs builds through cuda-oxide (`cargo oxide …`): its kernels are Rust compiled to PTX by the
+# rustc_codegen_cuda backend. Plain `cargo build` / `cargo run` cannot (build.rs explains why).
+# Built-in `cargo b` / `cargo r` cannot be overridden, hence the `o` prefix.
+[alias]
+ob = "oxide build"
+or = "oxide run"
+ogallery = "oxide run -- --gallery"
+obench = "oxide run -- --bench"

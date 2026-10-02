@@ -1,0 +1,565 @@
+#!/usr/bin/env python3
+"""
+bootstrap.py - Unified local build/run/check script for frac-rs.
+
+Cross-platform-ish (Linux / WSL2), Python 3, stdlib only. Adapted from the gitnexus-rs
+bootstrap.
+
+frac-rs builds through cuda-oxide: its GPU kernels (src/gpu.rs) are Rust compiled to PTX by the
+rustc_codegen_cuda backend, which `cargo oxide` enables. Plain `cargo build` cannot link them
+(build.rs stops it with an explanation). This script checks the toolchain first, then drives
+`cargo oxide`.
+
+Toolchain (see README.md):
+    NVIDIA driver (on WSL2: the Windows driver, never a Linux one inside WSL)
+    CUDA Toolkit 13.x (nvcc, libNVVM, nvJitLink)      CUDA_HOME, default /usr/local/cuda
+    LLVM llc 21+ and clang + libclang headers         CUDA_OXIDE_LLC, default newest llc-2x
+    rustup toolchain nightly-2026-08-28 (rust-toolchain.toml) + rust-src rustc-dev llvm-tools
+    cargo-oxide (cargo install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide)
+
+Commands:
+    d(octor)      Check the toolchain (--fix installs the rustup / cargo-oxide parts)
+    b(uild)       cargo oxide build  -> target/release/frac-rs
+    r(un)         Build, then run the browser (args after `--` go to frac-rs)
+    g(allery)     Render every preset:  g [DIR [W H SPP]]   (default gallery 1920 1080 256)
+    bench         Time every preset:    bench [W H SPP]     (default 960 540 32)
+    docs          Rebuild the README images in docs/ (needs uv for Pillow)
+    i(nstall)     Copy the release binary to ~/.local/bin/frac-rs
+    c(heck)       cargo fmt --check + cargo clippy
+    cl(ean)       cargo clean (+ stray *.ll / *.ptx dumps in the repo root)
+    h(elp)        Print help
+
+Examples:
+    python bootstrap.py d --fix
+    python bootstrap.py b
+    python bootstrap.py r
+    python bootstrap.py r -- --bench 1920 1080 64
+    python bootstrap.py g out 3840 2160 1024
+    python bootstrap.py i
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+
+ROOT_DIR = Path(__file__).parent.resolve()
+IS_WINDOWS = platform.system() == "Windows"
+IS_WSL = "microsoft" in platform.release().lower()
+
+BIN_NAME = "frac-rs.exe" if IS_WINDOWS else "frac-rs"
+RELEASE_BIN = ROOT_DIR / "target" / "release" / BIN_NAME
+INSTALL_DIR = Path.home() / ".local" / "bin"
+
+CUDA_OXIDE_GIT = "https://github.com/NVlabs/cuda-oxide.git"
+RUST_COMPONENTS = ["rust-src", "rustc-dev", "rust-analyzer", "clippy", "rustfmt", "llvm-tools"]
+MIN_LLVM = 21
+MIN_CUDA_MAJOR = 13
+
+
+class C:
+    RST = "\033[0m"
+    RED = "\033[91m"
+    GRN = "\033[92m"
+    YLW = "\033[93m"
+    CYN = "\033[96m"
+    WHT = "\033[97m"
+
+    @classmethod
+    def init(cls) -> None:
+        if IS_WINDOWS:
+            os.system("")
+
+
+def fmt_time(ms: float) -> str:
+    if ms < 1000:
+        return f"{ms:.0f}ms"
+    if ms < 60000:
+        return f"{ms / 1000:.1f}s"
+    mins = int(ms // 60000)
+    secs = (ms % 60000) / 1000
+    return f"{mins}m{secs:.0f}s"
+
+
+def header(text: str) -> None:
+    line = "=" * 60
+    print(f"\n{C.CYN}{line}\n{text}\n{line}{C.RST}")
+
+
+def step(text: str) -> None:
+    print(f"  {C.WHT}{text}{C.RST}")
+
+
+def ok(text: str) -> None:
+    print(f"  {C.GRN}[OK] {text}{C.RST}")
+
+
+def warn(text: str) -> None:
+    print(f"  {C.YLW}[WARN] {text}{C.RST}")
+
+
+def err(text: str) -> None:
+    print(f"  {C.RED}[ERR] {text}{C.RST}")
+
+
+def run(args: list[str], cwd: Path | None = None, capture: bool = False, env: dict | None = None) -> tuple[int, str, float]:
+    start = time.perf_counter()
+    try:
+        result = subprocess.run(args, cwd=cwd or ROOT_DIR, capture_output=capture, text=True, env=env or build_env())
+    except FileNotFoundError:
+        return 127, f"{args[0]}: not found", 0.0
+    elapsed_ms = (time.perf_counter() - start) * 1000
+    output = (result.stdout or "") + (result.stderr or "") if capture else ""
+    return result.returncode, output, elapsed_ms
+
+
+def which(cmd: str) -> Path | None:
+    found = shutil.which(cmd, path=build_env().get("PATH"))
+    return Path(found) if found else None
+
+
+# =============================================================================
+# environment
+# =============================================================================
+
+def pinned_toolchain() -> str:
+    text = (ROOT_DIR / "rust-toolchain.toml").read_text(encoding="utf-8")
+    m = re.search(r'channel\s*=\s*"([^"]+)"', text)
+    return m.group(1) if m else "nightly"
+
+
+def newest_llc() -> Path | None:
+    """The newest `llc-NN` (NN >= MIN_LLVM) on PATH, else a plain `llc` if new enough."""
+    path = os.environ.get("PATH", "")
+    best: tuple[int, Path] | None = None
+    for d in path.split(os.pathsep):
+        p = Path(d)
+        if not p.is_dir():
+            continue
+        for f in p.glob("llc-*"):
+            m = re.fullmatch(r"llc-(\d+)", f.name)
+            if m and int(m.group(1)) >= MIN_LLVM and (best is None or int(m.group(1)) > best[0]):
+                best = (int(m.group(1)), f)
+    if best:
+        return best[1]
+    plain = shutil.which("llc")
+    return Path(plain) if plain else None
+
+
+_ENV: dict | None = None
+
+
+def build_env() -> dict:
+    """os.environ plus the defaults cargo-oxide needs (CUDA_HOME, PATH, CUDA_OXIDE_LLC)."""
+    global _ENV
+    if _ENV is None:
+        env = dict(os.environ)
+        cuda = Path(env.get("CUDA_HOME", "/usr/local/cuda"))
+        env.setdefault("CUDA_HOME", str(cuda))
+        extra = [str(cuda / "bin"), str(Path.home() / ".cargo" / "bin")]
+        env["PATH"] = os.pathsep.join(extra + [env.get("PATH", "")])
+        if "CUDA_OXIDE_LLC" not in env:
+            llc = newest_llc()
+            if llc:
+                env["CUDA_OXIDE_LLC"] = str(llc)
+        _ENV = env
+    return _ENV
+
+
+def check_cargo() -> bool:
+    if not which("cargo"):
+        err("Rust/Cargo not found")
+        step("Install Rust from https://rustup.rs/")
+        return False
+    return True
+
+
+# =============================================================================
+# doctor
+# =============================================================================
+
+def doctor(fix: bool, full: bool = True) -> bool:
+    """Check every toolchain piece; with `fix`, install the user-level ones (rustup, cargo-oxide)."""
+    env = build_env()
+    passed = True
+
+    # --- GPU / driver
+    code, out, _ = run(["nvidia-smi", "--query-gpu=name,driver_version,compute_cap", "--format=csv,noheader"], capture=True)
+    if code == 0 and out.strip():
+        ok(f"GPU: {out.strip().splitlines()[0]}")
+    else:
+        err("nvidia-smi failed: no NVIDIA driver / GPU visible")
+        if IS_WSL:
+            step("WSL2: install/update the driver on WINDOWS; never install nvidia-driver-* or cuda-drivers in WSL")
+        passed = False
+
+    # --- CUDA toolkit
+    nvcc = which("nvcc")
+    if nvcc:
+        code, out, _ = run([str(nvcc), "--version"], capture=True)
+        m = re.search(r"release (\d+)\.(\d+)", out)
+        if m and int(m.group(1)) >= MIN_CUDA_MAJOR:
+            ok(f"CUDA {m.group(1)}.{m.group(2)} ({nvcc}), CUDA_HOME={env['CUDA_HOME']}")
+        else:
+            err(f"CUDA {MIN_CUDA_MAJOR}.x+ needed, found: {m.group(0) if m else 'unknown'}")
+            passed = False
+    else:
+        err("nvcc not found (CUDA toolkit)")
+        apt_hint("cuda-toolkit-13-3 libcurand-dev-13-3", repo=True)
+        passed = False
+
+    # --- LLVM llc + clang
+    llc = env.get("CUDA_OXIDE_LLC")
+    if llc and Path(llc).exists():
+        ok(f"llc: {llc}")
+    else:
+        err(f"LLVM llc {MIN_LLVM}+ not found")
+        apt_hint(f"llvm-{MIN_LLVM + 1} clang-{MIN_LLVM + 1} libclang-common-{MIN_LLVM + 1}-dev libclang-{MIN_LLVM + 1}-dev")
+        passed = False
+    clang = next((c for c in (f"clang-{v}" for v in range(30, MIN_LLVM - 1, -1)) if which(c)), None) or ("clang" if which("clang") else None)
+    if clang:
+        ok(f"clang: {clang}")
+    else:
+        err("clang not found (needed by bindgen)")
+        passed = False
+
+    # --- Rust toolchain
+    if not check_cargo():
+        return False
+    channel = pinned_toolchain()
+    code, out, _ = run(["rustup", "toolchain", "list"], capture=True)
+    if channel in out:
+        ok(f"rustup toolchain {channel}")
+    elif fix:
+        step(f"Installing {channel} ...")
+        code, _, _ = run(["rustup", "toolchain", "install", channel, "--profile", "minimal"])
+        passed &= code == 0
+    else:
+        err(f"rustup toolchain {channel} missing (python bootstrap.py d --fix)")
+        passed = False
+    code, out, _ = run(["rustup", "component", "list", "--installed", "--toolchain", channel], capture=True)
+    missing = [c for c in RUST_COMPONENTS if not any(line.startswith(c) for line in out.splitlines())]
+    if not missing:
+        ok("components: " + " ".join(RUST_COMPONENTS))
+    elif fix:
+        step("Adding components: " + " ".join(missing))
+        code, _, _ = run(["rustup", "component", "add", *missing, "--toolchain", channel])
+        passed &= code == 0
+    else:
+        err("missing components: " + " ".join(missing) + " (python bootstrap.py d --fix)")
+        passed = False
+
+    # --- cargo-oxide
+    if which("cargo-oxide"):
+        ok(f"cargo-oxide: {which('cargo-oxide')}")
+    elif fix:
+        step("Installing cargo-oxide (one-time, ~1 min) ...")
+        code, _, _ = run(["cargo", f"+{channel}", "install", "--git", CUDA_OXIDE_GIT, "cargo-oxide"])
+        passed &= code == 0
+    else:
+        err("cargo-oxide not installed (python bootstrap.py d --fix)")
+        passed = False
+
+    # --- cargo-oxide's own check (backend, libNVVM, nvJitLink, libdevice, ...)
+    if full and passed:
+        print()
+        step("cargo oxide doctor")
+        code, out, _ = run(["cargo", "oxide", "doctor"], capture=True)
+        for line in out.splitlines():
+            if "✓" in line or "✗" in line or "Environment" in line or "-" in line[:4]:
+                print("    " + line)
+        passed &= code == 0
+    return passed
+
+
+def apt_hint(packages: str, repo: bool = False) -> None:
+    if repo:
+        step("NVIDIA repo (WSL): https://developer.download.nvidia.com/compute/cuda/repos/wsl-ubuntu/x86_64/cuda-keyring_1.1-1_all.deb"
+             if IS_WSL else "NVIDIA repo: https://developer.nvidia.com/cuda-downloads")
+    step(f"sudo apt-get install -y {packages}")
+
+
+def run_doctor(args: argparse.Namespace) -> int:
+    header("DOCTOR")
+    good = doctor(fix=args.fix)
+    print()
+    if good:
+        ok("Toolchain ready")
+    else:
+        err("Toolchain incomplete (see above)")
+    print()
+    return 0 if good else 1
+
+
+# =============================================================================
+# build / run / render
+# =============================================================================
+
+def build(args: argparse.Namespace) -> int:
+    if not doctor(fix=False, full=False):
+        err("Toolchain incomplete: python bootstrap.py d --fix")
+        return 1
+    cmd = ["cargo", "oxide", "build"]
+    if getattr(args, "arch", None):
+        cmd += ["--arch", args.arch]
+    step("cargo oxide build (release; kernels -> PTX embedded in the binary)")
+    print()
+    code, _, elapsed = run(cmd)
+    if code == 0 and RELEASE_BIN.is_file():
+        ok(f"Build successful ({fmt_time(elapsed)})")
+        step(f"Binary: {RELEASE_BIN}")
+    else:
+        err("Build failed")
+    print()
+    return code
+
+
+def run_build(args: argparse.Namespace) -> int:
+    header("BUILD")
+    return build(args)
+
+
+def run_app(args: argparse.Namespace, app_args: list[str]) -> int:
+    header("RUN")
+    code = build(args)
+    if code != 0:
+        return code
+    step(f"{BIN_NAME} {' '.join(app_args)}".rstrip())
+    code, _, _ = run([str(RELEASE_BIN), *app_args])
+    return code
+
+
+def run_gallery(args: argparse.Namespace) -> int:
+    rest = args.rest or []
+    out = rest[0] if rest else "gallery"
+    dims = rest[1:4] if len(rest) > 1 else ["1920", "1080", "256"]
+    header(f"GALLERY -> {out}/")
+    return run_app(args, ["--gallery", out, *dims])
+
+
+def run_bench(args: argparse.Namespace) -> int:
+    dims = args.rest or ["960", "540", "32"]
+    return run_app(args, ["--bench", *dims])
+
+
+def run_docs(args: argparse.Namespace) -> int:
+    """Regenerate docs/: gallery contact sheet, hero renders, UI screenshots, bench table."""
+    header("DOCS")
+    if not which("uv"):
+        err("uv not found (used to run Pillow without touching system Python)")
+        return 1
+    code = build(args)
+    if code != 0:
+        return code
+    tmp = ROOT_DIR / "target" / "docs-gallery"
+    shutil.rmtree(tmp, ignore_errors=True)
+    step("Rendering the gallery (1280x720, 256 spp) ...")
+    code, out, _ = run([str(RELEASE_BIN), "--gallery", str(tmp), "1280", "720", "256"], capture=True)
+    if code != 0:
+        err("Gallery render failed")
+        print(out)
+        return code
+    (ROOT_DIR / "docs" / "bench-1280x720.txt").write_text(out, encoding="utf-8")
+    snaps = [
+        ("ui-menger.png", {"FRAC_SNAP_PRESET": "13"}),
+        ("ui-materials.png", {"FRAC_SNAP_PRESET": "9", "FRAC_SNAP_MATERIAL": "BrushedAluminium", "FRAC_SNAP_TAB": "materials"}),
+    ]
+    for name, extra in snaps:
+        step(f"Window screenshot {name} ...")
+        env = dict(build_env(), FRAC_SNAP=str(ROOT_DIR / "docs" / name), FRAC_SNAP_SPP="256", **extra)
+        run([str(RELEASE_BIN)], env=env)
+    script = r'''
+import glob, os, sys
+from PIL import Image
+src, docs = sys.argv[1], sys.argv[2]
+order = ["mandelbulb","mandelbox","quaternion-julia","kifs","kleinian","pseudo-kleinian","apollonian","hybrid",
+         "bulb-power-12-gold","menger-sponge","quaternion-glass-coat","bulb-julia","bulb-twisted","octahedron-kifs",
+         "hybrid-bulb-kifs","pseudo-kleinian-cave"]
+w, h, cols = 400, 225, 4
+sheet = Image.new("RGB", (cols * w, (len(order) + cols - 1) // cols * h))
+for i, n in enumerate(order):
+    sheet.paste(Image.open(f"{src}/{n}.png").resize((w, h), Image.LANCZOS), ((i % cols) * w, (i // cols) * h))
+sheet.save(f"{docs}/gallery.jpg", quality=90)
+for n in ["mandelbulb", "bulb-power-12-gold", "menger-sponge", "pseudo-kleinian-cave"]:
+    Image.open(f"{src}/{n}.png").convert("RGB").save(f"{docs}/{n}.jpg", quality=92)
+for f in glob.glob(f"{docs}/ui-*.png"):
+    Image.open(f).convert("RGB").save(f[:-4] + ".jpg", quality=90)
+    os.remove(f)
+'''
+    code, out, _ = run(["uv", "run", "-q", "--with", "pillow", "python", "-c", script, str(tmp), str(ROOT_DIR / "docs")], capture=True)
+    if code == 0:
+        ok("docs/ updated")
+    else:
+        err("Image processing failed")
+        print(out)
+    print()
+    return code
+
+
+def run_install(args: argparse.Namespace) -> int:
+    header("INSTALL")
+    if not RELEASE_BIN.is_file() or args.force_install:
+        code = build(args)
+        if code != 0:
+            return code
+    else:
+        step(f"Using existing binary: {RELEASE_BIN} (-f to rebuild)")
+    INSTALL_DIR.mkdir(parents=True, exist_ok=True)
+    dest = INSTALL_DIR / BIN_NAME
+    shutil.copy2(RELEASE_BIN, dest)
+    ok(f"Installed {dest}")
+    if str(INSTALL_DIR) not in os.environ.get("PATH", "").split(os.pathsep):
+        warn(f"{INSTALL_DIR} is not on PATH")
+    print()
+    return 0
+
+
+def run_check(_args: argparse.Namespace) -> int:
+    header("CHECK")
+    passed = True
+
+    step("Checking formatting ...")
+    code, _, elapsed = run(["cargo", "fmt", "--check"])
+    if code == 0:
+        ok(f"Format OK ({fmt_time(elapsed)})")
+    else:
+        err("Format check failed (cargo fmt)")
+        passed = False
+
+    print()
+    # clippy only type-checks (no codegen), so it runs on the plain backend; build.rs lets it
+    # through (CLIPPY_ARGS).
+    step("Running clippy ...")
+    code, _, elapsed = run(["cargo", "clippy", "--release", "--", "-D", "warnings"])
+    if code == 0:
+        ok(f"Clippy OK ({fmt_time(elapsed)})")
+    else:
+        err("Clippy failed")
+        passed = False
+
+    print()
+    if passed:
+        ok("All checks passed")
+    else:
+        err("Some checks failed")
+    print()
+    return 0 if passed else 1
+
+
+def run_clean(_args: argparse.Namespace) -> int:
+    header("CLEAN")
+    code, _, elapsed = run(["cargo", "clean"])
+    if code == 0:
+        ok(f"cargo clean ({fmt_time(elapsed)})")
+    else:
+        err("cargo clean failed")
+        return code
+    # cuda-oxide drops its pipeline dumps next to the manifest.
+    stray = [p for pat in ("*.ll", "*.ptx") for p in ROOT_DIR.glob(pat)]
+    for p in stray:
+        p.unlink()
+    if stray:
+        ok(f"Removed {len(stray)} *.ll / *.ptx dumps")
+    print()
+    return 0
+
+
+HELP_TEXT = """
+FRAC-RS BUILD SYSTEM
+
+Kernels are Rust compiled to PTX by cuda-oxide: always build through `cargo oxide`
+(this script, or `cargo ob` / `cargo or`). Plain `cargo build` cannot link them.
+
+COMMANDS
+  d       doctor: check driver, CUDA, LLVM, clang, pinned nightly, cargo-oxide
+            --fix   install the missing rustup toolchain / components / cargo-oxide
+  b       build (cargo oxide build) -> target/release/frac-rs
+  r       build + run the browser; arguments after `--` go to frac-rs
+  g       render every preset:  g [DIR [W H SPP]]    (gallery 1920 1080 256)
+  bench   time every preset:    bench [W H SPP]      (960 540 32)
+  docs    regenerate docs/ (README images, bench table)
+  i       install to ~/.local/bin (copies the release binary; -f rebuilds)
+  c       cargo fmt --check + cargo clippy -D warnings
+  cl      cargo clean (+ *.ll / *.ptx dumps)
+  h       help
+
+OPTIONS
+  --arch sm_86     target architecture for b / r (default: detected GPU)
+  --fix            doctor: install what can be installed without sudo
+  -f, --force      install: rebuild first
+
+CARGO ALIASES (.cargo/config.toml)
+  cargo ob | cargo or | cargo ogallery DIR W H SPP | cargo obench W H SPP
+
+EXAMPLES
+  python bootstrap.py d --fix
+  python bootstrap.py b
+  python bootstrap.py r
+  python bootstrap.py r -- --bench 1920 1080 64
+  python bootstrap.py g out 3840 2160 1024
+  python bootstrap.py docs
+  python bootstrap.py i
+"""
+
+COMMANDS = ["d", "b", "r", "g", "bench", "docs", "i", "c", "cl", "h"]
+
+
+def main() -> int:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(line_buffering=True)
+
+    C.init()
+
+    argv = sys.argv[1:]
+    app_args: list[str] = []
+    if "--" in argv:
+        i = argv.index("--")
+        argv, app_args = argv[:i], argv[i + 1:]
+
+    parser = argparse.ArgumentParser(
+        description="frac-rs build system",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("command", nargs="?", choices=COMMANDS, default="h", help=", ".join(COMMANDS))
+    parser.add_argument("rest", nargs="*", help="positional arguments for g / bench")
+    parser.add_argument("--arch", help="CUDA architecture, e.g. sm_86")
+    parser.add_argument("--fix", action="store_true", help="doctor: install missing user-level tools")
+    parser.add_argument("-f", "--force", dest="force_install", action="store_true", help="install: rebuild first")
+
+    args = parser.parse_args(argv)
+
+    if args.command == "h":
+        print(HELP_TEXT)
+        return 0
+
+    if args.command == "r":
+        return run_app(args, app_args)
+
+    dispatch = {
+        "d": run_doctor,
+        "b": run_build,
+        "g": run_gallery,
+        "bench": run_bench,
+        "docs": run_docs,
+        "i": run_install,
+        "c": run_check,
+        "cl": run_clean,
+    }
+    handler = dispatch.get(args.command)
+    if handler:
+        return handler(args)
+
+    print(HELP_TEXT)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
