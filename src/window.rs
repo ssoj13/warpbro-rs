@@ -58,8 +58,12 @@ impl Native {
         let gpu = gpu_info::shared_device().context("wgpu: shared GPU unavailable")?;
         log::info!("Display/OCIO adapter: {:?}", gpu.adapter.get_info());
         let adapter = gpu.adapter.clone();
-        let device = gpu.device.clone();
-        let queue = gpu.queue.clone();
+        // Surface configuration waits for this device to become idle. OCIO's
+        // continuously submitting offscreen queue must never own that wait.
+        // Keep the negotiated instance/physical adapter, with a private UI queue.
+        let (device, queue) =
+            gpu_info::request_max_device_blocking(&adapter, gpu.device.features())
+                .context("wgpu: private presentation device unavailable")?;
         let surface = gpu.instance.create_surface(window.clone())?;
         let caps = surface.get_capabilities(&adapter);
         let (format, color_space) = Output::Sdr8
@@ -113,6 +117,11 @@ impl Native {
         })
     }
     fn redraw(&mut self, events: &ActiveEventLoop) -> Result<()> {
+        let tick = Instant::now();
+        if tick < self.next_redraw {
+            return Ok(());
+        }
+        self.next_redraw = tick + Duration::from_secs_f64(1.0 / self.app.gui_fps() as f64);
         let size = self.window.inner_size();
         if size.width == 0 || size.height == 0 {
             return Ok(());
@@ -165,11 +174,7 @@ impl Native {
         });
         let raw = self.input.take_egui_input(&self.window);
         let full = self.ctx.run_ui(raw, |root| self.app.ui(root));
-        let delay = full
-            .viewport_output
-            .get(&egui::ViewportId::ROOT)
-            .map_or(Duration::from_secs(60), |v| v.repaint_delay);
-        self.next_redraw = Instant::now() + delay.min(Duration::from_secs(60));
+        self.next_redraw = tick + Duration::from_secs_f64(1.0 / self.app.gui_fps() as f64);
         self.input
             .handle_platform_output(&self.window, full.platform_output);
         let mut screenshot = false;
@@ -250,11 +255,10 @@ impl Native {
         }
         let view = frame.texture.create_view(&Default::default());
         self.present.draw(&self.queue, &mut encoder, &view, target);
-        let _ = gpu_info::submit(
-            &self.queue,
-            "frac-rs present",
-            buffers.into_iter().chain([encoder.finish()]),
-        );
+        // This queue belongs exclusively to Native. The shared submit helper's
+        // process-wide mutex would serialize presentation behind OCIO workers.
+        self.queue
+            .submit(buffers.into_iter().chain([encoder.finish()]));
         self.queue.present(frame);
         for id in &full.textures_delta.free {
             self.renderer.free_texture(id);
@@ -289,9 +293,7 @@ impl ApplicationHandler for Host {
             && let winit::event::DeviceEvent::MouseMotion { delta } = event
         {
             let _ = native.input.on_mouse_motion(delta);
-            if native.cursor_grab != egui::CursorGrab::None {
-                native.window.request_redraw();
-            }
+            // Input is consumed at the next GUI tick; CUDA completion never schedules it.
         }
     }
     fn resumed(&mut self, events: &ActiveEventLoop) {
@@ -331,7 +333,7 @@ impl ApplicationHandler for Host {
                     events.exit();
                 }
             }
-            _ => native.window.request_redraw(),
+            _ => {}
         }
     }
 }

@@ -52,15 +52,28 @@ pub struct Target {
 }
 
 impl Gpu {
-    pub fn invalidate_colour(&mut self) { self.colour = crate::color::ColorPipeline::new(); self.colour_revision = self.colour_revision.wrapping_add(1); }
+    pub fn invalidate_colour(&mut self) {
+        self.colour = crate::color::ColorPipeline::new();
+        self.colour_revision = self.colour_revision.wrapping_add(1);
+    }
     pub fn new() -> Result<Self, String> {
         let ctx = CudaContext::new(0).map_err(|e| format!("CUDA context: {e:?}"))?;
         let stream = ctx.default_stream();
         // SAFETY: this package owns the embedded device bundle for `kernels`.
         let module = unsafe { kernels::load(&ctx) }.map_err(|e| format!("load module: {e:?}"))?;
         let name = ctx.device_name().unwrap_or_else(|_| "CUDA GPU".into());
-        let lut = DeviceBuffer::zeroed(&stream, PALETTE_SAMPLES + 1).map_err(|e| format!("{e:?}"))?;
-        Ok(Self { _ctx: ctx, stream, module, lut, lut_scheme: None, name, colour: crate::color::ColorPipeline::new(), colour_revision: 0 })
+        let lut =
+            DeviceBuffer::zeroed(&stream, PALETTE_SAMPLES + 1).map_err(|e| format!("{e:?}"))?;
+        Ok(Self {
+            _ctx: ctx,
+            stream,
+            module,
+            lut,
+            lut_scheme: None,
+            name,
+            colour: crate::color::ColorPipeline::new(),
+            colour_revision: 0,
+        })
     }
 
     pub fn target(&self, width: usize, height: usize) -> Target {
@@ -84,33 +97,93 @@ impl Gpu {
         }
     }
 
-    /// Add `spp` samples (0 = only re-tonemap) and refresh `target.pixels`. Restarts the
-    /// accumulation when anything but the tonemap changed. `bounces_cap` limits bounces (preview).
-    pub fn step(&mut self, target: &mut Target, scene: &Scene, spp: u32, seed: u32, bounces_cap: Option<u32>) {
+    /// Read the accumulated scene-linear radiance without exposure, saturation or OCIO.
+    /// Only final exports need this additional readback; CUDA uses padded 8×4 tiles.
+    pub fn scene_linear(&self, target: &Target) -> Vec<[f32; 4]> {
+        let mut tiled = vec![[0.0; 4]; target.accum.len()];
+        target
+            .accum
+            .copy_to_host(&self.stream, &mut tiled)
+            .expect("scene-linear readback");
+        let mut radiance = vec![[0.0; 4]; target.width * target.height];
+        for y in 0..target.height {
+            for x in 0..target.width {
+                let tile = (y / 4) * target.width.div_ceil(8) + x / 8;
+                let value = tiled[tile * 32 + (y % 4) * 8 + x % 8];
+                let inv = if value[3] > 0.0 {
+                    value[3].recip()
+                } else {
+                    0.0
+                };
+                radiance[y * target.width + x] =
+                    [value[0] * inv, value[1] * inv, value[2] * inv, 1.0];
+            }
+        }
+        radiance
+    }
+
+    /// Reset accumulation for changed tracing parameters without rendering or CPU readback.
+    /// This lets schedulers calculate remaining samples before selecting a single traced batch.
+    pub fn prepare_target(
+        &self,
+        target: &mut Target,
+        scene: &Scene,
+        bounces_cap: Option<u32>,
+    ) -> bool {
         let mut p = scene.pack(target.width as u32, target.height as u32);
         if let Some(cap) = bounces_cap {
             p[P_MAX_BOUNCES] = p[P_MAX_BOUNCES].min(cap as f32);
         }
-        let mut key = p.clone();
+        self.reset_target_for_params(target, scene, &p)
+    }
+
+    fn reset_target_for_params(&self, target: &mut Target, scene: &Scene, params: &[f32]) -> bool {
+        let mut key = params.to_vec();
         for i in TONEMAP_ONLY.iter().chain(PER_LAUNCH.iter()) {
             key[*i] = 0.0;
         }
-        if key != target.key || target.palette != Some(scene.palette) {
-            target.accum.zero_async(&self.stream).expect("clear accumulator");
-            target.samples = 0;
-            target.display_key = None;
-            target.key = key;
-            target.palette = Some(scene.palette);
+        if key == target.key && target.palette == Some(scene.palette) {
+            return false;
         }
+        target
+            .accum
+            .zero_async(&self.stream)
+            .expect("clear accumulator");
+        target.samples = 0;
+        target.display_key = None;
+        target.key = key;
+        target.palette = Some(scene.palette);
+        true
+    }
+
+    /// Add `spp` samples (0 = only re-tonemap) and refresh `target.pixels`. Restarts the
+    /// accumulation when anything but the tonemap changed. `bounces_cap` limits bounces (preview).
+    pub fn step(
+        &mut self,
+        target: &mut Target,
+        scene: &Scene,
+        spp: u32,
+        seed: u32,
+        bounces_cap: Option<u32>,
+    ) {
+        let mut p = scene.pack(target.width as u32, target.height as u32);
+        if let Some(cap) = bounces_cap {
+            p[P_MAX_BOUNCES] = p[P_MAX_BOUNCES].min(cap as f32);
+        }
+        self.reset_target_for_params(target, scene, &p);
         if self.lut_scheme != Some(scene.palette) {
-            self.lut.copy_from_host(&self.stream, &build_lut(scene.palette)).expect("palette upload");
+            self.lut
+                .copy_from_host(&self.stream, &build_lut(scene.palette))
+                .expect("palette upload");
             self.lut_scheme = Some(scene.palette);
         }
         p[P_SAMPLE_BEGIN] = target.samples as f32;
         p[P_SPP] = spp as f32;
         p[P_SEED] = seed as f32;
         let block: [f32; P_COUNT] = p.as_slice().try_into().expect("parameter block size");
-        self.module.set_params(&self.stream, &block).expect("params upload");
+        self.module
+            .set_params(&self.stream, &block)
+            .expect("params upload");
 
         let t0 = Instant::now();
         if spp > 0 {
@@ -130,7 +203,9 @@ impl Gpu {
                 (false, FAMILY_QUAT) => launch!(prepare_fast_quat, fast_quat),
                 (false, FAMILY_KIFS) => launch!(prepare_fast_kifs, fast_kifs),
                 (false, FAMILY_KLEINIAN) => launch!(prepare_fast_kleinian, fast_kleinian),
-                (false, FAMILY_PSEUDO_KLEINIAN) => launch!(prepare_fast_pseudo_kleinian, fast_pseudo_kleinian),
+                (false, FAMILY_PSEUDO_KLEINIAN) => {
+                    launch!(prepare_fast_pseudo_kleinian, fast_pseudo_kleinian)
+                }
                 (false, FAMILY_APOLLONIAN) => launch!(prepare_fast_apollonian, fast_apollonian),
                 (false, _) => launch!(prepare_fast_hybrid, fast_hybrid),
                 (true, FAMILY_BULB) => launch!(prepare_full_bulb, full_bulb),
@@ -138,22 +213,44 @@ impl Gpu {
                 (true, FAMILY_QUAT) => launch!(prepare_full_quat, full_quat),
                 (true, FAMILY_KIFS) => launch!(prepare_full_kifs, full_kifs),
                 (true, FAMILY_KLEINIAN) => launch!(prepare_full_kleinian, full_kleinian),
-                (true, FAMILY_PSEUDO_KLEINIAN) => launch!(prepare_full_pseudo_kleinian, full_pseudo_kleinian),
+                (true, FAMILY_PSEUDO_KLEINIAN) => {
+                    launch!(prepare_full_pseudo_kleinian, full_pseudo_kleinian)
+                }
                 (true, FAMILY_APOLLONIAN) => launch!(prepare_full_apollonian, full_apollonian),
                 (true, _) => launch!(prepare_full_hybrid, full_hybrid),
             }
             target.samples += spp;
         }
-        let display_key = (scene.render.exposure_stops, scene.render.saturation, scene.render.reinhard, format!("{}:{}", self.colour_revision, serde_json::to_string(&scene.colour).expect("colour settings")));
-        if spp == 0 && target.display_key.as_ref() == Some(&display_key) { return; }
+        let display_key = (
+            scene.render.exposure_stops,
+            scene.render.saturation,
+            scene.render.reinhard,
+            format!(
+                "{}:{}",
+                self.colour_revision,
+                serde_json::to_string(&scene.colour).expect("colour settings")
+            ),
+        );
+        if spp == 0 && target.display_key.as_ref() == Some(&display_key) {
+            return;
+        }
         let n = (target.width * target.height) as u32;
         let cfg = LaunchConfig1D::new(n.div_ceil(BLOCK), BLOCK, 0);
         let prepared = self.module.prepare_tonemap(cfg).expect("prepare tonemap");
         self.module
             .tonemap(&self.stream, &prepared, &target.accum, &mut target.out)
             .expect("tonemap");
-        target.out.copy_to_host(&self.stream, &mut target.raw).expect("readback");
-        match self.colour.apply(target.width, target.height, &target.raw, &scene.colour, scene.render.reinhard) {
+        target
+            .out
+            .copy_to_host(&self.stream, &mut target.raw)
+            .expect("readback");
+        match self.colour.apply(
+            target.width,
+            target.height,
+            &target.raw,
+            &scene.colour,
+            scene.render.reinhard,
+        ) {
             Ok((light, encoded, absolute)) => {
                 target.light = light;
                 target.hdr = absolute;
@@ -175,51 +272,84 @@ impl Gpu {
 
 impl Target {
     /// Samples per second of the last traced batch, in millions.
+    #[allow(dead_code)] // Retained for standalone CUDA render consumers; GUI uses CPU Frame.
     pub fn msamples_per_s(&self) -> f64 {
         if self.last_ms <= 0.0 {
             return 0.0;
         }
-        (self.width * self.height) as f64 * self.last_spp as f64 / (self.last_ms as f64 / 1000.0) / 1.0e6
+        (self.width * self.height) as f64 * self.last_spp as f64
+            / (self.last_ms as f64 / 1000.0)
+            / 1.0e6
     }
 
     pub fn save_png(&self, path: &std::path::Path) -> Result<(), String> {
-        if let Some(e) = &self.colour_error { return Err(format!("Colour transform failed: {e}")); }
+        if let Some(e) = &self.colour_error {
+            return Err(format!("Colour transform failed: {e}"));
+        }
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
         let pixels = if self.hdr {
             // OCIO display light is absolute, 1 = 100 nits. HDR10 is BT.2020 + PQ.
-            let codes = self.light.iter().flat_map(|p| {
-                let nits = egui_display::rec2020_nits([p[0], p[1], p[2]], 100.0);
-                [pq16(nits[0]), pq16(nits[1]), pq16(nits[2]), 65535]
-            }).collect();
+            let codes = self
+                .light
+                .iter()
+                .flat_map(|p| {
+                    let nits = egui_display::rec2020_nits([p[0], p[1], p[2]], 100.0);
+                    [pq16(nits[0]), pq16(nits[1]), pq16(nits[2]), 65535]
+                })
+                .collect();
             egui_display::screenshot::Pixels::Rgba16(codes)
         } else {
-            egui_display::screenshot::Pixels::Rgba8(self.pixels.iter().flat_map(|p| p.to_le_bytes()).collect())
+            egui_display::screenshot::Pixels::Rgba8(
+                self.pixels.iter().flat_map(|p| p.to_le_bytes()).collect(),
+            )
         };
         let capture = egui_display::screenshot::Capture {
-            output: if self.hdr { egui_display::Output::Hdr10 } else { egui_display::Output::Sdr8 },
-            width: self.width as u32, height: self.height as u32,
-            white_nits: 100.0, peak_nits: if self.hdr { 1000.0 } else { 100.0 }, pixels,
+            output: if self.hdr {
+                egui_display::Output::Hdr10
+            } else {
+                egui_display::Output::Sdr8
+            },
+            width: self.width as u32,
+            height: self.height as u32,
+            white_nits: 100.0,
+            peak_nits: if self.hdr { 1000.0 } else { 100.0 },
+            pixels,
         };
         capture.save(path).map(|_| ()).map_err(|e| e.to_string())
     }
 
     /// Display light, linear Rec.709, normalized to 100 nits (matching exr-view).
     pub fn save_display_exr(&self, path: &std::path::Path) -> Result<(), String> {
-        if let Some(e) = &self.colour_error { return Err(format!("Colour transform failed: {e}")); }
-        if let Some(dir) = path.parent() { std::fs::create_dir_all(dir).map_err(|e| e.to_string())?; }
+        if let Some(e) = &self.colour_error {
+            return Err(format!("Colour transform failed: {e}"));
+        }
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
         use exr::prelude::*;
-        let mut image = Image::from_channels((self.width, self.height), SpecificChannels::rgb(|pos: Vec2<usize>| {
-            let p = self.light[pos.y() * self.width + pos.x()]; (p[0], p[1], p[2])
-        }));
-        image.attributes.chromaticities = Some(attribute::Chromaticities { red: Vec2(0.64, 0.33), green: Vec2(0.30, 0.60), blue: Vec2(0.15, 0.06), white: Vec2(0.3127, 0.3290) });
+        let mut image = Image::from_channels(
+            (self.width, self.height),
+            SpecificChannels::rgb(|pos: Vec2<usize>| {
+                let p = self.light[pos.y() * self.width + pos.x()];
+                (p[0], p[1], p[2])
+            }),
+        );
+        image.attributes.chromaticities = Some(attribute::Chromaticities {
+            red: Vec2(0.64, 0.33),
+            green: Vec2(0.30, 0.60),
+            blue: Vec2(0.15, 0.06),
+            white: Vec2(0.3127, 0.3290),
+        });
         image.layer_data.attributes.white_luminance = Some(100.0);
         image.write().to_file(path).map_err(|e| e.to_string())
     }
 }
 
-fn pq16(nits: f32) -> u16 { (egui_display::pq(nits.clamp(0.0, 10000.0)) * 65535.0 + 0.5) as u16 }
+fn pq16(nits: f32) -> u16 {
+    (egui_display::pq(nits.clamp(0.0, 10000.0)) * 65535.0 + 0.5) as u16
+}
 
 #[cfg(test)]
 mod tests {
@@ -233,20 +363,49 @@ mod tests {
         assert_eq!(target.samples, 2);
         assert!(target.colour_error.is_none(), "{:?}", target.colour_error);
         let old = target.light.clone();
+        let radiance = gpu.scene_linear(&target);
+        assert_eq!(radiance.len(), 17 * 9);
+        assert!(radiance.iter().all(|p| p.iter().all(|v| v.is_finite())));
+        assert!(
+            radiance
+                .iter()
+                .any(|p| p[0] > 0.0 || p[1] > 0.0 || p[2] > 0.0)
+        );
         scene.render.exposure_stops += 1.0;
+        assert!(!gpu.prepare_target(&mut target, &scene, None));
+        assert_eq!(
+            target.samples, 2,
+            "Display-only preparation must preserve accumulation"
+        );
         gpu.step(&mut target, &scene, 0, 0, None);
         assert_eq!(target.samples, 2);
         assert_ne!(target.light, old);
+        assert_eq!(
+            gpu.scene_linear(&target),
+            radiance,
+            "Exposure must not alter exported scene radiance"
+        );
         scene.colour.display = "Rec.2100-PQ - Display".into();
         scene.colour.view = crate::color::HDR_VIEW.into();
         gpu.step(&mut target, &scene, 0, 0, None);
         assert_eq!(target.samples, 2);
-        assert!(target.hdr && target.colour_error.is_none(), "{:?}", target.colour_error);
+        assert!(
+            target.hdr && target.colour_error.is_none(),
+            "{:?}",
+            target.colour_error
+        );
+        assert_eq!(
+            gpu.scene_linear(&target),
+            radiance,
+            "OCIO must not alter exported scene radiance"
+        );
         let dir = std::env::temp_dir().join(format!("frac-hdr-test-{}", std::process::id()));
         let png = dir.join("hdr.png");
         target.save_png(&png).unwrap();
         let bytes = std::fs::read(&png).unwrap();
-        for chunk in [b"cICP", b"mDCV", b"cLLI"] { assert!(bytes.windows(4).any(|b| b == chunk)); }
+        for chunk in [b"cICP", b"mDCV", b"cLLI"] {
+            assert!(bytes.windows(4).any(|b| b == chunk));
+        }
         let mut decoder = png::Decoder::new(std::io::Cursor::new(&bytes));
         decoder.set_transformations(png::Transformations::IDENTITY);
         let reader = decoder.read_info().unwrap();
@@ -261,6 +420,21 @@ mod tests {
         gpu.step(&mut target, &scene, 0, 0, None);
         assert!(target.colour_error.is_some());
         assert!(target.save_png(&png).is_err());
+        let display_before_reset = target.light.clone();
+        scene.camera.yaw_degrees += 5.0;
+        assert!(gpu.prepare_target(&mut target, &scene, None));
+        assert_eq!(target.samples, 0);
+        assert_eq!(
+            target.light, display_before_reset,
+            "Preparation must not run tonemap, OCIO or readback"
+        );
+        scene.colour.view = crate::color::HDR_VIEW.into();
+        gpu.step(&mut target, &scene, 1, 0, None);
+        assert_eq!(
+            target.samples, 1,
+            "One traced batch must follow the lightweight reset"
+        );
+        assert!(target.colour_error.is_none());
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]

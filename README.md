@@ -31,8 +31,8 @@ no WGSL and no DSL: host code and kernels live in the same crate and are built i
   - Glass renders opaque: a distance-estimated fractal has no interior to refract through, so
     glass becomes a clear-coated smooth dielectric.
 - **Unreal-style flight:** hold the right mouse button in the viewport to fly.
-  - The mouse looks around; WASD moves; Q and E go down and up; Shift boosts; the wheel sets
-    the speed.
+  - The mouse looks around; WASD moves; R/C moves up/down; Q/E rolls and enables free flight;
+    Shift boosts; the wheel sets the speed.
   - It uses `cam-controls` `SpaceFlight` with FPS damping and a level horizon.
     Inertial mouse-look is copied from the ready `nodes-rs` implementation of the shared crate.
   - When you release the button, the orbit pivot sits in front of the camera, so orbiting
@@ -41,8 +41,7 @@ no WGSL and no DSL: host code and kernels live in the same crate and are built i
     Q/E rolls and R/C moves up/down; all six flight axes have damped inertia. Roll and mode
     are saved with the camera and survive releasing RMB.
   - H restores the loaded preset/bookmark's camera; F frames the fractal's declared bounds
-    (or a 10×10×10 box), including object scale/offset/rotation. F without RMB frames;
-    RMB+F still moves down in free flight.
+    (or a 10×10×10 box), including object scale/offset/rotation.
   - Settings → Controls adjusts mouse sensitivity and flight speed, saved between runs.
 - **The browser:**
   - an 18-preset gallery with GPU-rendered thumbnails;
@@ -74,19 +73,29 @@ frac-rs is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX
 
 ## Requirements
 
-- An NVIDIA GPU (developed on an RTX 3080 Ti, `sm_86`) on Linux or WSL2.
+- An NVIDIA GPU (developed on an RTX 3080 Ti, `sm_86`) on Windows, Linux or WSL2.
   - On WSL2, install only the CUDA **toolkit**; the driver comes from Windows. Never install
     `cuda-drivers` or `nvidia-driver-*` inside WSL.
 - CUDA Toolkit 13.x, LLVM/`llc` 21 or newer, and clang (for bindgen).
 - Rust stable (currently **1.99**), with compiler-internal APIs enabled through `.cargo/config.toml` (see `rust-toolchain.toml`).
-- The local `cuda-oxide-windows` checkout at `../../cuda-oxide-windows`, including its Rust 1.99 backend fixes.
-- `cargo-oxide` (install from the same checkout):
+- CUDA crates and the backend come from [our Windows fork](https://github.com/ssoj13/cuda-oxide-windows),
+  pinned to `f3f1098a776a630d8003f2229934e0563cdec252` with the Rust 1.99 fixes. Cargo fetches the
+  checkout automatically; GitHub SSH access is required.
+- `cargo-oxide` must come from the same fork and revision:
   ```sh
-  cargo +stable install --locked --path ../../cuda-oxide-windows/crates/cargo-oxide
+  cargo +stable install --force --locked --git ssh://git@github.com/ssoj13/cuda-oxide-windows.git --rev f3f1098a776a630d8003f2229934e0563cdec252 cargo-oxide
   cargo oxide doctor
   ```
+  `python bootstrap.py d --fix` also installs or migrates the CLI to this revision; regular builds
+  check its source without reinstalling it.
 
 ## Build and run
+
+On Windows, `python bootstrap.py d --fix` sets up the Rust tools, then `python bootstrap.py b`
+builds the release binary. The bootstrap discovers the MSVC, Windows SDK and CUDA environment
+through `vcv-rs`, so a Developer Command Prompt is unnecessary.
+
+On Linux / WSL2:
 
 ```sh
 export CUDA_HOME=/usr/local/cuda CUDA_OXIDE_LLC=/usr/bin/llc-22
@@ -108,6 +117,18 @@ cargo oxide run                                         # the browser
 | `Space` | pause |
 | backtick / tilde | switch horizon / free flight (Q/E roll, R/C up/down in free mode) |
 
+The interface uses `egui-dock`: drag tabs to rearrange, split or float panels, including Settings.
+The top bar uses **File**, **Edit**, **View**, **Render** and **Window** menus, following Playa.
+Open Settings through **Edit → Settings…**; use **Window** to reopen panels or **Reset layout**
+to restore their arrangement. The floating toolbar sits against the viewport's top edge, with
+direct exposure (EV), colour view, proxy resolution, target samples, pause and free-flight controls.
+The top-right layout manager uses Playa's shared `egui-layout-manager`: save, select, rename
+or delete named workspaces; **Layout → Update selected** replaces the selected preset and
+**Layout → Reset to default** restores the default arrangement. Panel layout, named workspaces
+and toolbar position are saved between runs. **Settings → Fonts** (also **Window →
+Fonts…**) selects the built-in font family, body/control, small, heading and monospace text sizes,
+and UI scale.
+
 The scene inspector uses `egui-widgets-rs`: `egui-attr-table` for typed controls and
 reset/copy/paste actions, `egui-attr-grid` for vectors, and `egui-titlebar` for sections.
 
@@ -124,6 +145,16 @@ independent. A saved HDR scene on an SDR output gets a separate SDR ACES preview
 PQ/HDR render targets remain selectable in Color on SDR screens, including for HDR export;
 only the actual window-output modes in Display depend on the connected display.
 
+**Settings → Display → GUI FPS** sets the interface refresh rate independently of rendering
+(15–240 FPS, default 60). A dedicated CUDA worker owns all progressive targets, thumbnails
+and final renders. Commands and completion events use bounded queues; viewport requests and
+frames use replaceable slots, so the GUI takes the newest ready frame without waiting for
+CUDA. Scene changes invalidate older generations. Settings writes, screenshot output and
+OCIO config loading also run in background workers. Window presentation uses a separate wgpu
+device from offscreen OCIO processing, so surface reconfiguration does not wait for that
+worker's queue. The GUI still performs drawing and GPU presentation; the configured FPS is a
+target, not a guarantee under GPU or system load.
+
 Screenshot / Render PNG saves the selected rendering: SDR sRGB/selected monitor codes as
 8-bit PNG, or HDR10 BT.2020/PQ as 16-bit PNG with `cICP`, `mDCV`, and measured `cLLI` metadata.
 **Display EXR** saves unquantized linear Rec.709 display light with chromaticities and
@@ -133,6 +164,26 @@ Screenshot / Render PNG saves the selected rendering: SDR sRGB/selected monitor 
 ./target/release/frac-rs --gallery out 1920 1080 256 --hdr --display-exr
 CUDA_HOME=/usr/local/cuda CUDA_OXIDE_LLC=/usr/bin/llc-22 cargo oxide test -- --release
 ```
+
+### Render / Encode
+
+Open **Render → Render / Encode…** or **Window → Render / Encode**. This dockable panel
+uses Playa's shared encoder schema. Set output path, resolution, **Samples / frame**, and the
+inclusive frame range, then select an output:
+
+- **EXR sequence:** float RGB scene-linear Rec.709 with chromaticities; exposure and the
+  display transform are excluded. `renders/frame.exr`, range 1–3, produces
+  `renders/frame.000001.exr` through `renders/frame.000003.exr`.
+- **HEVC / ffmpeg-rs:** software Kvazaar encoding to MP4 or MOV, with rational FPS, QP 0–51
+  and preset controls. Output is SDR 8-bit YUV 4:2:0 with Rec.709 primaries and sRGB transfer;
+  the display transform is baked in. Width and height must be even. HDR video is unavailable.
+
+Each frame receives the requested sample count. The scene is frozen at export start; the
+current frame range repeats that scene with independent samples, without animation tracks.
+An autonomous coordinator advances rendering and a bounded writer queue handles encoding
+and file output even when the GUI stops updating. **Cancel** stops the run; completed EXR
+frames remain, while an unfinished video is discarded. Existing outputs are preserved unless
+**Overwrite existing output** is enabled; finished outputs are published atomically.
 
 Settings are saved in the platform config directory (`~/.config/frac-rs/settings.json` on
 Linux); the colour selection also travels with scene bookmarks. Older bookmarks default
@@ -197,10 +248,14 @@ src/gpu.rs        the kernels (#[cuda_module]): estimates, march, normals, light
 src/scene.rs      Scene (serde), formulas, presets, gallery, packing into the parameter block
 src/params.rs     parameter-block slots shared by host and device
 src/render.rs     CUDA context, progressive targets, kernel dispatch, PNG output
-src/app.rs        the egui browser + shared Settings panel
+src/app.rs        the egui browser, shared Settings panel and viewport toolbar
+src/dock.rs       dockable panels, named layout manager and viewport toolbar
+src/render_service.rs   CUDA worker, bounded command/event bus and latest-frame mailbox
+src/io_service.rs       background settings, bookmark and screenshot writes
+src/export.rs     autonomous render coordinator, EXR sink and ffmpeg-rs HEVC writer
 src/inspector.rs  scene controls from egui-widgets-rs attribute editors
 src/color.rs      cached vfx-ocio GPU colour processing (linear Rec.709 input)
-src/ocio.rs       OCIO controls adapted directly from exr-view (BSD-3-Clause)
+src/ocio.rs       OCIO controls and background config loader, adapted from exr-view (BSD-3-Clause)
 src/window.rs     winit/wgpu shell + egui-display float canvas and SDR/HDR swapchain
 src/palette.rs    the 14 palettes
 src/materials.rs  the usd-rs material library and its Standard Surface translation

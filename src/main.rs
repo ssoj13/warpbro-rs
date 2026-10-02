@@ -8,19 +8,22 @@
 //!   frac-rs --bench [W H SPP]                time every preset
 
 mod app;
-mod inspector;
 mod color;
+mod inspector;
 // Keep the copied viewer API intact, including its CPU oracle used by tests.
+mod export;
+mod gpu;
+mod io_service;
+mod materials;
 #[allow(dead_code)]
 mod ocio;
-mod transfer;
-mod window;
-mod gpu;
-mod materials;
 mod palette;
 mod params;
 mod render;
+mod render_service;
 mod scene;
+mod transfer;
+mod window;
 
 use std::time::Instant;
 
@@ -31,7 +34,13 @@ fn arg<T: std::str::FromStr>(args: &[String], i: usize, default: T) -> T {
 pub fn slug(name: &str) -> String {
     let mut s: String = name
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect();
     while s.contains("--") {
         s = s.replace("--", "-");
@@ -43,7 +52,10 @@ pub fn slug(name: &str) -> String {
 fn headless(out: Option<&str>, w: usize, h: usize, spp: u32, hdr: bool, display_exr: bool) {
     let mut gpu = render::Gpu::new().unwrap_or_else(|e| panic!("{e}"));
     println!("GPU: {}  ·  {w}x{h}, {spp} spp", gpu.name);
-    println!("{:<28} {:>16} {:>9} {:>11}", "preset", "model", "ms/spp", "Msamples/s");
+    println!(
+        "{:<28} {:>16} {:>9} {:>11}",
+        "preset", "model", "ms/spp", "Msamples/s"
+    );
     for mut scene in scene::Scene::gallery() {
         if hdr {
             scene.colour.config = "ocio://studio-config-latest".into();
@@ -70,7 +82,10 @@ fn headless(out: Option<&str>, w: usize, h: usize, spp: u32, hdr: bool, display_
         if let Some(dir) = out {
             let path = std::path::Path::new(dir).join(format!("{}.png", slug(&scene.name)));
             t.save_png(&path).expect("save png");
-            if display_exr { t.save_display_exr(&path.with_extension("display.exr")).expect("save display EXR"); }
+            if display_exr {
+                t.save_display_exr(&path.with_extension("display.exr"))
+                    .expect("save display EXR");
+            }
         }
     }
 }
@@ -81,11 +96,25 @@ fn main() -> anyhow::Result<()> {
     match args.get(1).map(String::as_str) {
         Some("--gallery") => {
             let dir = args.get(2).cloned().unwrap_or_else(|| "gallery".into());
-            headless(Some(&dir), arg(&args, 3, 960), arg(&args, 4, 540), arg(&args, 5, 64), args.iter().any(|a| a == "--hdr"), args.iter().any(|a| a == "--display-exr"));
+            headless(
+                Some(&dir),
+                arg(&args, 3, 960),
+                arg(&args, 4, 540),
+                arg(&args, 5, 64),
+                args.iter().any(|a| a == "--hdr"),
+                args.iter().any(|a| a == "--display-exr"),
+            );
             Ok(())
         }
         Some("--bench") => {
-            headless(None, arg(&args, 2, 960), arg(&args, 3, 540), arg(&args, 4, 32), false, false);
+            headless(
+                None,
+                arg(&args, 2, 960),
+                arg(&args, 3, 540),
+                arg(&args, 4, 32),
+                false,
+                false,
+            );
             Ok(())
         }
         _ => app::run(),

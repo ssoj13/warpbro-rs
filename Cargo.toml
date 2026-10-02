@@ -6,12 +6,15 @@ edition = "2024"
 [workspace]
 
 [dependencies]
-# Use the local checkout, including its Rust 1.99 backend fixes.
-cuda-device = { path = "../../cuda-oxide-windows/crates/cuda-device" }
-cuda-host = { path = "../../cuda-oxide-windows/crates/cuda-host" }
+# Our Windows fork includes the Rust 1.99 backend fixes.
+cuda-device = { git = "ssh://git@github.com/ssoj13/cuda-oxide-windows.git", rev = "f3f1098a776a630d8003f2229934e0563cdec252" }
+cuda-host = { git = "ssh://git@github.com/ssoj13/cuda-oxide-windows.git", rev = "f3f1098a776a630d8003f2229934e0563cdec252" }
 # Match cuda-host's Windows-compatible runtime to keep shared types identical.
 cuda-core = { git = "https://github.com/ansidium/cutile-rs", rev = "b4eae9b2a783eba8e18587aa2b760f985a07f866" }
 egui = "0.36"
+egui_dock = { version = "0.21", features = ["serde"] }
+egui-dock-layout = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
+egui-viewport-toolbar = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
 egui-wgpu = "0.36"
 egui-winit = "0.36"
 wgpu = "30"
@@ -23,6 +26,17 @@ egui-display = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch
 egui-hdr-view = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
 gpu-info = { package = "gpu-info-rs", git = "ssh://git@github.com/ssoj13/gpu-info-rs.git", branch = "main", default-features = false, features = ["wgpu"] }
 exr = "1.74"
+egui-encode-dialog = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
+egui-layout-manager = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
+av-codec = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main", default-features = false, features = ["enc-hevc"] }
+av-codec-core = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
+av-format-core = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
+av-format-movenc = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
+av-swscale = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
+av-util-core = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
+av-util-frame = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
+av-util-pixfmt = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
+
 standard-surface-bsdf = { version = "0.1.0", path = "vendor/standard-surface-bsdf" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

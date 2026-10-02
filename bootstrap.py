@@ -15,7 +15,7 @@ Toolchain (see README.md):
     CUDA Toolkit 13.x (nvcc, libNVVM, nvJitLink)      CUDA_HOME, default /usr/local/cuda
     LLVM llc 21+ and clang + libclang headers         CUDA_OXIDE_LLC, default newest llc-2x
     rustup toolchain stable (rust-toolchain.toml) + rust-src rustc-dev llvm-tools
-    cargo-oxide (cargo install --git https://github.com/ansidium/cuda-oxide-windows.git cargo-oxide)
+    cargo-oxide from our fork at CUDA_OXIDE_REV       python bootstrap.py d --fix
 
 Commands:
     d(octor)      Check the toolchain (--fix installs the rustup / cargo-oxide parts)
@@ -60,7 +60,8 @@ BIN_NAME = "frac-rs.exe" if IS_WINDOWS else "frac-rs"
 RELEASE_BIN = ROOT_DIR / "target" / "release" / BIN_NAME
 INSTALL_DIR = Path.home() / ".local" / "bin"
 
-CUDA_OXIDE_GIT = "https://github.com/ansidium/cuda-oxide-windows.git"
+CUDA_OXIDE_GIT = "ssh://git@github.com/ssoj13/cuda-oxide-windows.git"
+CUDA_OXIDE_REV = "f3f1098a776a630d8003f2229934e0563cdec252"
 RUST_COMPONENTS = ["rust-src", "rustc-dev", "rust-analyzer", "clippy", "rustfmt", "llvm-tools"]
 MIN_LLVM = 21
 MIN_CUDA_MAJOR = 13
@@ -213,6 +214,20 @@ def check_cargo() -> bool:
 # doctor
 # =============================================================================
 
+def installed_oxide_matches(output: str) -> bool:
+    """Cargo reports git installs as package headings ending in (URL#short-SHA)."""
+    for line in output.splitlines():
+        match = re.fullmatch(r"cargo-oxide v[^ ]+ \((.+)\):", line.strip())
+        if not match:
+            continue
+        source, separator, revision = match.group(1).rpartition("#")
+        repository = source.split("?", 1)[0].removesuffix(".git")
+        expected = CUDA_OXIDE_GIT.removesuffix(".git")
+        return bool(separator and repository == expected and len(revision) >= 7
+                    and CUDA_OXIDE_REV.startswith(revision))
+    return False
+
+
 def doctor(fix: bool, full: bool = True) -> bool:
     """Check every toolchain piece; with `fix`, install the user-level ones (rustup, cargo-oxide)."""
     env = build_env()
@@ -284,15 +299,18 @@ def doctor(fix: bool, full: bool = True) -> bool:
         err("missing components: " + " ".join(missing) + " (python bootstrap.py d --fix)")
         passed = False
 
-    # --- cargo-oxide
-    if which("cargo-oxide"):
-        ok(f"cargo-oxide: {which('cargo-oxide')}")
+    # --- cargo-oxide: an existing upstream/path install can have the same version.
+    oxide = which("cargo-oxide")
+    code, installs, _ = run(["cargo", f"+{channel}", "install", "--list"], capture=True)
+    if oxide and code == 0 and installed_oxide_matches(installs):
+        ok(f"cargo-oxide: {oxide} ({CUDA_OXIDE_REV[:10]})")
     elif fix:
-        step("Installing cargo-oxide (one-time, ~1 min) ...")
-        code, _, _ = run(["cargo", f"+{channel}", "install", "--git", CUDA_OXIDE_GIT, "cargo-oxide"])
+        step(f"Installing cargo-oxide from our fork at {CUDA_OXIDE_REV[:10]} ...")
+        code, _, _ = run(["cargo", f"+{channel}", "install", "--force", "--locked",
+                          "--git", CUDA_OXIDE_GIT, "--rev", CUDA_OXIDE_REV, "cargo-oxide"])
         passed &= code == 0
     else:
-        err("cargo-oxide not installed (python bootstrap.py d --fix)")
+        err(f"cargo-oxide missing or from another source (need {CUDA_OXIDE_REV[:10]}; python bootstrap.py d --fix)")
         passed = False
 
     # --- cargo-oxide's own check (backend, libNVVM, nvJitLink, libdevice, ...)
