@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 //! frac-rs: a path-traced 3D fractal browser. Rust CUDA kernels (cuda-oxide) port ofx-rs
 //! `ofx-fractal` (eight distance-estimated families, DE sphere tracing) and render-rs
 //! (`pt-integrator` path tracing, `standard-surface-bsdf`); the UI is egui.
@@ -7,6 +8,12 @@
 //!   frac-rs --bench [W H SPP]                time every preset
 
 mod app;
+mod color;
+// Keep the copied viewer API intact, including its CPU oracle used by tests.
+#[allow(dead_code)]
+mod ocio;
+mod transfer;
+mod window;
 mod gpu;
 mod materials;
 mod palette;
@@ -32,11 +39,16 @@ pub fn slug(name: &str) -> String {
 }
 
 /// Render (or only time) every gallery preset offscreen.
-fn headless(out: Option<&str>, w: usize, h: usize, spp: u32) {
+fn headless(out: Option<&str>, w: usize, h: usize, spp: u32, hdr: bool, display_exr: bool) {
     let mut gpu = render::Gpu::new().unwrap_or_else(|e| panic!("{e}"));
     println!("GPU: {}  ·  {w}x{h}, {spp} spp", gpu.name);
     println!("{:<28} {:>16} {:>9} {:>11}", "preset", "model", "ms/spp", "Msamples/s");
-    for scene in scene::Scene::gallery() {
+    for mut scene in scene::Scene::gallery() {
+        if hdr {
+            scene.colour.config = "ocio://studio-config-latest".into();
+            scene.colour.display = "Rec.2100-PQ - Display".into();
+            scene.colour.view = color::HDR_VIEW.into();
+        }
         let mut t = gpu.target(w, h);
         gpu.step(&mut t, &scene, 1, 0, None); // warm-up
         let batch = 8u32;
@@ -57,20 +69,22 @@ fn headless(out: Option<&str>, w: usize, h: usize, spp: u32) {
         if let Some(dir) = out {
             let path = std::path::Path::new(dir).join(format!("{}.png", slug(&scene.name)));
             t.save_png(&path).expect("save png");
+            if display_exr { t.save_display_exr(&path.with_extension("display.exr")).expect("save display EXR"); }
         }
     }
 }
 
-fn main() -> eframe::Result {
+fn main() -> anyhow::Result<()> {
+    env_logger::init();
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("--gallery") => {
             let dir = args.get(2).cloned().unwrap_or_else(|| "gallery".into());
-            headless(Some(&dir), arg(&args, 3, 960), arg(&args, 4, 540), arg(&args, 5, 64));
+            headless(Some(&dir), arg(&args, 3, 960), arg(&args, 4, 540), arg(&args, 5, 64), args.iter().any(|a| a == "--hdr"), args.iter().any(|a| a == "--display-exr"));
             Ok(())
         }
         Some("--bench") => {
-            headless(None, arg(&args, 2, 960), arg(&args, 3, 540), arg(&args, 4, 32));
+            headless(None, arg(&args, 2, 960), arg(&args, 3, 540), arg(&args, 4, 32), false, false);
             Ok(())
         }
         _ => app::run(),

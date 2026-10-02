@@ -10,7 +10,18 @@ cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git" }
 cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git" }
 # Shared host-side runtime, published from NVlabs/cutile-rs.
 cuda-core = "0.3.1"
-eframe = "0.36"
+egui = "0.36"
+egui-wgpu = "0.36"
+egui-winit = "0.36"
+wgpu = "30"
+winit = "0.30"
+bytemuck = "1"
+anyhow = "1"
+vfx-ocio = { git = "ssh://git@github.com/ssoj13/oiio-rs.git", branch = "main", features = ["gpu", "parallel"] }
+egui-display = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
+egui-hdr-view = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
+gpu-info = { package = "gpu-info-rs", git = "ssh://git@github.com/ssoj13/gpu-info-rs.git", branch = "main", default-features = false, features = ["wgpu"] }
+exr = "1.74"
 standard-surface-bsdf = { version = "0.1.0", path = "vendor/standard-surface-bsdf" }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -19,3 +30,15 @@ dirs = "7.0.0"
 cam-controls = { version = "0.1.0", path = "vendor/cam-controls" }
 glam = "0.33.6"
 cam-viewport = { version = "0.1.0", path = "vendor/cam-viewport" }
+
+log = "0.4"
+rayon = "1"
+egui-file-dialog = "0.15"
+egui-prefs2 = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
+egui-phosphor = { git = "ssh://git@github.com/ssoj13/egui-phosphor.git", branch = "main" }
+
+env_logger = "0.11"
+
+egui-attr-grid = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
+egui-attr-table = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
+egui-titlebar = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }

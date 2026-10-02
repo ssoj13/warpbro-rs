@@ -1,5 +1,5 @@
 //! Host side of the GPU: one CUDA context, the loaded kernel module, and progressive render
-//! targets (accumulator + RGBA8) that the viewport, the gallery thumbnails and final renders use.
+//! targets (accumulator + float display light) that the viewport, the gallery thumbnails and final renders use.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -25,6 +25,8 @@ pub struct Gpu {
     lut: DeviceBuffer<[f32; 4]>,
     lut_scheme: Option<PaletteScheme>,
     pub name: String,
+    colour: crate::color::ColorPipeline,
+    colour_revision: u64,
 }
 
 /// A progressive render of one scene at one size.
@@ -32,9 +34,15 @@ pub struct Target {
     pub width: usize,
     pub height: usize,
     accum: DeviceBuffer<[f32; 4]>,
-    out: DeviceBuffer<u32>,
-    /// RGBA8 (R in the low byte), row major, after the last `step`.
+    out: DeviceBuffer<[f32; 4]>,
+    /// SDR monitor codes (R in the low byte), row major, after the last `step`.
     pub pixels: Vec<u32>,
+    /// Linear display Rec.709 (HDR: 1 = 100 nits); never quantized.
+    pub light: Vec<[f32; 4]>,
+    raw: Vec<[f32; 4]>,
+    pub hdr: bool,
+    pub colour_error: Option<String>,
+    display_key: Option<(f32, f32, bool, String)>,
     pub samples: u32,
     key: Vec<f32>,
     palette: Option<PaletteScheme>,
@@ -44,6 +52,7 @@ pub struct Target {
 }
 
 impl Gpu {
+    pub fn invalidate_colour(&mut self) { self.colour = crate::color::ColorPipeline::new(); self.colour_revision = self.colour_revision.wrapping_add(1); }
     pub fn new() -> Result<Self, String> {
         let ctx = CudaContext::new(0).map_err(|e| format!("CUDA context: {e:?}"))?;
         let stream = ctx.default_stream();
@@ -51,7 +60,7 @@ impl Gpu {
         let module = unsafe { kernels::load(&ctx) }.map_err(|e| format!("load module: {e:?}"))?;
         let name = ctx.device_name().unwrap_or_else(|_| "CUDA GPU".into());
         let lut = DeviceBuffer::zeroed(&stream, PALETTE_SAMPLES + 1).map_err(|e| format!("{e:?}"))?;
-        Ok(Self { _ctx: ctx, stream, module, lut, lut_scheme: None, name })
+        Ok(Self { _ctx: ctx, stream, module, lut, lut_scheme: None, name, colour: crate::color::ColorPipeline::new(), colour_revision: 0 })
     }
 
     pub fn target(&self, width: usize, height: usize) -> Target {
@@ -62,6 +71,11 @@ impl Gpu {
             accum: DeviceBuffer::zeroed(&self.stream, padded).expect("accumulator"),
             out: DeviceBuffer::zeroed(&self.stream, width * height).expect("output"),
             pixels: vec![0; width * height],
+            light: vec![[0.0; 4]; width * height],
+            raw: vec![[0.0; 4]; width * height],
+            hdr: false,
+            colour_error: None,
+            display_key: None,
             samples: 0,
             key: Vec::new(),
             palette: None,
@@ -84,6 +98,7 @@ impl Gpu {
         if key != target.key || target.palette != Some(scene.palette) {
             target.accum.zero_async(&self.stream).expect("clear accumulator");
             target.samples = 0;
+            target.display_key = None;
             target.key = key;
             target.palette = Some(scene.palette);
         }
@@ -129,13 +144,28 @@ impl Gpu {
             }
             target.samples += spp;
         }
+        let display_key = (scene.render.exposure_stops, scene.render.saturation, scene.render.reinhard, format!("{}:{}", self.colour_revision, serde_json::to_string(&scene.colour).expect("colour settings")));
+        if spp == 0 && target.display_key.as_ref() == Some(&display_key) { return; }
         let n = (target.width * target.height) as u32;
         let cfg = LaunchConfig1D::new(n.div_ceil(BLOCK), BLOCK, 0);
         let prepared = self.module.prepare_tonemap(cfg).expect("prepare tonemap");
         self.module
             .tonemap(&self.stream, &prepared, &target.accum, &mut target.out)
             .expect("tonemap");
-        target.out.copy_to_host(&self.stream, &mut target.pixels).expect("readback");
+        target.out.copy_to_host(&self.stream, &mut target.raw).expect("readback");
+        match self.colour.apply(target.width, target.height, &target.raw, &scene.colour, scene.render.reinhard) {
+            Ok((light, encoded, absolute)) => {
+                target.light = light;
+                target.hdr = absolute;
+                target.colour_error = None;
+                target.display_key = Some(display_key);
+                for (p, l) in target.pixels.iter_mut().zip(&encoded) {
+                    let code = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+                    *p = u32::from_le_bytes([code(l[0]), code(l[1]), code(l[2]), 255]);
+                }
+            }
+            Err(e) => target.colour_error = Some(e),
+        }
         if spp > 0 {
             target.last_ms = t0.elapsed().as_secs_f32() * 1000.0;
             target.last_spp = spp;
@@ -152,24 +182,93 @@ impl Target {
         (self.width * self.height) as f64 * self.last_spp as f64 / (self.last_ms as f64 / 1000.0) / 1.0e6
     }
 
-    pub fn rgb8(&self) -> Vec<u8> {
-        let mut v = Vec::with_capacity(self.pixels.len() * 3);
-        for p in &self.pixels {
-            let [r, g, b, _] = p.to_le_bytes();
-            v.extend_from_slice(&[r, g, b]);
-        }
-        v
-    }
-
     pub fn save_png(&self, path: &std::path::Path) -> Result<(), String> {
+        if let Some(e) = &self.colour_error { return Err(format!("Colour transform failed: {e}")); }
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
-        let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
-        let mut enc = png::Encoder::new(std::io::BufWriter::new(file), self.width as u32, self.height as u32);
-        enc.set_color(png::ColorType::Rgb);
-        enc.set_depth(png::BitDepth::Eight);
-        let mut w = enc.write_header().map_err(|e| e.to_string())?;
-        w.write_image_data(&self.rgb8()).map_err(|e| e.to_string())
+        let pixels = if self.hdr {
+            // OCIO display light is absolute, 1 = 100 nits. HDR10 is BT.2020 + PQ.
+            let codes = self.light.iter().flat_map(|p| {
+                let nits = egui_display::rec2020_nits([p[0], p[1], p[2]], 100.0);
+                [pq16(nits[0]), pq16(nits[1]), pq16(nits[2]), 65535]
+            }).collect();
+            egui_display::screenshot::Pixels::Rgba16(codes)
+        } else {
+            egui_display::screenshot::Pixels::Rgba8(self.pixels.iter().flat_map(|p| p.to_le_bytes()).collect())
+        };
+        let capture = egui_display::screenshot::Capture {
+            output: if self.hdr { egui_display::Output::Hdr10 } else { egui_display::Output::Sdr8 },
+            width: self.width as u32, height: self.height as u32,
+            white_nits: 100.0, peak_nits: if self.hdr { 1000.0 } else { 100.0 }, pixels,
+        };
+        capture.save(path).map(|_| ()).map_err(|e| e.to_string())
+    }
+
+    /// Display light, linear Rec.709, normalized to 100 nits (matching exr-view).
+    pub fn save_display_exr(&self, path: &std::path::Path) -> Result<(), String> {
+        if let Some(e) = &self.colour_error { return Err(format!("Colour transform failed: {e}")); }
+        if let Some(dir) = path.parent() { std::fs::create_dir_all(dir).map_err(|e| e.to_string())?; }
+        use exr::prelude::*;
+        let mut image = Image::from_channels((self.width, self.height), SpecificChannels::rgb(|pos: Vec2<usize>| {
+            let p = self.light[pos.y() * self.width + pos.x()]; (p[0], p[1], p[2])
+        }));
+        image.attributes.chromaticities = Some(attribute::Chromaticities { red: Vec2(0.64, 0.33), green: Vec2(0.30, 0.60), blue: Vec2(0.15, 0.06), white: Vec2(0.3127, 0.3290) });
+        image.layer_data.attributes.white_luminance = Some(100.0);
+        image.write().to_file(path).map_err(|e| e.to_string())
+    }
+}
+
+fn pq16(nits: f32) -> u16 { (egui_display::pq(nits.clamp(0.0, 10000.0)) * 65535.0 + 0.5) as u16 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn cuda_float_output_reuses_samples_and_exports_hdr_metadata() {
+        let mut gpu = Gpu::new().unwrap();
+        let mut target = gpu.target(17, 9); // partial CUDA tiles
+        let mut scene = Scene::preset(FAMILY_KIFS);
+        gpu.step(&mut target, &scene, 2, 0, None);
+        assert_eq!(target.samples, 2);
+        assert!(target.colour_error.is_none(), "{:?}", target.colour_error);
+        let old = target.light.clone();
+        scene.render.exposure_stops += 1.0;
+        gpu.step(&mut target, &scene, 0, 0, None);
+        assert_eq!(target.samples, 2);
+        assert_ne!(target.light, old);
+        scene.colour.display = "Rec.2100-PQ - Display".into();
+        scene.colour.view = crate::color::HDR_VIEW.into();
+        gpu.step(&mut target, &scene, 0, 0, None);
+        assert_eq!(target.samples, 2);
+        assert!(target.hdr && target.colour_error.is_none(), "{:?}", target.colour_error);
+        let dir = std::env::temp_dir().join(format!("frac-hdr-test-{}", std::process::id()));
+        let png = dir.join("hdr.png");
+        target.save_png(&png).unwrap();
+        let bytes = std::fs::read(&png).unwrap();
+        for chunk in [b"cICP", b"mDCV", b"cLLI"] { assert!(bytes.windows(4).any(|b| b == chunk)); }
+        let mut decoder = png::Decoder::new(std::io::Cursor::new(&bytes));
+        decoder.set_transformations(png::Transformations::IDENTITY);
+        let reader = decoder.read_info().unwrap();
+        assert_eq!(reader.info().bit_depth, png::BitDepth::Sixteen);
+        assert_eq!(reader.info().width, 17);
+        let exr_path = dir.join("display.exr");
+        target.save_display_exr(&exr_path).unwrap();
+        let image = exr::prelude::read_all_flat_layers_from_file(&exr_path).unwrap();
+        assert!(image.attributes.chromaticities.is_some());
+        assert_eq!(image.layer_data[0].attributes.white_luminance, Some(100.0));
+        scene.colour.view = "missing view".into();
+        gpu.step(&mut target, &scene, 0, 0, None);
+        assert!(target.colour_error.is_some());
+        assert!(target.save_png(&png).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn old_bookmarks_default_to_linear_rec709_aces2() {
+        let scene = Scene::preset(FAMILY_BULB);
+        let mut json = serde_json::to_value(&scene).unwrap();
+        json.as_object_mut().unwrap().remove("colour");
+        let restored: Scene = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.colour, crate::color::default_selection());
     }
 }

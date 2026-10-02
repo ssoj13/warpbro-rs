@@ -218,7 +218,7 @@ impl Formula {
         match self {
             Self::Mandelbulb(_) => 1.0,
             Self::Mandelbox(_) => 4.0637,
-            Self::QuaternionJulia(_) => 1.618_034,
+            Self::QuaternionJulia(_) => std::f32::consts::GOLDEN_RATIO,
             Self::Kifs(k) => k.kind.bounding_radius(),
             Self::Kleinian(_) => BOUND_FRAMING * Kleinian::PRESET.bound_radius,
             Self::PseudoKleinian(_) => 1.0,
@@ -392,6 +392,8 @@ pub struct Scene {
     pub trap_axis: u32,
     pub trap_scale: f32,
     pub render: Render,
+    #[serde(default = "crate::color::default_selection")]
+    pub colour: crate::ocio::Sel,
 }
 
 impl Camera {
@@ -471,6 +473,7 @@ impl Scene {
     fn base(name: &str, formula: Formula, fov: f32, iterations: u32, max_steps: u32, hit_epsilon: f32, palette: PaletteScheme) -> Self {
         Self {
             name: name.into(),
+            colour: crate::color::default_selection(),
             formula,
             julia: None,
             object: ObjectTransform { offset: [0.0; 3], rotation_degrees: [0.0; 3], scale: 1.0 },

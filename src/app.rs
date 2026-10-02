@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use eframe::egui::{self, Color32, ColorImage, RichText, Sense, TextureHandle, TextureOptions, Vec2};
+use egui::{self, Color32, ColorImage, RichText, Sense, TextureHandle, TextureOptions, Vec2};
 
 use crate::palette::{PaletteScheme, build_lut};
 use crate::render::{Gpu, Target};
@@ -26,16 +26,7 @@ const FINAL_SIZES: [(u32, u32, &str); 5] = [
     (2048, 2048, "2048²"),
 ];
 
-pub fn run() -> eframe::Result {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("frac-rs — path-traced fractals on CUDA (Rust)")
-            .with_inner_size([1600.0, 940.0])
-            .with_min_inner_size([900.0, 560.0]),
-        ..Default::default()
-    };
-    eframe::run_native("frac-rs", options, Box::new(|cc| Ok(Box::new(App::new(cc)))))
-}
+pub fn run() -> anyhow::Result<()> { crate::window::run() }
 
 struct Entry {
     scene: Scene,
@@ -88,7 +79,7 @@ struct Job {
     started: Instant,
 }
 
-struct App {
+pub(crate) struct App {
     gpu: Gpu,
     scene: Scene,
     /// The preset / bookmark the scene came from, for "Reset".
@@ -96,8 +87,13 @@ struct App {
     full: Option<Target>,
     preview: Option<Target>,
     showing_preview: bool,
-    tex: Option<TextureHandle>,
-    tex_stamp: (u32, bool, usize),
+    hdr_view: std::sync::Arc<std::sync::Mutex<egui_hdr_view::HdrView>>,
+    pub display: egui_display::DisplayPrefs,
+    colour: crate::ocio::State,
+    prefs: egui_prefs2::PrefsPanelState,
+    settings_open: bool,
+    config_picker: egui_file_dialog::FileDialog,
+    saved_settings: String,
     gallery: Vec<Entry>,
     bookmarks: Vec<Entry>,
     thumb_target: Target,
@@ -172,8 +168,20 @@ fn to_image(t: &Target) -> ColorImage {
     )
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Settings {
+    display: egui_display::DisplayPrefs,
+    colour: crate::ocio::Sel,
+    panel: egui_prefs2::PrefsPanelState,
+}
+impl Default for Settings {
+    fn default() -> Self { Self { display: Default::default(), colour: crate::color::default_selection(), panel: Default::default() } }
+}
+fn settings_path() -> PathBuf { dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("frac-rs/settings.json") }
+
 impl App {
-    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub(crate) fn new() -> Self {
         let gpu = Gpu::new().unwrap_or_else(|e| panic!("CUDA init failed: {e}"));
         let gallery: Vec<Entry> =
             Scene::gallery().into_iter().map(|scene| Entry { scene, thumb: None, path: None }).collect();
@@ -184,12 +192,15 @@ impl App {
             gpu,
             origin: scene.clone(),
             last_scene: scene.clone(),
-            scene,
+            scene: scene.clone(),
             full: None,
             preview: None,
             showing_preview: false,
-            tex: None,
-            tex_stamp: (u32::MAX, false, 0),
+            hdr_view: std::sync::Arc::new(std::sync::Mutex::new(egui_hdr_view::HdrView::new())),
+            display: Default::default(),
+            colour: crate::ocio::State::new(scene.colour.clone()),
+            prefs: Default::default(), settings_open: false,
+            config_picker: egui_file_dialog::FileDialog::new(), saved_settings: String::new(),
             gallery,
             bookmarks: load_bookmarks(),
             thumb_target,
@@ -215,7 +226,81 @@ impl App {
                 (PathBuf::from(p), spp, false)
             }),
         }
-        .with_snap_preset()
+        .with_snap_preset().with_settings()
+    }
+
+    fn with_settings(mut self) -> Self {
+        if let Ok(data) = std::fs::read(settings_path())
+            && let Ok(settings) = serde_json::from_slice::<Settings>(&data) {
+                self.display = settings.display;
+                self.prefs = settings.panel;
+                self.colour = crate::ocio::State::new(settings.colour.clone());
+                self.scene.colour = settings.colour;
+                self.origin.colour = self.scene.colour.clone();
+        }
+        if let Ok(category) = std::env::var("FRAC_SETTINGS") {
+            self.settings_open = true;
+            self.prefs.selected = usize::from(category.eq_ignore_ascii_case("color"));
+        }
+        self
+    }
+
+    /// Settings layout and category bodies adapted directly from exr-view::ui_settings.
+    fn settings_ui(&mut self, ctx: &egui::Context) {
+        let state = ctx.data(|d| d.get_temp::<egui_display::DisplayState>(egui_display::state_id()));
+        self.colour.set_hdr(state.as_ref().is_some_and(|s| s.output.is_hdr()));
+        self.colour.set_filterable(gpu_info::shared_device().is_some_and(|g| g.device.features().contains(wgpu::Features::FLOAT32_FILTERABLE)));
+        let mut open = self.settings_open;
+        let mut browse = false;
+        let mut changed = false;
+        let mut reset = false;
+        let mut category = self.prefs.selected;
+        let mut destination = None;
+        egui::Window::new("Settings").open(&mut open).default_size([850.0, 600.0]).show(ctx, |ui| {
+            let categories = [egui_prefs2::Category::new(egui_phosphor::regular::MONITOR, "Display"), egui_prefs2::Category::new(egui_phosphor::regular::MONITOR, "Color")];
+            egui_prefs2::draw(ui, &mut self.prefs, &categories, |ui, idx| {
+                category = idx;
+                match idx {
+                    0 => {
+                        egui_display::settings_ui(ui, &mut self.display, state.as_ref());
+                        ui.add_space(8.0);
+                        if ui.button("Colour management & monitor presets…").clicked() { destination = Some(1); }
+                    }
+                    _ => {
+                        egui_prefs2::section_header(ui, "Colour management");
+                        if let Some(state) = &state { ui.label(format!("Window output: {}.", state.output.label())); }
+                        ui.label("Monitor presets choose the image rendering. HDR 1000 nits is a rendering peak; SDR reference white controls the brightness of the UI and relative-white image values.");
+                        if ui.button("Display output & reference white…").clicked() { destination = Some(0); }
+                        ui.add_space(8.0);
+                        changed = self.colour.ui(ui, &mut browse);
+                    }
+                }
+            }, Some(|| reset = true));
+        });
+        self.settings_open = open;
+        if reset {
+            if category == 0 { self.display = Default::default(); }
+            else { self.colour.sel = crate::color::default_selection(); self.colour.reload(); changed = true; }
+        }
+        if let Some(idx) = destination { self.prefs.selected = idx; }
+        if browse { self.config_picker.pick_file(); }
+        self.config_picker.update(ctx);
+        if let Some(path) = self.config_picker.take_picked() {
+            self.colour.set_config(path.to_string_lossy().into_owned());
+            changed = true;
+        }
+        if changed {
+            self.scene.render.reinhard = false;
+            self.scene.colour = self.colour.sel.clone();
+            self.gpu.invalidate_colour();
+        }
+        let settings = Settings { display: self.display, colour: self.scene.colour.clone(), panel: self.prefs.clone() };
+        if let Ok(json) = serde_json::to_string_pretty(&settings)
+            && self.saved_settings != json {
+                let path = settings_path();
+                let result = std::fs::create_dir_all(path.parent().unwrap()).and_then(|_| std::fs::write(&path, &json));
+                match result { Ok(()) => self.saved_settings = json, Err(e) => self.status = format!("Settings save failed: {e}") }
+        }
     }
 
     fn with_snap_preset(mut self) -> Self {
@@ -237,29 +322,19 @@ impl App {
     }
 
     fn handle_snap(&mut self, ctx: &egui::Context, thumbs_pending: bool) {
-        let Some((path, spp, requested)) = self.snap.clone() else { return };
-        for ev in ctx.input(|i| i.events.clone()) {
-            if let egui::Event::Screenshot { image, .. } = ev {
-                let rgb: Vec<u8> = image.pixels.iter().flat_map(|c| [c.r(), c.g(), c.b()]).collect();
-                let file = std::fs::File::create(&path).expect("snap file");
-                let mut enc = png::Encoder::new(std::io::BufWriter::new(file), image.size[0] as u32, image.size[1] as u32);
-                enc.set_color(png::ColorType::Rgb);
-                enc.set_depth(png::BitDepth::Eight);
-                enc.write_header().and_then(|mut w| w.write_image_data(&rgb)).expect("snap png");
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                return;
-            }
-        }
+        let Some((_path, spp, requested)) = self.snap.clone() else { return };
         let ready = !thumbs_pending && !self.showing_preview && self.full.as_ref().is_some_and(|t| t.samples >= spp);
         if ready && !requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
-            self.snap = Some((path, spp, true));
+            self.snap = self.snap.take().map(|(path, spp, _)| (path, spp, true));
         }
         ctx.request_repaint();
     }
 
     fn load(&mut self, scene: Scene) {
         self.origin = scene.clone();
+        self.colour.sel = scene.colour.clone();
+        self.colour.rebuild();
         self.scene = scene;
     }
 
@@ -391,6 +466,15 @@ impl App {
         };
     }
 
+    fn screenshot_exr(&mut self) {
+        let path = pictures_dir().join(format!("{}-{}.display.exr", crate::slug(&self.scene.name), now_stamp()));
+        self.status = match self.current().map(|t| t.save_display_exr(&path)) {
+            Some(Ok(())) => format!("Saved {}", path.display()),
+            Some(Err(e)) => format!("EXR failed: {e}"),
+            None => "Nothing to save yet".into(),
+        };
+    }
+
     fn start_job(&mut self) {
         let (w, h, _) = FINAL_SIZES[self.final_size];
         let path = pictures_dir().join(format!(
@@ -431,10 +515,15 @@ impl App {
 
     /// Trace the viewport for this frame (preview while the scene is changing).
     fn step_viewport(&mut self, w: usize, h: usize) {
-        if self.scene != self.last_scene {
+        let mut traced_scene = self.scene.clone();
+        traced_scene.render.exposure_stops = self.last_scene.render.exposure_stops;
+        traced_scene.render.saturation = self.last_scene.render.saturation;
+        traced_scene.render.reinhard = self.last_scene.render.reinhard;
+        traced_scene.colour = self.last_scene.colour.clone();
+        if traced_scene != self.last_scene {
             self.last_change = Instant::now();
-            self.last_scene = self.scene.clone();
         }
+        self.last_scene = self.scene.clone();
         let moving = self.last_change.elapsed().as_secs_f32() < PREVIEW_HOLD_S;
         if moving {
             let (pw, ph) = ((w / 2).max(8), (h / 2).max(8));
@@ -554,11 +643,15 @@ impl App {
             if ui.button("★ Bookmark").on_hover_text("Save the scene (JSON) to bookmarks").clicked() {
                 self.save_bookmark();
             }
-            if ui.button("📷 Screenshot").on_hover_text("Save the viewport as PNG").clicked() {
+            if ui.button("Settings…").clicked() { self.settings_open = true; }
+            if ui.button("📷 Screenshot").on_hover_text("SDR sRGB PNG or HDR10 PQ PNG with cICP/mDCV/cLLI metadata").clicked() {
                 self.screenshot();
             }
+            if ui.button("Display EXR").on_hover_text("Save linear Rec.709 display light; 1 = 100 nits").clicked() { self.screenshot_exr(); }
             if ui.button("⟲ Reset").on_hover_text("Back to the loaded preset / bookmark").clicked() {
                 self.scene = self.origin.clone();
+                self.colour.sel = self.scene.colour.clone();
+                self.colour.rebuild();
             }
             if ui.button("⧉ Copy JSON").on_hover_text("Copy the scene as JSON").clicked() {
                 if let Ok(json) = serde_json::to_string_pretty(&self.scene) {
@@ -778,23 +871,27 @@ impl App {
         }
 
         if let Some(t) = self.current() {
-            let stamp = (t.samples, self.showing_preview, t.width * t.height);
-            let image = (stamp != self.tex_stamp || self.paused).then(|| to_image(t));
-            if let Some(image) = image {
-                match &mut self.tex {
-                    Some(tex) => tex.set(image, TextureOptions::LINEAR),
-                    None => self.tex = Some(ui.ctx().load_texture("viewport", image, TextureOptions::LINEAR)),
-                }
-                self.tex_stamp = stamp;
+            let state = ui.ctx().data(|d| d.get_temp::<egui_display::DisplayState>(egui_display::state_id()));
+            let output_hdr = state.as_ref().is_some_and(|s| s.output.is_hdr());
+            let white = state.as_ref().map_or(100.0, |s| s.target.white);
+            let gain = if t.hdr && output_hdr { 100.0 / white } else { 1.0 };
+            if !output_hdr {
+                let bytes = std::sync::Arc::new(t.pixels.iter().flat_map(|p| p.to_le_bytes()).collect::<Vec<_>>());
+                let mut view = self.hdr_view.lock().unwrap();
+                view.set_output_format(egui_display::CANVAS_FORMAT);
+                view.stage_frame(egui_hdr_view::HdrFormat::Rgba8, bytes, t.width, t.height, Default::default());
+            } else {
+            let canvas: Vec<[f32; 4]> = t.light.iter().map(|p| {
+                let f = |v: f32| crate::color::oetf(if output_hdr { v * gain } else { v.clamp(0.0, 1.0) });
+                [f(p[0]), f(p[1]), f(p[2]), 1.0]
+            }).collect();
+            let bytes = std::sync::Arc::new(bytemuck::cast_slice::<[f32; 4], u8>(&canvas).to_vec());
+            let mut view = self.hdr_view.lock().unwrap();
+            view.set_output_format(egui_display::CANVAS_FORMAT);
+            view.stage_frame(egui_hdr_view::HdrFormat::Rgba32F, bytes, t.width, t.height, Default::default());
+            drop(view);
             }
-        }
-        if let Some(tex) = &self.tex {
-            ui.painter().image(
-                tex.id(),
-                rect,
-                egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                Color32::WHITE,
-            );
+            ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, egui_hdr_view::HdrPaintCallback { inner: self.hdr_view.clone() }));
         }
         if let Some(job) = &self.job {
             let text = format!(
@@ -812,8 +909,8 @@ impl App {
     }
 }
 
-impl eframe::App for App {
-    fn ui(&mut self, root: &mut egui::Ui, _frame: &mut eframe::Frame) {
+impl App {
+    pub(crate) fn ui(&mut self, root: &mut egui::Ui) {
         let ctx = root.ctx().clone();
         let dt = ctx.input(|i| i.stable_dt).max(1.0e-4);
         self.frame_ms = self.frame_ms * 0.9 + dt * 1000.0 * 0.1;
@@ -836,6 +933,10 @@ impl eframe::App for App {
         }
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(root, |ui| self.viewport(ui));
 
+        self.settings_ui(&ctx);
+        if let Some(error) = self.current().and_then(|t| t.colour_error.as_deref()) {
+            self.status = format!("Colour output failed: {error}");
+        }
         self.handle_snap(&ctx, thumbs_pending);
         let converged = self.full.as_ref().is_some_and(|t| t.samples >= self.target_spp) && !self.showing_preview;
         if !converged || thumbs_pending || self.job.is_some() {
@@ -1132,7 +1233,7 @@ fn render_ui(ui: &mut egui::Ui, r: &mut Render) {
     slider(ui, &mut r.exposure_stops, -6.0..=6.0, "exposure EV");
     slider(ui, &mut r.saturation, 0.0..=2.0, "saturation");
     ui.horizontal(|ui| {
-        ui.selectable_value(&mut r.reinhard, false, "ACES");
+        ui.selectable_value(&mut r.reinhard, false, "ACES 2.0");
         ui.selectable_value(&mut r.reinhard, true, "Reinhard");
     });
 }

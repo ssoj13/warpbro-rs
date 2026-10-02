@@ -6,3 +6,9 @@ ob = "oxide build"
 or = "oxide run"
 ogallery = "oxide run -- --gallery"
 obench = "oxide run -- --bench"
+
+[net]
+git-fetch-with-cli = true
+
+[env]
+CUDA_OXIDE_PTX_DIR = { value = "target/oxide-ptx", relative = true }

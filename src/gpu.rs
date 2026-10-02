@@ -7,7 +7,7 @@
 //! - `trace_fast` / `trace_full`: add `P_SPP` samples per pixel into the f32 accumulator; fast =
 //!   diffuse + GGX (cheap, for exploring), full = Autodesk Standard Surface (MaterialX port).
 //!   Two kernels, not a runtime branch, so the fast one keeps its low register count.
-//! - `tonemap`: running mean -> exposure / saturation -> ACES or Reinhard -> sRGB -> RGBA8.
+//! - `tonemap`: running mean -> exposure / saturation -> scene-linear RGBA32F for vfx-ocio.
 //!
 //! Pixels are traced in 8x4 tiles (one warp each) so neighbouring rays share their march paths.
 
@@ -1388,40 +1388,25 @@ pub mod kernels {
         }
     }
 
-    /// Running mean -> exposure / saturation -> ACES (Narkowicz) or Reinhard -> sRGB -> RGBA8.
+    /// Untile the running mean and apply exposure/saturation in scene-linear Rec.709.
+    /// Full ACES 2.0 runs through vfx-ocio on the shared wgpu device afterwards.
     #[kernel]
     #[launch_bounds(128)]
     #[launch_contract(domain = 1, block = (128, 1, 1))]
-    pub fn tonemap(accum: &[[f32; 4]], mut out: DisjointSlice<u32>) {
+    pub fn tonemap(accum: &[[f32; 4]], mut out: DisjointSlice<[f32; 4]>) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
         let width = pr(P_WIDTH) as u32;
         if let Some(px) = out.get_mut(idx) {
             let x = i % width;
             let y = i / width;
-            let tiles_x = width.div_ceil(8);
-            let tile = (y / 4) * tiles_x + x / 8;
+            let tile = (y / 4) * width.div_ceil(8) + x / 8;
             let a = accum[(tile * 32 + (y % 4) * 8 + x % 8) as usize];
             let inv = if a[3] > 0.0 { pr(P_EXPOSURE) / a[3] } else { 0.0 };
             let c = [a[0] * inv, a[1] * inv, a[2] * inv];
             let l = luminance(c);
             let sat = pr(P_SATURATION);
-            let c = [l + (c[0] - l) * sat, l + (c[1] - l) * sat, l + (c[2] - l) * sat];
-            let aces = pr(P_TONEMAP) == 0.0;
-            let mut packed = 0xFF00_0000u32;
-            let mut k = 0;
-            while k < 3 {
-                let v = c[k].max(0.0);
-                let t = if aces {
-                    ((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14)).clamp(0.0, 1.0)
-                } else {
-                    (v / (1.0 + v)).clamp(0.0, 1.0)
-                };
-                let s = if t <= 0.003_130_8 { 12.92 * t } else { 1.055 * t.powf(1.0 / 2.4) - 0.055 };
-                packed |= ((s * 255.0 + 0.5) as u32).min(255) << (8 * k);
-                k += 1;
-            }
-            *px = packed;
+            *px = [l + (c[0] - l) * sat, l + (c[1] - l) * sat, l + (c[2] - l) * sat, 1.0];
         }
     }
 }
