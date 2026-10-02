@@ -508,32 +508,18 @@ impl SpaceFlight {
         }
     }
 
-    /// Apply one intent: look turns the ship DIRECTLY (1:1, no momentum), roll
-    /// adds angular momentum, thrust adds linear momentum (body-relative), boost
-    /// scales thrust.
+    /// Apply one intent: look feeds angular momentum, roll adds angular momentum,
+    /// thrust adds linear momentum, boost scales thrust.
     pub fn apply_intent(&mut self, intent: CameraIntent, _viewport: ViewportSize) {
         match intent {
             CameraIntent::Look { dyaw, dpitch } | CameraIntent::Orbit { yaw_delta: dyaw, pitch_delta: dpitch } => {
-                // Mouse-look is applied DIRECTLY to the orientation, NOT through
-                // angular momentum: routing it through `momentum.angular` (× REF_FPS,
-                // then slow damping) made the view coast/overshoot after the cursor
-                // stopped — the "drunken" drift the look-sensitivity slider couldn't
-                // tame. Yaw about the ship's own up, pitch about its right; roll +
-                // thrust below keep their inertial spaceship feel.
-                if dyaw != 0.0 {
-                    let up = (self.orientation * Vec3::Y).normalize_or_zero();
-                    if up.length_squared() > 1e-10 {
-                        self.orientation =
-                            (Quat::from_axis_angle(up, dyaw) * self.orientation).normalize();
-                    }
-                }
-                if dpitch != 0.0 {
-                    let right = (self.orientation * Vec3::X).normalize_or_zero();
-                    if right.length_squared() > 1e-10 {
-                        self.orientation =
-                            (Quat::from_axis_angle(right, dpitch) * self.orientation).normalize();
-                    }
-                }
+                // From nodes-rs cam-controls @ 1078632: inertial mouse-look.
+                // The shared update_dynamics integrates and damps this momentum.
+                const MAX_ANG: f32 = 8.0;
+                self.momentum.angular.x =
+                    (self.momentum.angular.x + dyaw * REF_FPS).clamp(-MAX_ANG, MAX_ANG);
+                self.momentum.angular.y =
+                    (self.momentum.angular.y + dpitch * REF_FPS).clamp(-MAX_ANG, MAX_ANG);
             }
             CameraIntent::Roll { d } => {
                 // Held roll axis (−1/0/+1 from Q/E), refreshed every frame like

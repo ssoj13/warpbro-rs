@@ -6,7 +6,6 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use egui::{self, Color32, ColorImage, RichText, Sense, TextureHandle, TextureOptions, Vec2};
 
-use crate::palette::{PaletteScheme, build_lut};
 use crate::render::{Gpu, Target};
 use crate::scene::*;
 
@@ -116,11 +115,11 @@ pub(crate) struct App {
     /// `FRAC_SNAP=out.png [FRAC_SNAP_PRESET=i] [FRAC_SNAP_SPP=n]`: screenshot the window once the
     /// thumbnails and n viewport samples are done, then quit (for docs).
     snap: Option<(PathBuf, u32, bool)>,
-    /// Unreal-style flight (gitnexus-rs cam-controls `FpsFly`), alive while RMB is held and
+    /// Flight via cam-controls' inertial `SpaceFlight`, alive while RMB is held and
     /// while its momentum coasts after release.
-    fly: Option<cam_controls::FpsFly>,
-    /// Flight speed multiplier (mouse wheel while flying).
-    fly_speed: f32,
+    fly: Option<cam_controls::SpaceFlight>,
+    /// Persistent mouse sensitivity and flight speed (also adjusted by the wheel).
+    controls: Controls,
 }
 
 fn now_stamp() -> u64 {
@@ -170,13 +169,24 @@ fn to_image(t: &Target) -> ColorImage {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(default)]
+struct Controls {
+    look_sensitivity: f32,
+    fly_speed: f32,
+}
+impl Default for Controls {
+    fn default() -> Self { Self { look_sensitivity: 1.0, fly_speed: 1.0 } }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 struct Settings {
     display: egui_display::DisplayPrefs,
     colour: crate::ocio::Sel,
     panel: egui_prefs2::PrefsPanelState,
+    controls: Controls,
 }
 impl Default for Settings {
-    fn default() -> Self { Self { display: Default::default(), colour: crate::color::default_selection(), panel: Default::default() } }
+    fn default() -> Self { Self { display: Default::default(), colour: crate::color::default_selection(), panel: Default::default(), controls: Default::default() } }
 }
 fn settings_path() -> PathBuf { dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("frac-rs/settings.json") }
 
@@ -220,7 +230,7 @@ impl App {
             frame_ms: 16.0,
             seed: 0,
             fly: None,
-            fly_speed: 1.0,
+            controls: Default::default(),
             snap: std::env::var("FRAC_SNAP").ok().map(|p| {
                 let spp = std::env::var("FRAC_SNAP_SPP").ok().and_then(|v| v.parse().ok()).unwrap_or(256);
                 (PathBuf::from(p), spp, false)
@@ -234,13 +244,15 @@ impl App {
             && let Ok(settings) = serde_json::from_slice::<Settings>(&data) {
                 self.display = settings.display;
                 self.prefs = settings.panel;
+                self.controls = settings.controls;
                 self.colour = crate::ocio::State::new(settings.colour.clone());
                 self.scene.colour = settings.colour;
                 self.origin.colour = self.scene.colour.clone();
         }
         if let Ok(category) = std::env::var("FRAC_SETTINGS") {
             self.settings_open = true;
-            self.prefs.selected = usize::from(category.eq_ignore_ascii_case("color"));
+            self.prefs.selected = if category.eq_ignore_ascii_case("controls") { 2 }
+                else { usize::from(category.eq_ignore_ascii_case("color")) };
         }
         self
     }
@@ -248,7 +260,8 @@ impl App {
     /// Settings layout and category bodies adapted directly from exr-view::ui_settings.
     fn settings_ui(&mut self, ctx: &egui::Context) {
         let state = ctx.data(|d| d.get_temp::<egui_display::DisplayState>(egui_display::state_id()));
-        self.colour.set_hdr(state.as_ref().is_some_and(|s| s.output.is_hdr()));
+        // Colour chooses the rendering/export target; SDR presentation has its own preview.
+        self.colour.set_hdr(true);
         self.colour.set_filterable(gpu_info::shared_device().is_some_and(|g| g.device.features().contains(wgpu::Features::FLOAT32_FILTERABLE)));
         let mut open = self.settings_open;
         let mut browse = false;
@@ -257,22 +270,34 @@ impl App {
         let mut category = self.prefs.selected;
         let mut destination = None;
         egui::Window::new("Settings").open(&mut open).default_size([850.0, 600.0]).show(ctx, |ui| {
-            let categories = [egui_prefs2::Category::new(egui_phosphor::regular::MONITOR, "Display"), egui_prefs2::Category::new(egui_phosphor::regular::MONITOR, "Color")];
+            let categories = [egui_prefs2::Category::new(egui_phosphor::regular::MONITOR, "Display"), egui_prefs2::Category::new(egui_phosphor::regular::MONITOR, "Color"), egui_prefs2::Category::new(egui_phosphor::regular::MONITOR, "Controls")];
             egui_prefs2::draw(ui, &mut self.prefs, &categories, |ui, idx| {
                 category = idx;
                 match idx {
                     0 => {
                         egui_display::settings_ui(ui, &mut self.display, state.as_ref());
+                        if state.as_ref().is_some_and(|s| !s.available.iter().any(|o| o.is_hdr())) {
+                            ui.label("This window surface offers SDR only. PQ/HDR targets in Color still render and export HDR; the screen uses an SDR preview.");
+                        }
                         ui.add_space(8.0);
                         if ui.button("Colour management & monitor presets…").clicked() { destination = Some(1); }
                     }
-                    _ => {
+                    1 => {
                         egui_prefs2::section_header(ui, "Colour management");
                         if let Some(state) = &state { ui.label(format!("Window output: {}.", state.output.label())); }
-                        ui.label("Monitor presets choose the image rendering. HDR 1000 nits is a rendering peak; SDR reference white controls the brightness of the UI and relative-white image values.");
+                        ui.label("Monitor presets choose rendering and export. PQ/HDR remains available on SDR screens using an SDR preview. HDR 1000 nits is the rendering peak; SDR reference white controls UI brightness.");
                         if ui.button("Display output & reference white…").clicked() { destination = Some(0); }
                         ui.add_space(8.0);
                         changed = self.colour.ui(ui, &mut browse);
+                    }
+                    _ => {
+                        egui_prefs2::section_header(ui, "Camera controls");
+                        egui_attr_table::attr_table(ui, |t| {
+                            t.row("Mouse sensitivity").default(1.0).slider(&mut self.controls.look_sensitivity, 0.1..=5.0);
+                            t.row("Flight speed ×").default(1.0).slider(&mut self.controls.fly_speed, 0.02..=50.0);
+                        });
+                        ui.label("RMB: fly · wheel: flight speed · `: horizon/free flight");
+                        ui.label("H: restore camera · F: frame bounds (without RMB)");
                     }
                 }
             }, Some(|| reset = true));
@@ -280,7 +305,8 @@ impl App {
         self.settings_open = open;
         if reset {
             if category == 0 { self.display = Default::default(); }
-            else { self.colour.sel = crate::color::default_selection(); self.colour.reload(); changed = true; }
+            else if category == 1 { self.colour.sel = crate::color::default_selection(); self.colour.reload(); changed = true; }
+            else { self.controls = Default::default(); }
         }
         if let Some(idx) = destination { self.prefs.selected = idx; }
         if browse { self.config_picker.pick_file(); }
@@ -294,7 +320,7 @@ impl App {
             self.scene.colour = self.colour.sel.clone();
             self.gpu.invalidate_colour();
         }
-        let settings = Settings { display: self.display, colour: self.scene.colour.clone(), panel: self.prefs.clone() };
+        let settings = Settings { display: self.display, colour: self.scene.colour.clone(), panel: self.prefs.clone(), controls: Controls { look_sensitivity: self.controls.look_sensitivity, fly_speed: self.controls.fly_speed } };
         if let Ok(json) = serde_json::to_string_pretty(&settings)
             && self.saved_settings != json {
                 let path = settings_path();
@@ -557,73 +583,150 @@ impl App {
     }
 
     /// Unreal-style flight: hold RMB in the viewport, mouse looks, WASD moves, Q/E down/up,
-    /// Shift boosts, the wheel scales the speed. Integrated by cam-controls `FpsFly` (thrust,
+    /// Shift boosts, the wheel scales the speed. Integrated by cam-controls `SpaceFlight` (thrust,
     /// inertia, damping); on release the orbit pivot is placed in front of the camera at the
     /// current orbit distance, so orbiting continues from where you flew.
     fn fly_camera(&mut self, ui: &egui::Ui, resp: &egui::Response) {
-        use cam_controls::{CameraIntent, CameraPose, FpsFly};
+        use cam_controls::{CameraIntent, CameraPose, SpaceFlight, InertiaSettings};
         use glam::{Quat, Vec3};
-        let held = resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.secondary_down());
+        if !ui.ctx().text_edit_focused() && ui.input(|i| i.events.iter().any(|e| matches!(e,
+            egui::Event::Key { key, physical_key, pressed: true, repeat: false, modifiers }
+            if (*key == egui::Key::Backtick || *physical_key == Some(egui::Key::Backtick))
+                && !modifiers.command && !modifiers.ctrl && !modifiers.alt))) {
+            self.toggle_flight_mode();
+        }
+        let held = resp.is_pointer_button_down_on() && ui.input(|i| i.focused && i.pointer.secondary_down());
+        if !ui.ctx().text_edit_focused() {
+            let shortcut = |key| ui.input(|i| !i.modifiers.command && !i.modifiers.ctrl && !i.modifiers.alt && i.key_pressed(key));
+            if shortcut(egui::Key::H) {
+                self.scene.camera = self.origin.camera;
+                self.fly = None;
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+                self.status = "Camera restored".into();
+                return;
+            }
+            if !held && shortcut(egui::Key::F) {
+                self.frame_camera(resp.rect.width().max(1.0) as u32, resp.rect.height().max(1.0) as u32);
+                return;
+            }
+        }
         let radius = self.scene.formula.framing_radius();
         let cam = &mut self.scene.camera;
-        let (yaw, pitch) = (cam.yaw_degrees.to_radians(), cam.pitch_degrees.to_radians());
         let dist = cam.distance * radius;
         if held && self.fly.is_none() {
-            // Orbit -> free pose. Our forward is (-cosP sinY, -sinP, -cosP cosY); FpsFly's is
-            // (-cos p sin y, sin p, -cos p cos y): same yaw, pitch negated.
-            let eye = Vec3::new(
-                cam.target[0] + dist * pitch.cos() * yaw.sin(),
-                cam.target[1] + dist * pitch.sin(),
-                cam.target[2] + dist * pitch.cos() * yaw.cos(),
-            );
-            let orientation = Quat::from_axis_angle(Vec3::Y, yaw) * Quat::from_axis_angle(Vec3::X, -pitch);
+            let orientation = cam.orientation();
+            let eye = Vec3::from_array(cam.target) - (orientation * -Vec3::Z) * dist;
             let pose = CameraPose { eye, orientation, ..CameraPose::default() };
-            self.fly = Some(FpsFly::from_pose(pose));
+            let mut fly = SpaceFlight::from_pose(pose);
+            fly.inertia = InertiaSettings::fps();
+            self.fly = Some(fly);
         }
         let Some(fly) = &mut self.fly else { return };
         let viewport = cam_viewport::ViewportSize::new(resp.rect.width().max(1.0) as u32, resp.rect.height().max(1.0) as u32);
         let dt = ui.input(|i| i.stable_dt).clamp(1.0e-4, 0.1);
         if held {
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::Locked));
             let (delta, scroll, keys) = ui.input(|i| {
                 let k = |key| if i.key_down(key) { 1.0f32 } else { 0.0 };
                 (
-                    i.pointer.delta(),
+                    i.pointer.motion().unwrap_or_else(|| i.pointer.delta()),
                     i.smooth_scroll_delta.y,
                     [
                         k(egui::Key::W) - k(egui::Key::S),
                         k(egui::Key::D) - k(egui::Key::A),
-                        k(egui::Key::E) - k(egui::Key::Q),
+                        if cam.free_flight { k(egui::Key::R) - k(egui::Key::F) }
+                            else { k(egui::Key::E) - k(egui::Key::Q) },
                         if i.modifiers.shift { 1.0 } else { 0.0 },
+                        if cam.free_flight { k(egui::Key::E) - k(egui::Key::Q) } else { 0.0 },
                     ],
                 )
             });
             if scroll != 0.0 {
-                self.fly_speed = (self.fly_speed * (scroll * 0.003).exp()).clamp(0.02, 50.0);
-                self.status = format!("Flight speed ×{:.2}", self.fly_speed);
+                self.controls.fly_speed = (self.controls.fly_speed * (scroll * 0.003).exp()).clamp(0.02, 50.0);
+                self.status = format!("Flight speed ×{:.2}", self.controls.fly_speed);
             }
-            let sens = 0.0035;
+            let sens = 0.001 * self.controls.look_sensitivity;
             fly.apply_intent(CameraIntent::Look { dyaw: -delta.x * sens, dpitch: -delta.y * sens }, viewport);
             fly.apply_intent(CameraIntent::Thrust { forward: keys[0], right: keys[1], up: keys[2] }, viewport);
             fly.apply_intent(CameraIntent::Boost(keys[3] > 0.0), viewport);
+            fly.apply_intent(CameraIntent::Roll { d: keys[4] }, viewport);
         } else {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
             fly.apply_intent(CameraIntent::Thrust { forward: 0.0, right: 0.0, up: 0.0 }, viewport);
             fly.apply_intent(CameraIntent::Boost(false), viewport);
+            fly.apply_intent(CameraIntent::Roll { d: 0.0 }, viewport);
         }
         // Acceleration scales with the formula's size and the speed multiplier.
-        fly.inertia.thrust_sensitivity = 6.0 * radius * self.fly_speed;
+        fly.inertia.thrust_sensitivity = 6.0 * radius * self.controls.fly_speed;
         let moving = fly.update_dynamics(dt);
 
         let pose = fly.pose();
-        let f = pose.forward();
-        cam.pitch_degrees = (-f.y).clamp(-1.0, 1.0).asin().to_degrees();
-        cam.yaw_degrees = (-f.x).atan2(-f.z).to_degrees();
+        if cam.free_flight {
+            let (yaw, pitch, roll) = pose.orientation.to_euler(glam::EulerRot::YXZ);
+            cam.yaw_degrees = yaw.to_degrees();
+            cam.pitch_degrees = -pitch.to_degrees();
+            cam.roll_degrees = roll.to_degrees();
+        } else {
+            let f = pose.forward();
+            cam.pitch_degrees = (-f.y).clamp(-1.0, 1.0).asin().to_degrees().clamp(-89.0, 89.0);
+            cam.yaw_degrees = (-f.x).atan2(-f.z).to_degrees();
+            cam.roll_degrees = 0.0;
+            fly.orientation = Quat::from_axis_angle(Vec3::Y, cam.yaw_degrees.to_radians())
+                * Quat::from_axis_angle(Vec3::X, -cam.pitch_degrees.to_radians());
+        }
+        let f = fly.pose().forward();
         let target = pose.eye + f * dist;
         cam.target = [target.x, target.y, target.z];
         if !held && !moving {
             self.fly = None;
         }
         ui.ctx().request_repaint();
+    }
+
+    fn frame_camera(&mut self, width: u32, height: u32) {
+        use cam_controls::{CameraController, CameraPose, SpaceFlight};
+        let (min, max) = self.scene.framing_bounds();
+        let cam = &mut self.scene.camera;
+        let mut fly = SpaceFlight::from_pose(CameraPose { orientation: cam.orientation(), ..Default::default() });
+        fly.projection.fov_y = cam.fov_y_degrees.to_radians();
+        fly.projection.distance_min = 0.0001;
+        fly.projection.distance_max = f32::MAX;
+        let mut controller = CameraController::Space(fly);
+        // The shared fitter uses radius/tan(FOV/2); allow for the sphere's depth,
+        // especially with wide FOVs, so the entire box stays inside the frustum.
+        let margin = 1.1 / (cam.fov_y_degrees.to_radians() * 0.5).cos();
+        controller.frame_bounds(min, max, width, height, margin);
+        let center = (min + max) * 0.5;
+        cam.target = center.to_array();
+        cam.distance = controller.pose().eye.distance(center) / self.scene.formula.framing_radius();
+        self.fly = None;
+        self.status = "Camera framed to bounds".into();
+    }
+
+    fn toggle_flight_mode(&mut self) {
+        use glam::{Vec3, Quat};
+        let cam = &mut self.scene.camera;
+        let dist = cam.distance * self.scene.formula.framing_radius();
+        let eye = self.fly.as_ref().map_or_else(
+            || Vec3::from_array(cam.target) - (cam.orientation() * -Vec3::Z) * dist,
+            |fly| fly.eye);
+        cam.free_flight = !cam.free_flight;
+        if !cam.free_flight {
+            let f = cam.orientation() * -Vec3::Z;
+            cam.yaw_degrees = (-f.x).atan2(-f.z).to_degrees();
+            cam.pitch_degrees = (-f.y).clamp(-1.0, 1.0).asin().to_degrees().clamp(-89.0, 89.0);
+            cam.roll_degrees = 0.0;
+            let orientation: Quat = cam.orientation();
+            cam.target = (eye + (orientation * -Vec3::Z) * dist).to_array();
+            if let Some(fly) = &mut self.fly {
+                fly.orientation = orientation;
+                fly.momentum.angular.z = 0.0;
+                fly.apply_intent(cam_controls::CameraIntent::Roll { d: 0.0 }, cam_viewport::ViewportSize::new(1, 1));
+            }
+        }
+        self.status = if cam.free_flight { "Flight: free · Q/E roll · R/F up/down" }
+            else { "Flight: horizon · Q/E up/down" }.into();
     }
 
     fn current(&self) -> Option<&Target> {
@@ -778,21 +881,16 @@ impl App {
     }
 
     fn inspector(&mut self, ui: &mut egui::Ui) {
+        use crate::inspector as controls;
         egui::ScrollArea::vertical().show(ui, |ui| {
-            let s = &mut self.scene;
-            ui.horizontal(|ui| {
-                ui.label("Name");
-                ui.text_edit_singleline(&mut s.name);
-            });
-            egui::CollapsingHeader::new("Formula").default_open(true).show(ui, |ui| formula_ui(ui, s));
-            egui::CollapsingHeader::new("Camera").default_open(true).show(ui, |ui| camera_ui(ui, s));
-            egui::CollapsingHeader::new("Light").show(ui, |ui| light_ui(ui, &mut s.lighting));
-            egui::CollapsingHeader::new("Material").default_open(true).show(ui, |ui| material_ui(ui, &mut s.material));
-            egui::CollapsingHeader::new("Colour").default_open(true).show(ui, |ui| colour_ui(ui, s));
-            egui::CollapsingHeader::new("Render").default_open(true).show(ui, |ui| {
-                render_ui(ui, &mut s.render);
-                ui.add(egui::Slider::new(&mut self.target_spp, 1..=65536).logarithmic(true).text("target spp"));
-                ui.add(egui::Slider::new(&mut self.resolution, 0.25..=2.0).text("viewport scale"));
+            egui_attr_table::attr_table(ui, |t| { t.row("Name").text(&mut self.scene.name); });
+            controls::section(ui, "Formula", true, |ui| controls::formula(ui, &mut self.scene));
+            controls::section(ui, "Camera", true, |ui| controls::camera(ui, &mut self.scene));
+            controls::section(ui, "Light", false, |ui| controls::lighting(ui, &mut self.scene.lighting));
+            controls::section(ui, "Material", true, |ui| controls::material(ui, &mut self.scene.material));
+            controls::section(ui, "Palette", true, |ui| controls::palette(ui, &mut self.scene));
+            controls::section(ui, "Render", true, |ui| {
+                controls::render(ui, &mut self.scene.render, &mut self.target_spp, &mut self.resolution);
                 if ui.button("New noise seed").clicked() {
                     self.seed = self.seed.wrapping_add(7919);
                     self.full = None;
@@ -804,6 +902,7 @@ impl App {
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label(RichText::new(&self.gpu.name).weak());
+            ui.label(if self.scene.camera.free_flight { "Free flight · `" } else { "Horizon · `" });
             ui.separator();
             if let Some(t) = self.current() {
                 ui.label(format!("{}×{}", t.width, t.height));
@@ -838,17 +937,17 @@ impl App {
         let cam = &mut self.scene.camera;
         if resp.dragged_by(egui::PointerButton::Primary) {
             let d = resp.drag_delta();
-            cam.yaw_degrees = (cam.yaw_degrees - d.x * 0.3) % 360.0;
-            cam.pitch_degrees = (cam.pitch_degrees + d.y * 0.3).clamp(-89.0, 89.0);
+            let sensitivity = 0.1 * self.controls.look_sensitivity;
+            cam.yaw_degrees = (cam.yaw_degrees - d.x * sensitivity) % 360.0;
+            cam.pitch_degrees = (cam.pitch_degrees + d.y * sensitivity).clamp(-89.0, 89.0);
         }
         if resp.dragged_by(egui::PointerButton::Middle) {
             // Pan the orbit target in the camera plane.
             let d = resp.drag_delta();
             let radius = self.scene.formula.framing_radius();
-            let (yaw, pitch) = (cam.yaw_degrees.to_radians(), cam.pitch_degrees.to_radians());
-            let fwd = [-pitch.cos() * yaw.sin(), -pitch.sin(), -pitch.cos() * yaw.cos()];
-            let right = normalize(cross(fwd, [0.0, 1.0, 0.0]));
-            let up = cross(right, fwd);
+            let orientation = cam.orientation();
+            let right = (orientation * glam::Vec3::X).to_array();
+            let up = (orientation * glam::Vec3::Y).to_array();
             let k = cam.distance * radius * 2.0 * (cam.fov_y_degrees.to_radians() * 0.5).tan() / avail.y.max(1.0);
             for i in 0..3 {
                 cam.target[i] += (-d.x * right[i] + d.y * up[i]) * k;
@@ -857,7 +956,7 @@ impl App {
         if resp.hovered() && self.fly.is_none() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll != 0.0 {
-                cam.distance = (cam.distance * (-scroll * 0.0015).exp()).clamp(0.05, 20.0);
+                cam.distance = (cam.distance * (-scroll * 0.0015).exp()).max(0.05);
             }
         }
         if resp.double_clicked() {
@@ -875,11 +974,16 @@ impl App {
             let output_hdr = state.as_ref().is_some_and(|s| s.output.is_hdr());
             let white = state.as_ref().map_or(100.0, |s| s.target.white);
             let gain = if t.hdr && output_hdr { 100.0 / white } else { 1.0 };
+            // HdrView's quad spans [-0.5, 0.5]; cover the callback's full [-1, 1] viewport.
+            let mvp = egui_hdr_view::Mvp {
+                model: glam::Mat4::from_scale(glam::vec3(2.0, 2.0, 1.0)).to_cols_array_2d(),
+                ..Default::default()
+            };
             if !output_hdr {
                 let bytes = std::sync::Arc::new(t.pixels.iter().flat_map(|p| p.to_le_bytes()).collect::<Vec<_>>());
                 let mut view = self.hdr_view.lock().unwrap();
                 view.set_output_format(egui_display::CANVAS_FORMAT);
-                view.stage_frame(egui_hdr_view::HdrFormat::Rgba8, bytes, t.width, t.height, Default::default());
+                view.stage_frame(egui_hdr_view::HdrFormat::Rgba8, bytes, t.width, t.height, mvp);
             } else {
             let canvas: Vec<[f32; 4]> = t.light.iter().map(|p| {
                 let f = |v: f32| crate::color::oetf(if output_hdr { v * gain } else { v.clamp(0.0, 1.0) });
@@ -888,7 +992,7 @@ impl App {
             let bytes = std::sync::Arc::new(bytemuck::cast_slice::<[f32; 4], u8>(&canvas).to_vec());
             let mut view = self.hdr_view.lock().unwrap();
             view.set_output_format(egui_display::CANVAS_FORMAT);
-            view.stage_frame(egui_hdr_view::HdrFormat::Rgba32F, bytes, t.width, t.height, Default::default());
+            view.stage_frame(egui_hdr_view::HdrFormat::Rgba32F, bytes, t.width, t.height, mvp);
             drop(view);
             }
             ui.painter().add(egui_wgpu::Callback::new_paint_callback(rect, egui_hdr_view::HdrPaintCallback { inner: self.hdr_view.clone() }));
@@ -929,7 +1033,7 @@ impl App {
             egui::Panel::top("top").show(root, |ui| self.top_bar(ui));
             egui::Panel::bottom("status").show(root, |ui| self.status_bar(ui));
             egui::Panel::left("browser").default_size(250.0).min_size(180.0).show(root, |ui| self.browser(ui));
-            egui::Panel::right("inspector").default_size(330.0).min_size(260.0).show(root, |ui| self.inspector(ui));
+            egui::Panel::right("inspector").default_size(500.0).min_size(480.0).show(root, |ui| self.inspector(ui));
         }
         egui::CentralPanel::default().frame(egui::Frame::NONE).show(root, |ui| self.viewport(ui));
 
@@ -945,300 +1049,187 @@ impl App {
     }
 }
 
-// =============================================================================
-// inspector sections
-// =============================================================================
-
-fn slider(ui: &mut egui::Ui, v: &mut f32, range: std::ops::RangeInclusive<f32>, text: &str) {
-    ui.add(egui::Slider::new(v, range).text(text));
-}
-
-fn vec3(ui: &mut egui::Ui, v: &mut [f32; 3], range: std::ops::RangeInclusive<f32>, text: &str) {
-    ui.horizontal(|ui| {
-        for c in v.iter_mut() {
-            ui.add(egui::DragValue::new(c).speed(0.005).range(range.clone()));
-        }
-        ui.label(text);
-    });
-}
-
-fn formula_ui(ui: &mut egui::Ui, s: &mut Scene) {
-    let mut code = s.formula.code();
-    egui::ComboBox::from_label("family").selected_text(s.formula.name()).show_ui(ui, |ui| {
-        for (i, n) in Formula::NAMES.iter().enumerate() {
-            ui.selectable_value(&mut code, i as u32, *n);
-        }
-    });
-    if code != s.formula.code() {
-        let fresh = Scene::preset(code);
-        s.formula = fresh.formula;
-        s.render.iterations = fresh.render.iterations;
-        s.render.max_steps = fresh.render.max_steps;
-        s.render.hit_epsilon = fresh.render.hit_epsilon;
-        s.julia = None;
-    }
-    ui.add(egui::Slider::new(&mut s.render.iterations, 1..=64).text("iterations"));
-    match &mut s.formula {
-        Formula::Mandelbulb(b) => bulb_ui(ui, b),
-        Formula::Mandelbox(b) => box_ui(ui, b),
-        Formula::QuaternionJulia(q) => {
-            for (i, n) in ["c.x", "c.y", "c.z", "c.w"].iter().enumerate() {
-                slider(ui, &mut q.constant[i], -1.5..=1.5, n);
-            }
-            slider(ui, &mut q.slice_w, -1.5..=1.5, "slice w");
-            vec3(ui, &mut q.rotation_degrees, -360.0..=360.0, "4D rotation °");
-            slider(ui, &mut q.bailout, 2.0..=16.0, "bailout");
-        }
-        Formula::Kifs(k) => kifs_ui(ui, k),
-        Formula::Kleinian(k) => {
-            slider(ui, &mut k.a, 1.0..=2.2, "a");
-            slider(ui, &mut k.b, -1.0..=1.0, "b");
-            slider(ui, &mut k.bound_radius, 0.0..=4.0, "ball bound (0 = none)");
-        }
-        Formula::PseudoKleinian(k) => {
-            vec3(ui, &mut k.box_size, 0.1..=2.0, "box");
-            slider(ui, &mut k.size, 0.1..=2.0, "size");
-            vec3(ui, &mut k.c, -2.0..=2.0, "c");
-            vec3(ui, &mut k.offset, -2.0..=2.0, "offset");
-            slider(ui, &mut k.thickness, 0.0..=0.2, "thickness");
-            slider(ui, &mut k.bound_radius, 0.0..=4.0, "ball bound (0 = none)");
-        }
-        Formula::Apollonian(a) => {
-            slider(ui, &mut a.scale, 1.0..=2.0, "scale");
-            slider(ui, &mut a.bound_radius, 0.0..=4.0, "ball bound (0 = none)");
-        }
-        Formula::Hybrid(h) => {
-            ui.label("steps (repeated in order)");
-            for (i, st) in h.steps.iter_mut().enumerate() {
-                egui::ComboBox::from_id_salt(("hstep", i)).selected_text(format!("{st:?}")).show_ui(ui, |ui| {
-                    for v in [HybridStep::Off, HybridStep::Mandelbulb, HybridStep::Mandelbox, HybridStep::KifsFold, HybridStep::Inversion] {
-                        ui.selectable_value(st, v, format!("{v:?}"));
-                    }
-                });
-            }
-            slider(ui, &mut h.bailout, 2.0..=16.0, "bailout");
-            ui.collapsing("bulb step", |ui| bulb_ui(ui, &mut h.bulb));
-            ui.collapsing("box step", |ui| box_ui(ui, &mut h.mandelbox));
-            ui.collapsing("KIFS step", |ui| kifs_ui(ui, &mut h.kifs));
-            slider(ui, &mut h.apollonian_scale, 1.0..=2.0, "inversion scale");
-        }
-    }
-    if s.formula.supports_julia() {
-        let mut on = s.julia.is_some();
-        ui.checkbox(&mut on, "Julia mode");
-        if on && s.julia.is_none() {
-            s.julia = Some([0.35, 0.35, -0.4]);
-        } else if !on {
-            s.julia = None;
-        }
-        if let Some(c) = &mut s.julia {
-            vec3(ui, c, -2.0..=2.0, "Julia c");
-        }
-    }
-    ui.collapsing("object transform", |ui| {
-        vec3(ui, &mut s.object.offset, -4.0..=4.0, "offset");
-        vec3(ui, &mut s.object.rotation_degrees, -360.0..=360.0, "rotation °");
-        slider(ui, &mut s.object.scale, 0.1..=4.0, "scale");
-    });
-}
-
-fn bulb_ui(ui: &mut egui::Ui, b: &mut Bulb) {
-    slider(ui, &mut b.power, 2.0..=16.0, "power");
-    slider(ui, &mut b.bailout, 2.0..=16.0, "bailout");
-    slider(ui, &mut b.angle_scale[0], -4.0..=4.0, "θ scale");
-    slider(ui, &mut b.angle_scale[1], -4.0..=4.0, "φ scale");
-    slider(ui, &mut b.angle_phase_degrees[0], -360.0..=360.0, "θ phase °");
-    slider(ui, &mut b.angle_phase_degrees[1], -360.0..=360.0, "φ phase °");
-    vec3(ui, &mut b.rotation_degrees, -360.0..=360.0, "iter rotation °");
-}
-
-fn box_ui(ui: &mut egui::Ui, b: &mut MandelBox) {
-    slider(ui, &mut b.scale, -4.0..=4.0, "scale");
-    slider(ui, &mut b.min_radius_ratio, 0.05..=1.0, "min radius ratio");
-    slider(ui, &mut b.fixed_radius, 0.25..=2.0, "fixed radius");
-    slider(ui, &mut b.fold_limit, 0.25..=2.0, "fold limit");
-    vec3(ui, &mut b.rotation_degrees, -360.0..=360.0, "iter rotation °");
-}
-
-fn kifs_ui(ui: &mut egui::Ui, k: &mut Kifs) {
-    egui::ComboBox::from_label("kind").selected_text(format!("{:?}", k.kind)).show_ui(ui, |ui| {
-        for v in [KifsKind::Tetrahedron, KifsKind::Octahedron, KifsKind::Menger] {
-            if ui.selectable_value(&mut k.kind, v, format!("{v:?}")).changed() {
-                k.scale = v.preset_scale();
-            }
-        }
-    });
-    slider(ui, &mut k.scale, 1.2..=4.0, "scale");
-    vec3(ui, &mut k.offset, -2.0..=2.0, "centre offset");
-    vec3(ui, &mut k.rotation_degrees, -360.0..=360.0, "iter rotation °");
-}
-
-fn camera_ui(ui: &mut egui::Ui, s: &mut Scene) {
-    let c = &mut s.camera;
-    slider(ui, &mut c.yaw_degrees, -180.0..=180.0, "yaw °");
-    slider(ui, &mut c.pitch_degrees, -89.0..=89.0, "pitch °");
-    ui.add(egui::Slider::new(&mut c.distance, 0.05..=12.0).logarithmic(true).text("distance (framing radii)"));
-    slider(ui, &mut c.fov_y_degrees, 5.0..=120.0, "FOV °");
-    vec3(ui, &mut c.target, -10.0..=10.0, "target");
-    slider(ui, &mut c.aperture, 0.0..=1.0, "aperture (DOF)");
-    if c.aperture > 0.0 {
-        ui.add(egui::Slider::new(&mut c.focus_distance, 0.0..=12.0).text("focus (0 = target)"));
-    }
-    ui.label(RichText::new("LMB orbit · MMB pan · wheel zoom · RMB fly (WASD, Q/E, Shift, wheel = speed) · double-click recentre · Tab hides UI").small().weak());
-}
-
-fn light_ui(ui: &mut egui::Ui, l: &mut Lighting) {
-    slider(ui, &mut l.sun_azimuth, -180.0..=180.0, "sun azimuth °");
-    slider(ui, &mut l.sun_elevation, -30.0..=90.0, "sun elevation °");
-    ui.horizontal(|ui| {
-        ui.color_edit_button_rgb(&mut l.sun_color);
-        ui.add(egui::Slider::new(&mut l.sun_intensity, 0.0..=16.0).text("sun"));
-    });
-    ui.add(egui::Slider::new(&mut l.sun_angle, 0.05..=30.0).logarithmic(true).text("sun angle °"));
-    slider(ui, &mut l.sky_intensity, 0.0..=16.0, "sky intensity");
-    ui.horizontal(|ui| {
-        ui.color_edit_button_rgb(&mut l.sky_horizon);
-        ui.label("horizon");
-        ui.color_edit_button_rgb(&mut l.sky_zenith);
-        ui.label("zenith");
-    });
-    ui.checkbox(&mut l.background, "sky visible behind the fractal");
-}
-
-fn material_ui(ui: &mut egui::Ui, m: &mut Material) {
-    ui.horizontal(|ui| {
-        ui.selectable_value(&mut m.model, MaterialModel::Fast, "Fast");
-        ui.selectable_value(&mut m.model, MaterialModel::StandardSurface, "Standard Surface");
-    });
-    let presets = crate::materials::PRESETS;
-    egui::ComboBox::from_label("library")
-        .selected_text(m.preset.clone().unwrap_or_else(|| "—".into()))
-        .height(400.0)
-        .show_ui(ui, |ui| {
-            for p in presets {
-                if ui.selectable_label(m.preset.as_deref() == Some(p.name()), format!("{} · {}", p.category, p.name())).clicked() {
-                    p.apply(m);
-                }
-            }
-        });
-    ui.horizontal(|ui| {
-        ui.label("colour from");
-        ui.selectable_value(&mut m.color_source, ColorSource::Palette, "palette");
-        ui.selectable_value(&mut m.color_source, ColorSource::Material, "material");
-        if m.color_source == ColorSource::Material {
-            ui.color_edit_button_rgb(&mut m.base_color);
-        }
-    });
-    ui.horizontal(|ui| {
-        ui.color_edit_button_rgb(&mut m.base_tint);
-        ui.add(egui::Slider::new(&mut m.base, 0.0..=1.0).text("base (× palette)"));
-    });
-    slider(ui, &mut m.metalness, 0.0..=1.0, "metalness");
-    ui.horizontal(|ui| {
-        ui.color_edit_button_rgb(&mut m.specular_color);
-        ui.add(egui::Slider::new(&mut m.specular, 0.0..=1.0).text("specular"));
-    });
-    slider(ui, &mut m.specular_roughness, 0.0..=1.0, "roughness");
-    slider(ui, &mut m.specular_ior, 1.0..=3.0, "IOR");
-    ui.horizontal(|ui| {
-        ui.color_edit_button_rgb(&mut m.emission_color);
-        ui.add(egui::Slider::new(&mut m.emission, 0.0..=4.0).text("emission"));
-    });
-    let mut facing_on = m.facing.is_some();
-    if ui.checkbox(&mut facing_on, "facing mix (pearlescent)").changed() {
-        m.facing = facing_on.then_some(Facing { color: [0.18, 0.10, 0.65], roughness: 0.22, metallic: 0.0, exponent: 3.0 });
-    }
-    if let Some(f) = &mut m.facing {
-        ui.horizontal(|ui| {
-            ui.color_edit_button_rgb(&mut f.color);
-            ui.add(egui::Slider::new(&mut f.exponent, 0.5..=8.0).text("grazing colour · exponent"));
-        });
-        slider(ui, &mut f.roughness, 0.0..=1.0, "grazing roughness");
-        slider(ui, &mut f.metallic, 0.0..=1.0, "grazing metallic");
-    }
-    if m.model == MaterialModel::StandardSurface {
-        slider(ui, &mut m.diffuse_roughness, 0.0..=1.0, "diffuse roughness");
-        slider(ui, &mut m.specular_anisotropy, 0.0..=1.0, "anisotropy");
-        slider(ui, &mut m.specular_rotation, 0.0..=1.0, "aniso rotation");
-        ui.horizontal(|ui| {
-            ui.color_edit_button_rgb(&mut m.coat_color);
-            ui.add(egui::Slider::new(&mut m.coat, 0.0..=1.0).text("coat"));
-        });
-        slider(ui, &mut m.coat_roughness, 0.0..=1.0, "coat roughness");
-        slider(ui, &mut m.coat_ior, 1.0..=3.0, "coat IOR");
-        slider(ui, &mut m.coat_affect_color, 0.0..=1.0, "coat affect colour");
-        slider(ui, &mut m.coat_affect_roughness, 0.0..=1.0, "coat affect roughness");
-        ui.horizontal(|ui| {
-            ui.color_edit_button_rgb(&mut m.sheen_color);
-            ui.add(egui::Slider::new(&mut m.sheen, 0.0..=1.0).text("sheen"));
-        });
-        slider(ui, &mut m.sheen_roughness, 0.0..=1.0, "sheen roughness");
-        slider(ui, &mut m.thin_film_thickness, 0.0..=2000.0, "thin film nm");
-        slider(ui, &mut m.thin_film_ior, 1.0..=3.0, "thin film IOR");
-    } else {
-        ui.label(RichText::new("Fast: Lambert + GGX. Standard Surface adds coat, sheen, thin film, anisotropy.").small().weak());
-    }
-}
-
-fn colour_ui(ui: &mut egui::Ui, s: &mut Scene) {
-    egui::ComboBox::from_label("palette").selected_text(s.palette.label()).show_ui(ui, |ui| {
-        for p in PaletteScheme::ALL {
-            ui.selectable_value(&mut s.palette, p, p.label());
-        }
-    });
-    palette_strip(ui, s.palette);
-    egui::ComboBox::from_label("colouring").selected_text(format!("{:?}", s.coloring)).show_ui(ui, |ui| {
-        for c in [Coloring::Radius, Coloring::TrapOrigin, Coloring::TrapPlane, Coloring::TrapPoint] {
-            ui.selectable_value(&mut s.coloring, c, format!("{c:?}"));
-        }
-    });
-    if s.coloring != Coloring::Radius {
-        ui.add(egui::Slider::new(&mut s.trap_scale, 0.05..=20.0).logarithmic(true).text("trap scale"));
-        if s.coloring == Coloring::TrapPlane {
-            ui.horizontal(|ui| {
-                ui.label("plane normal");
-                for (i, a) in ["X", "Y", "Z"].iter().enumerate() {
-                    ui.selectable_value(&mut s.trap_axis, i as u32, *a);
-                }
-            });
-        }
-        if s.coloring != Coloring::TrapOrigin {
-            vec3(ui, &mut s.trap_point, -4.0..=4.0, "trap point");
-        }
-    }
-}
-
-fn palette_strip(ui: &mut egui::Ui, scheme: PaletteScheme) {
-    let lut = build_lut(scheme);
-    let (rect, _) = ui.allocate_exact_size(Vec2::new(ui.available_width(), 12.0), Sense::hover());
-    let n = 64;
-    for i in 0..n {
-        let c = lut[i * (lut.len() - 2) / (n - 1)];
-        let to8 = |v: f32| (v.clamp(0.0, 1.0).powf(1.0 / 2.2) * 255.0) as u8;
-        let x0 = rect.left() + rect.width() * i as f32 / n as f32;
-        let x1 = rect.left() + rect.width() * (i + 1) as f32 / n as f32;
-        ui.painter().rect_filled(
-            egui::Rect::from_min_max(egui::pos2(x0, rect.top()), egui::pos2(x1, rect.bottom())),
-            0.0,
-            Color32::from_rgb(to8(c[0]), to8(c[1]), to8(c[2])),
-        );
-    }
-}
-
-fn render_ui(ui: &mut egui::Ui, r: &mut Render) {
-    ui.add(egui::Slider::new(&mut r.max_bounces, 0..=16).text("bounces"));
-    ui.add(egui::Slider::new(&mut r.max_steps, 32..=2048).logarithmic(true).text("march steps"));
-    ui.add(egui::Slider::new(&mut r.hit_epsilon, 0.0001..=0.01).logarithmic(true).text("hit epsilon"));
-    ui.add(egui::Slider::new(&mut r.step_factor, 0.3..=1.0).text("step factor (0.5 = reference)"));
-    slider(ui, &mut r.exposure_stops, -6.0..=6.0, "exposure EV");
-    slider(ui, &mut r.saturation, 0.0..=2.0, "saturation");
-    ui.horizontal(|ui| {
-        ui.selectable_value(&mut r.reinhard, false, "ACES 2.0");
-        ui.selectable_value(&mut r.reinhard, true, "Reinhard");
-    });
-}
-
 #[allow(dead_code)]
 fn exists(p: &Path) -> bool {
     p.exists()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn right_button_enters_flight_moves_and_releases_capture() {
+        let mut app = App::new();
+        let ctx = egui::Context::default();
+        let mut time = 0.0;
+        let mut frame = |app: &mut App, events: Vec<egui::Event>| {
+            time += 1.0 / 60.0;
+            ctx.run_ui(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+                time: Some(time), events, ..Default::default()
+            }, |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut app.scene.name).id(egui::Id::new("flight-test-text")));
+                    let (_, response) = ui.allocate_exact_size(ui.available_size(), Sense::click_and_drag());
+                    app.fly_camera(ui, &response);
+                });
+            })
+        };
+        let pos = egui::pos2(400.0, 300.0);
+        let button = |pressed| egui::Event::PointerButton {
+            pos, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default()
+        };
+        let key = |pressed| egui::Event::Key {
+            key: egui::Key::W, physical_key: None, pressed, repeat: false, modifiers: Default::default()
+        };
+        frame(&mut app, vec![egui::Event::PointerMoved(pos)]);
+        assert!(app.fly.is_none());
+        let output = frame(&mut app, vec![button(true)]);
+        assert!(app.fly.is_some(), "RMB in the viewport must enter flight");
+        assert!(output.viewport_output[&egui::ViewportId::ROOT].commands.contains(
+            &egui::ViewportCommand::CursorGrab(egui::CursorGrab::Locked)));
+        let before = app.scene.camera;
+        let eye = app.fly.as_ref().unwrap().pose().eye;
+        frame(&mut app, vec![key(true), egui::Event::MouseMoved(egui::vec2(40.0, -20.0))]);
+        let first_yaw = app.scene.camera.yaw_degrees;
+        assert!(app.fly.as_ref().unwrap().momentum.angular.length() > 0.0,
+            "The shared controller must receive angular momentum from mouse-look");
+        frame(&mut app, vec![]);
+        assert!((app.scene.camera.yaw_degrees - first_yaw).abs() > 0.1,
+            "The shared controller must continue easing rotation without new mouse events");
+        for _ in 0..30 { frame(&mut app, vec![]); }
+        assert!((app.scene.camera.yaw_degrees - before.yaw_degrees).abs() > 1.0);
+        assert!((app.fly.as_ref().unwrap().pose().eye - eye).length() > 0.01,
+            "W must translate the camera independently of mouse rotation");
+        let output = frame(&mut app, vec![button(false), key(false)]);
+        assert!(output.viewport_output[&egui::ViewportId::ROOT].commands.contains(
+            &egui::ViewportCommand::CursorGrab(egui::CursorGrab::None)));
+        for _ in 0..600 { frame(&mut app, vec![]); }
+        assert!(app.fly.is_none(), "Flight must end once release inertia settles");
+        let toggle = |pressed, shift| egui::Event::Key {
+            key: egui::Key::Backtick, physical_key: Some(egui::Key::Backtick), pressed, repeat: false,
+            modifiers: egui::Modifiers { shift, ..Default::default() }
+        };
+        frame(&mut app, vec![toggle(true, false), button(true)]);
+        assert!(app.scene.camera.free_flight, "Backtick must enable free flight while RMB is held");
+        let roll = |pressed| egui::Event::Key {
+            key: egui::Key::E, physical_key: None, pressed, repeat: false, modifiers: Default::default()
+        };
+        frame(&mut app, vec![toggle(false, false), roll(true)]);
+        for _ in 0..30 { frame(&mut app, vec![]); }
+        assert!(app.scene.camera.roll_degrees.abs() > 1.0, "Q/E must roll the free-flight camera");
+        frame(&mut app, vec![roll(false), button(false)]);
+        for _ in 0..600 { frame(&mut app, vec![]); }
+        let saved_roll = app.scene.camera.roll_degrees;
+        assert!(saved_roll.abs() > 1.0, "Release must retain the free-flight roll");
+        let saved = serde_json::to_string(&app.scene).unwrap();
+        let loaded: Scene = serde_json::from_str(&saved).unwrap();
+        assert_eq!(loaded.camera, app.scene.camera);
+        let p = app.scene.pack(80, 60);
+        let right = app.scene.camera.orientation() * glam::Vec3::X;
+        assert!((glam::Vec3::from_slice(&p[crate::params::P_CAM_RIGHT..]) - right).length() < 1e-5,
+            "CUDA camera basis must retain free-flight roll");
+        frame(&mut app, vec![toggle(true, true)]);
+        assert!(!app.scene.camera.free_flight, "Shift+backtick (tilde) must restore horizon mode");
+        assert_eq!(app.scene.camera.roll_degrees, 0.0);
+        frame(&mut app, vec![toggle(false, true)]);
+        let shortcut = |key| egui::Event::Key { key, physical_key: None, pressed: true,
+            repeat: false, modifiers: Default::default() };
+        app.scene.object.offset = [7.0, -3.0, 2.0];
+        frame(&mut app, vec![shortcut(egui::Key::F)]);
+        assert!((glam::Vec3::from_array(app.scene.camera.target) - glam::Vec3::from_array(app.scene.object.offset)).length() < 1e-5);
+        assert!(app.fly.is_none());
+        frame(&mut app, vec![shortcut(egui::Key::H)]);
+        assert_eq!(app.scene.camera, app.origin.camera);
+        assert_eq!(app.scene.object.offset, [7.0, -3.0, 2.0], "H must reset only the camera");
+        ctx.memory_mut(|m| m.request_focus(egui::Id::new("flight-test-text")));
+        frame(&mut app, vec![]);
+        frame(&mut app, vec![toggle(true, false), egui::Event::Text("`".into())]);
+        assert!(!app.scene.camera.free_flight, "Typing backtick in a text field must not switch mode");
+    }
+
+    #[test]
+    fn frame_bounds_fit_transformed_fractal_and_fallback_in_both_aspects() {
+        use glam::Vec3;
+        let mut app = App::new();
+        for formula in [crate::scene::Formula::Mandelbulb(crate::scene::Bulb::PRESET),
+            crate::scene::Formula::Mandelbox(crate::scene::MandelBox::PRESET)] {
+            app.scene.formula = formula;
+            app.scene.object.offset = [12.0, -4.0, 3.0];
+            app.scene.object.scale = 2.0;
+            app.scene.object.rotation_degrees = [0.0, 45.0, 0.0];
+            let (min, max) = app.scene.framing_bounds();
+            assert!(((min + max) * 0.5 - Vec3::from_array(app.scene.object.offset)).length() < 1e-5);
+            if matches!(formula, crate::scene::Formula::Mandelbox(_)) {
+                assert!(((max - min).y - 20.0).abs() < 1e-4, "Fallback box must be 10 units before scaling");
+                assert!((max - min).x > 28.0, "Bounds must include object rotation");
+            } else {
+                assert!((max - min).y < 9.0, "Explicit fractal bounds must replace the fallback");
+            }
+            app.scene.camera.free_flight = true;
+            app.scene.camera.roll_degrees = 35.0;
+            let orientation = app.scene.camera.orientation();
+            for (width, height, fov) in [(800, 600, 40.0), (400, 900, 40.0), (800, 600, 120.0)] {
+                app.scene.camera.fov_y_degrees = fov;
+                app.frame_camera(width, height);
+                assert_eq!(app.scene.camera.orientation(), orientation, "Framing must retain rotation and roll");
+                let cam = app.scene.camera;
+                let eye = Vec3::from_array(cam.target) - (orientation * -Vec3::Z) * cam.distance * formula.framing_radius();
+                let half_y = (cam.fov_y_degrees.to_radians() * 0.5).tan();
+                let half_x = half_y * width as f32 / height as f32;
+                for x in [min.x, max.x] { for y in [min.y, max.y] { for z in [min.z, max.z] {
+                    let p = orientation.inverse() * (Vec3::new(x, y, z) - eye);
+                    assert!(p.z < 0.0 && p.x.abs() < -p.z * half_x && p.y.abs() < -p.z * half_y,
+                        "Every bounding box corner must fit the viewport");
+                } } }
+            }
+        }
+        let legacy: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(legacy.controls.look_sensitivity, 1.0);
+        app.controls.look_sensitivity = 0.4;
+        app.controls.fly_speed = 3.0;
+        let loaded: Controls = serde_json::from_str(&serde_json::to_string(&app.controls).unwrap()).unwrap();
+        assert_eq!(loaded.look_sensitivity, 0.4);
+        assert_eq!(loaded.fly_speed, 3.0);
+    }
+
+    #[test]
+    fn shared_flight_inertia_coasts_and_stops_on_all_six_axes() {
+        use cam_controls::{CameraIntent, SpaceFlight, InertiaSettings};
+        let cases = [
+            ("forward", CameraIntent::Thrust { forward: 1.0, right: 0.0, up: 0.0 }),
+            ("right", CameraIntent::Thrust { forward: 0.0, right: 1.0, up: 0.0 }),
+            ("up", CameraIntent::Thrust { forward: 0.0, right: 0.0, up: 1.0 }),
+            ("yaw", CameraIntent::Look { dyaw: 0.001, dpitch: 0.0 }),
+            ("pitch", CameraIntent::Look { dyaw: 0.0, dpitch: 0.001 }),
+            ("roll", CameraIntent::Roll { d: 1.0 }),
+        ];
+        let viewport = cam_viewport::ViewportSize::new(800, 600);
+        for (name, intent) in cases {
+            let mut fly = SpaceFlight::default();
+            fly.inertia = InertiaSettings::fps();
+            for _ in 0..30 { fly.apply_intent(intent, viewport); fly.update_dynamics(1.0 / 60.0); }
+            fly.apply_intent(CameraIntent::Thrust { forward: 0.0, right: 0.0, up: 0.0 }, viewport);
+            fly.apply_intent(CameraIntent::Roll { d: 0.0 }, viewport);
+            let before = fly.pose();
+            let momentum = fly.momentum;
+            assert!(fly.update_dynamics(1.0 / 60.0), "{name} must coast after release");
+            if matches!(intent, CameraIntent::Thrust { .. }) {
+                assert!((fly.eye - before.eye).length() > 0.0, "{name}");
+                assert!(fly.momentum.linear.length() < momentum.linear.length(), "{name} must damp");
+            } else {
+                assert!(fly.orientation.angle_between(before.orientation) > 1e-4, "{name}");
+                assert!(fly.momentum.angular.length() < momentum.angular.length(), "{name} must damp");
+            }
+            for _ in 0..600 { fly.update_dynamics(1.0 / 60.0); }
+            assert!(!fly.update_dynamics(1.0 / 60.0), "{name} must settle");
+        }
+        let mut old = serde_json::to_value(Scene::preset(0)).unwrap();
+        old["camera"].as_object_mut().unwrap().remove("roll_degrees");
+        old["camera"].as_object_mut().unwrap().remove("free_flight");
+        let loaded: Scene = serde_json::from_value(old).unwrap();
+        assert!(!loaded.camera.free_flight);
+        assert_eq!(loaded.camera.roll_degrees, 0.0);
+    }
 }

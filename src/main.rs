@@ -8,6 +8,7 @@
 //!   frac-rs --bench [W H SPP]                time every preset
 
 mod app;
+mod inspector;
 mod color;
 // Keep the copied viewer API intact, including its CPU oracle used by tests.
 #[allow(dead_code)]

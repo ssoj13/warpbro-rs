@@ -264,6 +264,10 @@ pub struct Camera {
     pub target: [f32; 3],
     pub yaw_degrees: f32,
     pub pitch_degrees: f32,
+    #[serde(default)]
+    pub roll_degrees: f32,
+    #[serde(default)]
+    pub free_flight: bool,
     /// In framing radii of the formula.
     pub distance: f32,
     pub fov_y_degrees: f32,
@@ -397,12 +401,18 @@ pub struct Scene {
 }
 
 impl Camera {
+    pub fn orientation(&self) -> glam::Quat {
+        glam::Quat::from_euler(glam::EulerRot::YXZ,
+            self.yaw_degrees.to_radians(), -self.pitch_degrees.to_radians(), self.roll_degrees.to_radians())
+    }
     /// ofx-fractal default_camera: eye on +Z, level, CAMERA_DEFAULT_DISTANCE framing radii.
     pub const fn default_fov(fov: f32) -> Self {
         Self {
             target: [0.0; 3],
             yaw_degrees: 0.0,
             pitch_degrees: 0.0,
+            roll_degrees: 0.0,
+            free_flight: false,
             distance: 2.5318,
             fov_y_degrees: fov,
             aperture: 0.0,
@@ -470,6 +480,24 @@ impl Default for Material {
 }
 
 impl Scene {
+    /// World-space bounds: use the DE's explicit bounds, otherwise a local 10³ box.
+    pub fn framing_bounds(&self) -> (glam::Vec3, glam::Vec3) {
+        use glam::Vec3;
+        let half_extent = match self.formula {
+            Formula::Kifs(k) if k.kind != KifsKind::Menger => Vec3::splat(k.kind.bounding_radius() * self.object.scale),
+            Formula::Mandelbulb(_) | Formula::QuaternionJulia(_) | Formula::Hybrid(_) =>
+                Vec3::splat(self.pack(1, 1)[P_CLIP_RADIUS]),
+            _ if self.formula.bound_radius() > 0.0 => Vec3::splat(self.formula.bound_radius() * self.object.scale),
+            _ => {
+                let half = if matches!(self.formula, Formula::Kifs(_)) { 1.0 } else { 5.0 };
+                let rot = euler_matrix(self.object.rotation_degrees);
+                Vec3::from_array(rot.map(|row| row.iter().map(|v| v.abs()).sum::<f32>() * half * self.object.scale))
+            }
+        };
+        let center = Vec3::from_array(self.object.offset);
+        (center - half_extent, center + half_extent)
+    }
+
     fn base(name: &str, formula: Formula, fov: f32, iterations: u32, max_steps: u32, hit_epsilon: f32, palette: PaletteScheme) -> Self {
         Self {
             name: name.into(),
@@ -624,16 +652,12 @@ impl Scene {
         let c = &self.camera;
 
         // --- camera (ofx-gen OrbitCamera: eye on +Z at yaw = pitch = 0, around the target)
-        let (yaw, pitch) = (c.yaw_degrees.to_radians(), c.pitch_degrees.to_radians());
         let dist = c.distance * radius;
-        let eye = [
-            c.target[0] + dist * pitch.cos() * yaw.sin(),
-            c.target[1] + dist * pitch.sin(),
-            c.target[2] + dist * pitch.cos() * yaw.cos(),
-        ];
-        let fwd = normalize(sub(c.target, eye));
-        let right = normalize(cross(fwd, [0.0, 1.0, 0.0]));
-        let up = cross(right, fwd);
+        let orientation = c.orientation();
+        let fwd = (orientation * -glam::Vec3::Z).to_array();
+        let right = (orientation * glam::Vec3::X).to_array();
+        let up = (orientation * glam::Vec3::Y).to_array();
+        let eye = (glam::Vec3::from_array(c.target) - glam::Vec3::from_array(fwd) * dist).to_array();
         let half_h = (c.fov_y_degrees.to_radians() * 0.5).tan();
         let half_w = half_h * w as f32 / h as f32;
         p[P_WIDTH] = w as f32;
@@ -881,12 +905,6 @@ pub fn normalize(a: [f32; 3]) -> [f32; 3] {
 }
 pub fn length(a: [f32; 3]) -> f32 {
     (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
-}
-pub fn sub(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-pub fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
 }
 fn put3(p: &mut [f32], i: usize, v: [f32; 3]) {
     p[i..i + 3].copy_from_slice(&v);

@@ -33,9 +33,17 @@ no WGSL and no DSL: host code and kernels live in the same crate and are built i
 - **Unreal-style flight:** hold the right mouse button in the viewport to fly.
   - The mouse looks around; WASD moves; Q and E go down and up; Shift boosts; the wheel sets
     the speed.
-  - It uses gitnexus-rs `cam-controls` `FpsFly` for thrust, inertia and damping.
+  - It uses `cam-controls` `SpaceFlight` with FPS damping and a level horizon.
+    Inertial mouse-look is copied from the ready `nodes-rs` implementation of the shared crate.
   - When you release the button, the orbit pivot sits in front of the camera, so orbiting
     continues from where you flew.
+  - Backtick / tilde switches between a level horizon and free flight. In free flight,
+    Q/E rolls and R/F moves up/down; all six flight axes have damped inertia. Roll and mode
+    are saved with the camera and survive releasing RMB.
+  - H restores the loaded preset/bookmark's camera; F frames the fractal's declared bounds
+    (or a 10×10×10 box), including object scale/offset/rotation. F without RMB frames;
+    RMB+F still moves down in free flight.
+  - Settings → Controls adjusts mouse sensitivity and flight speed, saved between runs.
 - **The browser:**
   - an 18-preset gallery with GPU-rendered thumbnails;
   - bookmarks (scenes saved as JSON);
@@ -62,7 +70,7 @@ frac-rs is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX
 | `ofx-gen/palette.rs` | `src/palette.rs` |
 | render-rs `standard-surface-bsdf` | `vendor/standard-surface-bsdf` (used unchanged, except `libm::*` → `f32` methods) |
 | usd-rs `usd-mat-lib` presets, `usd-hd-pt` translator, `pt-material-ext` facing mix | `src/materials.rs`, `src/gpu.rs` |
-| gitnexus-rs `cam-controls` / `cam-viewport` | `vendor/cam-controls`, `vendor/cam-viewport` (unchanged) |
+| gitnexus-rs `cam-controls` / `cam-viewport` | `vendor/cam-controls`, `vendor/cam-viewport`; inertial `SpaceFlight::Look` from nodes-rs |
 
 ## Requirements
 
@@ -97,6 +105,10 @@ cargo oxide run                                         # the browser
 | double-click | recentre |
 | `Tab` | hide the panels |
 | `Space` | pause |
+| backtick / tilde | switch horizon / free flight (Q/E roll, R/F up/down in free mode) |
+
+The scene inspector uses `egui-widgets-rs`: `egui-attr-table` for typed controls and
+reset/copy/paste actions, `egui-attr-grid` for vectors, and `egui-titlebar` for sections.
 
 **Settings → Display / Color** uses the same `egui-prefs2` layout as exr-view. Display uses
 `egui-display::settings_ui` directly: output, SDR reference white and HLG display peak, with
@@ -108,6 +120,8 @@ palette and lighting values; it must not be interpreted as ACEScg.
 For HDR on screen, enable HDR in the OS, choose an available HDR output in Display, then
 select **HDR · 1000 nits** in Color. The ACES rendering peak and UI reference white are
 independent. A saved HDR scene on an SDR output gets a separate SDR ACES preview.
+PQ/HDR render targets remain selectable in Color on SDR screens, including for HDR export;
+only the actual window-output modes in Display depend on the connected display.
 
 Screenshot / Render PNG saves the selected rendering: SDR sRGB/selected monitor codes as
 8-bit PNG, or HDR10 BT.2020/PQ as 16-bit PNG with `cICP`, `mDCV`, and measured `cLLI` metadata.
@@ -183,6 +197,7 @@ src/scene.rs      Scene (serde), formulas, presets, gallery, packing into the pa
 src/params.rs     parameter-block slots shared by host and device
 src/render.rs     CUDA context, progressive targets, kernel dispatch, PNG output
 src/app.rs        the egui browser + shared Settings panel
+src/inspector.rs  scene controls from egui-widgets-rs attribute editors
 src/color.rs      cached vfx-ocio GPU colour processing (linear Rec.709 input)
 src/ocio.rs       OCIO controls adapted directly from exr-view (BSD-3-Clause)
 src/window.rs     winit/wgpu shell + egui-display float canvas and SDR/HDR swapchain

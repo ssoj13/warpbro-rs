@@ -565,7 +565,7 @@ impl State {
             combo(ui, "ocio.input", &mut self.sel.input, &inputs, "scene_linear (role)");
             ui.end_row();
             ui.label("Display").on_hover_text(
-                "The display the image is rendered for. SDR output: the monitor's own colour space (HDR ones need an HDR output, Settings > Display).",
+                "The target display for rendering and export. HDR targets remain selectable on SDR screens; frac-rs presents an SDR preview there. Settings > Display selects the actual window output.",
             );
             let d_before = self.sel.display.clone();
             combo(ui, "ocio.display", &mut self.sel.display, &displays, &dflt(|n| &n.display));
@@ -637,7 +637,7 @@ const PRESETS: &[Preset] = &[
         display: "Rec.2100-PQ - Display",
         view: "ACES 2.0 - HDR 1000 nits (P3 D65)",
         hdr: true,
-        hint: "The ACES 2.0 1000-nit HDR rendering; the output (Settings > Display) carries it to the monitor.",
+        hint: "ACES 2.0 1000-nit HDR rendering and PQ export. Settings > Display selects HDR presentation; SDR screens use an SDR preview.",
     },
 ];
 
