@@ -41,6 +41,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import platform
 import re
@@ -113,7 +114,7 @@ def err(text: str) -> None:
 def run(args: list[str], cwd: Path | None = None, capture: bool = False, env: dict | None = None) -> tuple[int, str, float]:
     start = time.perf_counter()
     try:
-        result = subprocess.run(args, cwd=cwd or ROOT_DIR, capture_output=capture, text=True, env=env or build_env())
+        result = subprocess.run(args, cwd=cwd or ROOT_DIR, capture_output=capture, text=True, encoding="utf-8", errors="replace", env=env or build_env())
     except FileNotFoundError:
         return 127, f"{args[0]}: not found", 0.0
     elapsed_ms = (time.perf_counter() - start) * 1000
@@ -157,17 +158,43 @@ def newest_llc() -> Path | None:
 _ENV: dict | None = None
 
 
+def windows_toolchain_env(env: dict) -> dict:
+    """Compile the isolated vcv-rs helper before any CUDA build dependency runs."""
+    cargo = shutil.which("cargo", path=env.get("PATH"))
+    if not cargo:
+        raise RuntimeError("Rust/Cargo not found; install Rust from https://rustup.rs/")
+    target = ROOT_DIR / "target" / "bootstrap"
+    command = [cargo, "+stable", "build", "--manifest-path", str(ROOT_DIR / "xtask" / "Cargo.toml"),
+               "--release", "--target-dir", str(target)]
+    result = subprocess.run(command, cwd=ROOT_DIR, env=env)
+    if result.returncode:
+        raise RuntimeError("Failed to build the vcv-rs toolchain helper")
+    result = subprocess.run([str(target / "release" / "frac-toolchain.exe")],
+                            cwd=ROOT_DIR, env=env, capture_output=True, text=True)
+    if result.stderr:
+        print(result.stderr, end="", file=sys.stderr)
+    if result.returncode:
+        raise RuntimeError("MSVC environment setup failed (vcv-rs)")
+    return json.loads(result.stdout)
+
+
 def build_env() -> dict:
     """os.environ plus the defaults cargo-oxide needs (CUDA_HOME, PATH, CUDA_OXIDE_LLC)."""
     global _ENV
     if _ENV is None:
         env = dict(os.environ)
-        cuda = Path(env.get("CUDA_HOME", "/usr/local/cuda"))
-        env.setdefault("CUDA_HOME", str(cuda))
-        extra = [str(cuda / "bin"), str(Path.home() / ".cargo" / "bin")]
+        extra = [str(Path.home() / ".cargo" / "bin")]
         env["PATH"] = os.pathsep.join(extra + [env.get("PATH", "")])
+        if IS_WINDOWS:
+            # Normalize case: Windows treats Path/PATH as the same variable.
+            env = {k.upper(): v for k, v in env.items()}
+            env.update(windows_toolchain_env(env))
+        else:
+            cuda = Path(env.get("CUDA_HOME", "/usr/local/cuda"))
+            env.setdefault("CUDA_HOME", str(cuda))
+            env["PATH"] = os.pathsep.join([str(cuda / "bin"), env["PATH"]])
         if "CUDA_OXIDE_LLC" not in env:
-            llc = newest_llc()
+            llc = shutil.which("llc", path=env["PATH"]) if IS_WINDOWS else newest_llc()
             if llc:
                 env["CUDA_OXIDE_LLC"] = str(llc)
         _ENV = env
@@ -477,6 +504,8 @@ FRAC-RS BUILD SYSTEM
 
 Kernels are Rust compiled to PTX by cuda-oxide: always build through `cargo oxide`
 (this script, or `cargo ob` / `cargo or`). Plain `cargo build` cannot link them.
+On Windows this script prepares MSVC / SDK / CUDA via vcv-rs automatically.
+Direct cargo aliases require an already configured Developer PowerShell.
 
 COMMANDS
   d       doctor: check driver, CUDA, LLVM, clang, pinned nightly, cargo-oxide
@@ -514,7 +543,7 @@ COMMANDS = ["d", "b", "r", "g", "bench", "docs", "i", "c", "cl", "h"]
 
 def main() -> int:
     if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(line_buffering=True)
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
     C.init()
 
@@ -562,4 +591,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except (RuntimeError, json.JSONDecodeError) as error:
+        err(str(error))
+        sys.exit(1)
