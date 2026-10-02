@@ -1,0 +1,9 @@
+[package]
+name = "standard-surface-bsdf"
+version = "0.1.0"
+edition = "2024"
+# A derivative of MaterialX (Apache-2.0); see NOTICE. Vendored from render-rs @ b4a6c6c
+# (crates/render-engine-pt/standard-surface-bsdf) for the cuda-oxide device build.
+license = "Apache-2.0"
+publish = false
+

@@ -1,0 +1,39 @@
+standard-surface-bsdf
+Copyright 2026 Alex Joss
+
+This crate is a derivative work of MaterialX, licensed under the Apache License,
+Version 2.0 (see LICENSE):
+
+  MaterialX
+  Copyright Contributors to the MaterialX Project
+  https://github.com/AcademySoftwareFoundation/MaterialX
+  (source version v1.39.5-22-g47cecce6)
+
+The following MaterialX files were ported to Rust and WGSL; the port changes them as
+recorded in the crate documentation (reflection-only standard_surface subset, analytic
+directional albedo, two Airy iterations, Airy phase range reduction, exact-zero
+hemisphere rule, delta GGX lobes, disc-light NDF widening):
+
+  libraries/bxdf/standard_surface.mtlx
+  libraries/pbrlib/pbrlib_defs.mtlx
+  libraries/pbrlib/genglsl/lib/mx_microfacet.glsl
+  libraries/pbrlib/genglsl/lib/mx_microfacet_specular.glsl
+  libraries/pbrlib/genglsl/lib/mx_microfacet_diffuse.glsl
+  libraries/pbrlib/genglsl/lib/mx_microfacet_sheen.glsl
+  libraries/pbrlib/genglsl/lib/mx_environment_prefilter.glsl
+  libraries/pbrlib/genglsl/mx_dielectric_bsdf.glsl
+  libraries/pbrlib/genglsl/mx_conductor_bsdf.glsl
+  libraries/pbrlib/genglsl/mx_oren_nayar_diffuse_bsdf.glsl
+  libraries/pbrlib/genglsl/mx_sheen_bsdf.glsl
+  libraries/pbrlib/genglsl/mx_layer_bsdf.glsl
+  libraries/pbrlib/genglsl/mx_mix_bsdf.glsl
+  libraries/pbrlib/genglsl/mx_multiply_bsdf_color3.glsl
+  libraries/pbrlib/genglsl/mx_artistic_ior.glsl
+  libraries/pbrlib/genglsl/mx_roughness_anisotropy.glsl
+  libraries/pbrlib/genglsl/mx_generalized_schlick_edf.glsl
+  libraries/stdlib/genglsl/lib/mx_math.glsl
+  libraries/stdlib/genglsl/mx_rotate_vector3.glsl
+  libraries/stdlib/stdlib_defs.mtlx (luminance coefficients)
+  source/MaterialXGenShader/GenOptions.h (codegen defaults)
+
+Autodesk Standard Surface is a specification by Autodesk, Inc.

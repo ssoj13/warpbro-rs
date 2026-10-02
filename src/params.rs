@@ -1,0 +1,81 @@
+//! Slots of the f32 parameter block shared by host (`scene.rs` packs it) and kernels (`gpu.rs`
+//! reads it): the role of ofx-fractal's uniform3d LAYOUT. Integers are stored as exact f32
+//! (all below 2^24). Vectors take 3 consecutive slots, 3x3 matrices 9 (row major).
+
+macro_rules! slots {
+    ($($name:ident = $len:expr),* $(,)?) => {
+        slots!(@acc 0usize; $($name = $len,)*);
+    };
+    (@acc $at:expr; $name:ident = $len:expr, $($rest:tt)*) => {
+        pub const $name: usize = $at;
+        slots!(@acc $at + $len; $($rest)*);
+    };
+    (@acc $at:expr;) => {
+        pub const P_COUNT: usize = $at;
+    };
+}
+
+slots! {
+    // frame
+    P_WIDTH = 1, P_HEIGHT = 1, P_SAMPLE_BEGIN = 1, P_SPP = 1, P_SEED = 1,
+    // camera (thin lens)
+    P_CAM_ORIGIN = 3, P_CAM_FORWARD = 3, P_CAM_RIGHT = 3, P_CAM_UP = 3,
+    P_HALF_W = 1, P_HALF_H = 1, P_APERTURE = 1, P_FOCUS_DISTANCE = 1,
+    // march
+    P_MAX_STEPS = 1, P_MAX_DISTANCE = 1, P_FOOTPRINT = 1, P_SAMPLE_CONE = 1, P_STEP_FACTOR = 1, P_SECONDARY_STEPS = 1, P_SECONDARY_EPS = 1,
+    // bounding sphere of the set in scene space (centre, radius): rays only march inside it
+    P_CLIP_CENTER = 3, P_CLIP_RADIUS = 1,
+    // integrator
+    P_MAX_BOUNCES = 1, P_MATERIAL_MODEL = 1,
+    // formula: common
+    P_FAMILY = 1, P_ITERATIONS = 1, P_BAILOUT = 1, P_JULIA = 1, P_JULIA_C = 3,
+    P_ITER_ROTATE = 1, P_ITER_ROT = 9,
+    P_OBJ_OFFSET = 3, P_OBJ_AXES = 9, P_OBJ_SCALE = 1, P_BOUND_RADIUS = 1,
+    // bulb
+    P_BULB_POWER = 1, P_BULB_THETA_POWER = 1, P_BULB_PHI_POWER = 1, P_BULB_THETA_PHASE = 1,
+    P_BULB_PHI_PHASE = 1, P_BULB_GROWTH = 1, P_BULB_FAST8 = 1,
+    // box
+    P_BOX_SCALE = 1, P_BOX_FOLD = 1, P_BOX_MIN_R2 = 1, P_BOX_FIXED_R2 = 1,
+    // quaternion julia
+    P_QUAT_C = 4, P_QUAT_ROWS = 12, P_QUAT_OFFSET = 4,
+    // kifs
+    P_KIFS_KIND = 1, P_KIFS_SCALE = 1, P_KIFS_SHIFT = 3, P_KIFS_FOLD_HEIGHT = 1, P_KIFS_BOUND = 1,
+    // kleinian
+    P_KLEIN_A = 1, P_KLEIN_B = 1, P_KLEIN_SKEW = 1, P_KLEIN_LINE_AMP = 1, P_KLEIN_LINE_RATE = 1,
+    // pseudo-kleinian
+    P_PK_BOX = 3, P_PK_SIZE = 1, P_PK_C = 3, P_PK_OFFSET = 3, P_PK_THICKNESS = 1,
+    // apollonian
+    P_APOLLO_SCALE = 1,
+    // hybrid
+    P_HYBRID_STEPS = 1, P_HYBRID_COUNT = 1,
+    // colour
+    P_COLOR_MODE = 1, P_TRAP_POINT = 3, P_TRAP_NORMAL = 3, P_TRAP_SCALE = 1,
+    // light
+    P_LIGHT_DIR = 3, P_LIGHT_COLOR = 3, P_LIGHT_INTENSITY = 1, P_SUN_ONE_MINUS_COS = 1,
+    P_SUN_CONE_PDF = 1, P_SKY_INTENSITY = 1, P_SKY_HORIZON = 3, P_SKY_ZENITH = 3,
+    P_BACKGROUND = 1,
+    // material (Standard Surface inputs; the fast model reads base/metal/specular/roughness)
+    P_BASE = 1, P_BASE_TINT = 3, P_DIFFUSE_ROUGHNESS = 1, P_METALNESS = 1,
+    P_SPECULAR = 1, P_SPECULAR_COLOR = 3, P_SPECULAR_ROUGHNESS = 1, P_SPECULAR_IOR = 1,
+    P_SPECULAR_ANISOTROPY = 1, P_SPECULAR_ROTATION = 1,
+    P_SHEEN = 1, P_SHEEN_COLOR = 3, P_SHEEN_ROUGHNESS = 1,
+    P_COAT = 1, P_COAT_COLOR = 3, P_COAT_ROUGHNESS = 1, P_COAT_IOR = 1,
+    P_COAT_AFFECT_COLOR = 1, P_COAT_AFFECT_ROUGHNESS = 1,
+    P_THIN_FILM_THICKNESS = 1, P_THIN_FILM_IOR = 1,
+    P_EMISSION = 1, P_EMISSION_COLOR = 3,
+    // tonemap
+    P_EXPOSURE = 1, P_SATURATION = 1, P_TONEMAP = 1,
+}
+
+/// Formula families (ofx-fractal Formula3d codes).
+pub const FAMILY_BULB: u32 = 0;
+pub const FAMILY_BOX: u32 = 1;
+pub const FAMILY_QUAT: u32 = 2;
+pub const FAMILY_KIFS: u32 = 3;
+pub const FAMILY_KLEINIAN: u32 = 4;
+pub const FAMILY_PSEUDO_KLEINIAN: u32 = 5;
+pub const FAMILY_APOLLONIAN: u32 = 6;
+pub const FAMILY_HYBRID: u32 = 7;
+
+/// Palette LUT entries (ofx-gen PALETTE_SAMPLES) plus the interior colour.
+pub const PALETTE_SAMPLES: usize = 1024;

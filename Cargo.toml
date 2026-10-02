@@ -1,0 +1,18 @@
+[package]
+name = "frac-rs"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git" }
+cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git" }
+# Shared host-side runtime, published from NVlabs/cutile-rs.
+cuda-core = "0.3.1"
+eframe = "0.36"
+standard-surface-bsdf = { version = "0.1.0", path = "vendor/standard-surface-bsdf" }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+png = "0.18.1"
+dirs = "7.0.0"

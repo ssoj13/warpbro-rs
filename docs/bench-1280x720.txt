@@ -1,0 +1,20 @@
+GPU: NVIDIA GeForce RTX 3080 Ti  ·  1280x720, 256 spp
+preset                                  model    ms/spp  Msamples/s
+Mandelbulb                               Fast     35.41        26.0
+Mandelbox                                Fast     93.63         9.8
+Quaternion Julia                         Fast     12.57        73.3
+KIFS                                     Fast      5.21       176.9
+Kleinian                                 Fast     13.32        69.2
+Pseudo-Kleinian                          Fast     28.87        31.9
+Apollonian                               Fast     12.20        75.6
+Hybrid                                   Fast     31.61        29.2
+Bulb · power 3                           Fast    104.32         8.8
+Bulb · power 12, gold         StandardSurface     69.19        13.3
+Bulb · Julia                             Fast     17.69        52.1
+Bulb · twisted                           Fast     65.12        14.2
+Mandelbox · scale −1.5                   Fast     47.84        19.3
+Menger sponge                 StandardSurface     19.96        46.2
+Octahedron KIFS                          Fast      8.58       107.4
+Quaternion · glass-coat       StandardSurface     24.00        38.4
+Hybrid · bulb + KIFS                     Fast     34.04        27.1
+Pseudo-Kleinian · cave                   Fast     55.15        16.7

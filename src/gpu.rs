@@ -1,0 +1,1412 @@
+//! The CUDA kernels (compiled to PTX by cuda-oxide). A port of ofx-rs `ofx-fractal`:
+//! `fractal3d.wgsl` (the eight distance estimates, march, normals, colour, sky) and
+//! `pathtrace.wgsl` + render-rs `pt-integrator` (path tracing with sun/sky NEE and MIS), with the
+//! render-rs `standard-surface-bsdf` crate called directly as the full material model.
+//!
+//! Kernels:
+//! - `trace_fast` / `trace_full`: add `P_SPP` samples per pixel into the f32 accumulator; fast =
+//!   diffuse + GGX (cheap, for exploring), full = Autodesk Standard Surface (MaterialX port).
+//!   Two kernels, not a runtime branch, so the fast one keeps its low register count.
+//! - `tonemap`: running mean -> exposure / saturation -> ACES or Reinhard -> sRGB -> RGBA8.
+//!
+//! Pixels are traced in 8x4 tiles (one warp each) so neighbouring rays share their march paths.
+
+use crate::params::*;
+use cuda_device::{ConstantMemory, DisjointSlice, constant, kernel, launch_bounds, launch_contract, thread};
+use cuda_host::cuda_module;
+
+#[cuda_module]
+pub mod kernels {
+    use super::*;
+    use standard_surface_bsdf::sample::sample_with;
+    use standard_surface_bsdf::sample::pdf_with;
+    use standard_surface_bsdf::surface::{
+        ShadingFrame, SurfaceInputs, eval_emission, eval_light, lobe_weights,
+    };
+    use standard_surface_bsdf::ThinFilmEnergy;
+
+    // =========================================================================
+    // vector math
+    // =========================================================================
+
+    pub type V3 = [f32; 3];
+
+    #[inline(always)]
+    fn add(a: V3, b: V3) -> V3 {
+        [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+    }
+    #[inline(always)]
+    fn sub(a: V3, b: V3) -> V3 {
+        [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+    }
+    #[inline(always)]
+    fn mul(a: V3, s: f32) -> V3 {
+        [a[0] * s, a[1] * s, a[2] * s]
+    }
+    #[inline(always)]
+    fn had(a: V3, b: V3) -> V3 {
+        [a[0] * b[0], a[1] * b[1], a[2] * b[2]]
+    }
+    #[inline(always)]
+    fn dot(a: V3, b: V3) -> f32 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+    #[inline(always)]
+    fn length(a: V3) -> f32 {
+        dot(a, a).sqrt()
+    }
+    #[inline(always)]
+    fn normalize(a: V3) -> V3 {
+        mul(a, 1.0 / length(a))
+    }
+    #[inline(always)]
+    fn max3(a: V3) -> f32 {
+        a[0].max(a[1].max(a[2]))
+    }
+    #[inline(always)]
+    fn neg(a: V3) -> V3 {
+        [-a[0], -a[1], -a[2]]
+    }
+    #[inline(always)]
+    fn luminance(a: V3) -> f32 {
+        0.2126 * a[0] + 0.7152 * a[1] + 0.0722 * a[2]
+    }
+    /// The per-launch parameter block (`params.rs` slots), set by the host before each launch.
+    /// Every thread reads the same slot, so the constant cache broadcasts it to the warp.
+    #[constant]
+    static PARAMS: ConstantMemory<[f32; P_COUNT]> = ConstantMemory::UNINIT;
+
+    #[inline(always)]
+    fn pr(i: usize) -> f32 {
+        PARAMS.get_ref()[i]
+    }
+    #[inline(always)]
+    fn pv3(i: usize) -> V3 {
+        [pr(i), pr(i + 1), pr(i + 2)]
+    }
+    /// Row-major 3x3 at slot `i` times `v`.
+    #[inline(always)]
+    fn mat3(i: usize, v: V3) -> V3 {
+        [
+            pr(i) * v[0] + pr(i + 1) * v[1] + pr(i + 2) * v[2],
+            pr(i + 3) * v[0] + pr(i + 4) * v[1] + pr(i + 5) * v[2],
+            pr(i + 6) * v[0] + pr(i + 7) * v[1] + pr(i + 8) * v[2],
+        ]
+    }
+
+    const PI: f32 = core::f32::consts::PI;
+    const TRAP_START: f32 = 3.402_823_5e38;
+    const DERIVATIVE_LIMIT: f32 = 1.0e38;
+
+    // =========================================================================
+    // RNG: render-rs ss_rng (pcg4d over pixel x, pixel y, sample, dimension)
+    // =========================================================================
+
+    pub struct Rng {
+        px: u32,
+        py: u32,
+        sample: u32,
+        dim: u32,
+    }
+
+    #[inline(always)]
+    fn rand(r: &mut Rng) -> f32 {
+        let u = standard_surface_bsdf::sampling::rng(r.px, r.py, r.sample, r.dim, 0);
+        r.dim += 1;
+        u
+    }
+
+    // =========================================================================
+    // distance estimates (fractal3d.wgsl), each -> (DE, trap minimum)
+    // =========================================================================
+
+    #[inline(always)]
+    fn trap3(z: V3, mode: u32) -> f32 {
+        if mode == 1 {
+            return length(z);
+        }
+        let offset = sub(z, pv3(P_TRAP_POINT));
+        if mode == 2 {
+            return dot(offset, pv3(P_TRAP_NORMAL)).abs();
+        }
+        length(offset)
+    }
+
+    #[inline(always)]
+    fn iter_rotate(z: V3) -> V3 {
+        if pr(P_ITER_ROTATE) == 0.0 { z } else { mat3(P_ITER_ROT, z) }
+    }
+
+    #[inline(always)]
+    fn orbit_constant(z: V3) -> (V3, f32) {
+        if pr(P_JULIA) != 0.0 { (pv3(P_JULIA_C), 0.0) } else { (z, 1.0) }
+    }
+
+    /// One Mandelbulb step z <- z^p + c, dr <- g p r^(p-1) dr + k. Returns false to stop.
+    #[inline(always)]
+    fn bulb_step(z: &mut V3, dr: &mut f32, r: f32, c: V3, dr_constant: f32) -> bool {
+        if pr(P_BULB_FAST8) != 0.0 {
+            // Power 8, unit angle scales, no phase, no rotation: z^8 with three angle doublings
+            // instead of acos / atan2 / pow (same set as the angular form, ~3x cheaper).
+            let r2 = r * r;
+            let r4 = r2 * r2;
+            let growth = 8.0 * r4 * r2 * r;
+            if *dr > DERIVATIVE_LIMIT / growth {
+                return false;
+            }
+            *dr = growth * *dr + dr_constant;
+            let (x, y, w) = (z[0], z[1], z[2]);
+            let rxy2 = x * x + y * y;
+            let r8 = r4 * r4;
+            if rxy2 < 1.0e-20 {
+                *z = add([0.0, 0.0, r8], c);
+            } else {
+                let inv_r2 = 1.0 / r2;
+                let mut ct = 2.0 * w * w * inv_r2 - 1.0;
+                let mut st = 2.0 * w * rxy2.sqrt() * inv_r2;
+                let c2 = ct * ct - st * st;
+                st = 2.0 * st * ct;
+                ct = c2;
+                let c2 = ct * ct - st * st;
+                st = 2.0 * st * ct;
+                ct = c2;
+                let inv_rxy2 = 1.0 / rxy2;
+                let mut cp = (x * x - y * y) * inv_rxy2;
+                let mut sp = 2.0 * x * y * inv_rxy2;
+                let c2 = cp * cp - sp * sp;
+                sp = 2.0 * sp * cp;
+                cp = c2;
+                let c2 = cp * cp - sp * sp;
+                sp = 2.0 * sp * cp;
+                cp = c2;
+                *z = add([st * cp * r8, st * sp * r8, ct * r8], c);
+            }
+            return true;
+        }
+        let power = pr(P_BULB_POWER);
+        let turned = iter_rotate(*z);
+        let theta = (turned[2] / r).clamp(-1.0, 1.0).acos();
+        let phi = turned[1].atan2(turned[0]);
+        let lr = r.ln();
+        let growth = power * ((power - 1.0) * lr).exp() * pr(P_BULB_GROWTH);
+        if *dr > DERIVATIVE_LIMIT / growth {
+            return false;
+        }
+        let magnitude = (power * lr).exp();
+        *dr = growth * *dr + dr_constant;
+        let a = theta * pr(P_BULB_THETA_POWER) + pr(P_BULB_THETA_PHASE);
+        let b = phi * pr(P_BULB_PHI_POWER) + pr(P_BULB_PHI_PHASE);
+        let (sa, ca) = a.sin_cos();
+        let (sb, cb) = b.sin_cos();
+        *z = add(mul([sa * cb, sa * sb, ca], magnitude), c);
+        true
+    }
+
+    #[inline(always)]
+    fn bulb_distance(q: V3, trap_mode: u32) -> (f32, f32) {
+        let bailout = pr(P_BAILOUT);
+        let (c, dr_constant) = orbit_constant(q);
+        let iterations = pr(P_ITERATIONS) as u32;
+        let mut z = q;
+        let mut dr = 1.0f32;
+        let mut r = length(z);
+        let mut trap = TRAP_START;
+        let mut i = 0u32;
+        while i < iterations {
+            if r > bailout {
+                break;
+            }
+            if r < 1.0e-8 {
+                return (0.0, trap);
+            }
+            if !bulb_step(&mut z, &mut dr, r, c, dr_constant) {
+                break;
+            }
+            r = length(z);
+            if trap_mode != 0 {
+                trap = trap.min(trap3(z, trap_mode));
+            }
+            i += 1;
+        }
+        if r <= bailout || dr <= 0.0 {
+            return (0.0, trap);
+        }
+        (0.5 * r.ln() * r / dr, trap)
+    }
+
+    #[inline(always)]
+    fn box_fold(v: f32, limit: f32) -> f32 {
+        if v > limit {
+            2.0 * limit - v
+        } else if v < -limit {
+            -2.0 * limit - v
+        } else {
+            v
+        }
+    }
+
+    /// One Mandelbox step. Returns false to stop.
+    #[inline(always)]
+    fn box_step(z: &mut V3, dr: &mut f32, c: V3, dr_constant: f32) -> bool {
+        let signed_scale = pr(P_BOX_SCALE);
+        let magnitude = signed_scale.abs();
+        let fold = pr(P_BOX_FOLD);
+        let min_r2 = pr(P_BOX_MIN_R2);
+        let fixed_r2 = pr(P_BOX_FIXED_R2);
+        let t = iter_rotate(*z);
+        let t = [box_fold(t[0], fold), box_fold(t[1], fold), box_fold(t[2], fold)];
+        let r2 = dot(t, t);
+        let factor = if r2 < min_r2 {
+            fixed_r2 / min_r2
+        } else if r2 < fixed_r2 {
+            fixed_r2 / r2
+        } else {
+            1.0
+        };
+        if *dr > DERIVATIVE_LIMIT / (factor * magnitude) {
+            return false;
+        }
+        *z = add(mul(t, factor * signed_scale), c);
+        *dr = *dr * factor * magnitude + dr_constant;
+        true
+    }
+
+    #[inline(always)]
+    fn box_distance(q: V3, trap_mode: u32) -> (f32, f32) {
+        let (c, dr_constant) = orbit_constant(q);
+        let iterations = pr(P_ITERATIONS) as u32;
+        let mut z = q;
+        let mut dr = 1.0f32;
+        let mut trap = TRAP_START;
+        let mut i = 0u32;
+        while i < iterations {
+            if !box_step(&mut z, &mut dr, c, dr_constant) {
+                break;
+            }
+            if trap_mode != 0 {
+                trap = trap.min(trap3(z, trap_mode));
+            }
+            i += 1;
+        }
+        (length(z) / dr, trap)
+    }
+
+    #[inline(always)]
+    fn quat_distance(v: V3, trap_mode: u32) -> (f32, f32) {
+        let bailout = pr(P_BAILOUT);
+        let iterations = pr(P_ITERATIONS) as u32;
+        let c = [pr(P_QUAT_C), pr(P_QUAT_C + 1), pr(P_QUAT_C + 2), pr(P_QUAT_C + 3)];
+        let row = |k: usize| P_QUAT_ROWS + 3 * k;
+        let mut q = [
+            pr(row(0)) * v[0] + pr(row(0) + 1) * v[1] + pr(row(0) + 2) * v[2] + pr(P_QUAT_OFFSET),
+            pr(row(1)) * v[0] + pr(row(1) + 1) * v[1] + pr(row(1) + 2) * v[2] + pr(P_QUAT_OFFSET + 1),
+            pr(row(2)) * v[0] + pr(row(2) + 1) * v[1] + pr(row(2) + 2) * v[2] + pr(P_QUAT_OFFSET + 2),
+            pr(row(3)) * v[0] + pr(row(3) + 1) * v[1] + pr(row(3) + 2) * v[2] + pr(P_QUAT_OFFSET + 3),
+        ];
+        let len4 = |q: [f32; 4]| (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
+        let mut dr = 1.0f32;
+        let mut r = len4(q);
+        let mut trap = TRAP_START;
+        let mut i = 0u32;
+        while i < iterations {
+            if r > bailout {
+                break;
+            }
+            if r < 1.0e-8 {
+                return (0.0, trap);
+            }
+            let growth = 2.0 * r;
+            if dr > DERIVATIVE_LIMIT / growth {
+                break;
+            }
+            dr *= growth;
+            q = [
+                q[0] * q[0] - q[1] * q[1] - q[2] * q[2] - q[3] * q[3] + c[0],
+                2.0 * q[0] * q[1] + c[1],
+                2.0 * q[0] * q[2] + c[2],
+                2.0 * q[0] * q[3] + c[3],
+            ];
+            r = len4(q);
+            if trap_mode != 0 {
+                // trap4: the trap geometry embedded at w = 0
+                let t = if trap_mode == 1 {
+                    r
+                } else {
+                    let o = sub([q[0], q[1], q[2]], pv3(P_TRAP_POINT));
+                    if trap_mode == 2 {
+                        dot(o, pv3(P_TRAP_NORMAL)).abs()
+                    } else {
+                        (dot(o, o) + q[3] * q[3]).sqrt()
+                    }
+                };
+                trap = trap.min(t);
+            }
+            i += 1;
+        }
+        if r <= bailout || dr <= 0.0 {
+            return (0.0, trap);
+        }
+        (0.5 * r.ln() * r / dr, trap)
+    }
+
+    #[inline(always)]
+    fn kifs_fold(v: V3) -> V3 {
+        let (mut x, mut y, mut z) = (v[0], v[1], v[2]);
+        let kind = pr(P_KIFS_KIND) as u32;
+        if kind == 0 {
+            if x + y < 0.0 {
+                let t = x;
+                x = -y;
+                y = -t;
+            }
+            if x + z < 0.0 {
+                let t = x;
+                x = -z;
+                z = -t;
+            }
+            if y + z < 0.0 {
+                let t = y;
+                y = -z;
+                z = -t;
+            }
+        } else {
+            x = x.abs();
+            y = y.abs();
+            z = z.abs();
+            if x < y {
+                core::mem::swap(&mut x, &mut y);
+            }
+            if x < z {
+                core::mem::swap(&mut x, &mut z);
+            }
+            if y < z {
+                core::mem::swap(&mut y, &mut z);
+            }
+            if kind == 2 {
+                let h = pr(P_KIFS_FOLD_HEIGHT);
+                z = h - (z - h).abs();
+            }
+        }
+        [x, y, z]
+    }
+
+    #[inline(always)]
+    fn kifs_step(z: &mut V3, dr: &mut f32) -> bool {
+        let s = pr(P_KIFS_SCALE);
+        if *dr > DERIVATIVE_LIMIT / s {
+            return false;
+        }
+        *z = sub(mul(kifs_fold(iter_rotate(*z)), s), pv3(P_KIFS_SHIFT));
+        *dr *= s;
+        true
+    }
+
+    #[inline(always)]
+    fn kifs_distance(q: V3, trap_mode: u32) -> (f32, f32) {
+        let iterations = pr(P_ITERATIONS) as u32;
+        let mut z = q;
+        let mut dr = 1.0f32;
+        let mut trap = TRAP_START;
+        let mut i = 0u32;
+        while i < iterations {
+            if !kifs_step(&mut z, &mut dr) {
+                break;
+            }
+            if trap_mode != 0 {
+                trap = trap.min(trap3(z, trap_mode));
+            }
+            i += 1;
+        }
+        let bound = if pr(P_KIFS_KIND) as u32 == 2 {
+            // exact signed distance to [-1, 1]^3
+            let d = [z[0].abs() - 1.0, z[1].abs() - 1.0, z[2].abs() - 1.0];
+            length([d[0].max(0.0), d[1].max(0.0), d[2].max(0.0)]) + d[0].max(d[1].max(d[2])).min(0.0)
+        } else {
+            length(z) - pr(P_KIFS_BOUND)
+        };
+        (bound / dr, trap)
+    }
+
+    #[inline(always)]
+    fn exact_sign(v: f32) -> f32 {
+        if v > 0.0 {
+            1.0
+        } else if v < 0.0 {
+            -1.0
+        } else {
+            0.0
+        }
+    }
+
+    #[inline(always)]
+    fn kleinian_wrap(x: f32, width: f32, left: f32) -> f32 {
+        let shifted = x - left;
+        shifted - width * (shifted / width).floor() + left
+    }
+
+    #[inline(always)]
+    fn kleinian_distance(q: V3, trap_mode: u32) -> (f32, f32) {
+        let a = pr(P_KLEIN_A);
+        let b = pr(P_KLEIN_B);
+        let skew = pr(P_KLEIN_SKEW);
+        let line_amp = pr(P_KLEIN_LINE_AMP);
+        let line_rate = pr(P_KLEIN_LINE_RATE);
+        let iterations = pr(P_ITERATIONS) as u32;
+        let half_a = 0.5 * a;
+        let half_b = 0.5 * b;
+        let sign_b = exact_sign(b);
+        // face_camera: (x, z, -y), then half a cell up.
+        let mut z = [q[0], q[2] + half_a, -q[1]];
+        let mut dr = 1.0f32;
+        let mut previous = z;
+        let mut before = z;
+        let mut trap = TRAP_START;
+        let mut n = 0u32;
+        while n < iterations {
+            let (mut x, mut y, mut w) = (z[0], z[1], z[2]);
+            let s = skew * y;
+            x = kleinian_wrap(x + s, 2.0, -1.0) - s;
+            w = kleinian_wrap(w, 2.0, -1.0);
+            let u = x + half_b;
+            let line = half_a + sign_b * line_amp * exact_sign(u) * (1.0 - (-line_rate * u.abs()).exp());
+            if y >= line {
+                x = -b - x;
+                y = a - y;
+                w = -w;
+            }
+            let r2 = x * x + y * y + w * w;
+            if r2 < 1.0e-30 {
+                break;
+            }
+            let inverse = 1.0 / r2;
+            if inverse > 1.0 && dr > DERIVATIVE_LIMIT / inverse {
+                break;
+            }
+            z = [x * inverse - b, a - y * inverse, -w * inverse];
+            dr *= inverse;
+            if trap_mode != 0 {
+                trap = trap.min(trap3(z, trap_mode));
+            }
+            if dot(z, z) > 100.0 {
+                break;
+            }
+            if n >= 1 {
+                let gap = sub(z, before);
+                if dot(gap, gap) < 1.0e-12 {
+                    break;
+                }
+            }
+            before = previous;
+            previous = z;
+            n += 1;
+        }
+        (z[1].min(0.05) / dr.max(1.0), trap)
+    }
+
+    #[inline(always)]
+    fn pseudo_kleinian_distance(q: V3, trap_mode: u32) -> (f32, f32) {
+        let bx = pv3(P_PK_BOX);
+        let size = pr(P_PK_SIZE);
+        let c = pv3(P_PK_C);
+        let iterations = pr(P_ITERATIONS) as u32;
+        let mut z = q;
+        let mut dr = 1.0f32;
+        let mut trap = TRAP_START;
+        let mut i = 0u32;
+        while i < iterations {
+            z = [
+                2.0 * z[0].clamp(-bx[0], bx[0]) - z[0],
+                2.0 * z[1].clamp(-bx[1], bx[1]) - z[1],
+                2.0 * z[2].clamp(-bx[2], bx[2]) - z[2],
+            ];
+            let r2 = dot(z, z);
+            if r2 < 1.0e-30 {
+                break;
+            }
+            let k = (size / r2).max(1.0);
+            if dr > DERIVATIVE_LIMIT / k {
+                break;
+            }
+            z = add(mul(z, k), c);
+            dr *= k;
+            if trap_mode != 0 {
+                trap = trap.min(trap3(z, trap_mode));
+            }
+            i += 1;
+        }
+        let o = sub(z, pv3(P_PK_OFFSET));
+        let t = pr(P_PK_THICKNESS);
+        let thingy = ((o[0] * o[0] + o[1] * o[1]).sqrt() * o[2]).abs() - t;
+        (0.5 * thingy / (dot(o, o) + t.abs()).sqrt().max(1.0e-30) / dr, trap)
+    }
+
+    /// Apollonian wrap + inversion k = max(s / r2, 0.1). Returns false to stop.
+    #[inline(always)]
+    fn apollonian_step(z: &mut V3, dr: &mut f32) -> bool {
+        let h = [0.5 * z[0] + 0.5, 0.5 * z[1] + 0.5, 0.5 * z[2] + 0.5];
+        let w = [
+            -1.0 + 2.0 * (h[0] - h[0].floor()),
+            -1.0 + 2.0 * (h[1] - h[1].floor()),
+            -1.0 + 2.0 * (h[2] - h[2].floor()),
+        ];
+        let r2 = dot(w, w);
+        if r2 < 1.0e-30 {
+            return false;
+        }
+        let k = (pr(P_APOLLO_SCALE) / r2).max(0.1);
+        if *dr > DERIVATIVE_LIMIT / k {
+            return false;
+        }
+        *z = mul(w, k);
+        *dr *= k;
+        true
+    }
+
+    #[inline(always)]
+    fn apollonian_distance(q: V3, trap_mode: u32) -> (f32, f32) {
+        let iterations = pr(P_ITERATIONS) as u32;
+        let mut z = add(q, [0.0, 1.0, 0.0]);
+        let mut dr = 1.0f32;
+        let mut trap = TRAP_START;
+        let mut i = 0u32;
+        while i < iterations {
+            if !apollonian_step(&mut z, &mut dr) {
+                break;
+            }
+            if trap_mode != 0 {
+                trap = trap.min(trap3(z, trap_mode));
+            }
+            i += 1;
+        }
+        (0.25 * z[1].abs() / dr, trap)
+    }
+
+    #[inline(always)]
+    fn hybrid_distance(q: V3, trap_mode: u32) -> (f32, f32) {
+        let bailout = pr(P_BAILOUT);
+        let iterations = pr(P_ITERATIONS) as u32;
+        let steps = pr(P_HYBRID_STEPS) as u32;
+        let count = (pr(P_HYBRID_COUNT) as u32).max(1);
+        let c = q;
+        let mut z = q;
+        let mut dr = 1.0f32;
+        let mut trap = TRAP_START;
+        let mut i = 0u32;
+        while i < iterations {
+            let r = length(z);
+            if r > bailout {
+                break;
+            }
+            let step = (steps >> (3 * (i % count))) & 7;
+            let ok = if step == 1 {
+                r >= 1.0e-8 && bulb_step(&mut z, &mut dr, r, c, 1.0)
+            } else if step == 2 {
+                box_step(&mut z, &mut dr, c, 1.0)
+            } else if step == 3 {
+                kifs_step(&mut z, &mut dr)
+            } else if step == 4 {
+                apollonian_step(&mut z, &mut dr)
+            } else {
+                true
+            };
+            if !ok {
+                break;
+            }
+            if trap_mode != 0 {
+                trap = trap.min(trap3(z, trap_mode));
+            }
+            i += 1;
+        }
+        (0.5 * length(z) / dr, trap)
+    }
+
+    /// Scene point -> object space: R^T (p - offset) / scale.
+    #[inline(always)]
+    fn object_point(x: V3) -> V3 {
+        mul(mat3(P_OBJ_AXES, sub(x, pv3(P_OBJ_OFFSET))), 1.0 / pr(P_OBJ_SCALE))
+    }
+
+    /// Signed transformed estimate and trap (fractal3d.wgsl signed_distance_and_trap).
+    #[inline(always)]
+    fn signed_distance_and_trap<const F: u32>(x: V3, trap_mode: u32) -> (f32, f32) {
+        let q = object_point(x);
+                let (d, trap) = match F {
+            FAMILY_BULB => bulb_distance(q, trap_mode),
+            FAMILY_BOX => box_distance(q, trap_mode),
+            FAMILY_QUAT => quat_distance(q, trap_mode),
+            FAMILY_KIFS => kifs_distance(q, trap_mode),
+            FAMILY_KLEINIAN => kleinian_distance(q, trap_mode),
+            FAMILY_PSEUDO_KLEINIAN => pseudo_kleinian_distance(q, trap_mode),
+            FAMILY_APOLLONIAN => apollonian_distance(q, trap_mode),
+            _ => hybrid_distance(q, trap_mode),
+        };
+        let radius = pr(P_BOUND_RADIUS);
+        let d = if radius > 0.0 { d.max(length(q) - radius) } else { d };
+        (d * pr(P_OBJ_SCALE), trap)
+    }
+
+    #[inline(always)]
+    fn family_signed<const F: u32>() -> bool {
+        F == FAMILY_KIFS || F == FAMILY_KLEINIAN || F == FAMILY_PSEUDO_KLEINIAN
+    }
+
+    #[inline(always)]
+    fn scene_signed_distance<const F: u32>(x: V3) -> f32 {
+        signed_distance_and_trap::<F>(x, 0).0
+    }
+
+    // =========================================================================
+    // march (fractal3d.wgsl march)
+    // =========================================================================
+
+    const RAY_PRIMARY: u32 = 0;
+    const RAY_BOUNCE: u32 = 1;
+    const RAY_VISIBILITY: u32 = 2;
+    const HIT_REFINEMENTS: u32 = 16;
+    const FOOTPRINT_RELATIVE_FLOOR: f32 = 0.000_001_907_348_6;
+
+    #[derive(Clone, Copy)]
+    pub struct Hit {
+        hit: bool,
+        point: V3,
+        trap: f32,
+        eps: f32,
+    }
+
+    #[inline(always)]
+    fn footprint(base: f32, slope: f32, t: f32, x: V3) -> f32 {
+        (base + slope * t).max(length(x) * FOOTPRINT_RELATIVE_FLOOR)
+    }
+
+    #[inline(always)]
+    fn march_sample<const F: u32>(x: V3, trap_mode: u32) -> (f32, f32) {
+        let (d, t) = signed_distance_and_trap::<F>(x, trap_mode);
+        (d.max(0.0), t)
+    }
+
+    #[inline(always)]
+    fn march<const F: u32>(origin: V3, dir: V3, kind: u32, base: f32, slope: f32) -> Hit {
+        let miss = Hit { hit: false, point: origin, trap: TRAP_START, eps: 0.0 };
+        let max_steps = if kind == RAY_PRIMARY { pr(P_MAX_STEPS) } else { pr(P_SECONDARY_STEPS) } as u32;
+        // Secondary rays resolve a coarser surface (their footprint times P_SECONDARY_EPS).
+        let eps_scale = if kind == RAY_PRIMARY { 1.0 } else { pr(P_SECONDARY_EPS) };
+        let base = base * eps_scale;
+        let slope = slope * eps_scale;
+        // Clip to the bounding sphere: outside it every estimate is exact "outside" (escape
+        // radius / ball bound), so marching there only burns steps.
+        let oc = sub(origin, pv3(P_CLIP_CENTER));
+        let radius = pr(P_CLIP_RADIUS);
+        let b = dot(oc, dir);
+        let disc = b * b - (dot(oc, oc) - radius * radius);
+        if disc <= 0.0 {
+            return miss;
+        }
+        let root = disc.sqrt();
+        let t_exit = -b + root;
+        if t_exit <= 0.0 {
+            return miss;
+        }
+        let t_enter = (-b - root).max(0.0);
+        let max_distance = t_exit.min(pr(P_MAX_DISTANCE));
+        let trap_mode = if kind == RAY_VISIBILITY { 0 } else { pr(P_COLOR_MODE) as u32 };
+        let step_cap = 2.0 * (max_distance - t_enter) / max_steps as f32;
+        let step_factor = pr(P_STEP_FACTOR);
+        let mut t = t_enter;
+        let mut outside = miss;
+        let mut outside_t = 0.0f32;
+        let mut closest = miss;
+        let mut closest_ratio = 0.0f32;
+        let mut i = 0u32;
+        while i < max_steps {
+            if t > max_distance {
+                break;
+            }
+            let point = add(origin, mul(dir, t));
+            let (d, trap) = march_sample::<F>(point, trap_mode);
+            let eps = footprint(base, slope, t, point);
+            let hit = if kind == RAY_PRIMARY { d <= eps } else { d < eps };
+            if hit {
+                if !(outside.hit && d <= 0.0 && kind != RAY_VISIBILITY) {
+                    return Hit { hit: true, point, trap, eps };
+                }
+                let mut lo = outside_t;
+                let mut hi = t;
+                let mut best = outside;
+                let mut k = 0u32;
+                while k < HIT_REFINEMENTS {
+                    if hi - lo <= 0.5 * best.eps {
+                        break;
+                    }
+                    let mid = 0.5 * (lo + hi);
+                    let inner = add(origin, mul(dir, mid));
+                    let (rd, rt) = march_sample::<F>(inner, trap_mode);
+                    if rd > 0.0 {
+                        lo = mid;
+                        best = Hit { hit: true, point: inner, trap: rt, eps: footprint(base, slope, mid, inner) };
+                    } else {
+                        hi = mid;
+                    }
+                    k += 1;
+                }
+                return best;
+            }
+            let ratio = d / eps;
+            if !closest.hit || ratio < closest_ratio {
+                closest = Hit { hit: true, point, trap, eps };
+                closest_ratio = ratio;
+            }
+            outside = Hit { hit: true, point, trap, eps };
+            outside_t = t;
+            t += (step_factor * d).max(eps * 0.5).min(step_cap);
+            i += 1;
+        }
+        if t > max_distance || !closest.hit {
+            return miss;
+        }
+        if kind == RAY_VISIBILITY || closest_ratio <= pr(P_SAMPLE_CONE) {
+            return closest;
+        }
+        miss
+    }
+
+    // =========================================================================
+    // normals: tetrahedral stencil (4 estimates instead of 6), with the exterior
+    // step halving of fractal3d.wgsl stencil_normal
+    // =========================================================================
+
+    const NORMAL_STEP_HALVINGS: u32 = 3;
+
+    #[inline(always)]
+    fn surface_normal<const F: u32>(point: V3, dir: V3, eps: f32) -> V3 {
+        let signed = family_signed::<F>();
+        let center = if signed { point } else { sub(point, mul(dir, eps)) };
+        let mut h = 0.5 * eps;
+        let mut k = 0u32;
+        while k <= NORMAL_STEP_HALVINGS {
+            let a = scene_signed_distance::<F>(add(center, [h, -h, -h]));
+            let b = scene_signed_distance::<F>(add(center, [-h, -h, h]));
+            let c = scene_signed_distance::<F>(add(center, [-h, h, -h]));
+            let d = scene_signed_distance::<F>(add(center, [h, h, h]));
+            if signed || (a > 0.0 && b > 0.0 && c > 0.0 && d > 0.0) {
+                let g = [a - b - c + d, -a - b + c + d, -a + b - c + d];
+                if length(g) < 1.0e-7 {
+                    return neg(dir);
+                }
+                return normalize(g);
+            }
+            h *= 0.5;
+            k += 1;
+        }
+        neg(dir)
+    }
+
+    // =========================================================================
+    // colour (fractal3d.wgsl palette_color / hit_palette)
+    // =========================================================================
+
+    #[inline(always)]
+    fn palette_color(lut: &[[f32; 4]], t: f32) -> V3 {
+        let index = t.clamp(0.0, 1.0) * (PALETTE_SAMPLES - 1) as f32;
+        let low = index as usize;
+        let high = (low + 1).min(PALETTE_SAMPLES - 1);
+        let blend = index - low as f32;
+        // SAFETY: low, high <= PALETTE_SAMPLES - 1 and the LUT holds PALETTE_SAMPLES + 1 rows.
+        let (a, b) = unsafe { (*lut.get_unchecked(low), *lut.get_unchecked(high)) };
+        [a[0] + (b[0] - a[0]) * blend, a[1] + (b[1] - a[1]) * blend, a[2] + (b[2] - a[2]) * blend]
+    }
+
+    #[inline(always)]
+    fn hit_palette(lut: &[[f32; 4]], point: V3, n: V3, trap: f32) -> V3 {
+        let position = if pr(P_COLOR_MODE) == 0.0 {
+            (0.4 + 0.1 * length(object_point(point)) + 0.18 * n[1]).clamp(0.0, 1.0)
+        } else {
+            (1.0 - (-trap * pr(P_TRAP_SCALE)).exp()).clamp(0.0, 1.0)
+        };
+        palette_color(lut, position)
+    }
+
+    // =========================================================================
+    // lighting: sun cone + gradient sky (pathtrace.wgsl SunSky)
+    // =========================================================================
+
+    #[inline(always)]
+    fn sky_radiance(d: V3) -> V3 {
+        let t = (0.5 + 0.5 * d[1]).clamp(0.0, 1.0);
+        let horizon = pv3(P_SKY_HORIZON);
+        let zenith = pv3(P_SKY_ZENITH);
+        mul(add(horizon, mul(sub(zenith, horizon), t)), pr(P_SKY_INTENSITY))
+    }
+
+    #[inline(always)]
+    fn sun_select() -> f32 {
+        let sun = luminance(mul(pv3(P_LIGHT_COLOR), pr(P_LIGHT_INTENSITY)));
+        let sky = luminance(mul(add(pv3(P_SKY_HORIZON), pv3(P_SKY_ZENITH)), 0.5 * pr(P_SKY_INTENSITY)));
+        let total = sun + PI * sky;
+        let s = if total > 0.0 { sun / total } else { 0.5 };
+        s.clamp(0.1, 0.9)
+    }
+
+    #[inline(always)]
+    fn sun_contains(wi: V3) -> bool {
+        let d = sub(wi, pv3(P_LIGHT_DIR));
+        0.5 * dot(d, d) <= pr(P_SUN_ONE_MINUS_COS)
+    }
+
+    #[inline(always)]
+    fn env_radiance(dir: V3) -> V3 {
+        if sun_contains(dir) {
+            return mul(pv3(P_LIGHT_COLOR), pr(P_LIGHT_INTENSITY) * pr(P_SUN_CONE_PDF));
+        }
+        sky_radiance(dir)
+    }
+
+    #[inline(always)]
+    fn env_pdf(dir: V3) -> f32 {
+        let s = sun_select();
+        let mut pdf = (1.0 - s) * 0.079_577_47;
+        if sun_contains(dir) {
+            pdf += s * pr(P_SUN_CONE_PDF);
+        }
+        pdf
+    }
+
+    #[inline(always)]
+    fn basis(n: V3) -> (V3, V3) {
+        let s = if n[2] >= 0.0 { 1.0 } else { -1.0 };
+        let a = -1.0 / (s + n[2]);
+        let b = n[0] * n[1] * a;
+        ([1.0 + s * n[0] * n[0] * a, s * b, -s * n[0]], [b, s + n[1] * n[1] * a, -n[1]])
+    }
+
+    #[inline(always)]
+    fn env_sample(r1: f32, r2: f32) -> (V3, f32) {
+        let s = sun_select();
+        let dir = if r1 < s {
+            let d = pv3(P_LIGHT_DIR);
+            let (t, b) = basis(d);
+            let cos_t = 1.0 - (r1 / s) * pr(P_SUN_ONE_MINUS_COS);
+            let sin_t = (1.0 - cos_t * cos_t).max(0.0).sqrt();
+            let (sp, cp) = (2.0 * PI * r2).sin_cos();
+            add(add(mul(t, sin_t * cp), mul(b, sin_t * sp)), mul(d, cos_t))
+        } else {
+            let z = 1.0 - 2.0 * ((r1 - s) / (1.0 - s));
+            let r = (1.0 - z * z).max(0.0).sqrt();
+            let (sp, cp) = (2.0 * PI * r2).sin_cos();
+            [r * cp, r * sp, z]
+        };
+        (dir, env_pdf(dir))
+    }
+
+    #[inline(always)]
+    fn power_heuristic(a: f32, b: f32) -> f32 {
+        let (a2, b2) = (a * a, b * b);
+        if a2 + b2 > 0.0 { a2 / (a2 + b2) } else { 0.0 }
+    }
+
+    // =========================================================================
+    // materials
+    // =========================================================================
+
+    /// The fast model: Lambert base + one GGX lobe (dielectric F0 0.04 * specular or the metal's
+    /// base colour), Schlick Fresnel, height-correlated-free Smith G1 product.
+    #[derive(Clone, Copy)]
+    pub struct Fast {
+        albedo: V3,
+        f0: V3,
+        alpha: f32,
+        diffuse_w: f32,
+        spec_prob: f32,
+    }
+
+    #[inline(always)]
+    fn fast_material(base_color: V3) -> Fast {
+        let metal = pr(P_METALNESS);
+        let base = had(mul(base_color, pr(P_BASE)), pv3(P_BASE_TINT));
+        let ior = pr(P_SPECULAR_IOR);
+        let f0d = ((ior - 1.0) / (ior + 1.0)) * ((ior - 1.0) / (ior + 1.0)) * pr(P_SPECULAR);
+        let f0 = add(mul(had([f0d, f0d, f0d], pv3(P_SPECULAR_COLOR)), 1.0 - metal), mul(base, metal));
+        let rough = pr(P_SPECULAR_ROUGHNESS).max(0.03);
+        let diffuse_w = 1.0 - metal;
+        let lf = luminance(f0);
+        let spec_prob = (lf / (lf + diffuse_w * luminance(base) + 1.0e-4)).clamp(0.15, 0.9);
+        Fast { albedo: base, f0, alpha: rough * rough, diffuse_w, spec_prob }
+    }
+
+    #[inline(always)]
+    fn schlick(f0: V3, cos: f32) -> V3 {
+        let m = (1.0 - cos).clamp(0.0, 1.0);
+        let m5 = m * m * m * m * m;
+        add(f0, mul(sub([1.0, 1.0, 1.0], f0), m5))
+    }
+
+    #[inline(always)]
+    fn smith_g1(a2: f32, nv: f32) -> f32 {
+        2.0 * nv / (nv + (a2 + (1.0 - a2) * nv * nv).sqrt())
+    }
+
+    /// (f cos, pdf)
+    #[inline(always)]
+    fn fast_eval(m: &Fast, n: V3, wo: V3, wi: V3) -> (V3, f32) {
+        let nl = dot(n, wi);
+        let nv = dot(n, wo);
+        if nl <= 0.0 || nv <= 0.0 {
+            return ([0.0; 3], 0.0);
+        }
+        let h = normalize(add(wo, wi));
+        let nh = dot(n, h).max(0.0);
+        let vh = dot(wo, h).max(1.0e-6);
+        let a2 = m.alpha * m.alpha;
+        let dd = nh * nh * (a2 - 1.0) + 1.0;
+        let d = a2 / (PI * dd * dd);
+        let g = smith_g1(a2, nv) * smith_g1(a2, nl);
+        let f = schlick(m.f0, vh);
+        let spec = mul(f, d * g / (4.0 * nv));
+        let diff = mul(had(mul(sub([1.0, 1.0, 1.0], f), m.diffuse_w), m.albedo), nl / PI);
+        let pdf = m.spec_prob * d * nh / (4.0 * vh) + (1.0 - m.spec_prob) * nl / PI;
+        (add(spec, diff), pdf)
+    }
+
+    /// (wi, weight, pdf, valid)
+    #[inline(always)]
+    fn fast_sample(m: &Fast, n: V3, wo: V3, u: V3) -> (V3, V3, f32, bool) {
+        let (t, b) = basis(n);
+        let wi = if u[0] < m.spec_prob {
+            let a2 = m.alpha * m.alpha;
+            let cos_h = ((1.0 - u[1]) / (1.0 + (a2 - 1.0) * u[1])).sqrt();
+            let sin_h = (1.0 - cos_h * cos_h).max(0.0).sqrt();
+            let (sp, cp) = (2.0 * PI * u[2]).sin_cos();
+            let h = add(add(mul(t, sin_h * cp), mul(b, sin_h * sp)), mul(n, cos_h));
+            sub(mul(h, 2.0 * dot(wo, h)), wo)
+        } else {
+            let r = u[1].sqrt();
+            let (sp, cp) = (2.0 * PI * u[2]).sin_cos();
+            add(add(mul(t, r * cp), mul(b, r * sp)), mul(n, (1.0 - u[1]).max(0.0).sqrt()))
+        };
+        let (f, pdf) = fast_eval(m, n, wo, wi);
+        if pdf <= 0.0 {
+            return (wi, [0.0; 3], 0.0, false);
+        }
+        (wi, mul(f, 1.0 / pdf), pdf, true)
+    }
+
+    /// The full model's inputs (fractal3d.wgsl surface_inputs): palette * base_tint as base colour;
+    /// transmission and subsurface off.
+    #[inline(always)]
+    fn surface_inputs(base_color: V3) -> SurfaceInputs {
+        SurfaceInputs {
+            base: pr(P_BASE),
+            base_color: had(base_color, pv3(P_BASE_TINT)),
+            diffuse_roughness: pr(P_DIFFUSE_ROUGHNESS),
+            metalness: pr(P_METALNESS),
+            specular: pr(P_SPECULAR),
+            specular_color: pv3(P_SPECULAR_COLOR),
+            specular_roughness: pr(P_SPECULAR_ROUGHNESS),
+            specular_ior: pr(P_SPECULAR_IOR),
+            specular_anisotropy: pr(P_SPECULAR_ANISOTROPY),
+            specular_rotation: pr(P_SPECULAR_ROTATION),
+            sheen: pr(P_SHEEN),
+            sheen_color: pv3(P_SHEEN_COLOR),
+            sheen_roughness: pr(P_SHEEN_ROUGHNESS),
+            coat: pr(P_COAT),
+            coat_color: pv3(P_COAT_COLOR),
+            coat_roughness: pr(P_COAT_ROUGHNESS),
+            coat_ior: pr(P_COAT_IOR),
+            coat_affect_color: pr(P_COAT_AFFECT_COLOR),
+            coat_affect_roughness: pr(P_COAT_AFFECT_ROUGHNESS),
+            thin_film_thickness: pr(P_THIN_FILM_THICKNESS),
+            thin_film_ior: pr(P_THIN_FILM_IOR),
+            emission: pr(P_EMISSION),
+            emission_color: pv3(P_EMISSION_COLOR),
+            thin_film_energy: ThinFilmEnergy::MaterialX,
+            ..SurfaceInputs::MATERIALX_DEFAULT
+        }
+    }
+
+    // =========================================================================
+    // integrator (render-rs pt-integrator pt_trace_path)
+    // =========================================================================
+
+    /// One camera path. `FULL` picks the material model at compile time.
+    #[inline(always)]
+    fn trace_path<const FULL: bool, const F: u32>(
+        lut: &[[f32; 4]],
+        origin: V3,
+        dir0: V3,
+        r: &mut Rng,
+    ) -> (V3, bool) {
+        let cam = pv3(P_CAM_ORIGIN);
+        let slope = pr(P_FOOTPRINT);
+        let max_bounces = pr(P_MAX_BOUNCES) as u32;
+        let up = mat3(P_OBJ_AXES, [0.0, 1.0, 0.0]);
+        let mut ro = origin;
+        let mut rd = dir0;
+        let mut throughput = [1.0f32; 3];
+        let mut radiance = [0.0f32; 3];
+        let mut mis_bsdf_pdf = 0.0f32;
+        let mut mis_env = false;
+        let mut primary_hit = false;
+        let mut bounce = 0u32;
+        loop {
+            if bounce > max_bounces {
+                break;
+            }
+            let base = if bounce == 0 { 0.0 } else { slope * length(sub(ro, cam)) };
+            let kind = if bounce == 0 { RAY_PRIMARY } else { RAY_BOUNCE };
+            let m = march::<F>(ro, rd, kind, base, slope);
+            if !m.hit {
+                let w = if mis_env { power_heuristic(mis_bsdf_pdf, env_pdf(rd)) } else { 1.0 };
+                radiance = add(radiance, mul(had(throughput, env_radiance(rd)), w));
+                break;
+            }
+            if bounce == 0 {
+                primary_hit = true;
+            }
+            let n = surface_normal::<F>(m.point, rd, m.eps);
+            let geo_n = if dot(n, rd) > 0.0 { neg(n) } else { n };
+            let eps = 4.0 * m.eps;
+            let color = hit_palette(lut, m.point, n, m.trap);
+            let wo = neg(rd);
+
+            let full_inputs;
+            let frame;
+            let fast;
+            if FULL {
+                full_inputs = surface_inputs(color);
+                frame = ShadingFrame { n: geo_n, tangent: up, inside: false, curvature: 0.0 };
+                fast = Fast { albedo: [0.0; 3], f0: [0.0; 3], alpha: 0.0, diffuse_w: 0.0, spec_prob: 0.0 };
+                radiance = add(radiance, had(throughput, eval_emission(&full_inputs, &frame, wo)));
+            } else {
+                full_inputs = SurfaceInputs::MATERIALX_DEFAULT;
+                frame = ShadingFrame { n: geo_n, tangent: up, inside: false, curvature: 0.0 };
+                fast = fast_material(color);
+                if pr(P_EMISSION) > 0.0 {
+                    radiance = add(radiance, had(throughput, mul(pv3(P_EMISSION_COLOR), pr(P_EMISSION))));
+                }
+            }
+
+            // Russian roulette after the first bounce.
+            if bounce > 0 {
+                let p_continue = max3(throughput).min(1.0);
+                if rand(r) >= p_continue {
+                    break;
+                }
+                throughput = mul(throughput, 1.0 / p_continue);
+            }
+
+            let weights = if FULL { lobe_weights(&full_inputs, &frame, wo) } else { Default::default() };
+
+            // NEE: one sun/sky sample, MIS-weighted against BSDF sampling.
+            let r1 = rand(r);
+            let r2 = rand(r);
+            let (ld, lpdf) = env_sample(r1, r2);
+            if lpdf > 0.0 {
+                let (f, bpdf) = if FULL {
+                    let lobes = eval_light(&full_inputs, &frame, wo, ld);
+                    let f = add(add(lobes.base, lobes.specular), lobes.transmission);
+                    let bpdf = if max3(f) > 0.0 { pdf_with(&full_inputs, &frame, wo, ld, &weights) } else { 0.0 };
+                    (f, bpdf)
+                } else {
+                    fast_eval(&fast, geo_n, wo, ld)
+                };
+                if max3(f) > 0.0 {
+                    let so = add(m.point, mul(geo_n, eps));
+                    let sb = slope * length(sub(so, cam));
+                    if !march::<F>(so, ld, RAY_VISIBILITY, sb, 0.0).hit {
+                        let w = power_heuristic(lpdf, bpdf);
+                        radiance = add(radiance, had(throughput, had(f, mul(env_radiance(ld), w / lpdf))));
+                    }
+                }
+            }
+
+            let u = [rand(r), rand(r), rand(r)];
+            let (wi, weight, pdf, ok, delta) = if FULL {
+                let s = sample_with(&full_inputs, &frame, wo, u, &weights);
+                (s.wi, s.weight, s.pdf, s.valid, s.delta)
+            } else {
+                let (wi, weight, pdf, ok) = fast_sample(&fast, geo_n, wo, u);
+                (wi, weight, pdf, ok, false)
+            };
+            if !ok {
+                break;
+            }
+            throughput = had(throughput, weight);
+            mis_bsdf_pdf = pdf;
+            mis_env = !delta;
+            ro = add(m.point, mul(geo_n, if dot(wi, geo_n) < 0.0 { -eps } else { eps }));
+            rd = wi;
+            bounce += 1;
+        }
+        (radiance, primary_hit)
+    }
+
+    /// Linear thread index -> pixel, in 8x4 tiles so a warp traces a compact patch.
+    #[inline(always)]
+    fn tile_pixel(i: u32, width: u32) -> (u32, u32) {
+        let tiles_x = width.div_ceil(8);
+        let tile = i / 32;
+        let lane = i % 32;
+        ((tile % tiles_x) * 8 + lane % 8, (tile / tiles_x) * 4 + lane / 8)
+    }
+
+    #[inline(always)]
+    fn trace_pixel<const FULL: bool, const F: u32>(lut: &[[f32; 4]], i: u32, acc: &mut [f32; 4]) {
+        let width = pr(P_WIDTH) as u32;
+        let height = pr(P_HEIGHT) as u32;
+        let (x, y) = tile_pixel(i, width);
+        if x >= width || y >= height {
+            return;
+        }
+        let begin = pr(P_SAMPLE_BEGIN) as u32;
+        let spp = pr(P_SPP) as u32;
+        let seed = pr(P_SEED) as u32;
+        let origin = pv3(P_CAM_ORIGIN);
+        let fwd = pv3(P_CAM_FORWARD);
+        let right = pv3(P_CAM_RIGHT);
+        let up = pv3(P_CAM_UP);
+        let aperture = pr(P_APERTURE);
+        let background = pr(P_BACKGROUND) != 0.0;
+        let mut sum = [acc[0], acc[1], acc[2]];
+        let mut s = 0u32;
+        while s < spp {
+            let mut r = Rng { px: x ^ seed, py: y, sample: begin + s, dim: 0 };
+            let fx = x as f32 + rand(&mut r);
+            let fy = y as f32 + rand(&mut r);
+            let nx = 2.0 * fx / width as f32 - 1.0;
+            let ny = 1.0 - 2.0 * fy / height as f32;
+            let mut ro = origin;
+            let mut dir = normalize(add(fwd, add(mul(right, nx * pr(P_HALF_W)), mul(up, ny * pr(P_HALF_H)))));
+            if aperture > 0.0 {
+                // Thin lens: focus plane at P_FOCUS_DISTANCE along the view axis.
+                let focus = add(origin, mul(dir, pr(P_FOCUS_DISTANCE) / dot(dir, fwd)));
+                let (sa, ca) = (2.0 * PI * rand(&mut r)).sin_cos();
+                let rr = aperture * rand(&mut r).sqrt();
+                ro = add(origin, add(mul(right, rr * ca), mul(up, rr * sa)));
+                dir = normalize(sub(focus, ro));
+            }
+            let (l, hit) = trace_path::<FULL, F>(lut, ro, dir, &mut r);
+            let l = if hit || background { l } else { sky_radiance(dir) };
+            let peak = max3(l);
+            let l = if peak > 64.0 { mul(l, 64.0 / peak) } else { l };
+            sum = add(sum, l);
+            s += 1;
+        }
+        *acc = [sum[0], sum[1], sum[2], acc[3] + spp as f32];
+    }
+
+    // One kernel per (family, material model): the family and the model are compile-time
+    // constants, so each kernel carries only its own estimate and BSDF (fewer registers, no
+    // dispatch). Accumulator rows: (rgb sum, sample count), tile order.
+
+    #[kernel]
+    #[launch_bounds(128)]
+    #[launch_contract(domain = 1, block = (128, 1, 1))]
+    pub fn fast_bulb(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if let Some(acc) = accum.get_mut(idx) {
+            trace_pixel::<false, FAMILY_BULB>(lut, i, acc);
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(128)]
+    #[launch_contract(domain = 1, block = (128, 1, 1))]
+    pub fn fast_box(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if let Some(acc) = accum.get_mut(idx) {
+            trace_pixel::<false, FAMILY_BOX>(lut, i, acc);
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(128)]
+    #[launch_contract(domain = 1, block = (128, 1, 1))]
+    pub fn fast_quat(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if let Some(acc) = accum.get_mut(idx) {
+            trace_pixel::<false, FAMILY_QUAT>(lut, i, acc);
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(128)]
+    #[launch_contract(domain = 1, block = (128, 1, 1))]
+    pub fn fast_kifs(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if let Some(acc) = accum.get_mut(idx) {
+            trace_pixel::<false, FAMILY_KIFS>(lut, i, acc);
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(128)]
+    #[launch_contract(domain = 1, block = (128, 1, 1))]
+    pub fn fast_kleinian(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if let Some(acc) = accum.get_mut(idx) {
+            trace_pixel::<false, FAMILY_KLEINIAN>(lut, i, acc);
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(128)]
+    #[launch_contract(domain = 1, block = (128, 1, 1))]
+    pub fn fast_pseudo_kleinian(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if let Some(acc) = accum.get_mut(idx) {
+            trace_pixel::<false, FAMILY_PSEUDO_KLEINIAN>(lut, i, acc);
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(128)]
+    #[launch_contract(domain = 1, block = (128, 1, 1))]
+    pub fn fast_apollonian(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if let Some(acc) = accum.get_mut(idx) {
+            trace_pixel::<false, FAMILY_APOLLONIAN>(lut, i, acc);
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(128)]
+    #[launch_contract(domain = 1, block = (128, 1, 1))]
+    pub fn fast_hybrid(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if let Some(acc) = accum.get_mut(idx) {
+            trace_pixel::<false, FAMILY_HYBRID>(lut, i, acc);
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(128)]
+    #[launch_contract(domain = 1, block = (128, 1, 1))]
+    pub fn full_bulb(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if let Some(acc) = accum.get_mut(idx) {
+            trace_pixel::<true, FAMILY_BULB>(lut, i, acc);
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(128)]
+    #[launch_contract(domain = 1, block = (128, 1, 1))]
+    pub fn full_box(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if let Some(acc) = accum.get_mut(idx) {
+            trace_pixel::<true, FAMILY_BOX>(lut, i, acc);
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(128)]
+    #[launch_contract(domain = 1, block = (128, 1, 1))]
+    pub fn full_quat(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if let Some(acc) = accum.get_mut(idx) {
+            trace_pixel::<true, FAMILY_QUAT>(lut, i, acc);
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(128)]
+    #[launch_contract(domain = 1, block = (128, 1, 1))]
+    pub fn full_kifs(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if let Some(acc) = accum.get_mut(idx) {
+            trace_pixel::<true, FAMILY_KIFS>(lut, i, acc);
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(128)]
+    #[launch_contract(domain = 1, block = (128, 1, 1))]
+    pub fn full_kleinian(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if let Some(acc) = accum.get_mut(idx) {
+            trace_pixel::<true, FAMILY_KLEINIAN>(lut, i, acc);
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(128)]
+    #[launch_contract(domain = 1, block = (128, 1, 1))]
+    pub fn full_pseudo_kleinian(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if let Some(acc) = accum.get_mut(idx) {
+            trace_pixel::<true, FAMILY_PSEUDO_KLEINIAN>(lut, i, acc);
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(128)]
+    #[launch_contract(domain = 1, block = (128, 1, 1))]
+    pub fn full_apollonian(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if let Some(acc) = accum.get_mut(idx) {
+            trace_pixel::<true, FAMILY_APOLLONIAN>(lut, i, acc);
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(128)]
+    #[launch_contract(domain = 1, block = (128, 1, 1))]
+    pub fn full_hybrid(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if let Some(acc) = accum.get_mut(idx) {
+            trace_pixel::<true, FAMILY_HYBRID>(lut, i, acc);
+        }
+    }
+
+    /// Running mean -> exposure / saturation -> ACES (Narkowicz) or Reinhard -> sRGB -> RGBA8.
+    #[kernel]
+    #[launch_bounds(128)]
+    #[launch_contract(domain = 1, block = (128, 1, 1))]
+    pub fn tonemap(accum: &[[f32; 4]], mut out: DisjointSlice<u32>) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        let width = pr(P_WIDTH) as u32;
+        if let Some(px) = out.get_mut(idx) {
+            let x = i % width;
+            let y = i / width;
+            let tiles_x = width.div_ceil(8);
+            let tile = (y / 4) * tiles_x + x / 8;
+            let a = accum[(tile * 32 + (y % 4) * 8 + x % 8) as usize];
+            let inv = if a[3] > 0.0 { pr(P_EXPOSURE) / a[3] } else { 0.0 };
+            let c = [a[0] * inv, a[1] * inv, a[2] * inv];
+            let l = luminance(c);
+            let sat = pr(P_SATURATION);
+            let c = [l + (c[0] - l) * sat, l + (c[1] - l) * sat, l + (c[2] - l) * sat];
+            let aces = pr(P_TONEMAP) == 0.0;
+            let mut packed = 0xFF00_0000u32;
+            let mut k = 0;
+            while k < 3 {
+                let v = c[k].max(0.0);
+                let t = if aces {
+                    ((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14)).clamp(0.0, 1.0)
+                } else {
+                    (v / (1.0 + v)).clamp(0.0, 1.0)
+                };
+                let s = if t <= 0.003_130_8 { 12.92 * t } else { 1.055 * t.powf(1.0 / 2.4) - 0.055 };
+                packed |= ((s * 255.0 + 0.5) as u32).min(255) << (8 * k);
+                k += 1;
+            }
+            *px = packed;
+        }
+    }
+}
