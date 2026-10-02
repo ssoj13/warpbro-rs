@@ -14,8 +14,8 @@ Toolchain (see README.md):
     NVIDIA driver (on WSL2: the Windows driver, never a Linux one inside WSL)
     CUDA Toolkit 13.x (nvcc, libNVVM, nvJitLink)      CUDA_HOME, default /usr/local/cuda
     LLVM llc 21+ and clang + libclang headers         CUDA_OXIDE_LLC, default newest llc-2x
-    rustup toolchain nightly-2026-08-28 (rust-toolchain.toml) + rust-src rustc-dev llvm-tools
-    cargo-oxide (cargo install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide)
+    rustup toolchain stable (rust-toolchain.toml) + rust-src rustc-dev llvm-tools
+    cargo-oxide (cargo install --git https://github.com/ansidium/cuda-oxide-windows.git cargo-oxide)
 
 Commands:
     d(octor)      Check the toolchain (--fix installs the rustup / cargo-oxide parts)
@@ -60,7 +60,7 @@ BIN_NAME = "frac-rs.exe" if IS_WINDOWS else "frac-rs"
 RELEASE_BIN = ROOT_DIR / "target" / "release" / BIN_NAME
 INSTALL_DIR = Path.home() / ".local" / "bin"
 
-CUDA_OXIDE_GIT = "https://github.com/NVlabs/cuda-oxide.git"
+CUDA_OXIDE_GIT = "https://github.com/ansidium/cuda-oxide-windows.git"
 RUST_COMPONENTS = ["rust-src", "rustc-dev", "rust-analyzer", "clippy", "rustfmt", "llvm-tools"]
 MIN_LLVM = 21
 MIN_CUDA_MAJOR = 13
@@ -134,7 +134,7 @@ def which(cmd: str) -> Path | None:
 def pinned_toolchain() -> str:
     text = (ROOT_DIR / "rust-toolchain.toml").read_text(encoding="utf-8")
     m = re.search(r'channel\s*=\s*"([^"]+)"', text)
-    return m.group(1) if m else "nightly"
+    return m.group(1) if m else "stable"
 
 
 def newest_llc() -> Path | None:
@@ -508,7 +508,7 @@ On Windows this script prepares MSVC / SDK / CUDA via vcv-rs automatically.
 Direct cargo aliases require an already configured Developer PowerShell.
 
 COMMANDS
-  d       doctor: check driver, CUDA, LLVM, clang, pinned nightly, cargo-oxide
+  d       doctor: check driver, CUDA, LLVM, clang, stable toolchain, cargo-oxide
             --fix   install the missing rustup toolchain / components / cargo-oxide
   b       build (cargo oxide build) -> target/release/frac-rs
   r       build + run the browser; arguments after `--` go to frac-rs

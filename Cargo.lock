@@ -662,7 +662,6 @@ dependencies = [
 [[package]]
 name = "cuda-artifact-finalizer"
 version = "0.2.1"
-source = "git+https://github.com/NVlabs/cuda-oxide.git#918bbde123671153b29a89542f1781f1c7494c14"
 dependencies = [
  "libnvvm-sys",
  "nvjitlink-sys",
@@ -674,8 +673,7 @@ dependencies = [
 [[package]]
 name = "cuda-bindings"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f42e2c99c56bf2eef9d569435bfd72a478dfaea3f178b8e5bae891875bbbe2e"
+source = "git+https://github.com/ansidium/cutile-rs?rev=b4eae9b2a783eba8e18587aa2b760f985a07f866#b4eae9b2a783eba8e18587aa2b760f985a07f866"
 dependencies = [
  "bindgen",
  "libloading",
@@ -688,8 +686,7 @@ dependencies = [
 [[package]]
 name = "cuda-core"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "84bdb592a2844148fb13bdfbbab158879f56916bde1d1a1b6580ca27f23850cd"
+source = "git+https://github.com/ansidium/cutile-rs?rev=b4eae9b2a783eba8e18587aa2b760f985a07f866#b4eae9b2a783eba8e18587aa2b760f985a07f866"
 dependencies = [
  "anyhow",
  "cuda-bindings",
@@ -701,8 +698,7 @@ dependencies = [
 [[package]]
 name = "cuda-core-derive"
 version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8a48da7d10c1078f7fbb87d7176e9476affadea148babf31946e348073872d44"
+source = "git+https://github.com/ansidium/cutile-rs?rev=b4eae9b2a783eba8e18587aa2b760f985a07f866#b4eae9b2a783eba8e18587aa2b760f985a07f866"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -712,7 +708,6 @@ dependencies = [
 [[package]]
 name = "cuda-device"
 version = "0.2.1"
-source = "git+https://github.com/NVlabs/cuda-oxide.git#918bbde123671153b29a89542f1781f1c7494c14"
 dependencies = [
  "cuda-macros",
 ]
@@ -720,7 +715,6 @@ dependencies = [
 [[package]]
 name = "cuda-host"
 version = "0.2.1"
-source = "git+https://github.com/NVlabs/cuda-oxide.git#918bbde123671153b29a89542f1781f1c7494c14"
 dependencies = [
  "cuda-artifact-finalizer",
  "cuda-core",
@@ -736,7 +730,6 @@ dependencies = [
 [[package]]
 name = "cuda-macros"
 version = "0.2.1"
-source = "git+https://github.com/NVlabs/cuda-oxide.git#918bbde123671153b29a89542f1781f1c7494c14"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -747,7 +740,10 @@ dependencies = [
 [[package]]
 name = "cuda-target-spec"
 version = "0.1.0"
-source = "git+https://github.com/NVlabs/cuda-oxide.git#918bbde123671153b29a89542f1781f1c7494c14"
+
+[[package]]
+name = "cuda-toolkit-discovery"
+version = "0.1.0"
 
 [[package]]
 name = "cursor-icon"
@@ -2073,9 +2069,9 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "libnvvm-sys"
 version = "0.2.1"
-source = "git+https://github.com/NVlabs/cuda-oxide.git#918bbde123671153b29a89542f1781f1c7494c14"
 dependencies = [
  "cuda-target-spec",
+ "cuda-toolkit-discovery",
  "libloading",
  "thiserror 2.0.21",
 ]
@@ -2373,8 +2369,8 @@ dependencies = [
 [[package]]
 name = "nvjitlink-sys"
 version = "0.2.1"
-source = "git+https://github.com/NVlabs/cuda-oxide.git#918bbde123671153b29a89542f1781f1c7494c14"
 dependencies = [
+ "cuda-toolkit-discovery",
  "libloading",
  "thiserror 2.0.21",
 ]
@@ -3033,7 +3029,6 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 [[package]]
 name = "ptx-parse"
 version = "0.1.0"
-source = "git+https://github.com/NVlabs/cuda-oxide.git#918bbde123671153b29a89542f1781f1c7494c14"
 
 [[package]]
 name = "pulp"
@@ -3269,7 +3264,6 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 [[package]]
 name = "reserved-oxide-symbols"
 version = "0.2.1"
-source = "git+https://github.com/NVlabs/cuda-oxide.git#918bbde123671153b29a89542f1781f1c7494c14"
 
 [[package]]
 name = "rustc-hash"

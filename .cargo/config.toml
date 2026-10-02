@@ -11,4 +11,6 @@ obench = "oxide run -- --bench"
 git-fetch-with-cli = true
 
 [env]
+# cuda-oxide uses compiler-internal APIs with the stable toolchain.
+RUSTC_BOOTSTRAP = "1"
 CUDA_OXIDE_PTX_DIR = { value = "target/oxide-ptx", relative = true }

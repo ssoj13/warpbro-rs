@@ -6,10 +6,11 @@ edition = "2024"
 [workspace]
 
 [dependencies]
-cuda-device = { git = "https://github.com/NVlabs/cuda-oxide.git" }
-cuda-host = { git = "https://github.com/NVlabs/cuda-oxide.git" }
-# Shared host-side runtime, published from NVlabs/cutile-rs.
-cuda-core = "0.3.1"
+# Use the local checkout, including its Rust 1.99 backend fixes.
+cuda-device = { path = "../../cuda-oxide-windows/crates/cuda-device" }
+cuda-host = { path = "../../cuda-oxide-windows/crates/cuda-host" }
+# Match cuda-host's Windows-compatible runtime to keep shared types identical.
+cuda-core = { git = "https://github.com/ansidium/cutile-rs", rev = "b4eae9b2a783eba8e18587aa2b760f985a07f866" }
 egui = "0.36"
 egui-wgpu = "0.36"
 egui-winit = "0.36"

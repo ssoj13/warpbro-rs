@@ -38,7 +38,7 @@ no WGSL and no DSL: host code and kernels live in the same crate and are built i
   - When you release the button, the orbit pivot sits in front of the camera, so orbiting
     continues from where you flew.
   - Backtick / tilde switches between a level horizon and free flight. In free flight,
-    Q/E rolls and R/F moves up/down; all six flight axes have damped inertia. Roll and mode
+    Q/E rolls and R/C moves up/down; all six flight axes have damped inertia. Roll and mode
     are saved with the camera and survive releasing RMB.
   - H restores the loaded preset/bookmark's camera; F frames the fractal's declared bounds
     (or a 10×10×10 box), including object scale/offset/rotation. F without RMB frames;
@@ -78,10 +78,11 @@ frac-rs is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX
   - On WSL2, install only the CUDA **toolkit**; the driver comes from Windows. Never install
     `cuda-drivers` or `nvidia-driver-*` inside WSL.
 - CUDA Toolkit 13.x, LLVM/`llc` 21 or newer, and clang (for bindgen).
-- The pinned nightly `nightly-2026-08-28` (see `rust-toolchain.toml`).
-- `cargo-oxide`:
+- Rust stable (currently **1.99**), with compiler-internal APIs enabled through `.cargo/config.toml` (see `rust-toolchain.toml`).
+- The local `cuda-oxide-windows` checkout at `../../cuda-oxide-windows`, including its Rust 1.99 backend fixes.
+- `cargo-oxide` (install from the same checkout):
   ```sh
-  cargo +nightly-2026-08-28 install --git https://github.com/NVlabs/cuda-oxide.git cargo-oxide
+  cargo +stable install --locked --path ../../cuda-oxide-windows/crates/cargo-oxide
   cargo oxide doctor
   ```
 
@@ -101,11 +102,11 @@ cargo oxide run                                         # the browser
 | left drag | orbit |
 | middle drag | pan |
 | wheel | zoom |
-| hold right button | fly: mouse looks, WASD moves, Q/E down/up, Shift boosts, wheel sets speed |
+| hold right button | fly: mouse looks, WASD moves, R/C up/down, Q/E rolls (enables free flight), Shift boosts, wheel sets speed |
 | double-click | recentre |
 | `Tab` | hide the panels |
 | `Space` | pause |
-| backtick / tilde | switch horizon / free flight (Q/E roll, R/F up/down in free mode) |
+| backtick / tilde | switch horizon / free flight (Q/E roll, R/C up/down in free mode) |
 
 The scene inspector uses `egui-widgets-rs`: `egui-attr-table` for typed controls and
 reset/copy/paste actions, `egui-attr-grid` for vectors, and `egui-titlebar` for sections.

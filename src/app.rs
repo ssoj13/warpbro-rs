@@ -582,7 +582,7 @@ impl App {
         self.showing_preview = false;
     }
 
-    /// Unreal-style flight: hold RMB in the viewport, mouse looks, WASD moves, Q/E down/up,
+    /// Unreal-style flight: hold RMB in the viewport, mouse looks, WASD moves, R/C up/down, Q/E rolls,
     /// Shift boosts, the wheel scales the speed. Integrated by cam-controls `SpaceFlight` (thrust,
     /// inertia, damping); on release the orbit pivot is placed in front of the camera at the
     /// current orbit distance, so orbiting continues from where you flew.
@@ -612,6 +612,10 @@ impl App {
         }
         let radius = self.scene.formula.framing_radius();
         let cam = &mut self.scene.camera;
+        // Roll releases the horizon lock rather than being silently discarded.
+        if held && ui.input(|i| i.key_down(egui::Key::Q) || i.key_down(egui::Key::E)) {
+            cam.free_flight = true;
+        }
         let dist = cam.distance * radius;
         if held && self.fly.is_none() {
             let orientation = cam.orientation();
@@ -635,10 +639,9 @@ impl App {
                     [
                         k(egui::Key::W) - k(egui::Key::S),
                         k(egui::Key::D) - k(egui::Key::A),
-                        if cam.free_flight { k(egui::Key::R) - k(egui::Key::F) }
-                            else { k(egui::Key::E) - k(egui::Key::Q) },
+                        k(egui::Key::R) - k(egui::Key::C),
                         if i.modifiers.shift { 1.0 } else { 0.0 },
-                        if cam.free_flight { k(egui::Key::E) - k(egui::Key::Q) } else { 0.0 },
+                        k(egui::Key::E) - k(egui::Key::Q),
                     ],
                 )
             });
@@ -725,8 +728,8 @@ impl App {
                 fly.apply_intent(cam_controls::CameraIntent::Roll { d: 0.0 }, cam_viewport::ViewportSize::new(1, 1));
             }
         }
-        self.status = if cam.free_flight { "Flight: free · Q/E roll · R/F up/down" }
-            else { "Flight: horizon · Q/E up/down" }.into();
+        self.status = if cam.free_flight { "Flight: free · Q/E roll · R/C up/down" }
+            else { "Flight: horizon · R/C up/down · Q/E enables roll" }.into();
     }
 
     fn current(&self) -> Option<&Target> {
@@ -882,6 +885,11 @@ impl App {
 
     fn inspector(&mut self, ui: &mut egui::Ui) {
         use crate::inspector as controls;
+        // Halve the table's default 6 px headroom and 2 px inter-row gap.
+        let control_height = ui.spacing().interact_size.y.max(18.0);
+        egui_attr_table::set_row_height(ui.ctx(), control_height + 3.0);
+        egui_attr_table::set_row_gap(ui.ctx(), 1.0);
+        ui.spacing_mut().item_spacing.y *= 0.5;
         egui::ScrollArea::vertical().show(ui, |ui| {
             egui_attr_table::attr_table(ui, |t| { t.row("Name").text(&mut self.scene.name); });
             controls::section(ui, "Formula", true, |ui| controls::formula(ui, &mut self.scene));

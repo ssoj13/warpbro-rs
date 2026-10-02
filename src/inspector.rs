@@ -298,8 +298,8 @@ pub fn camera(ui: &mut Ui, s: &mut Scene) {
     });
     vector(ui, "Target", &mut c.target, -10.0..=10.0);
     ui.small("LMB orbit · MMB pan · wheel zoom · RMB fly · ` / ~ switches flight mode");
-    ui.small(if c.free_flight { "Free: WASD · R/F up/down · Q/E roll · Shift boost" }
-        else { "Horizon: WASD · Q/E up/down · Shift boost" });
+    ui.small(if c.free_flight { "Free: WASD · R/C up/down · Q/E roll · Shift boost" }
+        else { "Horizon: WASD · R/C up/down · Q/E enables roll · Shift boost" });
 }
 pub fn lighting(ui: &mut Ui, l: &mut Lighting) {
     let d = Lighting::default();
