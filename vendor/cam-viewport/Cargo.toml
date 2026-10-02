@@ -1,0 +1,10 @@
+[package]
+name = "cam-viewport"
+version = "0.1.0"
+edition = "2024"
+# Vendored from gitnexus-rs @ 5d035ac (crates/cam-viewport).
+license = "PolyForm-Noncommercial-1.0.0"
+publish = false
+
+[dependencies]
+glam = "0.33.6"

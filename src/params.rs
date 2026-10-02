@@ -63,6 +63,9 @@ slots! {
     P_COAT_AFFECT_COLOR = 1, P_COAT_AFFECT_ROUGHNESS = 1,
     P_THIN_FILM_THICKNESS = 1, P_THIN_FILM_IOR = 1,
     P_EMISSION = 1, P_EMISSION_COLOR = 3,
+    // base colour source (0 palette, 1 P_BASE_COLOR) and the facing mix (exponent 0 = off)
+    P_COLOR_SOURCE = 1, P_BASE_COLOR = 3,
+    P_FACING_EXPONENT = 1, P_FACING_COLOR = 3, P_FACING_ROUGHNESS = 1, P_FACING_METALLIC = 1,
     // tonemap
     P_EXPOSURE = 1, P_SATURATION = 1, P_TONEMAP = 1,
 }

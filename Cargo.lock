@@ -611,6 +611,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "cam-controls"
+version = "0.1.0"
+dependencies = [
+ "cam-viewport",
+ "glam",
+ "serde",
+]
+
+[[package]]
+name = "cam-viewport"
+version = "0.1.0"
+dependencies = [
+ "glam",
+]
+
+[[package]]
 name = "cc"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1325,11 +1341,14 @@ dependencies = [
 name = "frac-rs"
 version = "0.1.0"
 dependencies = [
+ "cam-controls",
+ "cam-viewport",
  "cuda-core",
  "cuda-device",
  "cuda-host",
  "dirs",
  "eframe",
+ "glam",
  "png",
  "serde",
  "serde_json",
@@ -1444,6 +1463,12 @@ dependencies = [
  "log",
  "xml-rs",
 ]
+
+[[package]]
+name = "glam"
+version = "0.33.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37bfe73dc8ec21f54d181e5a60554327ec3f1c600c455a75ccbfc65d2106a6c4"
 
 [[package]]
 name = "glifo"

@@ -21,6 +21,21 @@ no WGSL and no DSL: host code and kernels live in the same crate and are built i
     thin film and anisotropy. The [`standard-surface-bsdf`](vendor/standard-surface-bsdf) crate
     is called directly from the kernel.
 - **14 palettes** and orbit-trap colouring (origin, plane, point).
+- **Material library:** the 50 curated presets of usd-rs `usd-mat-lib` in 12 categories (metals,
+  brushed metals, plastics, car paint, ceramic, stone, wood, leather, velvet and fabric, rubber,
+  paper, glass, emissive), each shown as a GPU-rendered sphere swatch.
+  - Presets are translated the way usd-rs `usd-hd-pt` maps UsdPreviewSurface to Standard
+    Surface. Sheen (velvet) and anisotropy (brushed metal) select the Standard Surface kernels.
+  - The `pt-material-ext` facing mix (pearlescent, oil slick) works in both models.
+  - The fractal colour comes from either the palette or the material.
+  - Glass renders opaque: a distance-estimated fractal has no interior to refract through, so
+    glass becomes a clear-coated smooth dielectric.
+- **Unreal-style flight:** hold the right mouse button in the viewport to fly.
+  - The mouse looks around; WASD moves; Q and E go down and up; Shift boosts; the wheel sets
+    the speed.
+  - It uses gitnexus-rs `cam-controls` `FpsFly` for thrust, inertia and damping.
+  - When you release the button, the orbit pivot sits in front of the camera, so orbiting
+    continues from where you flew.
 - **The browser:**
   - an 18-preset gallery with GPU-rendered thumbnails;
   - bookmarks (scenes saved as JSON);
@@ -30,6 +45,8 @@ no WGSL and no DSL: host code and kernels live in the same crate and are built i
   - final PNG renders up to 4K.
 
 ![gallery](docs/gallery.jpg)
+
+![material library](docs/ui-materials.jpg)
 
 ## Origin
 
@@ -44,6 +61,8 @@ frac-rs is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX
 | `uniform3d.rs`: the uniform layout | `src/params.rs` |
 | `ofx-gen/palette.rs` | `src/palette.rs` |
 | render-rs `standard-surface-bsdf` | `vendor/standard-surface-bsdf` (used unchanged, except `libm::*` → `f32` methods) |
+| usd-rs `usd-mat-lib` presets, `usd-hd-pt` translator, `pt-material-ext` facing mix | `src/materials.rs`, `src/gpu.rs` |
+| gitnexus-rs `cam-controls` / `cam-viewport` | `vendor/cam-controls`, `vendor/cam-viewport` (unchanged) |
 
 ## Requirements
 
@@ -72,8 +91,9 @@ cargo oxide run                                         # the browser
 | input | action |
 |---|---|
 | left drag | orbit |
-| right or middle drag | pan |
+| middle drag | pan |
 | wheel | zoom |
+| hold right button | fly: mouse looks, WASD moves, Q/E down/up, Shift boosts, wheel sets speed |
 | double-click | recentre |
 | `Tab` | hide the panels |
 | `Space` | pause |
@@ -127,11 +147,14 @@ src/params.rs     parameter-block slots shared by host and device
 src/render.rs     CUDA context, progressive targets, kernel dispatch, PNG output
 src/app.rs        the egui browser
 src/palette.rs    the 14 palettes
+src/materials.rs  the usd-rs material library and its Standard Surface translation
 vendor/standard-surface-bsdf   Autodesk Standard Surface (MaterialX port, Apache-2.0, see its NOTICE)
+vendor/cam-controls, vendor/cam-viewport   camera rigs from gitnexus-rs (PolyForm-Noncommercial-1.0.0)
 ```
 
 ## Licences
 
 `vendor/standard-surface-bsdf` is a derivative of MaterialX (Apache-2.0); see its `LICENSE` and
-`NOTICE`. The fractal formulas credit their sources in the ofx-rs code they were ported from
+`NOTICE`. `vendor/cam-controls` and `vendor/cam-viewport` come from gitnexus-rs and are under
+PolyForm-Noncommercial-1.0.0. The fractal formulas credit their sources in the ofx-rs code they were ported from
 (Knighty's KIFS, Leys' Kleinian, Mandelbulber's pseudo-Kleinian, and others).

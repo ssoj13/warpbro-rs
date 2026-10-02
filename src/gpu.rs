@@ -919,13 +919,12 @@ pub mod kernels {
     }
 
     #[inline(always)]
-    fn fast_material(base_color: V3) -> Fast {
-        let metal = pr(P_METALNESS);
+    fn fast_material(base_color: V3, roughness: f32, metal: f32) -> Fast {
         let base = had(mul(base_color, pr(P_BASE)), pv3(P_BASE_TINT));
         let ior = pr(P_SPECULAR_IOR);
         let f0d = ((ior - 1.0) / (ior + 1.0)) * ((ior - 1.0) / (ior + 1.0)) * pr(P_SPECULAR);
         let f0 = add(mul(had([f0d, f0d, f0d], pv3(P_SPECULAR_COLOR)), 1.0 - metal), mul(base, metal));
-        let rough = pr(P_SPECULAR_ROUGHNESS).max(0.03);
+        let rough = roughness.max(0.03);
         let diffuse_w = 1.0 - metal;
         let lf = luminance(f0);
         let spec_prob = (lf / (lf + diffuse_w * luminance(base) + 1.0e-4)).clamp(0.15, 0.9);
@@ -992,15 +991,15 @@ pub mod kernels {
     /// The full model's inputs (fractal3d.wgsl surface_inputs): palette * base_tint as base colour;
     /// transmission and subsurface off.
     #[inline(always)]
-    fn surface_inputs(base_color: V3) -> SurfaceInputs {
+    fn surface_inputs(base_color: V3, roughness: f32, metal: f32) -> SurfaceInputs {
         SurfaceInputs {
             base: pr(P_BASE),
             base_color: had(base_color, pv3(P_BASE_TINT)),
             diffuse_roughness: pr(P_DIFFUSE_ROUGHNESS),
-            metalness: pr(P_METALNESS),
+            metalness: metal,
             specular: pr(P_SPECULAR),
             specular_color: pv3(P_SPECULAR_COLOR),
-            specular_roughness: pr(P_SPECULAR_ROUGHNESS),
+            specular_roughness: roughness,
             specular_ior: pr(P_SPECULAR_IOR),
             specular_anisotropy: pr(P_SPECULAR_ANISOTROPY),
             specular_rotation: pr(P_SPECULAR_ROTATION),
@@ -1064,21 +1063,37 @@ pub mod kernels {
             let n = surface_normal::<F>(m.point, rd, m.eps);
             let geo_n = if dot(n, rd) > 0.0 { neg(n) } else { n };
             let eps = 4.0 * m.eps;
-            let color = hit_palette(lut, m.point, n, m.trap);
             let wo = neg(rd);
+            // Base colour: the palette (escape / trap colouring) or the material's solid colour.
+            let mut color = if pr(P_COLOR_SOURCE) != 0.0 {
+                pv3(P_BASE_COLOR)
+            } else {
+                hit_palette(lut, m.point, n, m.trap)
+            };
+            let mut roughness = pr(P_SPECULAR_ROUGHNESS);
+            let mut metal = pr(P_METALNESS);
+            // usd-rs pt-material-ext facing mix: toward material B at grazing angles.
+            let facing_exp = pr(P_FACING_EXPONENT);
+            if facing_exp > 0.0 {
+                let f = (1.0 - dot(geo_n, wo).abs()).max(0.0).powf(facing_exp);
+                let b = pv3(P_FACING_COLOR);
+                color = add(color, mul(sub(b, color), f));
+                roughness += (pr(P_FACING_ROUGHNESS) - roughness) * f;
+                metal += (pr(P_FACING_METALLIC) - metal) * f;
+            }
 
             let full_inputs;
             let frame;
             let fast;
             if FULL {
-                full_inputs = surface_inputs(color);
+                full_inputs = surface_inputs(color, roughness, metal);
                 frame = ShadingFrame { n: geo_n, tangent: up, inside: false, curvature: 0.0 };
                 fast = Fast { albedo: [0.0; 3], f0: [0.0; 3], alpha: 0.0, diffuse_w: 0.0, spec_prob: 0.0 };
                 radiance = add(radiance, had(throughput, eval_emission(&full_inputs, &frame, wo)));
             } else {
                 full_inputs = SurfaceInputs::MATERIALX_DEFAULT;
                 frame = ShadingFrame { n: geo_n, tangent: up, inside: false, curvature: 0.0 };
-                fast = fast_material(color);
+                fast = fast_material(color, roughness, metal);
                 if pr(P_EMISSION) > 0.0 {
                     radiance = add(radiance, had(throughput, mul(pv3(P_EMISSION_COLOR), pr(P_EMISSION))));
                 }

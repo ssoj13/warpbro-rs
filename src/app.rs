@@ -47,6 +47,37 @@ struct Entry {
 enum Tab {
     Gallery,
     Bookmarks,
+    Materials,
+}
+
+const SWATCH: usize = 96;
+const SWATCH_SPP: u32 = 32;
+
+/// The scene a material-library swatch is rendered with: the preset on a unit sphere (a
+/// quaternion Julia set with c = 0 is exactly the unit ball), three-quarter light, sky behind.
+fn swatch_scene(preset: &crate::materials::MaterialPreset) -> Scene {
+    let mut s = Scene::preset(crate::params::FAMILY_QUAT);
+    if let Formula::QuaternionJulia(q) = &mut s.formula {
+        q.constant = [0.0; 4];
+    }
+    s.camera.distance = 2.3;
+    s.camera.fov_y_degrees = 30.0;
+    s.camera.yaw_degrees = 20.0;
+    s.camera.pitch_degrees = 15.0;
+    s.render.max_bounces = 4;
+    s.render.iterations = 8;
+    s.render.exposure_stops = -0.5;
+    // Neutral grey "studio" sky so metals show their own tint, not the blue sky's.
+    s.lighting.sun_azimuth = 45.0;
+    s.lighting.sun_elevation = 40.0;
+    s.lighting.sun_intensity = 3.0;
+    s.lighting.sky_horizon = [0.03, 0.03, 0.03];
+    s.lighting.sky_zenith = [0.14, 0.14, 0.14];
+    s.lighting.sky_intensity = 5.0;
+    s.material.model = MaterialModel::StandardSurface;
+    preset.apply(&mut s.material);
+    s.material.model = MaterialModel::StandardSurface;
+    s
 }
 
 struct Job {
@@ -70,6 +101,8 @@ struct App {
     gallery: Vec<Entry>,
     bookmarks: Vec<Entry>,
     thumb_target: Target,
+    swatch_target: Target,
+    swatches: Vec<Option<TextureHandle>>,
     tab: Tab,
     target_spp: u32,
     spp_per_frame: u32,
@@ -87,6 +120,11 @@ struct App {
     /// `FRAC_SNAP=out.png [FRAC_SNAP_PRESET=i] [FRAC_SNAP_SPP=n]`: screenshot the window once the
     /// thumbnails and n viewport samples are done, then quit (for docs).
     snap: Option<(PathBuf, u32, bool)>,
+    /// Unreal-style flight (gitnexus-rs cam-controls `FpsFly`), alive while RMB is held and
+    /// while its momentum coasts after release.
+    fly: Option<cam_controls::FpsFly>,
+    /// Flight speed multiplier (mouse wheel while flying).
+    fly_speed: f32,
 }
 
 fn now_stamp() -> u64 {
@@ -141,6 +179,7 @@ impl App {
             Scene::gallery().into_iter().map(|scene| Entry { scene, thumb: None, path: None }).collect();
         let scene = gallery[0].scene.clone();
         let thumb_target = gpu.target(THUMB_W, THUMB_H);
+        let swatch_target = gpu.target(SWATCH, SWATCH);
         Self {
             gpu,
             origin: scene.clone(),
@@ -154,6 +193,8 @@ impl App {
             gallery,
             bookmarks: load_bookmarks(),
             thumb_target,
+            swatch_target,
+            swatches: (0..crate::materials::PRESETS.len()).map(|_| None).collect(),
             tab: Tab::Gallery,
             target_spp: 1024,
             spp_per_frame: 1,
@@ -167,6 +208,8 @@ impl App {
             status: String::new(),
             frame_ms: 16.0,
             seed: 0,
+            fly: None,
+            fly_speed: 1.0,
             snap: std::env::var("FRAC_SNAP").ok().map(|p| {
                 let spp = std::env::var("FRAC_SNAP_SPP").ok().and_then(|v| v.parse().ok()).unwrap_or(256);
                 (PathBuf::from(p), spp, false)
@@ -181,6 +224,14 @@ impl App {
                 let scene = e.scene.clone();
                 self.load(scene);
             }
+        }
+        if let Ok(name) = std::env::var("FRAC_SNAP_MATERIAL") {
+            if let Some(p) = crate::materials::PRESETS.iter().find(|p| p.name() == name) {
+                p.apply(&mut self.scene.material);
+            }
+        }
+        if std::env::var("FRAC_SNAP_TAB").is_ok_and(|t| t == "materials") {
+            self.tab = Tab::Materials;
         }
         self
     }
@@ -219,7 +270,7 @@ impl App {
             .iter_mut()
             .chain(self.bookmarks.iter_mut())
             .find(|e| e.thumb.is_none());
-        let Some(entry) = pending else { return false };
+        let Some(entry) = pending else { return self.render_one_swatch(ctx) };
         let mut s = entry.scene.clone();
         s.render.max_bounces = s.render.max_bounces.min(3);
         let t = &mut self.thumb_target;
@@ -227,6 +278,90 @@ impl App {
         self.gpu.step(t, &s, THUMB_SPP / 2, 7, None);
         entry.thumb = Some(ctx.load_texture(format!("thumb-{}", s.name), to_image(t), TextureOptions::LINEAR));
         true
+    }
+
+    /// Render one pending material swatch. Returns true if one ran.
+    fn render_one_swatch(&mut self, ctx: &egui::Context) -> bool {
+        let Some(i) = self.swatches.iter().position(Option::is_none) else { return false };
+        let preset = &crate::materials::PRESETS[i];
+        let s = swatch_scene(preset);
+        let t = &mut self.swatch_target;
+        self.gpu.step(t, &s, SWATCH_SPP / 2, 3, None);
+        self.gpu.step(t, &s, SWATCH_SPP / 2, 3, None);
+        self.swatches[i] = Some(ctx.load_texture(format!("swatch-{}", preset.name()), to_image(t), TextureOptions::LINEAR));
+        true
+    }
+
+    fn materials_tab(&mut self, ui: &mut egui::Ui) {
+        use crate::materials::{CATEGORIES, PRESETS};
+        ui.label(RichText::new("usd-rs material library · click to apply").small().weak());
+        let current = self.scene.material.preset.clone();
+        let mut apply: Option<usize> = None;
+        let size = Vec2::splat(((ui.available_width() - 12.0) / 2.0).min(SWATCH as f32));
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            for cat in CATEGORIES {
+                let items: Vec<usize> = (0..PRESETS.len()).filter(|&i| PRESETS[i].category == cat).collect();
+                if items.is_empty() {
+                    continue;
+                }
+                egui::CollapsingHeader::new(format!("{cat} ({})", items.len())).default_open(true).show(ui, |ui| {
+                    egui::Grid::new(("mat-grid", cat)).spacing([6.0, 6.0]).show(ui, |ui| {
+                        for (k, &i) in items.iter().enumerate() {
+                            let p = &PRESETS[i];
+                            let selected = current.as_deref() == Some(p.name());
+                            let resp = ui
+                                .vertical(|ui| {
+                                    match &self.swatches[i] {
+                                        Some(t) => {
+                                            ui.add(egui::Image::new((t.id(), size)).corner_radius(6.0));
+                                        }
+                                        None => {
+                                            let (r, _) = ui.allocate_exact_size(size, Sense::hover());
+                                            ui.painter().rect_filled(r, 6.0, ui.visuals().extreme_bg_color);
+                                        }
+                                    }
+                                    let mut label = RichText::new(p.name()).small();
+                                    if selected {
+                                        label = label.strong().color(ui.visuals().selection.stroke.color);
+                                    }
+                                    ui.label(label);
+                                })
+                                .response
+                                .interact(Sense::click());
+                            let mut tip = format!(
+                                "{}\nroughness {:.2} · metallic {:.0} · IOR {:.2}",
+                                p.name(),
+                                p.roughness,
+                                p.metallic,
+                                p.ior
+                            );
+                            if p.sheen.is_some() {
+                                tip += "\n+ sheen (Standard Surface)";
+                            }
+                            if p.anisotropy.is_some() {
+                                tip += "\n+ anisotropy (Standard Surface)";
+                            }
+                            if p.facing.is_some() {
+                                tip += "\n+ facing mix";
+                            }
+                            if p.opacity < 1.0 {
+                                tip += "\nglass: rendered opaque (no refraction on DE fractals)";
+                            }
+                            if resp.on_hover_text(tip).clicked() {
+                                apply = Some(i);
+                            }
+                            if k % 2 == 1 {
+                                ui.end_row();
+                            }
+                        }
+                    });
+                });
+            }
+        });
+        if let Some(i) = apply {
+            PRESETS[i].apply(&mut self.scene.material);
+            self.status = format!("Material: {}", PRESETS[i].name());
+        }
     }
 
     fn save_bookmark(&mut self) {
@@ -332,6 +467,76 @@ impl App {
         self.showing_preview = false;
     }
 
+    /// Unreal-style flight: hold RMB in the viewport, mouse looks, WASD moves, Q/E down/up,
+    /// Shift boosts, the wheel scales the speed. Integrated by cam-controls `FpsFly` (thrust,
+    /// inertia, damping); on release the orbit pivot is placed in front of the camera at the
+    /// current orbit distance, so orbiting continues from where you flew.
+    fn fly_camera(&mut self, ui: &egui::Ui, resp: &egui::Response) {
+        use cam_controls::{CameraIntent, CameraPose, FpsFly};
+        use glam::{Quat, Vec3};
+        let held = resp.is_pointer_button_down_on() && ui.input(|i| i.pointer.secondary_down());
+        let radius = self.scene.formula.framing_radius();
+        let cam = &mut self.scene.camera;
+        let (yaw, pitch) = (cam.yaw_degrees.to_radians(), cam.pitch_degrees.to_radians());
+        let dist = cam.distance * radius;
+        if held && self.fly.is_none() {
+            // Orbit -> free pose. Our forward is (-cosP sinY, -sinP, -cosP cosY); FpsFly's is
+            // (-cos p sin y, sin p, -cos p cos y): same yaw, pitch negated.
+            let eye = Vec3::new(
+                cam.target[0] + dist * pitch.cos() * yaw.sin(),
+                cam.target[1] + dist * pitch.sin(),
+                cam.target[2] + dist * pitch.cos() * yaw.cos(),
+            );
+            let orientation = Quat::from_axis_angle(Vec3::Y, yaw) * Quat::from_axis_angle(Vec3::X, -pitch);
+            let pose = CameraPose { eye, orientation, ..CameraPose::default() };
+            self.fly = Some(FpsFly::from_pose(pose));
+        }
+        let Some(fly) = &mut self.fly else { return };
+        let viewport = cam_viewport::ViewportSize::new(resp.rect.width().max(1.0) as u32, resp.rect.height().max(1.0) as u32);
+        let dt = ui.input(|i| i.stable_dt).clamp(1.0e-4, 0.1);
+        if held {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+            let (delta, scroll, keys) = ui.input(|i| {
+                let k = |key| if i.key_down(key) { 1.0f32 } else { 0.0 };
+                (
+                    i.pointer.delta(),
+                    i.smooth_scroll_delta.y,
+                    [
+                        k(egui::Key::W) - k(egui::Key::S),
+                        k(egui::Key::D) - k(egui::Key::A),
+                        k(egui::Key::E) - k(egui::Key::Q),
+                        if i.modifiers.shift { 1.0 } else { 0.0 },
+                    ],
+                )
+            });
+            if scroll != 0.0 {
+                self.fly_speed = (self.fly_speed * (scroll * 0.003).exp()).clamp(0.02, 50.0);
+                self.status = format!("Flight speed ×{:.2}", self.fly_speed);
+            }
+            let sens = 0.0035;
+            fly.apply_intent(CameraIntent::Look { dyaw: -delta.x * sens, dpitch: -delta.y * sens }, viewport);
+            fly.apply_intent(CameraIntent::Thrust { forward: keys[0], right: keys[1], up: keys[2] }, viewport);
+            fly.apply_intent(CameraIntent::Boost(keys[3] > 0.0), viewport);
+        } else {
+            fly.apply_intent(CameraIntent::Thrust { forward: 0.0, right: 0.0, up: 0.0 }, viewport);
+            fly.apply_intent(CameraIntent::Boost(false), viewport);
+        }
+        // Acceleration scales with the formula's size and the speed multiplier.
+        fly.inertia.thrust_sensitivity = 6.0 * radius * self.fly_speed;
+        let moving = fly.update_dynamics(dt);
+
+        let pose = fly.pose();
+        let f = pose.forward();
+        cam.pitch_degrees = (-f.y).clamp(-1.0, 1.0).asin().to_degrees();
+        cam.yaw_degrees = (-f.x).atan2(-f.z).to_degrees();
+        let target = pose.eye + f * dist;
+        cam.target = [target.x, target.y, target.z];
+        if !held && !moving {
+            self.fly = None;
+        }
+        ui.ctx().request_repaint();
+    }
+
     fn current(&self) -> Option<&Target> {
         if self.showing_preview { self.preview.as_ref() } else { self.full.as_ref() }
     }
@@ -395,8 +600,13 @@ impl App {
         ui.horizontal(|ui| {
             ui.selectable_value(&mut self.tab, Tab::Gallery, format!("Gallery ({})", self.gallery.len()));
             ui.selectable_value(&mut self.tab, Tab::Bookmarks, format!("Bookmarks ({})", self.bookmarks.len()));
+            ui.selectable_value(&mut self.tab, Tab::Materials, "Materials");
         });
         ui.separator();
+        if self.tab == Tab::Materials {
+            self.materials_tab(ui);
+            return;
+        }
         let mut load: Option<Scene> = None;
         let mut delete: Option<usize> = None;
         let size = Vec2::new(ui.available_width().min(THUMB_W as f32), 0.0);
@@ -531,13 +741,14 @@ impl App {
     fn viewport(&mut self, ui: &mut egui::Ui) {
         let avail = ui.available_size();
         let (rect, resp) = ui.allocate_exact_size(avail, Sense::click_and_drag());
+        self.fly_camera(ui, &resp);
         let cam = &mut self.scene.camera;
         if resp.dragged_by(egui::PointerButton::Primary) {
             let d = resp.drag_delta();
             cam.yaw_degrees = (cam.yaw_degrees - d.x * 0.3) % 360.0;
             cam.pitch_degrees = (cam.pitch_degrees + d.y * 0.3).clamp(-89.0, 89.0);
         }
-        if resp.dragged_by(egui::PointerButton::Secondary) || resp.dragged_by(egui::PointerButton::Middle) {
+        if resp.dragged_by(egui::PointerButton::Middle) {
             // Pan the orbit target in the camera plane.
             let d = resp.drag_delta();
             let radius = self.scene.formula.framing_radius();
@@ -550,7 +761,7 @@ impl App {
                 cam.target[i] += (-d.x * right[i] + d.y * up[i]) * k;
             }
         }
-        if resp.hovered() {
+        if resp.hovered() && self.fly.is_none() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll != 0.0 {
                 cam.distance = (cam.distance * (-scroll * 0.0015).exp()).clamp(0.05, 20.0);
@@ -772,7 +983,7 @@ fn camera_ui(ui: &mut egui::Ui, s: &mut Scene) {
     if c.aperture > 0.0 {
         ui.add(egui::Slider::new(&mut c.focus_distance, 0.0..=12.0).text("focus (0 = target)"));
     }
-    ui.label(RichText::new("LMB orbit · RMB/MMB pan · wheel zoom · double-click recentre · Tab hides UI").small().weak());
+    ui.label(RichText::new("LMB orbit · MMB pan · wheel zoom · RMB fly (WASD, Q/E, Shift, wheel = speed) · double-click recentre · Tab hides UI").small().weak());
 }
 
 fn light_ui(ui: &mut egui::Ui, l: &mut Lighting) {
@@ -798,6 +1009,25 @@ fn material_ui(ui: &mut egui::Ui, m: &mut Material) {
         ui.selectable_value(&mut m.model, MaterialModel::Fast, "Fast");
         ui.selectable_value(&mut m.model, MaterialModel::StandardSurface, "Standard Surface");
     });
+    let presets = crate::materials::PRESETS;
+    egui::ComboBox::from_label("library")
+        .selected_text(m.preset.clone().unwrap_or_else(|| "—".into()))
+        .height(400.0)
+        .show_ui(ui, |ui| {
+            for p in presets {
+                if ui.selectable_label(m.preset.as_deref() == Some(p.name()), format!("{} · {}", p.category, p.name())).clicked() {
+                    p.apply(m);
+                }
+            }
+        });
+    ui.horizontal(|ui| {
+        ui.label("colour from");
+        ui.selectable_value(&mut m.color_source, ColorSource::Palette, "palette");
+        ui.selectable_value(&mut m.color_source, ColorSource::Material, "material");
+        if m.color_source == ColorSource::Material {
+            ui.color_edit_button_rgb(&mut m.base_color);
+        }
+    });
     ui.horizontal(|ui| {
         ui.color_edit_button_rgb(&mut m.base_tint);
         ui.add(egui::Slider::new(&mut m.base, 0.0..=1.0).text("base (× palette)"));
@@ -813,6 +1043,18 @@ fn material_ui(ui: &mut egui::Ui, m: &mut Material) {
         ui.color_edit_button_rgb(&mut m.emission_color);
         ui.add(egui::Slider::new(&mut m.emission, 0.0..=4.0).text("emission"));
     });
+    let mut facing_on = m.facing.is_some();
+    if ui.checkbox(&mut facing_on, "facing mix (pearlescent)").changed() {
+        m.facing = facing_on.then_some(Facing { color: [0.18, 0.10, 0.65], roughness: 0.22, metallic: 0.0, exponent: 3.0 });
+    }
+    if let Some(f) = &mut m.facing {
+        ui.horizontal(|ui| {
+            ui.color_edit_button_rgb(&mut f.color);
+            ui.add(egui::Slider::new(&mut f.exponent, 0.5..=8.0).text("grazing colour · exponent"));
+        });
+        slider(ui, &mut f.roughness, 0.0..=1.0, "grazing roughness");
+        slider(ui, &mut f.metallic, 0.0..=1.0, "grazing metallic");
+    }
     if m.model == MaterialModel::StandardSurface {
         slider(ui, &mut m.diffuse_roughness, 0.0..=1.0, "diffuse roughness");
         slider(ui, &mut m.specular_anisotropy, 0.0..=1.0, "anisotropy");

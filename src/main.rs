@@ -8,6 +8,7 @@
 
 mod app;
 mod gpu;
+mod materials;
 mod palette;
 mod params;
 mod render;

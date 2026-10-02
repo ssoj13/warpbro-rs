@@ -299,9 +299,37 @@ pub enum MaterialModel {
     StandardSurface,
 }
 
+/// Where the base colour comes from: the fractal's palette (escape / trap colouring) or a
+/// solid material colour (the material library).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ColorSource {
+    #[default]
+    Palette,
+    Material,
+}
+
+/// usd-rs pt-material-ext facing mix: the look blends from the material (head-on) toward
+/// material B by `pow(1 - |N.V|, exponent)` (pearlescent / falloff).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Facing {
+    pub color: [f32; 3],
+    pub roughness: f32,
+    pub metallic: f32,
+    pub exponent: f32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Material {
     pub model: MaterialModel,
+    #[serde(default)]
+    pub color_source: ColorSource,
+    #[serde(default = "default_base_color")]
+    pub base_color: [f32; 3],
+    #[serde(default)]
+    pub facing: Option<Facing>,
+    /// The library preset this material came from (UI label only).
+    #[serde(default)]
+    pub preset: Option<String>,
     pub base: f32,
     pub base_tint: [f32; 3],
     pub diffuse_roughness: f32,
@@ -399,11 +427,19 @@ impl Default for Lighting {
     }
 }
 
+fn default_base_color() -> [f32; 3] {
+    [0.8, 0.8, 0.8]
+}
+
 impl Default for Material {
     /// ofx-fractal Surface3d::default (MaterialX defaults, base_tint 1), fast model.
     fn default() -> Self {
         Self {
             model: MaterialModel::Fast,
+            color_source: ColorSource::Palette,
+            base_color: default_base_color(),
+            facing: None,
+            preset: None,
             base: 1.0,
             base_tint: [1.0; 3],
             diffuse_roughness: 0.0,
@@ -815,6 +851,14 @@ impl Scene {
         p[P_THIN_FILM_IOR] = m.thin_film_ior;
         p[P_EMISSION] = m.emission;
         put3(&mut p, P_EMISSION_COLOR, m.emission_color);
+        p[P_COLOR_SOURCE] = (m.color_source == ColorSource::Material) as u32 as f32;
+        put3(&mut p, P_BASE_COLOR, m.base_color);
+        if let Some(f) = m.facing {
+            p[P_FACING_EXPONENT] = f.exponent;
+            put3(&mut p, P_FACING_COLOR, f.color);
+            p[P_FACING_ROUGHNESS] = f.roughness;
+            p[P_FACING_METALLIC] = f.metallic;
+        }
 
         // --- tonemap
         p[P_EXPOSURE] = 2f32.powf(r.exposure_stops);
