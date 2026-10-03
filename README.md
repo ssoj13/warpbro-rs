@@ -32,7 +32,7 @@ The project repository is [WarpBro](https://github.com/ssoj13/WarpBro), with SSH
     is called directly from the kernel.
 - **14 palettes** and orbit-trap colouring (origin, plane, point).
 - **Material Gallery:** actual World material nodes appear as asynchronous GPU-rendered sphere cards.
-  The 50 curated presets of usd-rs `usd-mat-lib` remain available through explicit creation/apply menus in 12 categories (metals,
+  The separate **Material Library** window shows the 50 curated presets of usd-rs `usd-mat-lib` in adaptive grids across 12 categories (metals,
   brushed metals, plastics, car paint, ceramic, stone, wood, leather, velvet and fabric, rubber,
   paper, glass, emissive).
   - Presets are translated the way usd-rs `usd-hd-pt` maps UsdPreviewSurface to Standard
@@ -158,14 +158,14 @@ It follows Playa's original composition: `egui-attr-grid` inside
 Short labels keep rows compact; tooltips retain full property paths. Shared attribute metrics
 set label/value columns, numeric component widths, square icon buttons and vertical alignment
 across the editor and Timeline. **Settings → Controls** adjusts these compact layout metrics.
-Numeric gestures defer their undo transaction until completion.
+Numeric gestures defer their undo transaction until completion. Drag the vertical divider between Timeline names and time bars to resize the outline; its width is saved in settings, and double-click restores the default.
 
 One status bar provides resizable sections. The current Materials revision makes the gallery
 show actual World material nodes. Clicking a card selects its UUID and opens the existing
 Attribute Editor. Assignment uses the object's Material attribute or **Assign to selected objects**
 in the card context menu. The sibling toolbar buttons **+ New material** and **Create from preset**
 create a default node or a preset-based node respectively, without assigning it. The card's **Apply preset to this material** action updates the existing UUID
-and every consumer. **Refresh preview** retries terminal rendering/colour failures; stale
+and every consumer. **Library…** opens the separate preset library; clicking a preset creates and selects a workspace node without assigning it. Gallery and Bookmarks also adapt their columns to panel width. **Refresh preview** retries terminal rendering/colour failures; stale
 thumbnail results are rejected. Ordinary clicks only select the material for the shared editor.
 Gallery thumbnails compare evaluated Material values per UUID and become dirty only when those
 parameters change. Renames, unrelated edits and unchanged animated values retain their textures;
@@ -267,8 +267,7 @@ inclusive frame range, then select an output:
 - **EXR sequence:** float RGB scene-linear Rec.709 with chromaticities; exposure and the
   display transform are excluded. `renders/frame.exr`, range 1–3, produces
   `renders/frame.000001.exr` through `renders/frame.000003.exr`.
-- **HEVC / ffmpeg-rs:** software Kvazaar encoding to MP4 or MOV, with rational FPS, QP 0–51
-  and preset controls. Output is SDR 8-bit YUV 4:2:0 with Rec.709 primaries and sRGB transfer;
+- **HEVC / ffmpeg-rs:** hardware **GPU · Vulkan Video** encoding to MP4 or MOV by default, with rational FPS and QP 0–51. **CPU · Kvazaar (I-frames)** is an explicit software alternative using independent frames to avoid reproduced corruption in the pinned inter-prediction path; hardware initialization failures are reported instead of silently switching encoders. Output is SDR 8-bit YUV 4:2:0 with Rec.709 primaries and sRGB transfer;
   the display transform is baked in. Width and height must be even. HDR video is unavailable.
 
 Each frame receives the requested sample count. The World document is frozen at export start;
@@ -276,8 +275,7 @@ each frame evaluates its Playa animation at that frame's time, including transfo
 visibility and discrete keys. When OIDN is enabled, the scene-linear EXR output contains the
 final denoised radiance; exposure and OCIO remain excluded.
 An autonomous coordinator advances rendering and a bounded writer queue handles encoding
-and file output even when the GUI stops updating. **Cancel** stops the run; completed EXR
-frames remain, while an unfinished video is discarded. Existing outputs are preserved unless
+and file output even when the GUI stops updating. **Cancel** stops sampling new frames, drains completed frames and flushes delayed codec packets to publish a playable partial movie. Completed EXR frames remain; cancellation before the first complete video frame creates no movie. Existing outputs are preserved unless
 **Overwrite existing output** is enabled; finished outputs are published atomically.
 
 For compatibility, the local checkout folder, profile and data locations retain the legacy
@@ -312,6 +310,8 @@ middle and last PNGs plus `scene.frac.json`. Add `--all-frames` for all 250 fram
 and a reused render target. Initial 32-frame MP4 comparisons passed for all five presets at 160×90/4 SPP: QP 18/medium
 improved RGB PSNR over QP 27/veryfast, with correct frame count and zero-origin timing.
 Full 250-frame/high-resolution encoded output remains unverified.
+The current hardware backend, safe CPU mode, partial-video cancellation and independent decoder investigation are documented in [the export follow-up](plans/plan6.md). Its moving-source comparison supersedes the earlier inter-preset export configuration.
+
 The [MP4 quality harness](plans/plan3.md#reproduce-the-quality-comparison) reproduces the measured
 QP/preset tradeoff and verified zero-origin rational video timing on deterministic CPU patterns.
 

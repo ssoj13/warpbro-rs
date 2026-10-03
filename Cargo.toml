@@ -43,7 +43,8 @@ gpu-info = { package = "gpu-info-rs", git = "ssh://git@github.com/ssoj13/gpu-inf
 exr = "1.74"
 egui-encode-dialog = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", rev = "e953b2cc6836db2bb47aa44bb7995d9696636034" }
 egui-layout-manager = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", rev = "e953b2cc6836db2bb47aa44bb7995d9696636034" }
-av-codec = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main", default-features = false, features = ["enc-hevc"] }
+av-codec = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main", default-features = false, features = ["enc-hevc", "hwaccel-vulkan"] }
+av-hwaccel-vulkan = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main", features = ["vulkan"] }
 av-codec-core = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
 av-format-core = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
 av-format-movenc = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }

@@ -16,7 +16,6 @@ use std::{
     time::Duration,
 };
 
-const PRESETS: [&str; 5] = ["ultrafast", "veryfast", "fast", "medium", "slow"];
 const HIGH_QUALITY_QP: u8 = 18;
 const HIGH_QUALITY_PRESET: usize = 3;
 
@@ -25,10 +24,26 @@ pub enum ExportFormat {
     Exr,
     Hevc,
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VideoEncoder {
+    #[default]
+    Vulkan,
+    Kvazaar,
+}
+impl VideoEncoder {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Vulkan => "GPU · Vulkan Video",
+            Self::Kvazaar => "CPU · Kvazaar (I-frames)",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ExportSettings {
     pub format: ExportFormat,
+    pub encoder: VideoEncoder,
     pub output: String,
     pub width: usize,
     pub height: usize,
@@ -38,6 +53,7 @@ pub struct ExportSettings {
     pub fps_num: u32,
     pub fps_den: u32,
     pub qp: u8,
+    /// Retained for reading older settings. Unsafe inter presets are disabled.
     pub preset: usize,
     pub overwrite: bool,
 }
@@ -45,6 +61,7 @@ impl Default for ExportSettings {
     fn default() -> Self {
         Self {
             format: ExportFormat::Exr,
+            encoder: VideoEncoder::Vulkan,
             output: "renders/frame.exr".into(),
             width: 1920,
             height: 1080,
@@ -83,8 +100,8 @@ impl ExportSettings {
         if self.fps_num == 0 || self.fps_den == 0 {
             return Err("FPS numerator and denominator must be positive".into());
         }
-        if self.qp > 51 || self.preset >= PRESETS.len() {
-            return Err("Invalid encoder quality or preset".into());
+        if self.qp > 51 {
+            return Err("Invalid encoder quality".into());
         }
         let extension = Path::new(&self.output)
             .extension()
@@ -148,10 +165,10 @@ pub fn schema() -> &'static EncodeSchema {
                     "HEVC / ffmpeg-rs",
                     [
                         EncodeOption::int("qp", "QP", i64::from(HIGH_QUALITY_QP), 0, 51),
-                        EncodeOption::choice("preset", "Preset", PRESETS, HIGH_QUALITY_PRESET),
+                        EncodeOption::choice("encoder", "Encoder", ["GPU · Vulkan Video", "CPU · Kvazaar (I-frames)"], 0),
                     ],
                 )
-                .hint("Software Kvazaar, 8-bit sRGB / Rec.709 SDR, display transform baked in.")],
+                .hint("8-bit sRGB / Rec.709 SDR; display transform baked in. Cancel saves completed frames.")],
             ),
         ])
     })
@@ -249,7 +266,19 @@ impl ExportController {
                 }));
                 let status = match result {
                     Ok(Ok(true)) => "Export complete".to_string(),
-                    Ok(Ok(false)) => "Export cancelled; completed EXR frames retained".to_string(),
+                    Ok(Ok(false)) => {
+                        let completed = shared.lock().unwrap_or_else(|e| e.into_inner()).completed;
+                        if config.format == ExportFormat::Hevc && completed > 0 {
+                            format!(
+                                "Export cancelled; saved {completed} frames to {}",
+                                config.output
+                            )
+                        } else if config.format == ExportFormat::Hevc {
+                            "Export cancelled before any complete frames".into()
+                        } else {
+                            format!("Export cancelled; {completed} EXR frames retained")
+                        }
+                    }
                     Ok(Err(error)) => format!("Export failed: {error}"),
                     Err(_) => "Export failed: coordinator panicked".to_string(),
                 };
@@ -307,6 +336,12 @@ impl ExportController {
                 ui.label("Samples / frame"); ui.add(egui::DragValue::new(&mut self.settings.samples).range(1..=1_000_000)); ui.end_row();
                 ui.label("Frame range"); ui.horizontal(|ui| { ui.add(egui::DragValue::new(&mut self.settings.first).range(0..=u32::MAX)); ui.label("…"); ui.add(egui::DragValue::new(&mut self.settings.last).range(0..=u32::MAX)); }); ui.end_row();
                 if self.settings.format == ExportFormat::Hevc {
+                    ui.label("Encoder");
+                    egui::ComboBox::from_id_salt("video_encoder").selected_text(self.settings.encoder.label()).show_ui(ui, |ui| {
+                        for encoder in [VideoEncoder::Vulkan, VideoEncoder::Kvazaar] {
+                            ui.selectable_value(&mut self.settings.encoder, encoder, encoder.label());
+                        }
+                    }); ui.end_row();
                     ui.label("FPS"); ui.horizontal(|ui| { ui.add(egui::DragValue::new(&mut self.settings.fps_num).range(1..=120000)); ui.label("/"); ui.add(egui::DragValue::new(&mut self.settings.fps_den).range(1..=10000)); }); ui.end_row();
                     ui.label("Quality"); ui.horizontal(|ui| {
                         ui.add(egui::Slider::new(&mut self.settings.qp,0..=51).text("QP"))
@@ -316,7 +351,9 @@ impl ExportController {
                             self.settings.preset = HIGH_QUALITY_PRESET;
                         }
                     }); ui.end_row();
-                    ui.label("Preset"); egui::ComboBox::from_id_salt("export_preset").selected_text(PRESETS[self.settings.preset.min(4)]).show_ui(ui, |ui| { for (index,name) in PRESETS.iter().enumerate() { ui.selectable_value(&mut self.settings.preset,index,*name); } }); ui.end_row();
+                    if self.settings.encoder == VideoEncoder::Kvazaar {
+                        ui.label("Prediction"); ui.label("Independent I-frames"); ui.end_row();
+                    }
                 }
             });
             ui.checkbox(&mut self.settings.overwrite,"Overwrite existing output");
@@ -363,7 +400,7 @@ fn coordinate_export(
     progress: &Mutex<Progress>,
     cancel: &AtomicBool,
 ) -> Result<bool, String> {
-    let writer = ExportWriter::spawn(settings.clone())?;
+    let mut writer = ExportWriter::spawn(settings.clone())?;
     let (reply, events) = mpsc::sync_channel(16);
     let result = (|| -> Result<bool, String> {
         for number in settings.first..=settings.last {
@@ -430,10 +467,14 @@ fn coordinate_export(
             }
             let mut pending = (number, frame);
             loop {
-                if cancel.load(Ordering::Acquire) {
-                    return Ok(false);
-                }
-                match writer.frames.try_send(pending) {
+                // A fully rendered frame must enter the writer even if Cancel
+                // arrives here; only incomplete GPU work is discarded.
+                match writer
+                    .frames
+                    .as_ref()
+                    .ok_or("Export input closed")?
+                    .try_send(pending)
+                {
                     Ok(()) => break,
                     Err(TrySendError::Full(frame)) => {
                         pending = frame;
@@ -477,10 +518,31 @@ fn coordinate_export(
         }
         Err("Export pipeline ended without finalization".into())
     })();
-    if !matches!(result, Ok(true)) {
+    if matches!(result, Ok(false)) {
+        // Cancel is a graceful end of input: drain complete queued frames and
+        // flush delayed encoder packets before publishing the partial movie.
+        // This wait runs on the coordinator, never on the GUI thread.
+        let _ = port.try_command(Command::CancelExport);
+        progress.lock().unwrap_or_else(|e| e.into_inner()).status =
+            "Finishing export; saving completed frames…".into();
+        writer.frames.take();
+        loop {
+            match writer.events.recv_timeout(Duration::from_millis(20)) {
+                Ok(WriteEvent::Written(written)) => acknowledge(progress, settings.first, written)?,
+                Ok(WriteEvent::Finished) => break,
+                Ok(WriteEvent::Failed(error)) => return Err(error),
+                Ok(WriteEvent::Cancelled) => {
+                    return Err("Export writer aborted during finalization".into());
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err("Writer closed before finalization".into());
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+    } else if result.is_err() {
         writer.cancel.store(true, Ordering::Release);
         let _ = port.try_command(Command::CancelExport);
-        // The coordinator awaits cleanup off the UI thread before advertising a reusable run.
         loop {
             match writer.events.recv_timeout(Duration::from_millis(20)) {
                 Ok(WriteEvent::Cancelled)
@@ -510,7 +572,7 @@ enum WriteEvent {
     Failed(String),
 }
 struct ExportWriter {
-    frames: SyncSender<(u32, Arc<Frame>)>,
+    frames: Option<SyncSender<(u32, Arc<Frame>)>>,
     events: Receiver<WriteEvent>,
     cancel: Arc<AtomicBool>,
 }
@@ -538,7 +600,13 @@ impl ExportWriter {
                         let (number, frame) = match rx.recv_timeout(Duration::from_millis(30)) {
                             Ok(value) => value,
                             Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                            Err(_) => return Ok(()),
+                            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                                if let Some(sink) = hevc {
+                                    sink.finish(&stop)?;
+                                }
+                                let _ = tx.send(WriteEvent::Finished);
+                                return Ok(());
+                            }
                         };
                         if frame.samples < settings.samples {
                             return Err(format!(
@@ -574,7 +642,7 @@ impl ExportWriter {
             })
             .map_err(|e| e.to_string())?;
         Ok(Self {
-            frames,
+            frames: Some(frames),
             events,
             cancel,
         })
@@ -617,6 +685,11 @@ fn write_exr(path: &Path, frame: &Frame, overwrite: bool) -> Result<(), String> 
 struct HevcSink {
     ctx: av_codec_core::AVCodecContext,
     sws: Box<av_swscale::SwsContext>,
+    upload_sws: Option<Box<av_swscale::SwsContext>>,
+    rgb: Box<av_util_frame::AVFrame>,
+    yuv: Box<av_util_frame::AVFrame>,
+    nv12: Option<Box<av_util_frame::AVFrame>>,
+    hardware: bool,
     writer: Option<av_format_movenc::MovWriter<File>>,
     output: Option<av_util_core::outfile::AtomicOut>,
     width: usize,
@@ -666,26 +739,79 @@ impl VideoTiming {
 fn av_error(error: impl std::fmt::Debug) -> String {
     format!("{error:?}")
 }
+/// Fixed-size conversion buffers belong to one export writer and are reused
+/// for its lifetime. CPU encoding copies input; Vulkan upload owns its surface.
+fn video_buffer(
+    width: usize,
+    height: usize,
+    format: av_util_pixfmt::AVPixelFormat,
+) -> Result<Box<av_util_frame::AVFrame>, String> {
+    let mut frame = av_util_frame::av_frame_alloc();
+    frame.format = format as i32;
+    frame.width = width as i32;
+    frame.height = height as i32;
+    av_util_frame::av_frame_get_buffer(&mut frame, 0).map_err(av_error)?;
+    Ok(frame)
+}
 impl HevcSink {
     fn new(settings: &ExportSettings) -> Result<Self, String> {
         use av_util_pixfmt::{AVColorSpace as C, AVPixelFormat as P};
-        let entry = av_codec::avcodec_find_encoder_by_name("hevc_kvz")
-            .ok_or("ffmpeg-rs HEVC encoder is not registered")?;
+        let hardware = settings.encoder == VideoEncoder::Vulkan;
+        let entry = av_codec::avcodec_find_encoder_by_name(if hardware {
+            "hevc_vulkan"
+        } else {
+            "hevc_kvz"
+        })
+        .ok_or("Selected ffmpeg-rs HEVC encoder is not registered")?;
+        let sw_format = if hardware { P::NV12 } else { P::YUV420P };
         let mut ctx = av_codec_core::avcodec_alloc_context3();
         ctx.width = settings.width as i32;
         ctx.height = settings.height as i32;
-        ctx.pix_fmt = P::YUV420P;
+        ctx.pix_fmt = if hardware { P::VULKAN } else { sw_format };
+        ctx.time_base.num =
+            i32::try_from(settings.fps_den).map_err(|_| "FPS denominator overflow")?;
+        ctx.time_base.den =
+            i32::try_from(settings.fps_num).map_err(|_| "FPS numerator overflow")?;
+        if hardware {
+            ctx.hw_frames_ctx = Some(av_hwaccel_vulkan::hevc_vulkan_alloc_src_frames(
+                ctx.width, ctx.height, 4, sw_format,
+            ).map_err(|error| format!("Vulkan Video unavailable: {error:?}. Select CPU · Kvazaar to use software encoding."))?.into());
+            ctx.max_b_frames = 0;
+            ctx.gop_size = (settings.fps_num / settings.fps_den).max(1) as i32;
+        }
         ctx.flags |=
             av_codec_core::AV_CODEC_FLAG_GLOBAL_HEADER | av_codec_core::AV_CODEC_FLAG_QSCALE;
         ctx.global_quality = i32::from(settings.qp) * av_codec_core::FF_QP2LAMBDA;
-        ctx.open_with_opts((entry.make)(), &[("preset", PRESETS[settings.preset])])
-            .map_err(av_error)?;
+        if hardware {
+            let qp = settings.qp.to_string();
+            ctx.open_with_opts((entry.make)(), &[("qp", &qp), ("async_depth", "1")])
+                .map_err(|error| format!("Vulkan Video cannot encode {}×{}: {error:?}. Select CPU · Kvazaar for software encoding.", settings.width, settings.height))?;
+        } else {
+            // The pinned Kvazaar inter path produces block displacement on
+            // moving sources. Its no-preset route is bounded all-intra, with
+            // QP still controlled by global_quality; no temporal references.
+            ctx.gop_size = 1;
+            ctx.open_with_opts((entry.make)(), &[]).map_err(av_error)?;
+        }
         let mut sws = av_swscale::sws_alloc_context();
         sws.set_src(settings.width, settings.height, P::RGB24);
         sws.set_dst(settings.width, settings.height, P::YUV420P);
         sws.set_colorspace(C::AVCOL_SPC_BT709);
         sws.set_range(true, false);
-        av_swscale::sws_init_context(&mut sws).map_err(av_error)?;
+        av_swscale::sws_init_context(&mut sws)
+            .map_err(|e| format!("RGB to YUV conversion: {e:?}"))?;
+        // RGB → NV12 is not yet supported by the shared scaler. Convert color
+        // once to planar 4:2:0, then only repack chroma for Vulkan upload.
+        let upload_sws = if hardware {
+            let mut packing = av_swscale::sws_alloc_context();
+            packing.set_src(settings.width, settings.height, P::YUV420P);
+            packing.set_dst(settings.width, settings.height, P::NV12);
+            packing.set_range(false, false);
+            av_swscale::sws_init_context(&mut packing).map_err(av_error)?;
+            Some(packing)
+        } else {
+            None
+        };
         let mut output = av_util_core::outfile::AtomicOut::create(
             Path::new(&settings.output),
             settings.overwrite,
@@ -697,6 +823,15 @@ impl HevcSink {
         let mut sink = Self {
             ctx,
             sws,
+            upload_sws,
+            rgb: video_buffer(settings.width, settings.height, P::RGB24)?,
+            yuv: video_buffer(settings.width, settings.height, P::YUV420P)?,
+            nv12: if hardware {
+                Some(video_buffer(settings.width, settings.height, P::NV12)?)
+            } else {
+                None
+            },
+            hardware,
             writer: Some(writer),
             output: Some(output),
             width: settings.width,
@@ -712,7 +847,8 @@ impl HevcSink {
         Ok(sink)
     }
     fn header(&mut self, au: &[u8]) -> Result<(), String> {
-        let config = av_codec::hvcc_from_au(au).map_err(av_error)?;
+        let config =
+            av_codec::hvcc_from_au(au).map_err(|e| format!("HEVC configuration: {e:?}"))?;
         let writer = self.writer.as_mut().ok_or("HEVC writer is closed")?;
         writer
             .add_video(
@@ -732,7 +868,6 @@ impl HevcSink {
         Ok(())
     }
     fn write(&mut self, frame: &Frame) -> Result<(), String> {
-        use av_util_pixfmt::AVPixelFormat as P;
         if frame.hdr {
             return Err("HEVC SDR sink cannot encode HDR display codes".into());
         }
@@ -742,11 +877,7 @@ impl HevcSink {
         if frame.light.len() != self.width * self.height {
             return Err("Linear display pixel buffer is incomplete".into());
         }
-        let mut src = av_util_frame::av_frame_alloc();
-        src.format = P::RGB24 as i32;
-        src.width = self.width as i32;
-        src.height = self.height as i32;
-        av_util_frame::av_frame_get_buffer(&mut src, 0).map_err(av_error)?;
+        let src = &mut self.rgb;
         let stride = src.linesize[0] as usize;
         let plane = src.data[0]
             .as_mut()
@@ -761,15 +892,30 @@ impl HevcSink {
                 }
             }
         }
-        let mut dst = av_util_frame::av_frame_alloc();
-        dst.format = P::YUV420P as i32;
-        dst.width = self.width as i32;
-        dst.height = self.height as i32;
-        av_util_frame::av_frame_get_buffer(&mut dst, 0).map_err(av_error)?;
-        av_swscale::sws_scale_frame(&self.sws, &mut dst, &src).map_err(av_error)?;
+        let dst = &mut self.yuv;
+        av_swscale::sws_scale_frame(&self.sws, dst, src).map_err(av_error)?;
         dst.pts = self.frames * i64::from(self.fps.1);
         dst.duration = i64::from(self.fps.1);
-        self.ctx.avcodec_send_frame(Some(&dst)).map_err(av_error)?;
+        if self.hardware {
+            let pool = self
+                .ctx
+                .hw_frames_ctx
+                .as_ref()
+                .ok_or("Vulkan frame pool is missing")?;
+            let nv = self.nv12.as_mut().ok_or("NV12 buffer missing")?;
+            av_swscale::sws_scale_frame(
+                self.upload_sws.as_ref().ok_or("NV12 packer missing")?,
+                nv,
+                dst,
+            )
+            .map_err(av_error)?;
+            let mut hw = av_hwaccel_vulkan::hwupload_frame(pool, nv).map_err(av_error)?;
+            hw.pts = dst.pts;
+            hw.duration = dst.duration;
+            self.ctx.avcodec_send_frame(Some(&hw)).map_err(av_error)?;
+        } else {
+            self.ctx.avcodec_send_frame(Some(dst)).map_err(av_error)?;
+        }
         self.frames += 1;
         self.drain()
     }
@@ -816,7 +962,7 @@ impl HevcSink {
         }
     }
     fn finish(mut self, cancel: &AtomicBool) -> Result<(), String> {
-        if cancel.load(Ordering::Acquire) {
+        if cancel.load(Ordering::Acquire) || self.frames == 0 {
             return Ok(());
         }
         self.ctx.avcodec_send_frame(None).map_err(av_error)?;
@@ -894,7 +1040,12 @@ mod tests {
         settings.last = 8;
         let writer = ExportWriter::spawn(settings.clone()).unwrap();
         for number in 7..=8 {
-            writer.frames.send((number, Arc::new(frame(2, 2)))).unwrap();
+            writer
+                .frames
+                .as_ref()
+                .unwrap()
+                .send((number, Arc::new(frame(2, 2))))
+                .unwrap();
             match writer.events.recv_timeout(Duration::from_secs(30)).unwrap() {
                 WriteEvent::Written(n) => assert_eq!(n, number),
                 WriteEvent::Failed(e) => panic!("{e}"),
@@ -924,10 +1075,11 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
-    fn hevc_mux_finishes_and_cancel_never_publishes() {
+    fn hevc_mux_finishes_and_abort_never_publishes() {
         let dir = temp_dir("hevc");
         let mut settings = ExportSettings::default();
         settings.format = ExportFormat::Hevc;
+        settings.encoder = VideoEncoder::Kvazaar;
         settings.output = dir.join("clip.mp4").display().to_string();
         settings.width = 64;
         settings.height = 64;
@@ -950,11 +1102,194 @@ mod tests {
     }
 
     #[test]
+    fn graceful_video_stop_drains_queued_frames_and_flushes_delayed_packets() {
+        let dir = temp_dir("partial-hevc");
+        for count in [0, 1, 9] {
+            let settings = ExportSettings {
+                format: ExportFormat::Hevc,
+                encoder: VideoEncoder::Kvazaar,
+                output: dir
+                    .join(format!("partial-{count}.mp4"))
+                    .display()
+                    .to_string(),
+                width: 66,
+                height: 50,
+                samples: 4,
+                first: 17,
+                last: 100,
+                fps_num: 24000,
+                fps_den: 1001,
+                preset: HIGH_QUALITY_PRESET,
+                ..Default::default()
+            };
+            let mut writer = ExportWriter::spawn(settings.clone()).unwrap();
+            for number in 17..17 + count {
+                writer
+                    .frames
+                    .as_ref()
+                    .unwrap()
+                    .send((number, Arc::new(frame(66, 50))))
+                    .unwrap();
+            }
+            writer.frames.take();
+            let mut written = 0;
+            loop {
+                match writer.events.recv_timeout(Duration::from_secs(30)).unwrap() {
+                    WriteEvent::Written(number) => {
+                        assert_eq!(number, 17 + written);
+                        written += 1;
+                    }
+                    WriteEvent::Finished => break,
+                    WriteEvent::Failed(error) => panic!("{error}"),
+                    WriteEvent::Cancelled => panic!("graceful stop was aborted"),
+                }
+            }
+            assert_eq!(written, count);
+            if count == 0 {
+                assert!(!Path::new(&settings.output).exists());
+            } else {
+                let demux = av_format_mov::Demuxer::open(Path::new(&settings.output)).unwrap();
+                assert_eq!(demux.sample_count(), count as usize);
+                assert_eq!(demux.start_time(), 0);
+                assert_eq!(demux.presented_frame_count().unwrap(), count as usize);
+                assert_eq!(demux.presented_duration().unwrap(), count as u64 * 1001);
+            }
+        }
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires Vulkan Video HEVC hardware encode"]
+    fn vulkan_hevc_partial_export_flushes_and_has_exact_timing() {
+        let dir = temp_dir("vulkan-partial");
+        let settings = ExportSettings {
+            format: ExportFormat::Hevc,
+            encoder: VideoEncoder::Vulkan,
+            output: dir.join("partial.mp4").display().to_string(),
+            width: 256,
+            height: 256,
+            samples: 4,
+            first: 0,
+            last: 100,
+            fps_num: 24000,
+            fps_den: 1001,
+            ..Default::default()
+        };
+        let mut writer = ExportWriter::spawn(settings.clone()).unwrap();
+        for number in 0..9 {
+            writer
+                .frames
+                .as_ref()
+                .unwrap()
+                .send((number, Arc::new(frame(256, 256))))
+                .unwrap_or_else(|_| {
+                    match writer.events.try_iter().find_map(|event| {
+                        if let WriteEvent::Failed(error) = event {
+                            Some(error)
+                        } else {
+                            None
+                        }
+                    }) {
+                        Some(error) => panic!("{error}"),
+                        None => panic!("writer stopped"),
+                    }
+                });
+        }
+        writer.frames.take();
+        let mut written = 0;
+        loop {
+            match writer.events.recv_timeout(Duration::from_secs(30)).unwrap() {
+                WriteEvent::Written(number) => {
+                    assert_eq!(number, written);
+                    written += 1;
+                }
+                WriteEvent::Finished => break,
+                WriteEvent::Failed(error) => panic!("{error}"),
+                WriteEvent::Cancelled => panic!("partial GPU movie aborted"),
+            }
+        }
+        assert_eq!(written, 9);
+        let demux = av_format_mov::Demuxer::open(Path::new(&settings.output)).unwrap();
+        assert_eq!(demux.sample_count(), 9);
+        assert_eq!(demux.start_time(), 0);
+        assert_eq!(demux.presented_frame_count().unwrap(), 9);
+        assert_eq!(demux.presented_duration().unwrap(), 9 * 1001);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Moving, detailed frames exercise inter prediction; constant swatches cannot
+    /// expose stale references. Set WARP_BRO_VIDEO_FIXTURE to retain RGB oracles
+    /// and movies for an independent decoder comparison.
+    #[test]
+    fn hevc_motion_fixture_encodes_every_source_frame() {
+        use std::io::Write;
+        let retained = std::env::var_os("WARP_BRO_VIDEO_FIXTURE");
+        let dir = retained
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| temp_dir("motion"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut reference = File::create(dir.join("motion.rgb")).unwrap();
+        let mut source = frame(256, 256);
+        let mut sinks: Vec<_> = [VideoEncoder::Kvazaar, VideoEncoder::Vulkan]
+            .into_iter()
+            .map(|encoder| {
+                let settings = ExportSettings {
+                    encoder,
+                    format: ExportFormat::Hevc,
+                    width: 256,
+                    height: 256,
+                    preset: HIGH_QUALITY_PRESET,
+                    output: dir
+                        .join(format!("motion-{encoder:?}.mp4"))
+                        .display()
+                        .to_string(),
+                    ..Default::default()
+                };
+                HevcSink::new(&settings).unwrap()
+            })
+            .collect();
+        for number in 0..51 {
+            let mut rgb = Vec::with_capacity(256 * 256 * 3);
+            for y in 0..256 {
+                for x in 0..256 {
+                    let u = (x as f32 - 128.0) / 128.0;
+                    let v = (y as f32 - 128.0) / 128.0;
+                    let radius = (u * u + v * v).sqrt();
+                    let wave = (radius * 55.0 + v.atan2(u) * 7.0 + number as f32 * 0.23).sin();
+                    let values = [0.45 + wave * 0.4, 0.3 + wave * 0.25, 0.2 + wave * 0.15];
+                    source.light[y * 256 + x] = [values[0], values[1], values[2], 1.0];
+                    for value in values {
+                        rgb.push((crate::color::oetf(value).clamp(0.0, 1.0) * 255.0 + 0.5) as u8);
+                    }
+                }
+            }
+            reference.write_all(&rgb).unwrap();
+            for sink in &mut sinks {
+                sink.write(&source).unwrap();
+            }
+        }
+        for sink in sinks {
+            sink.finish(&AtomicBool::new(false)).unwrap();
+        }
+        for encoder in [VideoEncoder::Kvazaar, VideoEncoder::Vulkan] {
+            let demux =
+                av_format_mov::Demuxer::open(&dir.join(format!("motion-{encoder:?}.mp4"))).unwrap();
+            assert_eq!(demux.presented_frame_count().unwrap(), 51);
+        }
+        if retained.is_none() {
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[test]
     fn reordered_hevc_clips_start_at_zero_with_exact_rational_frame_timing() {
         let dir = temp_dir("hevc-timing");
         for preset in [1, HIGH_QUALITY_PRESET] {
             let settings = ExportSettings {
                 format: ExportFormat::Hevc,
+                encoder: VideoEncoder::Kvazaar,
                 output: dir.join(format!("clip-{preset}.mp4")).display().to_string(),
                 width: 66,
                 height: 50,
@@ -1051,6 +1386,53 @@ mod tests {
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
         std::fs::remove_dir_all(dir).unwrap();
     }
+    #[test]
+    fn cancel_controller_publishes_completed_movie_without_gui_waiting() {
+        let dir = temp_dir("controller-cancel");
+        let service = RenderService::spawn();
+        let mut controller = ExportController::default();
+        controller.settings = ExportSettings {
+            format: ExportFormat::Hevc,
+            encoder: VideoEncoder::Vulkan,
+            output: dir.join("partial.mp4").display().to_string(),
+            width: 256,
+            height: 256,
+            samples: 1,
+            last: 10000,
+            ..Default::default()
+        };
+        let mut scene = Scene::preset(crate::params::FAMILY_KIFS);
+        scene.render.denoise.enabled = false;
+        controller.start(&scene, &service).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(90);
+        while controller.completed == 0 {
+            controller.update(&service);
+            assert!(controller.is_running(), "{}", controller.status);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let started = std::time::Instant::now();
+        controller.cancel(&service);
+        assert!(started.elapsed() < Duration::from_millis(100));
+        while controller.is_running() {
+            controller.update(&service);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            controller.status.starts_with("Export cancelled; saved"),
+            "{}",
+            controller.status
+        );
+        let demux = av_format_mov::Demuxer::open(Path::new(&controller.settings.output)).unwrap();
+        assert_eq!(
+            demux.presented_frame_count().unwrap(),
+            controller.completed as usize
+        );
+        assert!(controller.completed > 0 && controller.completed < 10001);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn sequence_paths_and_validation() {
         let mut s = ExportSettings::default();

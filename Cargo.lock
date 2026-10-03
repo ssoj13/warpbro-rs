@@ -9375,6 +9375,7 @@ dependencies = [
  "av-format-core",
  "av-format-mov",
  "av-format-movenc",
+ "av-hwaccel-vulkan",
  "av-swscale",
  "av-util-core",
  "av-util-frame",

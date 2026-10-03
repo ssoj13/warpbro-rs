@@ -184,6 +184,8 @@ pub struct WorldUi {
     pub auto_key: bool,
     pub looping: bool,
     pub attribute_label_width: f32,
+    /// Authored outline/canvas split; narrow panels only clamp its drawn width.
+    pub timeline_outline_width: f32,
     pub attribute_metrics: AttributeMetrics,
     pub material_library_requested: bool,
     pub preview_action: Option<PreviewAction>,
@@ -223,6 +225,7 @@ impl Default for WorldUi {
             auto_key: false,
             looping: true,
             attribute_label_width: 180.0,
+            timeline_outline_width: 340.0,
             attribute_metrics: AttributeMetrics::default(),
             material_library_requested: false,
             preview_action: None,
@@ -458,10 +461,12 @@ impl WorldUi {
     pub fn reset(&mut self) {
         let attribute_metrics = self.attribute_metrics;
         let attribute_label_width = self.attribute_label_width;
+        let timeline_outline_width = self.timeline_outline_width;
         let auto_key = self.auto_key;
         *self = Self::default();
         self.attribute_metrics = attribute_metrics;
         self.attribute_label_width = attribute_label_width;
+        self.timeline_outline_width = timeline_outline_width;
         self.auto_key = auto_key;
     }
     pub fn advance(&mut self, dt: f32, editor: &WorldEditor) -> bool {
@@ -1149,16 +1154,30 @@ impl WorldUi {
             snap_keys_to_frames: self.snap,
             ..Default::default()
         };
-        let left_w = (ui.available_width() * 0.36)
-            .clamp(270.0, 430.0)
-            .min((ui.available_width() - 140.0).max(80.0));
-        let width = ui.available_width();
+
         let mut actions = vec![];
         egui::ScrollArea::vertical()
             .id_salt("world_timeline_scroll")
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 let origin = ui.cursor().min;
+                let width = ui.available_width();
+                let max_outline = (width - 140.0).max(width * 0.5).max(1.0);
+                let min_outline = 140.0_f32.min(max_outline);
+                let left_w = self.timeline_outline_width.clamp(min_outline, max_outline);
+                let visible = ui.available_rect_before_wrap().intersect(ui.clip_rect());
+                let handle = Rect::from_min_max(
+                    Pos2::new(origin.x + left_w - 3.0, visible.top()),
+                    Pos2::new(origin.x + left_w + 3.0, visible.bottom()),
+                );
+                let splitter_id = ui.id().with("timeline-outline-splitter");
+                // The shared timeline uses geometric trim hit zones extending
+                // outside its canvas. Reserve a splitter press before calling
+                // it, then reject canvas intents for the reserved gesture.
+                let splitter_reserved = ui.ctx().is_being_dragged(splitter_id)
+                    || (self.view.drag.is_none()
+                        && ui.input(|input| input.pointer.primary_pressed()
+                            && input.pointer.interact_pos().is_some_and(|pos| handle.contains(pos))));
                 let content_height = 20.0
                     + model
                         .tracks
@@ -1222,7 +1241,30 @@ impl WorldUi {
                         }
                     }
                 }
-                actions = resp.actions;
+                // Register last so row and canvas hit regions cannot capture
+                // the splitter gesture.
+                let splitter = ui.interact(handle, splitter_id, Sense::click_and_drag())
+                    .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+                if splitter.dragged() {
+                    self.timeline_outline_width = (left_w + splitter.drag_delta().x).clamp(min_outline, max_outline);
+                } else if splitter.double_clicked() {
+                    self.timeline_outline_width = 340.0;
+                }
+                ui.painter().vline(
+                    origin.x + left_w,
+                    visible.y_range(),
+                    if splitter.hovered() || splitter.dragged() {
+                        ui.visuals().selection.stroke
+                    } else {
+                        ui.visuals().widgets.noninteractive.bg_stroke
+                    },
+                );
+                if splitter_reserved {
+                    self.view.drag = None;
+                    actions.clear();
+                } else {
+                    actions = resp.actions;
+                }
                 ui.allocate_rect(
                     Rect::from_min_size(
                         origin,
@@ -2891,6 +2933,64 @@ mod tests {
             },
         }
     }
+    #[test]
+    fn timeline_splitter_drags_without_editing_document_and_retains_width_when_narrow() {
+        let mut e = editor();
+        let ctx = egui::Context::default();
+        let mut state = WorldUi::default();
+        let before = serde_json::to_string(&e.document).unwrap();
+        let mut draw = |state: &mut WorldUi, width, events| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(width, 600.0))),
+                    events,
+                    ..Default::default()
+                },
+                |root| state.timeline(root, &mut e),
+            )
+        };
+        let mut output = draw(&mut state, 900.0, vec![]);
+        for _ in 0..2 {
+            output = draw(&mut state, 900.0, vec![]);
+        }
+        let handle = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::LineSegment { points, .. }
+                    if (points[0].x - 340.0).abs() < 5.0
+                        && (points[1].y - points[0].y).abs() > 100.0 =>
+                {
+                    Some(Pos2::new(points[0].x, (points[0].y + points[1].y) * 0.5))
+                }
+                _ => None,
+            })
+            .expect("visible outline splitter");
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        draw(&mut state, 900.0, vec![egui::Event::PointerMoved(handle)]);
+        draw(&mut state, 900.0, vec![button(handle, true)]);
+        let end = handle + Vec2::new(60.0, 0.0);
+        draw(&mut state, 900.0, vec![egui::Event::PointerMoved(end)]);
+        draw(&mut state, 900.0, vec![button(end, false)]);
+        assert!(
+            (state.timeline_outline_width - 400.0).abs() < 1.0,
+            "{}",
+            state.timeline_outline_width
+        );
+        draw(&mut state, 220.0, vec![]);
+        assert_eq!(
+            state.timeline_outline_width, 400.0,
+            "draw clamp must not overwrite authored width"
+        );
+        drop(draw);
+        assert_eq!(serde_json::to_string(&e.document).unwrap(), before);
+    }
+
     #[test]
     fn timeline_keyboard_focus_survives_pointer_exit_and_clears_on_outside_click() {
         let e = editor();

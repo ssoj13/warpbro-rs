@@ -14,9 +14,10 @@ pub(super) enum Panel {
     Export,
     Timeline,
     Outliner,
+    MaterialLibrary,
 }
 impl Panel {
-    const ALL: [Self; 9] = [
+    const ALL: [Self; 10] = [
         Self::Viewport,
         Self::Gallery,
         Self::Bookmarks,
@@ -26,6 +27,7 @@ impl Panel {
         Self::Export,
         Self::Timeline,
         Self::Outliner,
+        Self::MaterialLibrary,
     ];
     fn title(self) -> &'static str {
         match self {
@@ -33,6 +35,7 @@ impl Panel {
             Self::Gallery => "Gallery",
             Self::Bookmarks => "Bookmarks",
             Self::Materials => "Materials",
+            Self::MaterialLibrary => "Material Library",
             Self::Inspector => "Attribute Editor",
             Self::Settings => "Settings",
             Self::Export => "Render / Encode",
@@ -114,7 +117,10 @@ fn open_panel(state: &mut DockState<Panel>, panel: Panel) {
     if let Some(path) = state.find_tab(&panel) {
         let _ = state.set_active_tab(path);
         state.set_focused_node_and_surface(path.node_path());
-    } else if matches!(panel, Panel::Settings | Panel::Export) {
+    } else if matches!(
+        panel,
+        Panel::Settings | Panel::Export | Panel::MaterialLibrary
+    ) {
         let surface = state.add_window(vec![panel]);
         if let Some(window) = state.get_window_state_mut(surface) {
             window.set_size(egui::vec2(850.0, 600.0));
@@ -139,6 +145,7 @@ impl TabViewer for Viewer<'_> {
         ui.push_id(*tab, |ui| match tab {
             Panel::Viewport => self.app.viewport(ui),
             Panel::Inspector => self.app.inspector(ui),
+            Panel::MaterialLibrary => self.app.material_library(ui),
             Panel::Settings => self.app.settings_ui(ui),
             Panel::Export => self.app.export_ui(ui),
             Panel::Timeline => self.app.world_ui.timeline(ui, &mut self.app.world),

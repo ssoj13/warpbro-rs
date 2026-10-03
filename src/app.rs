@@ -171,6 +171,14 @@ pub(crate) struct App {
     controls: Controls,
 }
 
+/// Shared fitted tile geometry for scene, workspace-material and library cards.
+fn thumbnail_grid(width: f32, maximum: Vec2, gap: f32) -> (usize, Vec2) {
+    let width = width.max(1.0);
+    let columns = ((width + gap) / (maximum.x + gap)).floor().max(1.0) as usize;
+    let cell = ((width - gap * (columns - 1) as f32) / columns as f32).clamp(1.0, maximum.x);
+    (columns, Vec2::new(cell, cell * maximum.y / maximum.x))
+}
+
 fn now_stamp() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -281,6 +289,7 @@ struct Settings {
     status_resizable: bool,
     attribute_metrics: crate::ui_style::AttributeMetrics,
     auto_key: bool,
+    timeline_outline_width: f32,
     #[serde(default)]
     timeline_initialized: bool,
     #[serde(default)]
@@ -303,6 +312,7 @@ impl Default for Settings {
             status_resizable: true,
             attribute_metrics: Default::default(),
             auto_key: false,
+            timeline_outline_width: 340.0,
             timeline_initialized: true,
             world_layout_initialized: true,
         }
@@ -438,6 +448,9 @@ impl App {
             self.status_resizable = settings.status_resizable;
             self.world_ui.attribute_metrics = settings.attribute_metrics.normalized();
             self.world_ui.auto_key = settings.auto_key;
+            if settings.timeline_outline_width.is_finite() {
+                self.world_ui.timeline_outline_width = settings.timeline_outline_width.max(80.0);
+            }
             self.fonts = settings.fonts;
             if let Some(blob) = settings.layout {
                 match egui_dock_layout::from_blob(&blob) {
@@ -629,7 +642,9 @@ impl App {
             && saved.status_resizable == self.status_resizable
             && saved.attribute_metrics == self.world_ui.attribute_metrics
             && saved.auto_key == self.world_ui.auto_key
+            && saved.timeline_outline_width == self.world_ui.timeline_outline_width
             && export.format == previous.format
+            && export.encoder == previous.encoder
             && export.output == previous.output
             && export.width == previous.width
             && export.height == previous.height
@@ -675,6 +690,7 @@ impl App {
             status_resizable: self.status_resizable,
             attribute_metrics: self.world_ui.attribute_metrics,
             auto_key: self.world_ui.auto_key,
+            timeline_outline_width: self.world_ui.timeline_outline_width,
             timeline_initialized: true,
             world_layout_initialized: true,
         };
@@ -968,6 +984,9 @@ impl App {
         let mut create_default = false;
         ui.horizontal_wrapped(|ui| {
             create_default = ui.button("+ New material").clicked();
+            if ui.button("Library…").clicked() {
+                self.panels_to_open.push(dock::Panel::MaterialLibrary);
+            }
             ui.menu_button("Create from preset", |ui| {
                 for category in CATEGORIES {
                     ui.menu_button(category, |ui| {
@@ -1000,13 +1019,8 @@ impl App {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 let gap = 6.0;
-                let columns = ((ui.available_width() + gap) / (SWATCH as f32 + gap))
-                    .floor()
-                    .max(1.0) as usize;
-                let size = Vec2::splat(
-                    ((ui.available_width() - gap * (columns - 1) as f32) / columns as f32)
-                        .clamp(1.0, SWATCH as f32),
-                );
+                let (columns, size) =
+                    thumbnail_grid(ui.available_width(), Vec2::splat(SWATCH as f32), gap);
                 egui::Grid::new("material-node-grid")
                     .spacing([gap, gap])
                     .show(ui, |ui| {
@@ -1144,6 +1158,109 @@ impl App {
                 }
                 Err(error) => self.status = error,
             }
+        }
+    }
+
+    /// Presets are reusable sources. Only this explicit action creates a
+    /// workspace Material node; creation never changes object assignments.
+    fn add_library_material(&mut self, index: usize) {
+        let preset = &crate::materials::PRESETS[index];
+        let mut material = Material::default();
+        preset.apply(&mut material);
+        self.world.finish_edit();
+        match self
+            .world
+            .execute(crate::world::WorldCommand::CreateMaterial {
+                material,
+                name: preset.name().into(),
+            }) {
+            Ok(()) => {
+                if let Some(id) = self.world.selection {
+                    self.select_material_node(id);
+                }
+                self.panels_to_open.push(dock::Panel::Materials);
+            }
+            Err(error) => self.status = error,
+        }
+    }
+
+    fn material_library(&mut self, ui: &mut egui::Ui) {
+        use crate::materials::{CATEGORIES, PRESETS};
+        ui.label("Click a preset to add a Material node to the work area. Assign it separately.");
+        let mut add = None;
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for category in CATEGORIES {
+                    egui::CollapsingHeader::new(category)
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            let (columns, size) = thumbnail_grid(
+                                ui.available_width(),
+                                Vec2::splat(SWATCH as f32),
+                                6.0,
+                            );
+                            egui::Grid::new(("library", category))
+                                .spacing([6.0, 6.0])
+                                .show(ui, |ui| {
+                                    let mut column = 0;
+                                    for (index, preset) in PRESETS
+                                        .iter()
+                                        .enumerate()
+                                        .filter(|(_, p)| p.category == category)
+                                    {
+                                        let response = ui
+                                            .push_id(index, |ui| {
+                                                ui.vertical(|ui| {
+                                                    ui.set_width(size.x);
+                                                    if let Some(texture) = &self.swatches[index] {
+                                                        ui.add(
+                                                            egui::Image::new((texture.id(), size))
+                                                                .corner_radius(6.0),
+                                                        );
+                                                    } else {
+                                                        let (rect, _) = ui.allocate_exact_size(
+                                                            size,
+                                                            Sense::hover(),
+                                                        );
+                                                        ui.painter().rect_filled(
+                                                            rect,
+                                                            6.0,
+                                                            ui.visuals().extreme_bg_color,
+                                                        );
+                                                    }
+                                                    ui.add(
+                                                        egui::Label::new(
+                                                            RichText::new(preset.name()).small(),
+                                                        )
+                                                        .truncate(),
+                                                    );
+                                                })
+                                                .response
+                                                .interact(Sense::click())
+                                            })
+                                            .inner;
+                                        if response.clicked() {
+                                            add = Some(index);
+                                        }
+                                        response.context_menu(|ui| {
+                                            if ui.button("Add to work area").clicked() {
+                                                add = Some(index);
+                                                ui.close();
+                                            }
+                                        });
+                                        column += 1;
+                                        if column == columns {
+                                            ui.end_row();
+                                            column = 0;
+                                        }
+                                    }
+                                });
+                        });
+                }
+            });
+        if let Some(index) = add {
+            self.add_library_material(index);
         }
     }
 
@@ -1799,75 +1916,94 @@ impl App {
         }
         let mut load: Option<Scene> = None;
         let mut delete: Option<usize> = None;
-        let size = Vec2::new(ui.available_width().min(THUMB_W as f32), 0.0);
-        let size = Vec2::new(size.x, size.x * THUMB_H as f32 / THUMB_W as f32);
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            let entries = if self.tab == Tab::Gallery {
-                &self.gallery
-            } else {
-                &self.bookmarks
-            };
-            if entries.is_empty() {
-                ui.label("No bookmarks yet: ★ Bookmark saves the current scene.");
-            }
-            for (i, e) in entries.iter().enumerate() {
-                let selected = e.scene == self.origin;
-                let frame = egui::Frame::group(ui.style()).stroke(if selected {
-                    egui::Stroke::new(2.0, ui.visuals().selection.stroke.color)
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let entries = if self.tab == Tab::Gallery {
+                    &self.gallery
                 } else {
-                    ui.visuals().widgets.noninteractive.bg_stroke
-                });
-                let resp = frame
-                    .show(ui, |ui| {
-                        ui.vertical(|ui| {
-                            match &e.thumb {
-                                Some(t) => {
-                                    ui.add(egui::Image::new((t.id(), size)));
-                                }
-                                None => {
-                                    let (r, _) = ui.allocate_exact_size(size, Sense::hover());
-                                    ui.painter()
-                                        .rect_filled(r, 4.0, ui.visuals().extreme_bg_color);
-                                    ui.painter().text(
-                                        r.center(),
-                                        egui::Align2::CENTER_CENTER,
-                                        "rendering…",
-                                        egui::FontId::proportional(12.0),
-                                        ui.visuals().weak_text_color(),
-                                    );
-                                }
-                            }
-                            ui.label(RichText::new(&e.scene.name).strong());
-                            ui.label(
-                                RichText::new(format!(
-                                    "{} · {}",
-                                    e.scene.formula.name(),
-                                    if e.scene.material.model == MaterialModel::StandardSurface {
-                                        "Standard Surface"
-                                    } else {
-                                        "fast"
-                                    }
-                                ))
-                                .small()
-                                .weak(),
-                            );
-                        });
-                    })
-                    .response
-                    .interact(Sense::click());
-                if resp.clicked() {
-                    load = Some(e.scene.clone());
+                    &self.bookmarks
+                };
+                if entries.is_empty() {
+                    ui.label("No bookmarks yet: ★ Bookmark saves the current scene.");
                 }
-                if e.path.is_some() {
-                    resp.context_menu(|ui| {
-                        if ui.button("Delete bookmark").clicked() {
-                            delete = Some(i);
-                            ui.close();
+                let gap = 6.0;
+                let padding = egui::Frame::group(ui.style()).inner_margin.sum();
+                let (columns, cell) =
+                    thumbnail_grid(ui.available_width(), Vec2::new(168.0 + padding.x, 1.0), gap);
+                let image_width = (cell.x - padding.x).max(1.0);
+                let size = Vec2::new(image_width, image_width * THUMB_H as f32 / THUMB_W as f32);
+                egui::Grid::new("scene-card-grid")
+                    .spacing([gap, gap])
+                    .show(ui, |ui| {
+                        for (i, e) in entries.iter().enumerate() {
+                            let selected = e.scene == self.origin;
+                            let frame = egui::Frame::group(ui.style()).stroke(if selected {
+                                egui::Stroke::new(2.0, ui.visuals().selection.stroke.color)
+                            } else {
+                                ui.visuals().widgets.noninteractive.bg_stroke
+                            });
+                            let resp = ui
+                                .push_id(i, |ui| {
+                                    ui.vertical(|ui| {
+                                        ui.set_width(cell.x);
+                                        frame
+                                            .show(ui, |ui| {
+                                                ui.set_width(image_width);
+                                                match &e.thumb {
+                                                    Some(t) => {
+                                                        ui.add(egui::Image::new((t.id(), size)));
+                                                    }
+                                                    None => {
+                                                        let (r, _) = ui.allocate_exact_size(
+                                                            size,
+                                                            Sense::hover(),
+                                                        );
+                                                        ui.painter().rect_filled(
+                                                            r,
+                                                            4.0,
+                                                            ui.visuals().extreme_bg_color,
+                                                        );
+                                                    }
+                                                }
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(&e.scene.name).strong(),
+                                                    )
+                                                    .truncate(),
+                                                );
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(e.scene.formula.name())
+                                                            .small()
+                                                            .weak(),
+                                                    )
+                                                    .truncate(),
+                                                );
+                                            })
+                                            .response
+                                            .interact(Sense::click())
+                                    })
+                                    .inner
+                                })
+                                .inner;
+                            if resp.clicked() {
+                                load = Some(e.scene.clone());
+                            }
+                            if e.path.is_some() {
+                                resp.context_menu(|ui| {
+                                    if ui.button("Delete bookmark").clicked() {
+                                        delete = Some(i);
+                                        ui.close();
+                                    }
+                                });
+                            }
+                            if (i + 1) % columns == 0 {
+                                ui.end_row();
+                            }
                         }
                     });
-                }
-            }
-        });
+            });
         if let Some(s) = load {
             self.load(s);
         }
@@ -2469,6 +2605,44 @@ mod tests {
     use super::*;
 
     #[test]
+    fn library_is_read_only_until_explicit_creation_and_never_assigns_objects() {
+        let mut app = App::new();
+        let before = serde_json::to_string(&app.world.document).unwrap();
+        let object = app.world.selection.unwrap();
+        let assignment = app.world.document.assigned_material(object).unwrap();
+        let ctx = egui::Context::default();
+        for _ in 0..3 {
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(850.0, 600.0),
+                    )),
+                    ..Default::default()
+                },
+                |root| app.material_library(root),
+            );
+        }
+        assert_eq!(serde_json::to_string(&app.world.document).unwrap(), before);
+        app.add_library_material(0);
+        let material = app.world.selection.unwrap();
+        assert_ne!(material, object);
+        assert_eq!(
+            app.world.document.assigned_material(object).unwrap(),
+            assignment
+        );
+        assert!(
+            app.world
+                .document
+                .nodes()
+                .iter()
+                .any(|node| node.id == material && node.kind == crate::world::WorldKind::Material)
+        );
+        assert!(app.world.undo());
+        assert_eq!(serde_json::to_string(&app.world.document).unwrap(), before);
+    }
+
+    #[test]
     fn material_library_adapts_columns_to_available_panel_width() {
         fn labels(shape: &egui::epaint::Shape, found: &mut Vec<(String, egui::Pos2)>) {
             match shape {
@@ -2550,6 +2724,53 @@ mod tests {
                 assert!(positions[2].y > positions[0].y);
             } else if columns > 2 {
                 assert!((positions[2].y - positions[0].y).abs() < 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn scene_gallery_cards_reflow_to_multiple_columns() {
+        for (width, columns) in [(200.0, 1), (600.0, 3)] {
+            let mut app = App::new();
+            app.tab = Tab::Gallery;
+            app.gallery.truncate(4);
+            for (index, entry) in app.gallery.iter_mut().enumerate() {
+                entry.scene.name = format!("Gallery-{index}");
+            }
+            let ctx = egui::Context::default();
+            let mut positions = Vec::new();
+            for _ in 0..3 {
+                let output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(width, 900.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |root| app.browser(root),
+                );
+                positions = output
+                    .shapes
+                    .iter()
+                    .filter_map(|shape| match &shape.shape {
+                        egui::epaint::Shape::Text(text)
+                            if text.galley.text().starts_with("Gallery-") =>
+                        {
+                            Some((text.galley.text().to_owned(), text.pos))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+            }
+            positions.sort_by(|a, b| a.0.cmp(&b.0));
+            assert_eq!(positions.len(), 4);
+            if columns == 1 {
+                assert!(positions[1].1.y > positions[0].1.y);
+            } else {
+                assert!((positions[2].1.y - positions[0].1.y).abs() < 1.0);
+                assert!(positions[2].1.x > positions[1].1.x);
+                assert!(positions[3].1.y > positions[0].1.y);
             }
         }
     }
