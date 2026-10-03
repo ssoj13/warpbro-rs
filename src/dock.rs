@@ -12,9 +12,11 @@ pub(super) enum Panel {
     Inspector,
     Settings,
     Export,
+    Timeline,
+    Outliner,
 }
 impl Panel {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 9] = [
         Self::Viewport,
         Self::Gallery,
         Self::Bookmarks,
@@ -22,6 +24,8 @@ impl Panel {
         Self::Inspector,
         Self::Settings,
         Self::Export,
+        Self::Timeline,
+        Self::Outliner,
     ];
     fn title(self) -> &'static str {
         match self {
@@ -32,26 +36,54 @@ impl Panel {
             Self::Inspector => "Inspector",
             Self::Settings => "Settings",
             Self::Export => "Render / Encode",
+            Self::Timeline => "Timeline",
+            Self::Outliner => "Outliner",
         }
     }
 }
 
 pub(super) fn default_layout() -> DockState<Panel> {
     let mut state = DockState::new(vec![Panel::Viewport]);
-    let [viewport, _] = state.main_surface_mut().split_left(
-        NodeIndex::root(),
-        0.20,
-        vec![Panel::Gallery, Panel::Bookmarks, Panel::Materials],
+    let [workspace, _] =
+        state
+            .main_surface_mut()
+            .split_below(NodeIndex::root(), 0.64, vec![Panel::Timeline]);
+    let [workspace, _] = state.main_surface_mut().split_left(
+        workspace,
+        0.18,
+        vec![
+            Panel::Outliner,
+            Panel::Gallery,
+            Panel::Bookmarks,
+            Panel::Materials,
+        ],
     );
     state
         .main_surface_mut()
-        .split_right(viewport, 0.60, vec![Panel::Inspector]);
+        .split_right(workspace, 0.64, vec![Panel::Inspector]);
     state
 }
 
 pub(super) fn valid_layout(state: &DockState<Panel>) -> bool {
     let mut seen = std::collections::HashSet::new();
     state.iter_all_tabs().all(|(_, tab)| seen.insert(*tab)) && seen.contains(&Panel::Viewport)
+}
+
+/// One-time upgrade preserves the user's existing panes and floating tools.
+pub(super) fn add_timeline(state: &mut DockState<Panel>) {
+    if state.find_tab(&Panel::Timeline).is_none() {
+        if let Some(path) = state.find_tab(&Panel::Viewport) {
+            state[path.surface].split_below(path.node, 0.74, vec![Panel::Timeline]);
+        }
+    }
+}
+
+pub(super) fn add_outliner(state: &mut DockState<Panel>) {
+    if state.find_tab(&Panel::Outliner).is_none() {
+        if let Some(path) = state.find_tab(&Panel::Viewport) {
+            state[path.surface].split_left(path.node, 0.22, vec![Panel::Outliner]);
+        }
+    }
 }
 
 // egui_dock 0.21 does not update WindowState::screen_rect. Preserve each
@@ -109,6 +141,8 @@ impl TabViewer for Viewer<'_> {
             Panel::Inspector => self.app.inspector(ui),
             Panel::Settings => self.app.settings_ui(ui),
             Panel::Export => self.app.export_ui(ui),
+            Panel::Timeline => self.app.world_ui.timeline(ui, &mut self.app.world),
+            Panel::Outliner => self.app.world_ui.outliner(ui, &mut self.app.world),
             Panel::Gallery | Panel::Bookmarks | Panel::Materials => {
                 self.app.tab = match tab {
                     Panel::Bookmarks => Tab::Bookmarks,
@@ -446,7 +480,7 @@ mod tests {
         let blob = layout_blob(&state, &egui::Context::default()).unwrap();
         let restored = egui_dock_layout::from_blob::<Panel>(&blob).unwrap();
         assert!(valid_layout(&restored));
-        assert_eq!(restored.iter_all_tabs().count(), 6);
+        assert_eq!(restored.iter_all_tabs().count(), 8);
     }
     #[test]
     fn floating_geometry_survives_a_new_egui_context() {
@@ -524,7 +558,7 @@ mod tests {
         let mut restored_store: LayoutStore = serde_json::from_str(&json).unwrap();
         let mut restored =
             restore_layout(&restored_store.select("Export workspace").unwrap()).unwrap();
-        assert_eq!(restored.iter_all_tabs().count(), 7);
+        assert_eq!(restored.iter_all_tabs().count(), 9);
         assert!(restored.find_tab(&Panel::Export).is_some());
         let window = restored.get_window_state_mut(surface).unwrap();
         let geometry = serde_json::to_value(window).unwrap();
@@ -537,9 +571,37 @@ mod tests {
             serde_json::to_value(egui::pos2(125.0, 80.0)).unwrap()
         );
         let legacy_restored = restore_layout(&restored_store.select("Default").unwrap()).unwrap();
-        assert_eq!(legacy_restored.iter_all_tabs().count(), 5);
+        assert_eq!(legacy_restored.iter_all_tabs().count(), 7);
         assert!(restored_store.delete("Export workspace"));
         assert_eq!(restored_store.len(), 1);
+    }
+
+    #[test]
+    fn timeline_upgrade_preserves_existing_panels_and_is_idempotent() {
+        let mut state = DockState::new(vec![Panel::Viewport, Panel::Inspector]);
+        add_timeline(&mut state);
+        add_timeline(&mut state);
+        assert!(valid_layout(&state));
+        assert_eq!(state.iter_all_tabs().count(), 3);
+        for panel in [Panel::Viewport, Panel::Inspector, Panel::Timeline] {
+            assert!(state.find_tab(&panel).is_some());
+        }
+    }
+    #[test]
+    fn world_upgrade_preserves_existing_panels_and_is_idempotent() {
+        let mut state = DockState::new(vec![Panel::Viewport, Panel::Inspector, Panel::Timeline]);
+        add_outliner(&mut state);
+        add_outliner(&mut state);
+        assert!(valid_layout(&state));
+        assert_eq!(state.iter_all_tabs().count(), 4);
+        for panel in [
+            Panel::Viewport,
+            Panel::Inspector,
+            Panel::Timeline,
+            Panel::Outliner,
+        ] {
+            assert!(state.find_tab(&panel).is_some());
+        }
     }
 
     #[test]

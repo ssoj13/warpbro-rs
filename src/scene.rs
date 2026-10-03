@@ -117,12 +117,21 @@ impl Bulb {
     };
 }
 impl MandelBox {
-    pub const PRESET: Self =
-        Self { scale: 2.0, min_radius_ratio: 0.5, fixed_radius: 1.0, fold_limit: 1.0, rotation_degrees: [0.0; 3] };
+    pub const PRESET: Self = Self {
+        scale: 2.0,
+        min_radius_ratio: 0.5,
+        fixed_radius: 1.0,
+        fold_limit: 1.0,
+        rotation_degrees: [0.0; 3],
+    };
 }
 impl Quat {
-    pub const PRESET: Self =
-        Self { constant: [-0.2, 0.6, 0.2, -0.4], slice_w: 0.0, rotation_degrees: [0.0; 3], bailout: 4.0 };
+    pub const PRESET: Self = Self {
+        constant: [-0.2, 0.6, 0.2, -0.4],
+        slice_w: 0.0,
+        rotation_degrees: [0.0; 3],
+        bailout: 4.0,
+    };
 }
 impl KifsKind {
     pub const fn centre(self) -> [f32; 3] {
@@ -149,11 +158,20 @@ impl KifsKind {
 }
 impl Kifs {
     pub const fn preset(kind: KifsKind) -> Self {
-        Self { kind, scale: kind.preset_scale(), offset: [0.0; 3], rotation_degrees: [0.0; 3] }
+        Self {
+            kind,
+            scale: kind.preset_scale(),
+            offset: [0.0; 3],
+            rotation_degrees: [0.0; 3],
+        }
     }
 }
 impl Kleinian {
-    pub const PRESET: Self = Self { a: 1.846_275_6, b: 0.096_275_8, bound_radius: 2.0 };
+    pub const PRESET: Self = Self {
+        a: 1.846_275_6,
+        b: 0.096_275_8,
+        bound_radius: 2.0,
+    };
 }
 impl PseudoKleinian {
     pub const PRESET: Self = Self {
@@ -166,11 +184,19 @@ impl PseudoKleinian {
     };
 }
 impl Apollonian {
-    pub const PRESET: Self = Self { scale: 1.3, bound_radius: 1.5 };
+    pub const PRESET: Self = Self {
+        scale: 1.3,
+        bound_radius: 1.5,
+    };
 }
 impl Hybrid {
     pub const PRESET: Self = Self {
-        steps: [HybridStep::Mandelbulb, HybridStep::Mandelbox, HybridStep::Off, HybridStep::Off],
+        steps: [
+            HybridStep::Mandelbulb,
+            HybridStep::Mandelbox,
+            HybridStep::Off,
+            HybridStep::Off,
+        ],
         bulb: Bulb::PRESET,
         mandelbox: MandelBox::PRESET,
         kifs: Kifs::preset(KifsKind::Tetrahedron),
@@ -379,10 +405,31 @@ pub struct Render {
     pub exposure_stops: f32,
     pub saturation: f32,
     pub reinhard: bool,
+    /// OIDN works on neutral scene-linear samples before display transforms.
+    #[serde(default)]
+    pub denoise: crate::denoise::Settings,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Scene {
+    /// Evaluated world data; the editor owns the authoring document.
+    #[serde(skip)]
+    pub world_render: bool,
+    #[serde(skip)]
+    pub camera_reference: Option<f32>,
+    #[serde(skip)]
+    pub objects: Vec<Scene>,
+    #[serde(skip)]
+    pub lights: Vec<Lighting>,
+    #[serde(skip)]
+    pub object_world: Option<[[f32; 4]; 4]>,
+    /// Frozen document carried only by exports/bookmark entries, never CUDA requests.
+    #[serde(skip)]
+    pub document: Option<Box<crate::world::WorldDocument>>,
+    #[serde(default)]
+    pub animation: crate::animation::Animation,
+    #[serde(default)]
+    pub environment: crate::environment::Environment,
     pub name: String,
     pub formula: Formula,
     pub julia: Option<[f32; 3]>,
@@ -402,8 +449,12 @@ pub struct Scene {
 
 impl Camera {
     pub fn orientation(&self) -> glam::Quat {
-        glam::Quat::from_euler(glam::EulerRot::YXZ,
-            self.yaw_degrees.to_radians(), -self.pitch_degrees.to_radians(), self.roll_degrees.to_radians())
+        glam::Quat::from_euler(
+            glam::EulerRot::YXZ,
+            self.yaw_degrees.to_radians(),
+            -self.pitch_degrees.to_radians(),
+            self.roll_degrees.to_radians(),
+        )
     }
     /// ofx-fractal default_camera: eye on +Z, level, CAMERA_DEFAULT_DISTANCE framing radii.
     pub const fn default_fov(fov: f32) -> Self {
@@ -483,28 +534,102 @@ impl Scene {
     /// World-space bounds: use the DE's explicit bounds, otherwise a local 10³ box.
     pub fn framing_bounds(&self) -> (glam::Vec3, glam::Vec3) {
         use glam::Vec3;
-        let half_extent = match self.formula {
-            Formula::Kifs(k) if k.kind != KifsKind::Menger => Vec3::splat(k.kind.bounding_radius() * self.object.scale),
-            Formula::Mandelbulb(_) | Formula::QuaternionJulia(_) | Formula::Hybrid(_) =>
-                Vec3::splat(self.pack(1, 1)[P_CLIP_RADIUS]),
-            _ if self.formula.bound_radius() > 0.0 => Vec3::splat(self.formula.bound_radius() * self.object.scale),
-            _ => {
-                let half = if matches!(self.formula, Formula::Kifs(_)) { 1.0 } else { 5.0 };
-                let rot = euler_matrix(self.object.rotation_degrees);
-                Vec3::from_array(rot.map(|row| row.iter().map(|v| v.abs()).sum::<f32>() * half * self.object.scale))
+        if self.world_render {
+            let mut lower = Vec3::splat(f32::INFINITY);
+            let mut upper = Vec3::splat(f32::NEG_INFINITY);
+            for object in &self.objects {
+                let matrix = object
+                    .object_world
+                    .map(|m| glam::Mat4::from_cols_array_2d(&m))
+                    .unwrap_or_else(|| {
+                        let rotation = glam::Mat3::from_cols_array_2d(&transpose(euler_matrix(
+                            object.object.rotation_degrees,
+                        )));
+                        glam::Mat4::from_scale_rotation_translation(
+                            Vec3::splat(object.object.scale),
+                            glam::Quat::from_mat3(&rotation),
+                            Vec3::from_array(object.object.offset),
+                        )
+                    });
+                let mut local = object.clone();
+                local.object = ObjectTransform {
+                    offset: [0.0; 3],
+                    rotation_degrees: [0.0; 3],
+                    scale: 1.0,
+                };
+                let radius = local.pack(1, 1)[P_CLIP_RADIUS];
+                let columns = matrix.to_cols_array_2d();
+                let half = Vec3::from_array(std::array::from_fn(|axis| {
+                    radius
+                        * (0..3)
+                            .map(|col| columns[col][axis] * columns[col][axis])
+                            .sum::<f32>()
+                            .sqrt()
+                }));
+                let center = matrix.transform_point3(Vec3::ZERO);
+                lower = lower.min(center - half);
+                upper = upper.max(center + half);
             }
-        };
+            return if self.objects.is_empty() {
+                (Vec3::splat(-1.0), Vec3::splat(1.0))
+            } else {
+                (lower, upper)
+            };
+        }
+        let half_extent =
+            match self.formula {
+                Formula::Kifs(k) if k.kind != KifsKind::Menger => {
+                    Vec3::splat(k.kind.bounding_radius() * self.object.scale)
+                }
+                Formula::Mandelbulb(_) | Formula::QuaternionJulia(_) | Formula::Hybrid(_) => {
+                    Vec3::splat(self.pack(1, 1)[P_CLIP_RADIUS])
+                }
+                _ if self.formula.bound_radius() > 0.0 => {
+                    Vec3::splat(self.formula.bound_radius() * self.object.scale)
+                }
+                _ => {
+                    let half = if matches!(self.formula, Formula::Kifs(_)) {
+                        1.0
+                    } else {
+                        5.0
+                    };
+                    let rot = euler_matrix(self.object.rotation_degrees);
+                    Vec3::from_array(rot.map(|row| {
+                        row.iter().map(|v| v.abs()).sum::<f32>() * half * self.object.scale
+                    }))
+                }
+            };
         let center = Vec3::from_array(self.object.offset);
         (center - half_extent, center + half_extent)
     }
 
-    fn base(name: &str, formula: Formula, fov: f32, iterations: u32, max_steps: u32, hit_epsilon: f32, palette: PaletteScheme) -> Self {
+    fn base(
+        name: &str,
+        formula: Formula,
+        fov: f32,
+        iterations: u32,
+        max_steps: u32,
+        hit_epsilon: f32,
+        palette: PaletteScheme,
+    ) -> Self {
         Self {
+            world_render: false,
+            camera_reference: None,
+            objects: Vec::new(),
+            lights: Vec::new(),
+            object_world: None,
+            document: None,
+            animation: Default::default(),
+            environment: Default::default(),
             name: name.into(),
             colour: crate::color::default_selection(),
             formula,
             julia: None,
-            object: ObjectTransform { offset: [0.0; 3], rotation_degrees: [0.0; 3], scale: 1.0 },
+            object: ObjectTransform {
+                offset: [0.0; 3],
+                rotation_degrees: [0.0; 3],
+                scale: 1.0,
+            },
             camera: Camera::default_fov(fov),
             lighting: Lighting::default(),
             material: Material::default(),
@@ -522,6 +647,7 @@ impl Scene {
                 exposure_stops: -1.0,
                 saturation: 1.0,
                 reinhard: false,
+                denoise: crate::denoise::Settings::default(),
             },
         }
     }
@@ -630,7 +756,12 @@ impl Scene {
         let mut s = Self::preset(FAMILY_HYBRID);
         s.name = "Hybrid · bulb + KIFS".into();
         if let Formula::Hybrid(h) = &mut s.formula {
-            h.steps = [HybridStep::Mandelbulb, HybridStep::KifsFold, HybridStep::Off, HybridStep::Off];
+            h.steps = [
+                HybridStep::Mandelbulb,
+                HybridStep::KifsFold,
+                HybridStep::Off,
+                HybridStep::Off,
+            ];
         }
         s.palette = P::Fire;
         v.push(s);
@@ -650,14 +781,16 @@ impl Scene {
         let mut p = vec![0.0f32; P_COUNT];
         let radius = self.formula.framing_radius();
         let c = &self.camera;
+        let camera_radius = self.camera_reference.unwrap_or(radius);
 
         // --- camera (ofx-gen OrbitCamera: eye on +Z at yaw = pitch = 0, around the target)
-        let dist = c.distance * radius;
+        let dist = c.distance * camera_radius;
         let orientation = c.orientation();
         let fwd = (orientation * -glam::Vec3::Z).to_array();
         let right = (orientation * glam::Vec3::X).to_array();
         let up = (orientation * glam::Vec3::Y).to_array();
-        let eye = (glam::Vec3::from_array(c.target) - glam::Vec3::from_array(fwd) * dist).to_array();
+        let eye =
+            (glam::Vec3::from_array(c.target) - glam::Vec3::from_array(fwd) * dist).to_array();
         let half_h = (c.fov_y_degrees.to_radians() * 0.5).tan();
         let half_w = half_h * w as f32 / h as f32;
         p[P_WIDTH] = w as f32;
@@ -668,14 +801,21 @@ impl Scene {
         put3(&mut p, P_CAM_UP, up);
         p[P_HALF_W] = half_w;
         p[P_HALF_H] = half_h;
-        p[P_APERTURE] = c.aperture * radius * 0.05;
-        p[P_FOCUS_DISTANCE] = if c.focus_distance > 0.0 { c.focus_distance * radius } else { dist };
+        p[P_APERTURE] = c.aperture * camera_radius * 0.05;
+        p[P_FOCUS_DISTANCE] = if c.focus_distance > 0.0 {
+            c.focus_distance * camera_radius
+        } else {
+            dist
+        };
 
         // --- march (Scene3d::max_distance, pixel_footprint, sample_cone)
         let r = &self.render;
-        let object_radius = (REACH_MARGIN_FRAMES * radius).max(self.formula.bound_radius()) * self.object.scale;
+        let object_radius =
+            (REACH_MARGIN_FRAMES * radius).max(self.formula.bound_radius()) * self.object.scale;
         let object_radius = match (self.formula, self.julia) {
-            (Formula::Mandelbulb(b), Some(j)) => object_radius.max(b.bailout.max(length(j)) * self.object.scale),
+            (Formula::Mandelbulb(b), Some(j)) => {
+                object_radius.max(b.bailout.max(length(j)) * self.object.scale)
+            }
             _ => object_radius,
         };
         p[P_MAX_DISTANCE] = dist + length(c.target) + length(self.object.offset) + object_radius;
@@ -726,7 +866,9 @@ impl Scene {
             p[P_BULB_PHI_POWER] = b.angle_scale[1] * b.power;
             p[P_BULB_THETA_PHASE] = b.angle_phase_degrees[0].to_radians();
             p[P_BULB_PHI_PHASE] = b.angle_phase_degrees[1].to_radians();
-            p[P_BULB_GROWTH] = 1.0f32.max(b.angle_scale[0].abs()).max(b.angle_scale[1].abs());
+            p[P_BULB_GROWTH] = 1.0f32
+                .max(b.angle_scale[0].abs())
+                .max(b.angle_scale[1].abs());
         };
         let pack_box = |p: &mut Vec<f32>, b: &MandelBox| {
             let min_r = b.min_radius_ratio * b.fixed_radius;
@@ -738,14 +880,22 @@ impl Scene {
         let pack_kifs = |p: &mut Vec<f32>, k: &Kifs| {
             let s = k.scale;
             let base = k.kind.centre();
-            let cc = [base[0] + k.offset[0], base[1] + k.offset[1], base[2] + k.offset[2]];
+            let cc = [
+                base[0] + k.offset[0],
+                base[1] + k.offset[1],
+                base[2] + k.offset[2],
+            ];
             let (shift_z, fold_height) = match k.kind {
                 KifsKind::Menger => (0.0, 0.5 * cc[2] * (s - 1.0) / s),
                 _ => ((s - 1.0) * cc[2], 0.0),
             };
             p[P_KIFS_KIND] = k.kind.code() as f32;
             p[P_KIFS_SCALE] = s;
-            put3(p, P_KIFS_SHIFT, [(s - 1.0) * cc[0], (s - 1.0) * cc[1], shift_z]);
+            put3(
+                p,
+                P_KIFS_SHIFT,
+                [(s - 1.0) * cc[0], (s - 1.0) * cc[1], shift_z],
+            );
             p[P_KIFS_FOLD_HEIGHT] = fold_height;
             p[P_KIFS_BOUND] = k.kind.bounding_radius();
         };
@@ -754,7 +904,11 @@ impl Scene {
             Formula::Mandelbulb(b) => {
                 pack_bulb(&mut p, b);
                 set_rotation(&mut p, b.rotation_degrees);
-                let escape = if julia_ok { b.bailout.max(length(self.julia.unwrap_or([0.0; 3]))) } else { b.bailout };
+                let escape = if julia_ok {
+                    b.bailout.max(length(self.julia.unwrap_or([0.0; 3])))
+                } else {
+                    b.bailout
+                };
                 p[P_BAILOUT] = escape;
                 p[P_BULB_FAST8] = (b.power == 8.0
                     && b.angle_scale == [1.0, 1.0]
@@ -819,7 +973,11 @@ impl Scene {
                     })
                     .collect();
                 let active = if active.is_empty() { vec![1] } else { active };
-                p[P_HYBRID_STEPS] = active.iter().enumerate().fold(0u32, |acc, (i, c)| acc | (c << (3 * i))) as f32;
+                p[P_HYBRID_STEPS] = active
+                    .iter()
+                    .enumerate()
+                    .fold(0u32, |acc, (i, c)| acc | (c << (3 * i)))
+                    as f32;
                 p[P_HYBRID_COUNT] = active.len() as f32;
             }
         }
@@ -841,7 +999,11 @@ impl Scene {
         // --- light
         let l = &self.lighting;
         let (az, el) = (l.sun_azimuth.to_radians(), l.sun_elevation.to_radians());
-        put3(&mut p, P_LIGHT_DIR, [el.cos() * az.sin(), el.sin(), el.cos() * az.cos()]);
+        put3(
+            &mut p,
+            P_LIGHT_DIR,
+            [el.cos() * az.sin(), el.sin(), el.cos() * az.cos()],
+        );
         put3(&mut p, P_LIGHT_COLOR, l.sun_color);
         p[P_LIGHT_INTENSITY] = l.sun_intensity;
         let half_angle = (l.sun_angle * 0.5).to_radians().max(1.0e-4);
@@ -852,6 +1014,8 @@ impl Scene {
         put3(&mut p, P_SKY_HORIZON, l.sky_horizon);
         put3(&mut p, P_SKY_ZENITH, l.sky_zenith);
         p[P_BACKGROUND] = l.background as u32 as f32;
+        p[P_ENV_INTENSITY] = self.environment.intensity.max(0.0);
+        p[P_ENV_ROTATION] = self.environment.rotation_degrees.to_radians();
 
         // --- material
         let m = &self.material;
@@ -915,7 +1079,11 @@ fn put9(p: &mut [f32], i: usize, m: [[f32; 3]; 3]) {
     }
 }
 fn transpose(m: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
-    [[m[0][0], m[1][0], m[2][0]], [m[0][1], m[1][1], m[2][1]], [m[0][2], m[1][2], m[2][2]]]
+    [
+        [m[0][0], m[1][0], m[2][0]],
+        [m[0][1], m[1][1], m[2][1]],
+        [m[0][2], m[1][2], m[2][2]],
+    ]
 }
 
 /// fractal3d.rs euler_matrix: about world X, then Y, then Z (extrinsic), evaluated in f64.

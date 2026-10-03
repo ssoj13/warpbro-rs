@@ -96,6 +96,8 @@ pub(crate) struct App {
     thumb_pending: Option<(u64, Scene)>,
     gui_fps: u32,
     scene: Scene,
+    world: crate::world::WorldEditor,
+    world_ui: crate::world_ui::WorldUi,
     /// The preset / bookmark the scene came from, for "Reset".
     origin: Scene,
 
@@ -148,6 +150,9 @@ fn now_stamp() -> u64 {
 }
 
 fn data_dir() -> PathBuf {
+    if let Some(root) = std::env::var_os("FRAC_PROFILE_DIR") {
+        return PathBuf::from(root).join("data");
+    }
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("frac-rs")
@@ -170,7 +175,15 @@ fn load_bookmarks() -> Vec<Entry> {
         .filter(|p| p.extension().is_some_and(|x| x == "json"))
         .filter_map(|p| {
             let s = std::fs::read_to_string(&p).ok()?;
-            Some((p, serde_json::from_str::<Scene>(&s).ok()?))
+            let scene =
+                if let Ok(document) = serde_json::from_str::<crate::world::WorldDocument>(&s) {
+                    let mut snapshot = document.snapshot(f64::from(document.first)).ok()?;
+                    snapshot.document = Some(Box::new(document));
+                    snapshot
+                } else {
+                    serde_json::from_str::<Scene>(&s).ok()?
+                };
+            Some((p, scene))
         })
         .collect();
     v.sort_by(|a, b| a.0.cmp(&b.0));
@@ -235,6 +248,10 @@ struct Settings {
     layouts: egui_layout_manager::LayoutStore,
     export: crate::export::ExportSettings,
     gui_fps: u32,
+    #[serde(default)]
+    timeline_initialized: bool,
+    #[serde(default)]
+    world_layout_initialized: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -249,10 +266,15 @@ impl Default for Settings {
             layouts: Default::default(),
             export: Default::default(),
             gui_fps: 60,
+            timeline_initialized: true,
+            world_layout_initialized: true,
         }
     }
 }
 fn settings_path() -> PathBuf {
+    if let Some(root) = std::env::var_os("FRAC_PROFILE_DIR") {
+        return PathBuf::from(root).join("settings.json");
+    }
     dirs::config_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("frac-rs/settings.json")
@@ -286,6 +308,8 @@ impl App {
             origin: scene.clone(),
             last_scene: scene.clone(),
             scene: scene.clone(),
+            world: crate::world::WorldEditor::new(crate::world::WorldDocument::from_scene(&scene)),
+            world_ui: Default::default(),
 
             showing_preview: false,
             hdr_view: std::sync::Arc::new(std::sync::Mutex::new(egui_hdr_view::HdrView::new())),
@@ -349,6 +373,12 @@ impl App {
                     _ => self.status = "Saved layout could not be restored; using default".into(),
                 }
             }
+            if !settings.timeline_initialized {
+                dock::add_timeline(&mut self.dock);
+            }
+            if !settings.world_layout_initialized {
+                dock::add_outliner(&mut self.dock);
+            }
             self.colour = crate::ocio::State::new(settings.colour.clone());
             self.scene.colour = settings.colour;
             self.origin.colour = self.scene.colour.clone();
@@ -367,6 +397,18 @@ impl App {
             } else {
                 usize::from(category.eq_ignore_ascii_case("color"))
             };
+        }
+        if let Ok(before) = self
+            .world
+            .document
+            .snapshot(f64::from(self.world_ui.playhead))
+        {
+            let _ = self.world.edit_snapshot(
+                None,
+                &before,
+                &self.scene,
+                f64::from(self.world_ui.playhead),
+            );
         }
         self
     }
@@ -464,8 +506,17 @@ impl App {
             changed = true;
         }
         if changed {
+            let before = self.scene.clone();
             self.scene.render.reinhard = false;
             self.scene.colour = self.colour.sel.clone();
+            if let Err(error) = self.world.edit_snapshot(
+                None,
+                &before,
+                &self.scene,
+                f64::from(self.world_ui.playhead),
+            ) {
+                self.status = error;
+            }
             let _ = self.renderer.try_command(Command::ReloadColour);
         }
         let layout = match dock::layout_blob(&self.dock, ctx) {
@@ -489,6 +540,8 @@ impl App {
             layouts: self.layouts.store.clone(),
             export: self.export.settings().clone(),
             gui_fps: self.gui_fps,
+            timeline_initialized: true,
+            world_layout_initialized: true,
         };
         if let Ok(json) = serde_json::to_string_pretty(&settings)
             && self.saved_settings != json
@@ -511,7 +564,14 @@ impl App {
         if let Ok(name) = std::env::var("FRAC_SNAP_MATERIAL")
             && let Some(p) = crate::materials::PRESETS.iter().find(|p| p.name() == name)
         {
+            let before = self.scene.clone();
             p.apply(&mut self.scene.material);
+            let _ = self.world.edit_snapshot(
+                self.world.selection,
+                &before,
+                &self.scene,
+                f64::from(self.world_ui.playhead),
+            );
         }
         if std::env::var("FRAC_SNAP_TAB").is_ok_and(|t| t == "materials") {
             self.tab = Tab::Materials;
@@ -535,11 +595,20 @@ impl App {
         ctx.request_repaint();
     }
 
-    fn load(&mut self, scene: Scene) {
+    fn load(&mut self, mut scene: Scene) {
+        let document = crate::world::WorldDocument::from_scene(&scene);
+        self.world_ui.reset();
+        self.world_ui.seek(document.first);
+        self.world = crate::world::WorldEditor::new(document.clone());
         self.origin = scene.clone();
+        scene.document = Some(Box::new(document));
         self.colour.sel = scene.colour.clone();
         self.colour.rebuild();
-        self.scene = scene;
+        self.scene = self
+            .world
+            .document
+            .snapshot(f64::from(self.world_ui.playhead))
+            .unwrap_or(scene);
     }
 
     fn render_one_thumbnail(&mut self, _ctx: &egui::Context) -> bool {
@@ -607,7 +676,17 @@ impl App {
                 .small()
                 .weak(),
         );
-        let current = self.scene.material.preset.clone();
+        let material_scene = self
+            .world
+            .selection
+            .and_then(|id| {
+                self.world
+                    .document
+                    .node_scene(id, f64::from(self.world_ui.playhead))
+                    .ok()
+            })
+            .unwrap_or_else(|| self.scene.clone());
+        let current = material_scene.material.preset.clone();
         let mut apply: Option<usize> = None;
         let size = Vec2::splat(((ui.available_width() - 12.0) / 2.0).min(SWATCH as f32));
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -671,8 +750,18 @@ impl App {
             }
         });
         if let Some(i) = apply {
-            PRESETS[i].apply(&mut self.scene.material);
-            self.status = format!("Material: {}", PRESETS[i].name());
+            let before = material_scene;
+            let mut after = before.clone();
+            PRESETS[i].apply(&mut after.material);
+            self.status = match self.world.edit_snapshot(
+                self.world.selection,
+                &before,
+                &after,
+                f64::from(self.world_ui.playhead),
+            ) {
+                Ok(()) => format!("Material: {}", PRESETS[i].name()),
+                Err(error) => error,
+            };
         }
     }
 
@@ -683,7 +772,7 @@ impl App {
             now_stamp(),
             crate::slug(&self.scene.name)
         ));
-        match serde_json::to_string_pretty(&self.scene)
+        match serde_json::to_string_pretty(&self.world.document)
             .map_err(|e| e.to_string())
             .and_then(|text| {
                 self.io.send(crate::io_service::Command::Write {
@@ -693,7 +782,7 @@ impl App {
             }) {
             Ok(()) => {
                 self.bookmarks.push(Entry {
-                    scene: self.scene.clone(),
+                    scene: self.frozen_world_scene(),
                     thumb: None,
                     path: Some(path),
                 });
@@ -739,10 +828,21 @@ impl App {
             self.final_spp,
             now_stamp()
         ));
+        let scene = match self
+            .world
+            .document
+            .snapshot(f64::from(self.world_ui.playhead))
+        {
+            Ok(scene) => scene,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
         match self.renderer.try_command(Command::RenderExport {
             reply: None,
             id: 1,
-            scene: self.scene.clone(),
+            scene,
             width: w as usize,
             height: h as usize,
             spp: self.final_spp,
@@ -760,29 +860,33 @@ impl App {
         }
     }
     fn step_viewport(&mut self, w: usize, h: usize, output_hdr: bool, white_nits: f32) {
-        let mut traced = self.scene.clone();
+        let mut snapshot = self.scene.clone();
+        snapshot.animation = Default::default();
+        let mut traced = snapshot.clone();
         traced.render.exposure_stops = self.last_scene.render.exposure_stops;
         traced.render.saturation = self.last_scene.render.saturation;
         traced.render.reinhard = self.last_scene.render.reinhard;
+        traced.render.denoise = self.last_scene.render.denoise;
         traced.colour = self.last_scene.colour.clone();
         if traced != self.last_scene {
             self.last_change = Instant::now();
         }
-        self.last_scene = self.scene.clone();
+        self.last_scene = snapshot.clone();
         if self.request.as_ref().is_none_or(|r| {
-            r.scene != self.scene || r.width != w || r.height != h || r.seed != self.seed
+            r.scene != snapshot || r.width != w || r.height != h || r.seed != self.seed
         }) {
             self.generation = self.generation.wrapping_add(1);
         }
         let req = ViewportRequest {
             active: true,
             generation: self.generation,
-            scene: self.scene.clone(),
+            scene: snapshot,
             width: w,
             height: h,
             target_spp: self.target_spp,
             paused: self.paused,
-            interactive: self.last_change.elapsed().as_secs_f32() < PREVIEW_HOLD_S,
+            interactive: self.world_ui.playing
+                || self.last_change.elapsed().as_secs_f32() < PREVIEW_HOLD_S,
             seed: self.seed,
             output_hdr,
             white_nits,
@@ -860,9 +964,19 @@ impl App {
     pub(crate) fn gui_fps(&self) -> u32 {
         self.gui_fps.clamp(15, 240)
     }
+    fn frozen_world_scene(&self) -> Scene {
+        let mut scene = self.scene.clone();
+        scene.document = Some(Box::new(self.world.document.clone()));
+        scene.animation.first = self.world.document.first;
+        scene.animation.last = self.world.document.last;
+        scene.animation.fps = self.world.document.fps;
+        scene
+    }
+
     fn export_ui(&mut self, ui: &mut egui::Ui) {
+        let frozen = self.frozen_world_scene();
         ui.add_enabled_ui(self.job.is_none(), |ui| {
-            self.export.ui(ui, &self.scene, &self.renderer)
+            self.export.ui(ui, &frozen, &self.renderer)
         });
     }
 
@@ -912,7 +1026,10 @@ impl App {
                 return;
             }
         }
-        let radius = self.scene.formula.framing_radius();
+        let radius = self
+            .scene
+            .camera_reference
+            .unwrap_or(self.scene.formula.framing_radius());
         let cam = &mut self.scene.camera;
         // Roll releases the horizon lock rather than being silently discarded.
         if held && ui.input(|i| i.key_down(egui::Key::Q) || i.key_down(egui::Key::E)) {
@@ -1041,7 +1158,11 @@ impl App {
         controller.frame_bounds(min, max, width, height, margin);
         let center = (min + max) * 0.5;
         cam.target = center.to_array();
-        cam.distance = controller.pose().eye.distance(center) / self.scene.formula.framing_radius();
+        cam.distance = controller.pose().eye.distance(center)
+            / self
+                .scene
+                .camera_reference
+                .unwrap_or(self.scene.formula.framing_radius());
         self.fly = None;
         self.status = "Camera framed to bounds".into();
     }
@@ -1049,7 +1170,11 @@ impl App {
     fn toggle_flight_mode(&mut self) {
         use glam::{Quat, Vec3};
         let cam = &mut self.scene.camera;
-        let dist = cam.distance * self.scene.formula.framing_radius();
+        let dist = cam.distance
+            * self
+                .scene
+                .camera_reference
+                .unwrap_or(self.scene.formula.framing_radius());
         let eye = self.fly.as_ref().map_or_else(
             || Vec3::from_array(cam.target) - (cam.orientation() * -Vec3::Z) * dist,
             |fly| fly.eye,
@@ -1108,14 +1233,23 @@ impl App {
                 }
             });
             ui.menu_button("Edit", |ui| {
+                if ui.button("Undo    Ctrl+Z").clicked() {
+                    self.world.undo();
+                    ui.close();
+                }
+                if ui.button("Redo    Ctrl+Shift+Z").clicked() {
+                    self.world.redo();
+                    ui.close();
+                }
+                ui.separator();
                 if ui.button("Reset scene").clicked() {
-                    self.scene = self.origin.clone();
+                    self.load(self.origin.clone());
                     self.colour.sel = self.scene.colour.clone();
                     self.colour.rebuild();
                     ui.close();
                 }
                 if ui.button("Copy scene JSON").clicked()
-                    && let Ok(json) = serde_json::to_string_pretty(&self.scene)
+                    && let Ok(json) = serde_json::to_string_pretty(&self.world.document)
                 {
                     ui.ctx().copy_text(json);
                     ui.close();
@@ -1277,49 +1411,18 @@ impl App {
     }
 
     fn inspector(&mut self, ui: &mut egui::Ui) {
-        use crate::inspector as controls;
-        // Halve the table's default 6 px headroom and 2 px inter-row gap.
-        let control_height = ui.spacing().interact_size.y.max(18.0).max(
-            ui.text_style_height(&egui::TextStyle::Body) + ui.spacing().button_padding.y * 2.0,
-        );
-        egui_attr_table::set_row_height(ui.ctx(), control_height + 3.0);
-        egui_attr_table::set_row_gap(ui.ctx(), 1.0);
-        ui.spacing_mut().item_spacing.y *= 0.5;
-        egui::ScrollArea::both()
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.set_min_width(480.0 * (self.fonts.body / 13.0).max(1.0));
-                egui_attr_table::attr_table(ui, |t| {
-                    t.row("Name").text(&mut self.scene.name);
-                });
-                controls::section(ui, "Formula", true, |ui| {
-                    controls::formula(ui, &mut self.scene)
-                });
-                controls::section(ui, "Camera", true, |ui| {
-                    controls::camera(ui, &mut self.scene)
-                });
-                controls::section(ui, "Light", false, |ui| {
-                    controls::lighting(ui, &mut self.scene.lighting)
-                });
-                controls::section(ui, "Material", true, |ui| {
-                    controls::material(ui, &mut self.scene.material)
-                });
-                controls::section(ui, "Palette", true, |ui| {
-                    controls::palette(ui, &mut self.scene)
-                });
-                controls::section(ui, "Render", true, |ui| {
-                    controls::render(
-                        ui,
-                        &mut self.scene.render,
-                        &mut self.target_spp,
-                        &mut self.resolution,
-                    );
-                    if ui.button("New noise seed").clicked() {
-                        self.seed = self.seed.wrapping_add(7919);
-                        self.seed = self.seed.wrapping_add(1);
-                    }
-                });
-            });
+        egui::CollapsingHeader::new("Render settings").show(ui, |ui| {
+            crate::inspector::render(
+                ui,
+                &mut self.scene.render,
+                &mut self.target_spp,
+                &mut self.resolution,
+            );
+            if ui.button("New noise seed").clicked() {
+                self.seed = self.seed.wrapping_add(7920);
+            }
+        });
+        self.world_ui.inspector(ui, &mut self.world);
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
@@ -1348,6 +1451,18 @@ impl App {
                 ui.label(format!("{:.1} Msamples/s", t.msamples_per_s()));
                 ui.separator();
                 ui.label(format!("{} spp/batch", self.spp_per_frame));
+                if t.denoised_samples > 0 {
+                    ui.separator();
+                    ui.label(format!(
+                        "OIDN {} spp · {:.1} ms",
+                        t.denoised_samples, t.denoise_ms
+                    ));
+                }
+                if let Some(error) = &t.denoise_error {
+                    ui.separator();
+                    ui.label(RichText::new("OIDN failed").color(Color32::from_rgb(230, 180, 60)))
+                        .on_hover_text(error);
+                }
             }
             ui.separator();
             ui.label(format!("UI {:.0} fps", 1000.0 / self.frame_ms.max(0.1)));
@@ -1377,7 +1492,10 @@ impl App {
         if resp.dragged_by(egui::PointerButton::Middle) {
             // Pan the orbit target in the camera plane.
             let d = resp.drag_delta();
-            let radius = self.scene.formula.framing_radius();
+            let radius = self
+                .scene
+                .camera_reference
+                .unwrap_or(self.scene.formula.framing_radius());
             let orientation = cam.orientation();
             let right = (orientation * glam::Vec3::X).to_array();
             let up = (orientation * glam::Vec3::Y).to_array();
@@ -1461,12 +1579,34 @@ impl App {
         self.colour.poll();
         let dt = ctx.input(|i| i.stable_dt).max(1.0e-4);
         self.frame_ms = self.frame_ms * 0.9 + dt * 1000.0 * 0.1;
+        self.world_ui.advance(dt, &self.world);
+        match self
+            .world
+            .document
+            .snapshot(f64::from(self.world_ui.playhead))
+        {
+            Ok(snapshot) => self.scene = snapshot,
+            Err(error) => {
+                self.world_ui.playing = false;
+                self.status = error;
+            }
+        }
+        let edit_frame = f64::from(self.world_ui.playhead);
+        let edit_origin = self.origin.clone();
+        let before = self.scene.clone();
         if !ctx.text_edit_focused() {
             if ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
                 self.show_ui = !self.show_ui;
             }
             if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
-                self.paused = !self.paused;
+                self.world_ui.playing = !self.world_ui.playing;
+            }
+            if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z)) {
+                if ctx.input(|i| i.modifiers.shift) {
+                    self.world.redo();
+                } else {
+                    self.world.undo();
+                }
             }
         }
 
@@ -1496,6 +1636,21 @@ impl App {
             }
             self.fly = None;
             ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+        }
+        if self.origin == edit_origin && self.scene != before {
+            if let Err(error) =
+                self.world
+                    .edit_snapshot(self.world.selection, &before, &self.scene, edit_frame)
+            {
+                self.status = error;
+            }
+        }
+        if let Ok(snapshot) = self
+            .world
+            .document
+            .snapshot(f64::from(self.world_ui.playhead))
+        {
+            self.scene = snapshot;
         }
         self.save_settings(&ctx);
         if let Some(error) = self.current().and_then(|t| t.colour_error.as_deref()) {

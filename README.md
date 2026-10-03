@@ -1,8 +1,8 @@
 # frac-rs
 
-A browser for path-traced 3D fractals. The GPU kernels are **Rust compiled straight to PTX** by
-NVIDIA's [cuda-oxide](https://github.com/NVlabs/cuda-oxide) rustc backend. There is no CUDA C++,
-no WGSL and no DSL: host code and kernels live in the same crate and are built in a single
+A browser for path-traced 3D fractals. The tracing kernels are **Rust compiled straight to PTX** by
+NVIDIA's [cuda-oxide](https://github.com/NVlabs/cuda-oxide) rustc backend. The tracer uses no CUDA C++
+or shader DSL: host code and tracing kernels live in the same crate and are built in a single
 `cargo oxide build`. The UI is [egui](https://github.com/emilk/egui).
 
 ![frac-rs browsing the Menger sponge](docs/ui-menger.jpg)
@@ -13,12 +13,20 @@ no WGSL and no DSL: host code and kernels live in the same crate and are built i
   phases and per-iteration rotation), Mandelbox, quaternion Julia (a rotated 4D slice), KIFS
   (tetrahedron, octahedron, Menger), Kleinian, pseudo-Kleinian, Apollonian, and Hybrid (up to
   four bulb / box / KIFS-fold / inversion steps, repeated).
-- **Unidirectional path tracing:** sun-cone and gradient-sky next-event estimation, MIS with the
+- **World objects:** Playa UUID nodes for fractals, cameras, directional lights, HDR environments,
+  groups and materials, with parent transforms, visibility, layer spans, lock and solo.
+  Multiple fractals take part in primary rays, shadows and reflections; multiple directional
+  lights and one active HDR/EXR environment illuminate the same world.
+- **Object animation:** an Outliner, Inspector and AE-style Timeline share selection and
+  transactional undo/redo. Numeric components and discrete properties use Playa animation.
+- **Unidirectional path tracing:** sun-cone, sky and HDR next-event estimation, MIS with the
   power heuristic, and Russian roulette. A thin-lens camera gives depth of field.
-- **Two material models**, each compiled as its own set of kernels:
+- **GPU OIDN:** periodic scene-linear HDR denoising with primary-hit albedo/normal guides,
+  followed by exposure and the display transform. Raw samples remain available.
+- **Two material models**, supported by both the world tracer and legacy specialized kernels:
   - *Fast*: Lambert plus GGX.
   - *Standard Surface*: the full Autodesk Standard Surface (MaterialX port) with coat, sheen,
-    thin film and anisotropy. The [`standard-surface-bsdf`](vendor/standard-surface-bsdf) crate
+    thin film and anisotropy. The [`standard-surface-bsdf`](https://github.com/ssoj13/render-rs/tree/13c757e45aecc490352bc82ebd5de6ce2e234274) crate
     is called directly from the kernel.
 - **14 palettes** and orbit-trap colouring (origin, plane, point).
 - **Material library:** the 50 curated presets of usd-rs `usd-mat-lib` in 12 categories (metals,
@@ -34,7 +42,7 @@ no WGSL and no DSL: host code and kernels live in the same crate and are built i
   - The mouse looks around; WASD moves; R/C moves up/down; Q/E rolls and enables free flight;
     Shift boosts; the wheel sets the speed.
   - It uses `cam-controls` `SpaceFlight` with FPS damping and a level horizon.
-    Inertial mouse-look is copied from the ready `nodes-rs` implementation of the shared crate.
+    The shared crate's opt-in `inertial-look` feature provides damped mouse-look.
   - When you release the button, the orbit pivot sits in front of the camera, so orbiting
     continues from where you flew.
   - Backtick / tilde switches between a level horizon and free flight. In free flight,
@@ -67,9 +75,9 @@ frac-rs is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX
 | `fractal3d.rs`: presets, `Frames`, `max_distance`, footprint | `src/scene.rs` |
 | `uniform3d.rs`: the uniform layout | `src/params.rs` |
 | `ofx-gen/palette.rs` | `src/palette.rs` |
-| render-rs `standard-surface-bsdf` | `vendor/standard-surface-bsdf` (used unchanged, except `libm::*` → `f32` methods) |
+| render-rs `standard-surface-bsdf` | pinned SSH crate with opt-in `cuda-math` (`libm::*` → `f32` methods) |
 | usd-rs `usd-mat-lib` presets, `usd-hd-pt` translator, `pt-material-ext` facing mix | `src/materials.rs`, `src/gpu.rs` |
-| gitnexus-rs `cam-controls` / `cam-viewport` | `vendor/cam-controls`, `vendor/cam-viewport`; inertial `SpaceFlight::Look` from nodes-rs |
+| gitnexus-rs `cam-controls` / `cam-viewport` | pinned SSH crates; opt-in `inertial-look` for `SpaceFlight::Look` |
 
 ## Requirements
 
@@ -82,12 +90,24 @@ frac-rs is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX
   pinned to `f3f1098a776a630d8003f2229934e0563cdec252` with the Rust 1.99 fixes. Cargo fetches the
   checkout automatically; GitHub SSH access is required.
 - `cargo-oxide` must come from the same fork and revision:
+
   ```sh
   cargo +stable install --force --locked --git ssh://git@github.com/ssoj13/cuda-oxide-windows.git --rev f3f1098a776a630d8003f2229934e0563cdec252 cargo-oxide
   cargo oxide doctor
   ```
+
   `python bootstrap.py d --fix` also installs or migrates the CLI to this revision; regular builds
   check its source without reinstalling it.
+- Git dependencies resolve through GitHub SSH; Cargo.lock records their exact commits.
+  Playa is pinned to `6b1c6c7d53522b696f859af400e0b141aaab2ba5`. OIDN reuses squarebob-rs
+  `pt-denoise-oidn` and `render-core` at `3dedf872cddb06b4aa5689f5cfe022468cdb6f3b`;
+  the shared `oidn-rs` branch source is locked to `a93300d744953865cad3f1ba610107e981d8deee`.
+  `cam-controls` and `cam-viewport` use gitnexus-rs commit
+  `268bcfc8f31d291aefd0e67e2358a6d1e69b39cd`, with `inertial-look` enabled on controls.
+  `standard-surface-bsdf` uses render-rs commit `13c757e45aecc490352bc82ebd5de6ce2e234274`
+  with `cuda-math`. These upstream features preserve their crates' default behaviour.
+  The final audit resolved 214 Git packages, all over SSH, with no local path dependencies.
+  The release build and all 95 tests passed after this source switch.
 
 ## Build and run
 
@@ -132,6 +152,20 @@ and UI scale.
 The scene inspector uses `egui-widgets-rs`: `egui-attr-table` for typed controls and
 reset/copy/paste actions, `egui-attr-grid` for vectors, and `egui-titlebar` for sections.
 
+The **Outliner** uses `egui-outliner` for the parent tree. The **Timeline** shows the same
+objects as layers with spans, property groups and component lanes; stopwatch and diamond
+controls enable animation and add/remove keys. Rename, reparent and layer order preserve
+UUID-based property addresses. Selection chooses the editing target; visibility and solo
+filter the rendered world. Solo is saved and applies equally to preview and export.
+Visibility and the half-open span `[start, end)` inherit through parents; a locked ancestor
+prevents edits. The active camera remains active when its layer is hidden.
+
+Bookmarks save a Playa `SubnetFile` with node attributes, material UUID assignments and
+arbitrary JSON metadata. Each node separates its GPU baseline (`gpu`) from Playa attributes
+and animation (`host`), discrete-value dictionaries and metadata. Evaluated `Scene` objects
+and device buffers are temporary. Legacy scenes migrate their transforms and keys, including
+the rotation convention; layer order is separate from hierarchy and physical occlusion.
+
 **Settings → Display / Color** uses the same `egui-prefs2` layout as exr-view. Display uses
 `egui-display::settings_ui` directly: output, SDR reference white and HLG display peak, with
 OS values used automatically unless overridden. Color is the copied exr-view OCIO panel:
@@ -154,6 +188,33 @@ OCIO config loading also run in background workers. Window presentation uses a s
 device from offscreen OCIO processing, so surface reconfiguration does not wait for that
 worker's queue. The GUI still performs drawing and GPU presentation; the configured FPS is a
 target, not a guarantee under GPU or system load.
+
+### OIDN denoising
+
+In the render controls, **OIDN denoise** is enabled by default. **Denoise every N samples**
+defaults to 128; 0 disables periodic passes while retaining the final pass. **Denoise guides**
+selects Color, Color + Albedo, or Color + Albedo + Normal (default). **Denoise quality** offers
+Fast, Balanced (default), and High. Turning denoising off shows raw radiance without discarding
+samples. Changing mode or quality refilters current samples; changing the interval preserves
+accumulation and the last usable result.
+
+CUDA accumulates primary-hit albedo and world-normal sums with their counts. The worker
+passes normalized scene-linear Rec.709 HDR to squarebob-rs OIDN before exposure, saturation
+or OCIO. No firefly clamp changes the HDR input range; NaN protection acts on the denoiser's
+input only. Raw radiance and guide accumulators remain untouched. Until the next pass,
+the viewport can show the last denoised result; its status reports that result's sample count
+and elapsed milliseconds. An OIDN error shows **OIDN failed** with diagnostic details and
+falls back to raw output, separately from colour-processing errors.
+
+A persistent worker processor reuses the existing offscreen wgpu device and embedded model
+weights. CUDA readback, wgpu uploads, inference and result readback run on workers; the GUI
+receives ready frames. New render generations and dimensions invalidate target results.
+Screenshots save the already computed frame; final renders and each export frame request
+a final denoise pass when enabled, even below the periodic threshold. Release validation
+passed 92 regular tests and all three explicitly enabled GPU tests (95 total) after the
+final SSH dependency switch, including
+HDR preservation, unchanged raw samples and final denoising below the interval.
+Build, GPU/export and window verification details are in [plan1.md](plan1.md).
 
 Screenshot / Render PNG saves the selected rendering: SDR sRGB/selected monitor codes as
 8-bit PNG, or HDR10 BT.2020/PQ as 16-bit PNG with `cICP`, `mDCV`, and measured `cLLI` metadata.
@@ -178,8 +239,10 @@ inclusive frame range, then select an output:
   and preset controls. Output is SDR 8-bit YUV 4:2:0 with Rec.709 primaries and sRGB transfer;
   the display transform is baked in. Width and height must be even. HDR video is unavailable.
 
-Each frame receives the requested sample count. The scene is frozen at export start; the
-current frame range repeats that scene with independent samples, without animation tracks.
+Each frame receives the requested sample count. The World document is frozen at export start;
+each frame evaluates its Playa animation at that frame's time, including transforms, lights,
+visibility and discrete keys. When OIDN is enabled, the scene-linear EXR output contains the
+final denoised radiance; exposure and OCIO remain excluded.
 An autonomous coordinator advances rendering and a bounded writer queue handles encoding
 and file output even when the GUI stops updating. **Cancel** stops the run; completed EXR
 frames remain, while an unfinished video is discarded. Existing outputs are preserved unless
@@ -216,10 +279,10 @@ the full table is in [docs/bench-1280x720.txt](docs/bench-1280x720.txt)):
 
 **What makes it fast:**
 
-- **One kernel per (family, material model).** Both are const generics, so each of the 16
-  kernels contains only its own estimate and its own BSDF. There is no runtime dispatch, and the
-  kernels need fewer registers. All device functions are force-inlined, so there are no ABI
-  spills.
+- **World and specialized kernels.** The world tracer dispatches each hit object's formula
+  and material at runtime and checks all objects for primary, shadow and reflection rays.
+  The legacy single-object path retains one specialized kernel per (family, material model).
+  GPU inlining is tuned per path, including outlined world-estimate functions.
 - **Parameters in `#[constant]` memory.** Every lane reads the same slot, so the value is
   broadcast to the whole warp.
 - **Bounding-sphere ray clipping.** Rays march only inside the escape radius or ball bound. This
@@ -229,23 +292,27 @@ the full table is in [docs/bench-1280x720.txt](docs/bench-1280x720.txt)):
 - **Step factor 0.85** (ofx-fractal uses 0.5). On the presets it measured unbiased (mean
   luminance unchanged) and is 1.5× faster. A slider brings back 0.5.
 - **8×4 pixel tiles per warp,** so neighbouring rays share their march paths.
-- **Float colour pipeline.** CUDA resolves accumulation, exposure and saturation to linear
-  Rec.709 RGBA32F. The shared `vfx-ocio` GPU runtime applies the complete ACES 2.0 output
-  transform from oiio-rs; no Narkowicz approximation. Display changes preserve accumulated samples.
+- **Float colour pipeline.** Normalized scene-linear Rec.709 RGBA32F passes through optional
+  OIDN, then exposure and saturation. The shared `vfx-ocio` GPU runtime applies the complete
+  ACES 2.0 output transform from oiio-rs; no Narkowicz approximation. Display and denoise
+  setting changes preserve accumulated samples.
 - **Shared SDR/HDR presentation.** `egui-display` renders an extended-sRGB float canvas to a
   supported SDR 8/10-bit, HDR10/PQ, HLG or scRGB surface. HDR output negotiates both the pixel
   format and colour space; unavailable modes are disabled in Settings.
 
 Under WSL2 CUDA↔graphics interop is unavailable (WSLg is Mesa d3d12). The current bridge
-reads back the CUDA float resolve, uploads it to the shared wgpu device for OCIO, reads back
-its display light/codes, then uploads the viewport. OCIO pipelines are cached, but these
-transfers cost more than the former RGBA8-only path. The timings above predate this change.
+reads back CUDA float data, uploads it to the shared offscreen wgpu device for OIDN/OCIO,
+reads back the result and display light/codes, then uploads the viewport. Pipelines and the
+OIDN processor are reused, but these transfers cost more than the former RGBA8-only path.
+The timings above predate this bridge, the World tracer and OIDN integration.
 
 ## Layout
 
 ```text
 src/gpu.rs        the kernels (#[cuda_module]): estimates, march, normals, lighting, integrator, tonemap
-src/scene.rs      Scene (serde), formulas, presets, gallery, packing into the parameter block
+src/scene.rs      evaluated Scene, legacy serde, formulas, presets and parameter packing
+src/world.rs      Playa World document, migration, evaluator, commands and undo/redo
+src/world_ui.rs   Outliner, object Inspector and layered component Timeline
 src/params.rs     parameter-block slots shared by host and device
 src/render.rs     CUDA context, progressive targets, kernel dispatch, PNG output
 src/app.rs        the egui browser, shared Settings panel and viewport toolbar
@@ -254,20 +321,22 @@ src/render_service.rs   CUDA worker, bounded command/event bus and latest-frame 
 src/io_service.rs       background settings, bookmark and screenshot writes
 src/export.rs     autonomous render coordinator, EXR sink and ffmpeg-rs HEVC writer
 src/inspector.rs  scene controls from egui-widgets-rs attribute editors
+src/denoise.rs    worker OIDN settings, target cadence and shared-device processor
 src/color.rs      cached vfx-ocio GPU colour processing (linear Rec.709 input)
 src/ocio.rs       OCIO controls and background config loader, adapted from exr-view (BSD-3-Clause)
 src/window.rs     winit/wgpu shell + egui-display float canvas and SDR/HDR swapchain
 src/palette.rs    the 14 palettes
 src/materials.rs  the usd-rs material library and its Standard Surface translation
-vendor/standard-surface-bsdf   Autodesk Standard Surface (MaterialX port, Apache-2.0, see its NOTICE)
-vendor/cam-controls, vendor/cam-viewport   camera rigs from gitnexus-rs (PolyForm-Noncommercial-1.0.0)
+standard-surface-bsdf   SSH dependency: Autodesk Standard Surface (MaterialX port, Apache-2.0)
+cam-controls, cam-viewport   SSH dependencies: gitnexus-rs camera rigs (PolyForm-Noncommercial-1.0.0)
 ```
 
 ## Licences
 
-`vendor/standard-surface-bsdf` is a derivative of MaterialX (Apache-2.0); see its `LICENSE` and
-`NOTICE`. `vendor/cam-controls` and `vendor/cam-viewport` come from gitnexus-rs and are under
-PolyForm-Noncommercial-1.0.0. The fractal formulas credit their sources in the ofx-rs code they were ported from
+`standard-surface-bsdf` is a derivative of MaterialX (Apache-2.0); its source checkout
+contains `LICENSE` and `NOTICE`. `cam-controls` and `cam-viewport` come from gitnexus-rs
+and are under PolyForm-Noncommercial-1.0.0. The retained vendor copies are historical;
+Cargo uses the pinned SSH dependencies above. The fractal formulas credit their sources in the ofx-rs code they were ported from
 (Knighty's KIFS, Leys' Kleinian, Mandelbulber's pseudo-Kleinian, and others).
 
 The OCIO panel in `src/ocio.rs` is adapted from exr-view; its BSD-3-Clause notice is in

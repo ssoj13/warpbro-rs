@@ -12,18 +12,20 @@
 //! Pixels are traced in 8x4 tiles (one warp each) so neighbouring rays share their march paths.
 
 use crate::params::*;
-use cuda_device::{ConstantMemory, DisjointSlice, constant, kernel, launch_bounds, launch_contract, thread};
+use cuda_device::{
+    ConstantMemory, DisjointSlice, constant, kernel, launch_bounds, launch_contract, thread,
+};
 use cuda_host::cuda_module;
 
 #[cuda_module]
 pub mod kernels {
     use super::*;
-    use standard_surface_bsdf::sample::sample_with;
+    use standard_surface_bsdf::ThinFilmEnergy;
     use standard_surface_bsdf::sample::pdf_with;
+    use standard_surface_bsdf::sample::sample_with;
     use standard_surface_bsdf::surface::{
         ShadingFrame, SurfaceInputs, eval_emission, eval_light, lobe_weights,
     };
-    use standard_surface_bsdf::ThinFilmEnergy;
 
     // =========================================================================
     // vector math
@@ -77,21 +79,42 @@ pub mod kernels {
     static PARAMS: ConstantMemory<[f32; P_COUNT]> = ConstantMemory::UNINIT;
 
     #[inline(always)]
-    fn pr(i: usize) -> f32 {
-        PARAMS.get_ref()[i]
+    fn pr(ctx: Context<'_>, i: usize) -> f32 {
+        if ctx.world
+            && ((i >= P_FAMILY && i < P_LIGHT_DIR)
+                || (i >= P_BASE && i < P_EXPOSURE)
+                || i == P_MATERIAL_MODEL)
+        {
+            ctx.objects[ctx.object * OBJECT_STRIDE + i]
+        } else {
+            global(i)
+        }
     }
     #[inline(always)]
-    fn pv3(i: usize) -> V3 {
-        [pr(i), pr(i + 1), pr(i + 2)]
+    fn pv3(ctx: Context<'_>, i: usize) -> V3 {
+        [pr(ctx, i), pr(ctx, i + 1), pr(ctx, i + 2)]
     }
     /// Row-major 3x3 at slot `i` times `v`.
     #[inline(always)]
-    fn mat3(i: usize, v: V3) -> V3 {
+    fn mat3(ctx: Context<'_>, i: usize, v: V3) -> V3 {
         [
-            pr(i) * v[0] + pr(i + 1) * v[1] + pr(i + 2) * v[2],
-            pr(i + 3) * v[0] + pr(i + 4) * v[1] + pr(i + 5) * v[2],
-            pr(i + 6) * v[0] + pr(i + 7) * v[1] + pr(i + 8) * v[2],
+            pr(ctx, i) * v[0] + pr(ctx, i + 1) * v[1] + pr(ctx, i + 2) * v[2],
+            pr(ctx, i + 3) * v[0] + pr(ctx, i + 4) * v[1] + pr(ctx, i + 5) * v[2],
+            pr(ctx, i + 6) * v[0] + pr(ctx, i + 7) * v[1] + pr(ctx, i + 8) * v[2],
         ]
+    }
+
+    #[derive(Clone, Copy)]
+    struct Context<'a> {
+        world: bool,
+        objects: &'a [f32],
+        lights: &'a [f32],
+        object: usize,
+    }
+
+    #[inline(always)]
+    fn global(i: usize) -> f32 {
+        PARAMS.get_ref()[i]
     }
 
     const PI: f32 = core::f32::consts::PI;
@@ -121,31 +144,46 @@ pub mod kernels {
     // =========================================================================
 
     #[inline(always)]
-    fn trap3(z: V3, mode: u32) -> f32 {
+    fn trap3(ctx: Context<'_>, z: V3, mode: u32) -> f32 {
         if mode == 1 {
             return length(z);
         }
-        let offset = sub(z, pv3(P_TRAP_POINT));
+        let offset = sub(z, pv3(ctx, P_TRAP_POINT));
         if mode == 2 {
-            return dot(offset, pv3(P_TRAP_NORMAL)).abs();
+            return dot(offset, pv3(ctx, P_TRAP_NORMAL)).abs();
         }
         length(offset)
     }
 
     #[inline(always)]
-    fn iter_rotate(z: V3) -> V3 {
-        if pr(P_ITER_ROTATE) == 0.0 { z } else { mat3(P_ITER_ROT, z) }
+    fn iter_rotate(ctx: Context<'_>, z: V3) -> V3 {
+        if pr(ctx, P_ITER_ROTATE) == 0.0 {
+            z
+        } else {
+            mat3(ctx, P_ITER_ROT, z)
+        }
     }
 
     #[inline(always)]
-    fn orbit_constant(z: V3) -> (V3, f32) {
-        if pr(P_JULIA) != 0.0 { (pv3(P_JULIA_C), 0.0) } else { (z, 1.0) }
+    fn orbit_constant(ctx: Context<'_>, z: V3) -> (V3, f32) {
+        if pr(ctx, P_JULIA) != 0.0 {
+            (pv3(ctx, P_JULIA_C), 0.0)
+        } else {
+            (z, 1.0)
+        }
     }
 
     /// One Mandelbulb step z <- z^p + c, dr <- g p r^(p-1) dr + k. Returns false to stop.
     #[inline(always)]
-    fn bulb_step(z: &mut V3, dr: &mut f32, r: f32, c: V3, dr_constant: f32) -> bool {
-        if pr(P_BULB_FAST8) != 0.0 {
+    fn bulb_step(
+        ctx: Context<'_>,
+        z: &mut V3,
+        dr: &mut f32,
+        r: f32,
+        c: V3,
+        dr_constant: f32,
+    ) -> bool {
+        if pr(ctx, P_BULB_FAST8) != 0.0 {
             // Power 8, unit angle scales, no phase, no rotation: z^8 with three angle doublings
             // instead of acos / atan2 / pow (same set as the angular form, ~3x cheaper).
             let r2 = r * r;
@@ -183,19 +221,19 @@ pub mod kernels {
             }
             return true;
         }
-        let power = pr(P_BULB_POWER);
-        let turned = iter_rotate(*z);
+        let power = pr(ctx, P_BULB_POWER);
+        let turned = iter_rotate(ctx, *z);
         let theta = (turned[2] / r).clamp(-1.0, 1.0).acos();
         let phi = turned[1].atan2(turned[0]);
         let lr = r.ln();
-        let growth = power * ((power - 1.0) * lr).exp() * pr(P_BULB_GROWTH);
+        let growth = power * ((power - 1.0) * lr).exp() * pr(ctx, P_BULB_GROWTH);
         if *dr > DERIVATIVE_LIMIT / growth {
             return false;
         }
         let magnitude = (power * lr).exp();
         *dr = growth * *dr + dr_constant;
-        let a = theta * pr(P_BULB_THETA_POWER) + pr(P_BULB_THETA_PHASE);
-        let b = phi * pr(P_BULB_PHI_POWER) + pr(P_BULB_PHI_PHASE);
+        let a = theta * pr(ctx, P_BULB_THETA_POWER) + pr(ctx, P_BULB_THETA_PHASE);
+        let b = phi * pr(ctx, P_BULB_PHI_POWER) + pr(ctx, P_BULB_PHI_PHASE);
         let (sa, ca) = a.sin_cos();
         let (sb, cb) = b.sin_cos();
         *z = add(mul([sa * cb, sa * sb, ca], magnitude), c);
@@ -203,10 +241,10 @@ pub mod kernels {
     }
 
     #[inline(always)]
-    fn bulb_distance(q: V3, trap_mode: u32) -> (f32, f32) {
-        let bailout = pr(P_BAILOUT);
-        let (c, dr_constant) = orbit_constant(q);
-        let iterations = pr(P_ITERATIONS) as u32;
+    fn bulb_distance(ctx: Context<'_>, q: V3, trap_mode: u32) -> (f32, f32) {
+        let bailout = pr(ctx, P_BAILOUT);
+        let (c, dr_constant) = orbit_constant(ctx, q);
+        let iterations = pr(ctx, P_ITERATIONS) as u32;
         let mut z = q;
         let mut dr = 1.0f32;
         let mut r = length(z);
@@ -219,12 +257,12 @@ pub mod kernels {
             if r < 1.0e-8 {
                 return (0.0, trap);
             }
-            if !bulb_step(&mut z, &mut dr, r, c, dr_constant) {
+            if !bulb_step(ctx, &mut z, &mut dr, r, c, dr_constant) {
                 break;
             }
             r = length(z);
             if trap_mode != 0 {
-                trap = trap.min(trap3(z, trap_mode));
+                trap = trap.min(trap3(ctx, z, trap_mode));
             }
             i += 1;
         }
@@ -247,14 +285,18 @@ pub mod kernels {
 
     /// One Mandelbox step. Returns false to stop.
     #[inline(always)]
-    fn box_step(z: &mut V3, dr: &mut f32, c: V3, dr_constant: f32) -> bool {
-        let signed_scale = pr(P_BOX_SCALE);
+    fn box_step(ctx: Context<'_>, z: &mut V3, dr: &mut f32, c: V3, dr_constant: f32) -> bool {
+        let signed_scale = pr(ctx, P_BOX_SCALE);
         let magnitude = signed_scale.abs();
-        let fold = pr(P_BOX_FOLD);
-        let min_r2 = pr(P_BOX_MIN_R2);
-        let fixed_r2 = pr(P_BOX_FIXED_R2);
-        let t = iter_rotate(*z);
-        let t = [box_fold(t[0], fold), box_fold(t[1], fold), box_fold(t[2], fold)];
+        let fold = pr(ctx, P_BOX_FOLD);
+        let min_r2 = pr(ctx, P_BOX_MIN_R2);
+        let fixed_r2 = pr(ctx, P_BOX_FIXED_R2);
+        let t = iter_rotate(ctx, *z);
+        let t = [
+            box_fold(t[0], fold),
+            box_fold(t[1], fold),
+            box_fold(t[2], fold),
+        ];
         let r2 = dot(t, t);
         let factor = if r2 < min_r2 {
             fixed_r2 / min_r2
@@ -272,19 +314,19 @@ pub mod kernels {
     }
 
     #[inline(always)]
-    fn box_distance(q: V3, trap_mode: u32) -> (f32, f32) {
-        let (c, dr_constant) = orbit_constant(q);
-        let iterations = pr(P_ITERATIONS) as u32;
+    fn box_distance(ctx: Context<'_>, q: V3, trap_mode: u32) -> (f32, f32) {
+        let (c, dr_constant) = orbit_constant(ctx, q);
+        let iterations = pr(ctx, P_ITERATIONS) as u32;
         let mut z = q;
         let mut dr = 1.0f32;
         let mut trap = TRAP_START;
         let mut i = 0u32;
         while i < iterations {
-            if !box_step(&mut z, &mut dr, c, dr_constant) {
+            if !box_step(ctx, &mut z, &mut dr, c, dr_constant) {
                 break;
             }
             if trap_mode != 0 {
-                trap = trap.min(trap3(z, trap_mode));
+                trap = trap.min(trap3(ctx, z, trap_mode));
             }
             i += 1;
         }
@@ -292,16 +334,33 @@ pub mod kernels {
     }
 
     #[inline(always)]
-    fn quat_distance(v: V3, trap_mode: u32) -> (f32, f32) {
-        let bailout = pr(P_BAILOUT);
-        let iterations = pr(P_ITERATIONS) as u32;
-        let c = [pr(P_QUAT_C), pr(P_QUAT_C + 1), pr(P_QUAT_C + 2), pr(P_QUAT_C + 3)];
+    fn quat_distance(ctx: Context<'_>, v: V3, trap_mode: u32) -> (f32, f32) {
+        let bailout = pr(ctx, P_BAILOUT);
+        let iterations = pr(ctx, P_ITERATIONS) as u32;
+        let c = [
+            pr(ctx, P_QUAT_C),
+            pr(ctx, P_QUAT_C + 1),
+            pr(ctx, P_QUAT_C + 2),
+            pr(ctx, P_QUAT_C + 3),
+        ];
         let row = |k: usize| P_QUAT_ROWS + 3 * k;
         let mut q = [
-            pr(row(0)) * v[0] + pr(row(0) + 1) * v[1] + pr(row(0) + 2) * v[2] + pr(P_QUAT_OFFSET),
-            pr(row(1)) * v[0] + pr(row(1) + 1) * v[1] + pr(row(1) + 2) * v[2] + pr(P_QUAT_OFFSET + 1),
-            pr(row(2)) * v[0] + pr(row(2) + 1) * v[1] + pr(row(2) + 2) * v[2] + pr(P_QUAT_OFFSET + 2),
-            pr(row(3)) * v[0] + pr(row(3) + 1) * v[1] + pr(row(3) + 2) * v[2] + pr(P_QUAT_OFFSET + 3),
+            pr(ctx, row(0)) * v[0]
+                + pr(ctx, row(0) + 1) * v[1]
+                + pr(ctx, row(0) + 2) * v[2]
+                + pr(ctx, P_QUAT_OFFSET),
+            pr(ctx, row(1)) * v[0]
+                + pr(ctx, row(1) + 1) * v[1]
+                + pr(ctx, row(1) + 2) * v[2]
+                + pr(ctx, P_QUAT_OFFSET + 1),
+            pr(ctx, row(2)) * v[0]
+                + pr(ctx, row(2) + 1) * v[1]
+                + pr(ctx, row(2) + 2) * v[2]
+                + pr(ctx, P_QUAT_OFFSET + 2),
+            pr(ctx, row(3)) * v[0]
+                + pr(ctx, row(3) + 1) * v[1]
+                + pr(ctx, row(3) + 2) * v[2]
+                + pr(ctx, P_QUAT_OFFSET + 3),
         ];
         let len4 = |q: [f32; 4]| (q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3]).sqrt();
         let mut dr = 1.0f32;
@@ -332,9 +391,9 @@ pub mod kernels {
                 let t = if trap_mode == 1 {
                     r
                 } else {
-                    let o = sub([q[0], q[1], q[2]], pv3(P_TRAP_POINT));
+                    let o = sub([q[0], q[1], q[2]], pv3(ctx, P_TRAP_POINT));
                     if trap_mode == 2 {
-                        dot(o, pv3(P_TRAP_NORMAL)).abs()
+                        dot(o, pv3(ctx, P_TRAP_NORMAL)).abs()
                     } else {
                         (dot(o, o) + q[3] * q[3]).sqrt()
                     }
@@ -350,9 +409,9 @@ pub mod kernels {
     }
 
     #[inline(always)]
-    fn kifs_fold(v: V3) -> V3 {
+    fn kifs_fold(ctx: Context<'_>, v: V3) -> V3 {
         let (mut x, mut y, mut z) = (v[0], v[1], v[2]);
-        let kind = pr(P_KIFS_KIND) as u32;
+        let kind = pr(ctx, P_KIFS_KIND) as u32;
         if kind == 0 {
             if x + y < 0.0 {
                 let t = x;
@@ -383,7 +442,7 @@ pub mod kernels {
                 core::mem::swap(&mut y, &mut z);
             }
             if kind == 2 {
-                let h = pr(P_KIFS_FOLD_HEIGHT);
+                let h = pr(ctx, P_KIFS_FOLD_HEIGHT);
                 z = h - (z - h).abs();
             }
         }
@@ -391,38 +450,42 @@ pub mod kernels {
     }
 
     #[inline(always)]
-    fn kifs_step(z: &mut V3, dr: &mut f32) -> bool {
-        let s = pr(P_KIFS_SCALE);
+    fn kifs_step(ctx: Context<'_>, z: &mut V3, dr: &mut f32) -> bool {
+        let s = pr(ctx, P_KIFS_SCALE);
         if *dr > DERIVATIVE_LIMIT / s {
             return false;
         }
-        *z = sub(mul(kifs_fold(iter_rotate(*z)), s), pv3(P_KIFS_SHIFT));
+        *z = sub(
+            mul(kifs_fold(ctx, iter_rotate(ctx, *z)), s),
+            pv3(ctx, P_KIFS_SHIFT),
+        );
         *dr *= s;
         true
     }
 
     #[inline(always)]
-    fn kifs_distance(q: V3, trap_mode: u32) -> (f32, f32) {
-        let iterations = pr(P_ITERATIONS) as u32;
+    fn kifs_distance(ctx: Context<'_>, q: V3, trap_mode: u32) -> (f32, f32) {
+        let iterations = pr(ctx, P_ITERATIONS) as u32;
         let mut z = q;
         let mut dr = 1.0f32;
         let mut trap = TRAP_START;
         let mut i = 0u32;
         while i < iterations {
-            if !kifs_step(&mut z, &mut dr) {
+            if !kifs_step(ctx, &mut z, &mut dr) {
                 break;
             }
             if trap_mode != 0 {
-                trap = trap.min(trap3(z, trap_mode));
+                trap = trap.min(trap3(ctx, z, trap_mode));
             }
             i += 1;
         }
-        let bound = if pr(P_KIFS_KIND) as u32 == 2 {
+        let bound = if pr(ctx, P_KIFS_KIND) as u32 == 2 {
             // exact signed distance to [-1, 1]^3
             let d = [z[0].abs() - 1.0, z[1].abs() - 1.0, z[2].abs() - 1.0];
-            length([d[0].max(0.0), d[1].max(0.0), d[2].max(0.0)]) + d[0].max(d[1].max(d[2])).min(0.0)
+            length([d[0].max(0.0), d[1].max(0.0), d[2].max(0.0)])
+                + d[0].max(d[1].max(d[2])).min(0.0)
         } else {
-            length(z) - pr(P_KIFS_BOUND)
+            length(z) - pr(ctx, P_KIFS_BOUND)
         };
         (bound / dr, trap)
     }
@@ -445,13 +508,13 @@ pub mod kernels {
     }
 
     #[inline(always)]
-    fn kleinian_distance(q: V3, trap_mode: u32) -> (f32, f32) {
-        let a = pr(P_KLEIN_A);
-        let b = pr(P_KLEIN_B);
-        let skew = pr(P_KLEIN_SKEW);
-        let line_amp = pr(P_KLEIN_LINE_AMP);
-        let line_rate = pr(P_KLEIN_LINE_RATE);
-        let iterations = pr(P_ITERATIONS) as u32;
+    fn kleinian_distance(ctx: Context<'_>, q: V3, trap_mode: u32) -> (f32, f32) {
+        let a = pr(ctx, P_KLEIN_A);
+        let b = pr(ctx, P_KLEIN_B);
+        let skew = pr(ctx, P_KLEIN_SKEW);
+        let line_amp = pr(ctx, P_KLEIN_LINE_AMP);
+        let line_rate = pr(ctx, P_KLEIN_LINE_RATE);
+        let iterations = pr(ctx, P_ITERATIONS) as u32;
         let half_a = 0.5 * a;
         let half_b = 0.5 * b;
         let sign_b = exact_sign(b);
@@ -468,7 +531,8 @@ pub mod kernels {
             x = kleinian_wrap(x + s, 2.0, -1.0) - s;
             w = kleinian_wrap(w, 2.0, -1.0);
             let u = x + half_b;
-            let line = half_a + sign_b * line_amp * exact_sign(u) * (1.0 - (-line_rate * u.abs()).exp());
+            let line =
+                half_a + sign_b * line_amp * exact_sign(u) * (1.0 - (-line_rate * u.abs()).exp());
             if y >= line {
                 x = -b - x;
                 y = a - y;
@@ -485,7 +549,7 @@ pub mod kernels {
             z = [x * inverse - b, a - y * inverse, -w * inverse];
             dr *= inverse;
             if trap_mode != 0 {
-                trap = trap.min(trap3(z, trap_mode));
+                trap = trap.min(trap3(ctx, z, trap_mode));
             }
             if dot(z, z) > 100.0 {
                 break;
@@ -504,11 +568,11 @@ pub mod kernels {
     }
 
     #[inline(always)]
-    fn pseudo_kleinian_distance(q: V3, trap_mode: u32) -> (f32, f32) {
-        let bx = pv3(P_PK_BOX);
-        let size = pr(P_PK_SIZE);
-        let c = pv3(P_PK_C);
-        let iterations = pr(P_ITERATIONS) as u32;
+    fn pseudo_kleinian_distance(ctx: Context<'_>, q: V3, trap_mode: u32) -> (f32, f32) {
+        let bx = pv3(ctx, P_PK_BOX);
+        let size = pr(ctx, P_PK_SIZE);
+        let c = pv3(ctx, P_PK_C);
+        let iterations = pr(ctx, P_ITERATIONS) as u32;
         let mut z = q;
         let mut dr = 1.0f32;
         let mut trap = TRAP_START;
@@ -530,19 +594,22 @@ pub mod kernels {
             z = add(mul(z, k), c);
             dr *= k;
             if trap_mode != 0 {
-                trap = trap.min(trap3(z, trap_mode));
+                trap = trap.min(trap3(ctx, z, trap_mode));
             }
             i += 1;
         }
-        let o = sub(z, pv3(P_PK_OFFSET));
-        let t = pr(P_PK_THICKNESS);
+        let o = sub(z, pv3(ctx, P_PK_OFFSET));
+        let t = pr(ctx, P_PK_THICKNESS);
         let thingy = ((o[0] * o[0] + o[1] * o[1]).sqrt() * o[2]).abs() - t;
-        (0.5 * thingy / (dot(o, o) + t.abs()).sqrt().max(1.0e-30) / dr, trap)
+        (
+            0.5 * thingy / (dot(o, o) + t.abs()).sqrt().max(1.0e-30) / dr,
+            trap,
+        )
     }
 
     /// Apollonian wrap + inversion k = max(s / r2, 0.1). Returns false to stop.
     #[inline(always)]
-    fn apollonian_step(z: &mut V3, dr: &mut f32) -> bool {
+    fn apollonian_step(ctx: Context<'_>, z: &mut V3, dr: &mut f32) -> bool {
         let h = [0.5 * z[0] + 0.5, 0.5 * z[1] + 0.5, 0.5 * z[2] + 0.5];
         let w = [
             -1.0 + 2.0 * (h[0] - h[0].floor()),
@@ -553,7 +620,7 @@ pub mod kernels {
         if r2 < 1.0e-30 {
             return false;
         }
-        let k = (pr(P_APOLLO_SCALE) / r2).max(0.1);
+        let k = (pr(ctx, P_APOLLO_SCALE) / r2).max(0.1);
         if *dr > DERIVATIVE_LIMIT / k {
             return false;
         }
@@ -563,18 +630,18 @@ pub mod kernels {
     }
 
     #[inline(always)]
-    fn apollonian_distance(q: V3, trap_mode: u32) -> (f32, f32) {
-        let iterations = pr(P_ITERATIONS) as u32;
+    fn apollonian_distance(ctx: Context<'_>, q: V3, trap_mode: u32) -> (f32, f32) {
+        let iterations = pr(ctx, P_ITERATIONS) as u32;
         let mut z = add(q, [0.0, 1.0, 0.0]);
         let mut dr = 1.0f32;
         let mut trap = TRAP_START;
         let mut i = 0u32;
         while i < iterations {
-            if !apollonian_step(&mut z, &mut dr) {
+            if !apollonian_step(ctx, &mut z, &mut dr) {
                 break;
             }
             if trap_mode != 0 {
-                trap = trap.min(trap3(z, trap_mode));
+                trap = trap.min(trap3(ctx, z, trap_mode));
             }
             i += 1;
         }
@@ -582,11 +649,11 @@ pub mod kernels {
     }
 
     #[inline(always)]
-    fn hybrid_distance(q: V3, trap_mode: u32) -> (f32, f32) {
-        let bailout = pr(P_BAILOUT);
-        let iterations = pr(P_ITERATIONS) as u32;
-        let steps = pr(P_HYBRID_STEPS) as u32;
-        let count = (pr(P_HYBRID_COUNT) as u32).max(1);
+    fn hybrid_distance(ctx: Context<'_>, q: V3, trap_mode: u32) -> (f32, f32) {
+        let bailout = pr(ctx, P_BAILOUT);
+        let iterations = pr(ctx, P_ITERATIONS) as u32;
+        let steps = pr(ctx, P_HYBRID_STEPS) as u32;
+        let count = (pr(ctx, P_HYBRID_COUNT) as u32).max(1);
         let c = q;
         let mut z = q;
         let mut dr = 1.0f32;
@@ -599,13 +666,13 @@ pub mod kernels {
             }
             let step = (steps >> (3 * (i % count))) & 7;
             let ok = if step == 1 {
-                r >= 1.0e-8 && bulb_step(&mut z, &mut dr, r, c, 1.0)
+                r >= 1.0e-8 && bulb_step(ctx, &mut z, &mut dr, r, c, 1.0)
             } else if step == 2 {
-                box_step(&mut z, &mut dr, c, 1.0)
+                box_step(ctx, &mut z, &mut dr, c, 1.0)
             } else if step == 3 {
-                kifs_step(&mut z, &mut dr)
+                kifs_step(ctx, &mut z, &mut dr)
             } else if step == 4 {
-                apollonian_step(&mut z, &mut dr)
+                apollonian_step(ctx, &mut z, &mut dr)
             } else {
                 true
             };
@@ -613,7 +680,7 @@ pub mod kernels {
                 break;
             }
             if trap_mode != 0 {
-                trap = trap.min(trap3(z, trap_mode));
+                trap = trap.min(trap3(ctx, z, trap_mode));
             }
             i += 1;
         }
@@ -622,37 +689,99 @@ pub mod kernels {
 
     /// Scene point -> object space: R^T (p - offset) / scale.
     #[inline(always)]
-    fn object_point(x: V3) -> V3 {
-        mul(mat3(P_OBJ_AXES, sub(x, pv3(P_OBJ_OFFSET))), 1.0 / pr(P_OBJ_SCALE))
+    fn object_point(ctx: Context<'_>, x: V3) -> V3 {
+        if !ctx.world {
+            return mul(
+                mat3(ctx, P_OBJ_AXES, sub(x, pv3(ctx, P_OBJ_OFFSET))),
+                1.0 / pr(ctx, P_OBJ_SCALE),
+            );
+        }
+        let b = ctx.object * OBJECT_STRIDE + O_INVERSE;
+        [
+            ctx.objects[b] * x[0]
+                + ctx.objects[b + 1] * x[1]
+                + ctx.objects[b + 2] * x[2]
+                + ctx.objects[b + 3],
+            ctx.objects[b + 4] * x[0]
+                + ctx.objects[b + 5] * x[1]
+                + ctx.objects[b + 6] * x[2]
+                + ctx.objects[b + 7],
+            ctx.objects[b + 8] * x[0]
+                + ctx.objects[b + 9] * x[1]
+                + ctx.objects[b + 10] * x[2]
+                + ctx.objects[b + 11],
+        ]
     }
 
     /// Signed transformed estimate and trap (fractal3d.wgsl signed_distance_and_trap).
     #[inline(always)]
-    fn signed_distance_and_trap<const F: u32>(x: V3, trap_mode: u32) -> (f32, f32) {
-        let q = object_point(x);
-                let (d, trap) = match F {
-            FAMILY_BULB => bulb_distance(q, trap_mode),
-            FAMILY_BOX => box_distance(q, trap_mode),
-            FAMILY_QUAT => quat_distance(q, trap_mode),
-            FAMILY_KIFS => kifs_distance(q, trap_mode),
-            FAMILY_KLEINIAN => kleinian_distance(q, trap_mode),
-            FAMILY_PSEUDO_KLEINIAN => pseudo_kleinian_distance(q, trap_mode),
-            FAMILY_APOLLONIAN => apollonian_distance(q, trap_mode),
-            _ => hybrid_distance(q, trap_mode),
+    fn signed_distance_and_trap<const F: u32>(
+        ctx: Context<'_>,
+        x: V3,
+        trap_mode: u32,
+    ) -> (f32, f32) {
+        let q = object_point(ctx, x);
+        let family = if F == FAMILY_WORLD {
+            pr(ctx, P_FAMILY) as u32
+        } else {
+            F
         };
-        let radius = pr(P_BOUND_RADIUS);
-        let d = if radius > 0.0 { d.max(length(q) - radius) } else { d };
-        (d * pr(P_OBJ_SCALE), trap)
+        let (d, trap) = match family {
+            FAMILY_BULB => bulb_distance(ctx, q, trap_mode),
+            FAMILY_BOX => box_distance(ctx, q, trap_mode),
+            FAMILY_QUAT => quat_distance(ctx, q, trap_mode),
+            FAMILY_KIFS => kifs_distance(ctx, q, trap_mode),
+            FAMILY_KLEINIAN => kleinian_distance(ctx, q, trap_mode),
+            FAMILY_PSEUDO_KLEINIAN => pseudo_kleinian_distance(ctx, q, trap_mode),
+            FAMILY_APOLLONIAN => apollonian_distance(ctx, q, trap_mode),
+            _ => hybrid_distance(ctx, q, trap_mode),
+        };
+        let radius = pr(ctx, P_BOUND_RADIUS);
+        let d = if radius > 0.0 {
+            d.max(length(q) - radius)
+        } else {
+            d
+        };
+        // Use the same clipped field for marching and its normal stencil.
+        let d = if F == FAMILY_WORLD {
+            d.max(length(q) - ctx.objects[ctx.object * OBJECT_STRIDE + O_CLIP_RADIUS])
+        } else {
+            d
+        };
+        (
+            d * if ctx.world {
+                ctx.objects[ctx.object * OBJECT_STRIDE + O_DISTANCE_SCALE]
+            } else {
+                pr(ctx, P_OBJ_SCALE)
+            },
+            trap,
+        )
     }
 
     #[inline(always)]
-    fn family_signed<const F: u32>() -> bool {
-        F == FAMILY_KIFS || F == FAMILY_KLEINIAN || F == FAMILY_PSEUDO_KLEINIAN
+    fn family_signed<const F: u32>(ctx: Context<'_>) -> bool {
+        let f = if F == FAMILY_WORLD {
+            pr(ctx, P_FAMILY) as u32
+        } else {
+            F
+        };
+        f == FAMILY_KIFS || f == FAMILY_KLEINIAN || f == FAMILY_PSEUDO_KLEINIAN
+    }
+
+    // Keep the runtime family dispatcher out of line. Inlining eight DEs into
+    // primary/shadow marches and four normal stencils makes cold driver JIT very costly.
+    #[inline(never)]
+    fn world_estimate(ctx: Context<'_>, x: V3, trap_mode: u32) -> (f32, f32) {
+        signed_distance_and_trap::<FAMILY_WORLD>(ctx, x, trap_mode)
     }
 
     #[inline(always)]
-    fn scene_signed_distance<const F: u32>(x: V3) -> f32 {
-        signed_distance_and_trap::<F>(x, 0).0
+    fn scene_signed_distance<const F: u32>(ctx: Context<'_>, x: V3) -> f32 {
+        if F == FAMILY_WORLD {
+            world_estimate(ctx, x, 0).0
+        } else {
+            signed_distance_and_trap::<F>(ctx, x, 0).0
+        }
     }
 
     // =========================================================================
@@ -671,6 +800,8 @@ pub mod kernels {
         point: V3,
         trap: f32,
         eps: f32,
+        // Each evaluated object owns one packed material, so this is also its material index.
+        object: usize,
     }
 
     #[inline(always)]
@@ -679,23 +810,63 @@ pub mod kernels {
     }
 
     #[inline(always)]
-    fn march_sample<const F: u32>(x: V3, trap_mode: u32) -> (f32, f32) {
-        let (d, t) = signed_distance_and_trap::<F>(x, trap_mode);
-        (d.max(0.0), t)
+    fn march_sample<const F: u32>(ctx: Context<'_>, x: V3, trap_mode: u32) -> (f32, f32, usize) {
+        if F != FAMILY_WORLD {
+            let (d, t) = signed_distance_and_trap::<F>(ctx, x, trap_mode);
+            return (d.max(0.0), t, 0);
+        }
+        let mut best = (f32::MAX, TRAP_START, 0usize);
+        let mut object = 0usize;
+        while object < global(P_OBJECT_COUNT) as usize {
+            let c = Context { object, ..ctx };
+            let mode = if trap_mode == 0 {
+                0
+            } else {
+                pr(c, P_COLOR_MODE) as u32
+            };
+            let (d, trap) = world_estimate(c, x, mode);
+            let d = d.max(0.0);
+            if d < best.0 {
+                best = (d, trap, object);
+            }
+            object += 1;
+        }
+        best
     }
 
     #[inline(always)]
-    fn march<const F: u32>(origin: V3, dir: V3, kind: u32, base: f32, slope: f32) -> Hit {
-        let miss = Hit { hit: false, point: origin, trap: TRAP_START, eps: 0.0 };
-        let max_steps = if kind == RAY_PRIMARY { pr(P_MAX_STEPS) } else { pr(P_SECONDARY_STEPS) } as u32;
+    fn march<const F: u32>(
+        ctx: Context<'_>,
+        origin: V3,
+        dir: V3,
+        kind: u32,
+        base: f32,
+        slope: f32,
+    ) -> Hit {
+        let miss = Hit {
+            hit: false,
+            point: origin,
+            trap: TRAP_START,
+            eps: 0.0,
+            object: 0,
+        };
+        let max_steps = if kind == RAY_PRIMARY {
+            pr(ctx, P_MAX_STEPS)
+        } else {
+            pr(ctx, P_SECONDARY_STEPS)
+        } as u32;
         // Secondary rays resolve a coarser surface (their footprint times P_SECONDARY_EPS).
-        let eps_scale = if kind == RAY_PRIMARY { 1.0 } else { pr(P_SECONDARY_EPS) };
+        let eps_scale = if kind == RAY_PRIMARY {
+            1.0
+        } else {
+            pr(ctx, P_SECONDARY_EPS)
+        };
         let base = base * eps_scale;
         let slope = slope * eps_scale;
         // Clip to the bounding sphere: outside it every estimate is exact "outside" (escape
         // radius / ball bound), so marching there only burns steps.
-        let oc = sub(origin, pv3(P_CLIP_CENTER));
-        let radius = pr(P_CLIP_RADIUS);
+        let oc = sub(origin, pv3(ctx, P_CLIP_CENTER));
+        let radius = pr(ctx, P_CLIP_RADIUS);
         let b = dot(oc, dir);
         let disc = b * b - (dot(oc, oc) - radius * radius);
         if disc <= 0.0 {
@@ -707,10 +878,16 @@ pub mod kernels {
             return miss;
         }
         let t_enter = (-b - root).max(0.0);
-        let max_distance = t_exit.min(pr(P_MAX_DISTANCE));
-        let trap_mode = if kind == RAY_VISIBILITY { 0 } else { pr(P_COLOR_MODE) as u32 };
+        let max_distance = t_exit.min(pr(ctx, P_MAX_DISTANCE));
+        let trap_mode = if kind == RAY_VISIBILITY {
+            0
+        } else if F == FAMILY_WORLD {
+            1
+        } else {
+            pr(ctx, P_COLOR_MODE) as u32
+        };
         let step_cap = 2.0 * (max_distance - t_enter) / max_steps as f32;
-        let step_factor = pr(P_STEP_FACTOR);
+        let step_factor = pr(ctx, P_STEP_FACTOR);
         let mut t = t_enter;
         let mut outside = miss;
         let mut outside_t = 0.0f32;
@@ -722,12 +899,22 @@ pub mod kernels {
                 break;
             }
             let point = add(origin, mul(dir, t));
-            let (d, trap) = march_sample::<F>(point, trap_mode);
+            let (d, trap, object) = march_sample::<F>(ctx, point, trap_mode);
             let eps = footprint(base, slope, t, point);
-            let hit = if kind == RAY_PRIMARY { d <= eps } else { d < eps };
+            let hit = if kind == RAY_PRIMARY {
+                d <= eps
+            } else {
+                d < eps
+            };
             if hit {
                 if !(outside.hit && d <= 0.0 && kind != RAY_VISIBILITY) {
-                    return Hit { hit: true, point, trap, eps };
+                    return Hit {
+                        hit: true,
+                        point,
+                        trap,
+                        eps,
+                        object,
+                    };
                 }
                 let mut lo = outside_t;
                 let mut hi = t;
@@ -739,10 +926,16 @@ pub mod kernels {
                     }
                     let mid = 0.5 * (lo + hi);
                     let inner = add(origin, mul(dir, mid));
-                    let (rd, rt) = march_sample::<F>(inner, trap_mode);
+                    let (rd, rt, object) = march_sample::<F>(ctx, inner, trap_mode);
                     if rd > 0.0 {
                         lo = mid;
-                        best = Hit { hit: true, point: inner, trap: rt, eps: footprint(base, slope, mid, inner) };
+                        best = Hit {
+                            hit: true,
+                            point: inner,
+                            trap: rt,
+                            eps: footprint(base, slope, mid, inner),
+                            object,
+                        };
                     } else {
                         hi = mid;
                     }
@@ -752,10 +945,22 @@ pub mod kernels {
             }
             let ratio = d / eps;
             if !closest.hit || ratio < closest_ratio {
-                closest = Hit { hit: true, point, trap, eps };
+                closest = Hit {
+                    hit: true,
+                    point,
+                    trap,
+                    eps,
+                    object,
+                };
                 closest_ratio = ratio;
             }
-            outside = Hit { hit: true, point, trap, eps };
+            outside = Hit {
+                hit: true,
+                point,
+                trap,
+                eps,
+                object,
+            };
             outside_t = t;
             t += (step_factor * d).max(eps * 0.5).min(step_cap);
             i += 1;
@@ -763,7 +968,7 @@ pub mod kernels {
         if t > max_distance || !closest.hit {
             return miss;
         }
-        if kind == RAY_VISIBILITY || closest_ratio <= pr(P_SAMPLE_CONE) {
+        if kind == RAY_VISIBILITY || closest_ratio <= pr(ctx, P_SAMPLE_CONE) {
             return closest;
         }
         miss
@@ -777,16 +982,22 @@ pub mod kernels {
     const NORMAL_STEP_HALVINGS: u32 = 3;
 
     #[inline(always)]
-    fn surface_normal<const F: u32>(point: V3, dir: V3, eps: f32) -> V3 {
-        let signed = family_signed::<F>();
-        let center = if signed { point } else { sub(point, mul(dir, eps)) };
+    fn surface_normal<const F: u32>(ctx: Context<'_>, point: V3, dir: V3, eps: f32) -> V3 {
+        // For world objects the stencil samples f(A^-1 x). Its world gradient is
+        // A^-T grad(f), so nonuniform scale and parent shear transform normals correctly.
+        let signed = family_signed::<F>(ctx);
+        let center = if signed {
+            point
+        } else {
+            sub(point, mul(dir, eps))
+        };
         let mut h = 0.5 * eps;
         let mut k = 0u32;
         while k <= NORMAL_STEP_HALVINGS {
-            let a = scene_signed_distance::<F>(add(center, [h, -h, -h]));
-            let b = scene_signed_distance::<F>(add(center, [-h, -h, h]));
-            let c = scene_signed_distance::<F>(add(center, [-h, h, -h]));
-            let d = scene_signed_distance::<F>(add(center, [h, h, h]));
+            let a = scene_signed_distance::<F>(ctx, add(center, [h, -h, -h]));
+            let b = scene_signed_distance::<F>(ctx, add(center, [-h, -h, h]));
+            let c = scene_signed_distance::<F>(ctx, add(center, [-h, h, -h]));
+            let d = scene_signed_distance::<F>(ctx, add(center, [h, h, h]));
             if signed || (a > 0.0 && b > 0.0 && c > 0.0 && d > 0.0) {
                 let g = [a - b - c + d, -a - b + c + d, -a + b - c + d];
                 if length(g) < 1.0e-7 {
@@ -805,24 +1016,38 @@ pub mod kernels {
     // =========================================================================
 
     #[inline(always)]
-    fn palette_color(lut: &[[f32; 4]], t: f32) -> V3 {
+    fn palette_color(ctx: Context<'_>, lut: &[[f32; 4]], t: f32) -> V3 {
         let index = t.clamp(0.0, 1.0) * (PALETTE_SAMPLES - 1) as f32;
         let low = index as usize;
         let high = (low + 1).min(PALETTE_SAMPLES - 1);
         let blend = index - low as f32;
         // SAFETY: low, high <= PALETTE_SAMPLES - 1 and the LUT holds PALETTE_SAMPLES + 1 rows.
-        let (a, b) = unsafe { (*lut.get_unchecked(low), *lut.get_unchecked(high)) };
-        [a[0] + (b[0] - a[0]) * blend, a[1] + (b[1] - a[1]) * blend, a[2] + (b[2] - a[2]) * blend]
+        let offset = if ctx.world {
+            (ctx.object + 1) * (PALETTE_SAMPLES + 1)
+        } else {
+            0
+        };
+        let (a, b) = unsafe {
+            (
+                *lut.get_unchecked(offset + low),
+                *lut.get_unchecked(offset + high),
+            )
+        };
+        [
+            a[0] + (b[0] - a[0]) * blend,
+            a[1] + (b[1] - a[1]) * blend,
+            a[2] + (b[2] - a[2]) * blend,
+        ]
     }
 
     #[inline(always)]
-    fn hit_palette(lut: &[[f32; 4]], point: V3, n: V3, trap: f32) -> V3 {
-        let position = if pr(P_COLOR_MODE) == 0.0 {
-            (0.4 + 0.1 * length(object_point(point)) + 0.18 * n[1]).clamp(0.0, 1.0)
+    fn hit_palette(ctx: Context<'_>, lut: &[[f32; 4]], point: V3, n: V3, trap: f32) -> V3 {
+        let position = if pr(ctx, P_COLOR_MODE) == 0.0 {
+            (0.4 + 0.1 * length(object_point(ctx, point)) + 0.18 * n[1]).clamp(0.0, 1.0)
         } else {
-            (1.0 - (-trap * pr(P_TRAP_SCALE)).exp()).clamp(0.0, 1.0)
+            (1.0 - (-trap * pr(ctx, P_TRAP_SCALE)).exp()).clamp(0.0, 1.0)
         };
-        palette_color(lut, position)
+        palette_color(ctx, lut, position)
     }
 
     // =========================================================================
@@ -830,42 +1055,237 @@ pub mod kernels {
     // =========================================================================
 
     #[inline(always)]
-    fn sky_radiance(d: V3) -> V3 {
+    fn sky_radiance(ctx: Context<'_>, d: V3) -> V3 {
         let t = (0.5 + 0.5 * d[1]).clamp(0.0, 1.0);
-        let horizon = pv3(P_SKY_HORIZON);
-        let zenith = pv3(P_SKY_ZENITH);
-        mul(add(horizon, mul(sub(zenith, horizon), t)), pr(P_SKY_INTENSITY))
+        let horizon = pv3(ctx, P_SKY_HORIZON);
+        let zenith = pv3(ctx, P_SKY_ZENITH);
+        mul(
+            add(horizon, mul(sub(zenith, horizon), t)),
+            pr(ctx, P_SKY_INTENSITY),
+        )
     }
 
     #[inline(always)]
-    fn sun_select() -> f32 {
-        let sun = luminance(mul(pv3(P_LIGHT_COLOR), pr(P_LIGHT_INTENSITY)));
-        let sky = luminance(mul(add(pv3(P_SKY_HORIZON), pv3(P_SKY_ZENITH)), 0.5 * pr(P_SKY_INTENSITY)));
+    fn map_index(ctx: Context<'_>, dir: V3) -> usize {
+        let w = pr(ctx, P_ENV_WIDTH) as usize;
+        let h = pr(ctx, P_ENV_HEIGHT) as usize;
+        let u =
+            (0.5 + (dir[0].atan2(dir[2]) - pr(ctx, P_ENV_ROTATION)) / (2.0 * PI)).rem_euclid(1.0);
+        let v = dir[1].clamp(-1.0, 1.0).acos() / PI;
+        ((v * h as f32) as usize).min(h - 1) * w + ((u * w as f32) as usize).min(w - 1)
+    }
+
+    #[inline(always)]
+    fn map_texel(ctx: Context<'_>, lut: &[[f32; 4]], i: usize) -> [f32; 4] {
+        // Host appends exactly width*height texels after the palette and interior entry.
+        unsafe {
+            *lut.get_unchecked(
+                (1 + if ctx.world {
+                    global(P_OBJECT_COUNT) as usize
+                } else {
+                    0
+                }) * (PALETTE_SAMPLES + 1)
+                    + i,
+            )
+        }
+    }
+
+    #[inline(always)]
+    fn map_pdf(ctx: Context<'_>, lut: &[[f32; 4]], dir: V3) -> f32 {
+        let i = map_index(ctx, dir);
+        let a = if i > 0 {
+            map_texel(ctx, lut, i - 1)[3]
+        } else {
+            0.0
+        };
+        let probability = (map_texel(ctx, lut, i)[3] - a).max(0.0);
+        let row = i / (pr(ctx, P_ENV_WIDTH) as usize);
+        let t0 = PI * row as f32 / pr(ctx, P_ENV_HEIGHT);
+        let t1 = PI * (row + 1) as f32 / pr(ctx, P_ENV_HEIGHT);
+        let omega = (2.0 * PI / pr(ctx, P_ENV_WIDTH)) * (t0.cos() - t1.cos());
+        probability / omega.max(1e-12)
+    }
+
+    #[inline(always)]
+    fn map_sample(ctx: Context<'_>, lut: &[[f32; 4]], u: f32, v: f32) -> V3 {
+        let w = pr(ctx, P_ENV_WIDTH) as usize;
+        let h = pr(ctx, P_ENV_HEIGHT) as usize;
+        let mut lo = 0usize;
+        let mut hi = w * h;
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            if map_texel(ctx, lut, mid)[3] <= u {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        let i = lo.min(w * h - 1);
+        let start = if i > 0 {
+            map_texel(ctx, lut, i - 1)[3]
+        } else {
+            0.0
+        };
+        let probability = map_texel(ctx, lut, i)[3] - start;
+        let jitter = ((u - start) / probability.max(1e-20)).clamp(0.0, 0.999999);
+        let phi = ((i % w) as f32 + jitter) / w as f32 * (2.0 * PI) - PI + pr(ctx, P_ENV_ROTATION);
+        let t0 = PI * (i / w) as f32 / h as f32;
+        let t1 = PI * (i / w + 1) as f32 / h as f32;
+        let y = t0.cos() + (t1.cos() - t0.cos()) * v;
+        let radius = (1.0 - y * y).max(0.0).sqrt();
+        let (sp, cp) = phi.sin_cos();
+        [radius * sp, y, radius * cp]
+    }
+
+    #[inline(always)]
+    fn light_slot(ctx: Context<'_>, light: usize, slot: usize) -> f32 {
+        ctx.lights[light * LIGHT_STRIDE + slot - P_LIGHT_DIR]
+    }
+    #[inline(always)]
+    fn light_v3(ctx: Context<'_>, light: usize, slot: usize) -> V3 {
+        [
+            light_slot(ctx, light, slot),
+            light_slot(ctx, light, slot + 1),
+            light_slot(ctx, light, slot + 2),
+        ]
+    }
+    #[inline(always)]
+    fn world_sun_contains(ctx: Context<'_>, light: usize, dir: V3) -> bool {
+        let d = sub(dir, light_v3(ctx, light, P_LIGHT_DIR));
+        0.5 * dot(d, d) <= light_slot(ctx, light, P_SUN_ONE_MINUS_COS)
+    }
+    #[inline(always)]
+    fn world_sun_weight(ctx: Context<'_>, light: usize) -> f32 {
+        luminance(mul(
+            light_v3(ctx, light, P_LIGHT_COLOR),
+            light_slot(ctx, light, P_LIGHT_INTENSITY),
+        ))
+        .max(0.0)
+    }
+    #[inline(always)]
+    fn world_sky_weight(ctx: Context<'_>) -> f32 {
+        let mean = if pr(ctx, P_ENV_WIDTH) > 0.0 {
+            pr(ctx, P_ENV_MEAN) * pr(ctx, P_ENV_INTENSITY)
+        } else {
+            luminance(mul(
+                add(pv3(ctx, P_SKY_HORIZON), pv3(ctx, P_SKY_ZENITH)),
+                0.5 * pr(ctx, P_SKY_INTENSITY),
+            ))
+        };
+        (PI * mean).max(0.000001)
+    }
+    #[inline(always)]
+    fn world_light_total(ctx: Context<'_>) -> f32 {
+        let mut total = world_sky_weight(ctx);
+        let mut i = 0usize;
+        while i < global(P_LIGHT_COUNT) as usize {
+            total += world_sun_weight(ctx, i);
+            i += 1;
+        }
+        total
+    }
+
+    #[inline(always)]
+    fn sun_select(ctx: Context<'_>) -> f32 {
+        let sun = luminance(mul(pv3(ctx, P_LIGHT_COLOR), pr(ctx, P_LIGHT_INTENSITY)));
+        let sky = if pr(ctx, P_ENV_WIDTH) > 0.0 {
+            pr(ctx, P_ENV_MEAN) * pr(ctx, P_ENV_INTENSITY)
+        } else {
+            luminance(mul(
+                add(pv3(ctx, P_SKY_HORIZON), pv3(ctx, P_SKY_ZENITH)),
+                0.5 * pr(ctx, P_SKY_INTENSITY),
+            ))
+        };
         let total = sun + PI * sky;
         let s = if total > 0.0 { sun / total } else { 0.5 };
         s.clamp(0.1, 0.9)
     }
 
     #[inline(always)]
-    fn sun_contains(wi: V3) -> bool {
-        let d = sub(wi, pv3(P_LIGHT_DIR));
-        0.5 * dot(d, d) <= pr(P_SUN_ONE_MINUS_COS)
+    fn sun_contains(ctx: Context<'_>, wi: V3) -> bool {
+        let d = sub(wi, pv3(ctx, P_LIGHT_DIR));
+        0.5 * dot(d, d) <= pr(ctx, P_SUN_ONE_MINUS_COS)
     }
 
     #[inline(always)]
-    fn env_radiance(dir: V3) -> V3 {
-        if sun_contains(dir) {
-            return mul(pv3(P_LIGHT_COLOR), pr(P_LIGHT_INTENSITY) * pr(P_SUN_CONE_PDF));
+    fn env_radiance(ctx: Context<'_>, lut: &[[f32; 4]], dir: V3) -> V3 {
+        if ctx.world {
+            let mut radiance = if pr(ctx, P_ENV_WIDTH) > 0.0 {
+                let p = map_texel(ctx, lut, map_index(ctx, dir));
+                mul([p[0], p[1], p[2]], pr(ctx, P_ENV_INTENSITY))
+            } else {
+                sky_radiance(ctx, dir)
+            };
+            let mut i = 0usize;
+            while i < global(P_LIGHT_COUNT) as usize {
+                if world_sun_contains(ctx, i, dir) {
+                    radiance = add(
+                        radiance,
+                        mul(
+                            light_v3(ctx, i, P_LIGHT_COLOR),
+                            light_slot(ctx, i, P_LIGHT_INTENSITY)
+                                * light_slot(ctx, i, P_SUN_CONE_PDF),
+                        ),
+                    );
+                }
+                i += 1;
+            }
+            return radiance;
         }
-        sky_radiance(dir)
+
+        if pr(ctx, P_ENV_WIDTH) > 0.0 {
+            let p = map_texel(ctx, lut, map_index(ctx, dir));
+            let map = mul([p[0], p[1], p[2]], pr(ctx, P_ENV_INTENSITY));
+            return if sun_contains(ctx, dir) {
+                add(
+                    map,
+                    mul(
+                        pv3(ctx, P_LIGHT_COLOR),
+                        pr(ctx, P_LIGHT_INTENSITY) * pr(ctx, P_SUN_CONE_PDF),
+                    ),
+                )
+            } else {
+                map
+            };
+        }
+        if sun_contains(ctx, dir) {
+            return mul(
+                pv3(ctx, P_LIGHT_COLOR),
+                pr(ctx, P_LIGHT_INTENSITY) * pr(ctx, P_SUN_CONE_PDF),
+            );
+        }
+        sky_radiance(ctx, dir)
     }
 
     #[inline(always)]
-    fn env_pdf(dir: V3) -> f32 {
-        let s = sun_select();
-        let mut pdf = (1.0 - s) * 0.079_577_47;
-        if sun_contains(dir) {
-            pdf += s * pr(P_SUN_CONE_PDF);
+    fn env_pdf(ctx: Context<'_>, lut: &[[f32; 4]], dir: V3) -> f32 {
+        if ctx.world {
+            let total = world_light_total(ctx);
+            let mut pdf = world_sky_weight(ctx) / total
+                * if pr(ctx, P_ENV_WIDTH) > 0.0 {
+                    map_pdf(ctx, lut, dir)
+                } else {
+                    0.079_577_47
+                };
+            let mut i = 0usize;
+            while i < global(P_LIGHT_COUNT) as usize {
+                if world_sun_contains(ctx, i, dir) {
+                    pdf += world_sun_weight(ctx, i) / total * light_slot(ctx, i, P_SUN_CONE_PDF);
+                }
+                i += 1;
+            }
+            return pdf;
+        }
+
+        let s = sun_select(ctx);
+        let mut pdf = (1.0 - s)
+            * if pr(ctx, P_ENV_WIDTH) > 0.0 {
+                map_pdf(ctx, lut, dir)
+            } else {
+                0.079_577_47
+            };
+        if sun_contains(ctx, dir) {
+            pdf += s * pr(ctx, P_SUN_CONE_PDF);
         }
         pdf
     }
@@ -875,26 +1295,60 @@ pub mod kernels {
         let s = if n[2] >= 0.0 { 1.0 } else { -1.0 };
         let a = -1.0 / (s + n[2]);
         let b = n[0] * n[1] * a;
-        ([1.0 + s * n[0] * n[0] * a, s * b, -s * n[0]], [b, s + n[1] * n[1] * a, -n[1]])
+        (
+            [1.0 + s * n[0] * n[0] * a, s * b, -s * n[0]],
+            [b, s + n[1] * n[1] * a, -n[1]],
+        )
     }
 
     #[inline(always)]
-    fn env_sample(r1: f32, r2: f32) -> (V3, f32) {
-        let s = sun_select();
+    fn env_sample(ctx: Context<'_>, lut: &[[f32; 4]], r1: f32, r2: f32) -> (V3, f32) {
+        if ctx.world {
+            let mut selector = r1 * world_light_total(ctx);
+            let mut i = 0usize;
+            while i < global(P_LIGHT_COUNT) as usize {
+                let weight = world_sun_weight(ctx, i);
+                if selector < weight {
+                    let d = light_v3(ctx, i, P_LIGHT_DIR);
+                    let (t, b) = basis(d);
+                    let cos_t = 1.0 - (selector / weight) * light_slot(ctx, i, P_SUN_ONE_MINUS_COS);
+                    let sin_t = (1.0 - cos_t * cos_t).max(0.0).sqrt();
+                    let (sp, cp) = (2.0 * PI * r2).sin_cos();
+                    let dir = add(add(mul(t, sin_t * cp), mul(b, sin_t * sp)), mul(d, cos_t));
+                    return (dir, env_pdf(ctx, lut, dir));
+                }
+                selector -= weight;
+                i += 1;
+            }
+            let u = (selector / world_sky_weight(ctx)).clamp(0.0, 0.99999994);
+            let dir = if pr(ctx, P_ENV_WIDTH) > 0.0 {
+                map_sample(ctx, lut, u, r2)
+            } else {
+                let z = 1.0 - 2.0 * u;
+                let radius = (1.0 - z * z).max(0.0).sqrt();
+                let (sp, cp) = (2.0 * PI * r2).sin_cos();
+                [radius * cp, radius * sp, z]
+            };
+            return (dir, env_pdf(ctx, lut, dir));
+        }
+
+        let s = sun_select(ctx);
         let dir = if r1 < s {
-            let d = pv3(P_LIGHT_DIR);
+            let d = pv3(ctx, P_LIGHT_DIR);
             let (t, b) = basis(d);
-            let cos_t = 1.0 - (r1 / s) * pr(P_SUN_ONE_MINUS_COS);
+            let cos_t = 1.0 - (r1 / s) * pr(ctx, P_SUN_ONE_MINUS_COS);
             let sin_t = (1.0 - cos_t * cos_t).max(0.0).sqrt();
             let (sp, cp) = (2.0 * PI * r2).sin_cos();
             add(add(mul(t, sin_t * cp), mul(b, sin_t * sp)), mul(d, cos_t))
+        } else if pr(ctx, P_ENV_WIDTH) > 0.0 {
+            map_sample(ctx, lut, ((r1 - s) / (1.0 - s)).min(0.99999994), r2)
         } else {
             let z = 1.0 - 2.0 * ((r1 - s) / (1.0 - s));
             let r = (1.0 - z * z).max(0.0).sqrt();
             let (sp, cp) = (2.0 * PI * r2).sin_cos();
             [r * cp, r * sp, z]
         };
-        (dir, env_pdf(dir))
+        (dir, env_pdf(ctx, lut, dir))
     }
 
     #[inline(always)]
@@ -919,16 +1373,28 @@ pub mod kernels {
     }
 
     #[inline(always)]
-    fn fast_material(base_color: V3, roughness: f32, metal: f32) -> Fast {
-        let base = had(mul(base_color, pr(P_BASE)), pv3(P_BASE_TINT));
-        let ior = pr(P_SPECULAR_IOR);
-        let f0d = ((ior - 1.0) / (ior + 1.0)) * ((ior - 1.0) / (ior + 1.0)) * pr(P_SPECULAR);
-        let f0 = add(mul(had([f0d, f0d, f0d], pv3(P_SPECULAR_COLOR)), 1.0 - metal), mul(base, metal));
+    fn fast_material(ctx: Context<'_>, base_color: V3, roughness: f32, metal: f32) -> Fast {
+        let base = had(mul(base_color, pr(ctx, P_BASE)), pv3(ctx, P_BASE_TINT));
+        let ior = pr(ctx, P_SPECULAR_IOR);
+        let f0d = ((ior - 1.0) / (ior + 1.0)) * ((ior - 1.0) / (ior + 1.0)) * pr(ctx, P_SPECULAR);
+        let f0 = add(
+            mul(
+                had([f0d, f0d, f0d], pv3(ctx, P_SPECULAR_COLOR)),
+                1.0 - metal,
+            ),
+            mul(base, metal),
+        );
         let rough = roughness.max(0.03);
         let diffuse_w = 1.0 - metal;
         let lf = luminance(f0);
         let spec_prob = (lf / (lf + diffuse_w * luminance(base) + 1.0e-4)).clamp(0.15, 0.9);
-        Fast { albedo: base, f0, alpha: rough * rough, diffuse_w, spec_prob }
+        Fast {
+            albedo: base,
+            f0,
+            alpha: rough * rough,
+            diffuse_w,
+            spec_prob,
+        }
     }
 
     #[inline(always)]
@@ -960,7 +1426,10 @@ pub mod kernels {
         let g = smith_g1(a2, nv) * smith_g1(a2, nl);
         let f = schlick(m.f0, vh);
         let spec = mul(f, d * g / (4.0 * nv));
-        let diff = mul(had(mul(sub([1.0, 1.0, 1.0], f), m.diffuse_w), m.albedo), nl / PI);
+        let diff = mul(
+            had(mul(sub([1.0, 1.0, 1.0], f), m.diffuse_w), m.albedo),
+            nl / PI,
+        );
         let pdf = m.spec_prob * d * nh / (4.0 * vh) + (1.0 - m.spec_prob) * nl / PI;
         (add(spec, diff), pdf)
     }
@@ -979,7 +1448,10 @@ pub mod kernels {
         } else {
             let r = u[1].sqrt();
             let (sp, cp) = (2.0 * PI * u[2]).sin_cos();
-            add(add(mul(t, r * cp), mul(b, r * sp)), mul(n, (1.0 - u[1]).max(0.0).sqrt()))
+            add(
+                add(mul(t, r * cp), mul(b, r * sp)),
+                mul(n, (1.0 - u[1]).max(0.0).sqrt()),
+            )
         };
         let (f, pdf) = fast_eval(m, n, wo, wi);
         if pdf <= 0.0 {
@@ -991,31 +1463,36 @@ pub mod kernels {
     /// The full model's inputs (fractal3d.wgsl surface_inputs): palette * base_tint as base colour;
     /// transmission and subsurface off.
     #[inline(always)]
-    fn surface_inputs(base_color: V3, roughness: f32, metal: f32) -> SurfaceInputs {
+    fn surface_inputs(
+        ctx: Context<'_>,
+        base_color: V3,
+        roughness: f32,
+        metal: f32,
+    ) -> SurfaceInputs {
         SurfaceInputs {
-            base: pr(P_BASE),
-            base_color: had(base_color, pv3(P_BASE_TINT)),
-            diffuse_roughness: pr(P_DIFFUSE_ROUGHNESS),
+            base: pr(ctx, P_BASE),
+            base_color: had(base_color, pv3(ctx, P_BASE_TINT)),
+            diffuse_roughness: pr(ctx, P_DIFFUSE_ROUGHNESS),
             metalness: metal,
-            specular: pr(P_SPECULAR),
-            specular_color: pv3(P_SPECULAR_COLOR),
+            specular: pr(ctx, P_SPECULAR),
+            specular_color: pv3(ctx, P_SPECULAR_COLOR),
             specular_roughness: roughness,
-            specular_ior: pr(P_SPECULAR_IOR),
-            specular_anisotropy: pr(P_SPECULAR_ANISOTROPY),
-            specular_rotation: pr(P_SPECULAR_ROTATION),
-            sheen: pr(P_SHEEN),
-            sheen_color: pv3(P_SHEEN_COLOR),
-            sheen_roughness: pr(P_SHEEN_ROUGHNESS),
-            coat: pr(P_COAT),
-            coat_color: pv3(P_COAT_COLOR),
-            coat_roughness: pr(P_COAT_ROUGHNESS),
-            coat_ior: pr(P_COAT_IOR),
-            coat_affect_color: pr(P_COAT_AFFECT_COLOR),
-            coat_affect_roughness: pr(P_COAT_AFFECT_ROUGHNESS),
-            thin_film_thickness: pr(P_THIN_FILM_THICKNESS),
-            thin_film_ior: pr(P_THIN_FILM_IOR),
-            emission: pr(P_EMISSION),
-            emission_color: pv3(P_EMISSION_COLOR),
+            specular_ior: pr(ctx, P_SPECULAR_IOR),
+            specular_anisotropy: pr(ctx, P_SPECULAR_ANISOTROPY),
+            specular_rotation: pr(ctx, P_SPECULAR_ROTATION),
+            sheen: pr(ctx, P_SHEEN),
+            sheen_color: pv3(ctx, P_SHEEN_COLOR),
+            sheen_roughness: pr(ctx, P_SHEEN_ROUGHNESS),
+            coat: pr(ctx, P_COAT),
+            coat_color: pv3(ctx, P_COAT_COLOR),
+            coat_roughness: pr(ctx, P_COAT_ROUGHNESS),
+            coat_ior: pr(ctx, P_COAT_IOR),
+            coat_affect_color: pr(ctx, P_COAT_AFFECT_COLOR),
+            coat_affect_roughness: pr(ctx, P_COAT_AFFECT_ROUGHNESS),
+            thin_film_thickness: pr(ctx, P_THIN_FILM_THICKNESS),
+            thin_film_ior: pr(ctx, P_THIN_FILM_IOR),
+            emission: pr(ctx, P_EMISSION),
+            emission_color: pv3(ctx, P_EMISSION_COLOR),
             thin_film_energy: ThinFilmEnergy::MaterialX,
             ..SurfaceInputs::MATERIALX_DEFAULT
         }
@@ -1028,15 +1505,16 @@ pub mod kernels {
     /// One camera path. `FULL` picks the material model at compile time.
     #[inline(always)]
     fn trace_path<const FULL: bool, const F: u32>(
+        ctx: Context<'_>,
         lut: &[[f32; 4]],
         origin: V3,
         dir0: V3,
         r: &mut Rng,
-    ) -> (V3, bool) {
-        let cam = pv3(P_CAM_ORIGIN);
-        let slope = pr(P_FOOTPRINT);
-        let max_bounces = pr(P_MAX_BOUNCES) as u32;
-        let up = mat3(P_OBJ_AXES, [0.0, 1.0, 0.0]);
+    ) -> (V3, bool, V3, V3) {
+        let cam = pv3(ctx, P_CAM_ORIGIN);
+        let slope = pr(ctx, P_FOOTPRINT);
+        let max_bounces = pr(ctx, P_MAX_BOUNCES) as u32;
+
         let mut ro = origin;
         let mut rd = dir0;
         let mut throughput = [1.0f32; 3];
@@ -1044,58 +1522,122 @@ pub mod kernels {
         let mut mis_bsdf_pdf = 0.0f32;
         let mut mis_env = false;
         let mut primary_hit = false;
+        let mut primary_albedo = [0.0; 3];
+        let mut primary_normal = [0.0; 3];
         let mut bounce = 0u32;
         loop {
             if bounce > max_bounces {
                 break;
             }
-            let base = if bounce == 0 { 0.0 } else { slope * length(sub(ro, cam)) };
+            let base = if bounce == 0 {
+                0.0
+            } else {
+                slope * length(sub(ro, cam))
+            };
             let kind = if bounce == 0 { RAY_PRIMARY } else { RAY_BOUNCE };
-            let m = march::<F>(ro, rd, kind, base, slope);
+            let m = march::<F>(ctx, ro, rd, kind, base, slope);
             if !m.hit {
-                let w = if mis_env { power_heuristic(mis_bsdf_pdf, env_pdf(rd)) } else { 1.0 };
-                radiance = add(radiance, mul(had(throughput, env_radiance(rd)), w));
+                let w = if mis_env {
+                    power_heuristic(mis_bsdf_pdf, env_pdf(ctx, lut, rd))
+                } else {
+                    1.0
+                };
+                radiance = add(
+                    radiance,
+                    mul(had(throughput, env_radiance(ctx, lut, rd)), w),
+                );
                 break;
             }
             if bounce == 0 {
                 primary_hit = true;
             }
-            let n = surface_normal::<F>(m.point, rd, m.eps);
+            let ctx = Context {
+                object: m.object,
+                ..ctx
+            };
+            let full = if F == FAMILY_WORLD {
+                pr(ctx, P_MATERIAL_MODEL) != 0.0
+            } else {
+                FULL
+            };
+            let up = if F == FAMILY_WORLD {
+                let b = ctx.object * OBJECT_STRIDE + O_TANGENT;
+                [ctx.objects[b], ctx.objects[b + 1], ctx.objects[b + 2]]
+            } else {
+                mat3(ctx, P_OBJ_AXES, [0.0, 1.0, 0.0])
+            };
+            let n = surface_normal::<F>(ctx, m.point, rd, m.eps);
             let geo_n = if dot(n, rd) > 0.0 { neg(n) } else { n };
             let eps = 4.0 * m.eps;
             let wo = neg(rd);
             // Base colour: the palette (escape / trap colouring) or the material's solid colour.
-            let mut color = if pr(P_COLOR_SOURCE) != 0.0 {
-                pv3(P_BASE_COLOR)
+            let mut color = if pr(ctx, P_COLOR_SOURCE) != 0.0 {
+                pv3(ctx, P_BASE_COLOR)
             } else {
-                hit_palette(lut, m.point, n, m.trap)
+                hit_palette(ctx, lut, m.point, n, m.trap)
             };
-            let mut roughness = pr(P_SPECULAR_ROUGHNESS);
-            let mut metal = pr(P_METALNESS);
+            let mut roughness = pr(ctx, P_SPECULAR_ROUGHNESS);
+            let mut metal = pr(ctx, P_METALNESS);
             // usd-rs pt-material-ext facing mix: toward material B at grazing angles.
-            let facing_exp = pr(P_FACING_EXPONENT);
+            let facing_exp = pr(ctx, P_FACING_EXPONENT);
             if facing_exp > 0.0 {
                 let f = (1.0 - dot(geo_n, wo).abs()).max(0.0).powf(facing_exp);
-                let b = pv3(P_FACING_COLOR);
+                let b = pv3(ctx, P_FACING_COLOR);
                 color = add(color, mul(sub(b, color), f));
-                roughness += (pr(P_FACING_ROUGHNESS) - roughness) * f;
-                metal += (pr(P_FACING_METALLIC) - metal) * f;
+                roughness += (pr(ctx, P_FACING_ROUGHNESS) - roughness) * f;
+                metal += (pr(ctx, P_FACING_METALLIC) - metal) * f;
+            }
+
+            if bounce == 0 {
+                primary_albedo = add(
+                    mul(
+                        had(mul(color, pr(ctx, P_BASE)), pv3(ctx, P_BASE_TINT)),
+                        1.0 - metal,
+                    ),
+                    mul(pv3(ctx, P_EMISSION_COLOR), pr(ctx, P_EMISSION)),
+                );
+                primary_normal = geo_n;
             }
 
             let full_inputs;
             let frame;
             let fast;
-            if FULL {
-                full_inputs = surface_inputs(color, roughness, metal);
-                frame = ShadingFrame { n: geo_n, tangent: up, inside: false, curvature: 0.0 };
-                fast = Fast { albedo: [0.0; 3], f0: [0.0; 3], alpha: 0.0, diffuse_w: 0.0, spec_prob: 0.0 };
-                radiance = add(radiance, had(throughput, eval_emission(&full_inputs, &frame, wo)));
+            if full {
+                full_inputs = surface_inputs(ctx, color, roughness, metal);
+                frame = ShadingFrame {
+                    n: geo_n,
+                    tangent: up,
+                    inside: false,
+                    curvature: 0.0,
+                };
+                fast = Fast {
+                    albedo: [0.0; 3],
+                    f0: [0.0; 3],
+                    alpha: 0.0,
+                    diffuse_w: 0.0,
+                    spec_prob: 0.0,
+                };
+                radiance = add(
+                    radiance,
+                    had(throughput, eval_emission(&full_inputs, &frame, wo)),
+                );
             } else {
                 full_inputs = SurfaceInputs::MATERIALX_DEFAULT;
-                frame = ShadingFrame { n: geo_n, tangent: up, inside: false, curvature: 0.0 };
-                fast = fast_material(color, roughness, metal);
-                if pr(P_EMISSION) > 0.0 {
-                    radiance = add(radiance, had(throughput, mul(pv3(P_EMISSION_COLOR), pr(P_EMISSION))));
+                frame = ShadingFrame {
+                    n: geo_n,
+                    tangent: up,
+                    inside: false,
+                    curvature: 0.0,
+                };
+                fast = fast_material(ctx, color, roughness, metal);
+                if pr(ctx, P_EMISSION) > 0.0 {
+                    radiance = add(
+                        radiance,
+                        had(
+                            throughput,
+                            mul(pv3(ctx, P_EMISSION_COLOR), pr(ctx, P_EMISSION)),
+                        ),
+                    );
                 }
             }
 
@@ -1108,17 +1650,25 @@ pub mod kernels {
                 throughput = mul(throughput, 1.0 / p_continue);
             }
 
-            let weights = if FULL { lobe_weights(&full_inputs, &frame, wo) } else { Default::default() };
+            let weights = if full {
+                lobe_weights(&full_inputs, &frame, wo)
+            } else {
+                Default::default()
+            };
 
             // NEE: one sun/sky sample, MIS-weighted against BSDF sampling.
             let r1 = rand(r);
             let r2 = rand(r);
-            let (ld, lpdf) = env_sample(r1, r2);
+            let (ld, lpdf) = env_sample(ctx, lut, r1, r2);
             if lpdf > 0.0 {
-                let (f, bpdf) = if FULL {
+                let (f, bpdf) = if full {
                     let lobes = eval_light(&full_inputs, &frame, wo, ld);
                     let f = add(add(lobes.base, lobes.specular), lobes.transmission);
-                    let bpdf = if max3(f) > 0.0 { pdf_with(&full_inputs, &frame, wo, ld, &weights) } else { 0.0 };
+                    let bpdf = if max3(f) > 0.0 {
+                        pdf_with(&full_inputs, &frame, wo, ld, &weights)
+                    } else {
+                        0.0
+                    };
                     (f, bpdf)
                 } else {
                     fast_eval(&fast, geo_n, wo, ld)
@@ -1126,15 +1676,21 @@ pub mod kernels {
                 if max3(f) > 0.0 {
                     let so = add(m.point, mul(geo_n, eps));
                     let sb = slope * length(sub(so, cam));
-                    if !march::<F>(so, ld, RAY_VISIBILITY, sb, 0.0).hit {
+                    if !march::<F>(ctx, so, ld, RAY_VISIBILITY, sb, 0.0).hit {
                         let w = power_heuristic(lpdf, bpdf);
-                        radiance = add(radiance, had(throughput, had(f, mul(env_radiance(ld), w / lpdf))));
+                        radiance = add(
+                            radiance,
+                            had(
+                                throughput,
+                                had(f, mul(env_radiance(ctx, lut, ld), w / lpdf)),
+                            ),
+                        );
                     }
                 }
             }
 
             let u = [rand(r), rand(r), rand(r)];
-            let (wi, weight, pdf, ok, delta) = if FULL {
+            let (wi, weight, pdf, ok, delta) = if full {
                 let s = sample_with(&full_inputs, &frame, wo, u, &weights);
                 (s.wi, s.weight, s.pdf, s.valid, s.delta)
             } else {
@@ -1147,11 +1703,14 @@ pub mod kernels {
             throughput = had(throughput, weight);
             mis_bsdf_pdf = pdf;
             mis_env = !delta;
-            ro = add(m.point, mul(geo_n, if dot(wi, geo_n) < 0.0 { -eps } else { eps }));
+            ro = add(
+                m.point,
+                mul(geo_n, if dot(wi, geo_n) < 0.0 { -eps } else { eps }),
+            );
             rd = wi;
             bounce += 1;
         }
-        (radiance, primary_hit)
+        (radiance, primary_hit, primary_albedo, primary_normal)
     }
 
     /// Linear thread index -> pixel, in 8x4 tiles so a warp traces a compact patch.
@@ -1160,52 +1719,87 @@ pub mod kernels {
         let tiles_x = width.div_ceil(8);
         let tile = i / 32;
         let lane = i % 32;
-        ((tile % tiles_x) * 8 + lane % 8, (tile / tiles_x) * 4 + lane / 8)
+        (
+            (tile % tiles_x) * 8 + lane % 8,
+            (tile / tiles_x) * 4 + lane / 8,
+        )
     }
 
     #[inline(always)]
-    fn trace_pixel<const FULL: bool, const F: u32>(lut: &[[f32; 4]], i: u32, acc: &mut [f32; 4]) {
-        let width = pr(P_WIDTH) as u32;
-        let height = pr(P_HEIGHT) as u32;
+    fn trace_pixel<const FULL: bool, const F: u32>(
+        ctx: Context<'_>,
+        lut: &[[f32; 4]],
+        i: u32,
+        acc: &mut [f32; 4],
+        albedo: &mut [f32; 4],
+        normal: &mut [f32; 4],
+    ) {
+        let width = pr(ctx, P_WIDTH) as u32;
+        let height = pr(ctx, P_HEIGHT) as u32;
         let (x, y) = tile_pixel(i, width);
         if x >= width || y >= height {
             return;
         }
-        let begin = pr(P_SAMPLE_BEGIN) as u32;
-        let spp = pr(P_SPP) as u32;
-        let seed = pr(P_SEED) as u32;
-        let origin = pv3(P_CAM_ORIGIN);
-        let fwd = pv3(P_CAM_FORWARD);
-        let right = pv3(P_CAM_RIGHT);
-        let up = pv3(P_CAM_UP);
-        let aperture = pr(P_APERTURE);
-        let background = pr(P_BACKGROUND) != 0.0;
+        let begin = pr(ctx, P_SAMPLE_BEGIN) as u32;
+        let spp = pr(ctx, P_SPP) as u32;
+        let seed = pr(ctx, P_SEED) as u32;
+        let origin = pv3(ctx, P_CAM_ORIGIN);
+        let fwd = pv3(ctx, P_CAM_FORWARD);
+        let right = pv3(ctx, P_CAM_RIGHT);
+        let up = pv3(ctx, P_CAM_UP);
+        let aperture = pr(ctx, P_APERTURE);
+        let background = pr(ctx, P_BACKGROUND) != 0.0;
         let mut sum = [acc[0], acc[1], acc[2]];
+        let mut albedo_sum = [albedo[0], albedo[1], albedo[2]];
+        let mut normal_sum = [normal[0], normal[1], normal[2]];
         let mut s = 0u32;
         while s < spp {
-            let mut r = Rng { px: x ^ seed, py: y, sample: begin + s, dim: 0 };
+            let mut r = Rng {
+                px: x ^ seed,
+                py: y,
+                sample: begin + s,
+                dim: 0,
+            };
             let fx = x as f32 + rand(&mut r);
             let fy = y as f32 + rand(&mut r);
             let nx = 2.0 * fx / width as f32 - 1.0;
             let ny = 1.0 - 2.0 * fy / height as f32;
             let mut ro = origin;
-            let mut dir = normalize(add(fwd, add(mul(right, nx * pr(P_HALF_W)), mul(up, ny * pr(P_HALF_H)))));
+            let mut dir = normalize(add(
+                fwd,
+                add(
+                    mul(right, nx * pr(ctx, P_HALF_W)),
+                    mul(up, ny * pr(ctx, P_HALF_H)),
+                ),
+            ));
             if aperture > 0.0 {
                 // Thin lens: focus plane at P_FOCUS_DISTANCE along the view axis.
-                let focus = add(origin, mul(dir, pr(P_FOCUS_DISTANCE) / dot(dir, fwd)));
+                let focus = add(origin, mul(dir, pr(ctx, P_FOCUS_DISTANCE) / dot(dir, fwd)));
                 let (sa, ca) = (2.0 * PI * rand(&mut r)).sin_cos();
                 let rr = aperture * rand(&mut r).sqrt();
                 ro = add(origin, add(mul(right, rr * ca), mul(up, rr * sa)));
                 dir = normalize(sub(focus, ro));
             }
-            let (l, hit) = trace_path::<FULL, F>(lut, ro, dir, &mut r);
-            let l = if hit || background { l } else { sky_radiance(dir) };
-            let peak = max3(l);
-            let l = if peak > 64.0 { mul(l, 64.0 / peak) } else { l };
+            let (l, hit, a, n) = trace_path::<FULL, F>(ctx, lut, ro, dir, &mut r);
+            albedo_sum = add(albedo_sum, a);
+            normal_sum = add(normal_sum, n);
+            let l = if hit || background { l } else { [0.0; 3] };
             sum = add(sum, l);
             s += 1;
         }
         *acc = [sum[0], sum[1], sum[2], acc[3] + spp as f32];
+        *albedo = [
+            albedo_sum[0],
+            albedo_sum[1],
+            albedo_sum[2],
+            albedo[3] + spp as f32,
+        ];
+        *normal = [
+            normal_sum[0],
+            normal_sum[1],
+            normal_sum[2],
+            normal[3] + spp as f32,
+        ];
     }
 
     // One kernel per (family, material model): the family and the model are compile-time
@@ -1215,176 +1809,578 @@ pub mod kernels {
     #[kernel]
     #[launch_bounds(128)]
     #[launch_contract(domain = 1, block = (128, 1, 1))]
-    pub fn fast_bulb(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+    pub fn fast_bulb(
+        lut: &[[f32; 4]],
+        objects: &[f32],
+        lights: &[f32],
+        mut accum: DisjointSlice<[f32; 4]>,
+        mut albedo: DisjointSlice<[f32; 4]>,
+        mut normal: DisjointSlice<[f32; 4]>,
+    ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let Some(acc) = accum.get_mut(idx) {
-            trace_pixel::<false, FAMILY_BULB>(lut, i, acc);
+        if let (Some(acc), Some(albedo), Some(normal)) = (
+            accum.get_mut(idx),
+            albedo.get_mut(thread::index_1d()),
+            normal.get_mut(thread::index_1d()),
+        ) {
+            trace_pixel::<false, FAMILY_BULB>(
+                Context {
+                    world: false,
+                    objects,
+                    lights,
+                    object: 0,
+                },
+                lut,
+                i,
+                acc,
+                albedo,
+                normal,
+            );
         }
     }
 
     #[kernel]
     #[launch_bounds(128)]
     #[launch_contract(domain = 1, block = (128, 1, 1))]
-    pub fn fast_box(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+    pub fn fast_box(
+        lut: &[[f32; 4]],
+        objects: &[f32],
+        lights: &[f32],
+        mut accum: DisjointSlice<[f32; 4]>,
+        mut albedo: DisjointSlice<[f32; 4]>,
+        mut normal: DisjointSlice<[f32; 4]>,
+    ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let Some(acc) = accum.get_mut(idx) {
-            trace_pixel::<false, FAMILY_BOX>(lut, i, acc);
+        if let (Some(acc), Some(albedo), Some(normal)) = (
+            accum.get_mut(idx),
+            albedo.get_mut(thread::index_1d()),
+            normal.get_mut(thread::index_1d()),
+        ) {
+            trace_pixel::<false, FAMILY_BOX>(
+                Context {
+                    world: false,
+                    objects,
+                    lights,
+                    object: 0,
+                },
+                lut,
+                i,
+                acc,
+                albedo,
+                normal,
+            );
         }
     }
 
     #[kernel]
     #[launch_bounds(128)]
     #[launch_contract(domain = 1, block = (128, 1, 1))]
-    pub fn fast_quat(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+    pub fn fast_quat(
+        lut: &[[f32; 4]],
+        objects: &[f32],
+        lights: &[f32],
+        mut accum: DisjointSlice<[f32; 4]>,
+        mut albedo: DisjointSlice<[f32; 4]>,
+        mut normal: DisjointSlice<[f32; 4]>,
+    ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let Some(acc) = accum.get_mut(idx) {
-            trace_pixel::<false, FAMILY_QUAT>(lut, i, acc);
+        if let (Some(acc), Some(albedo), Some(normal)) = (
+            accum.get_mut(idx),
+            albedo.get_mut(thread::index_1d()),
+            normal.get_mut(thread::index_1d()),
+        ) {
+            trace_pixel::<false, FAMILY_QUAT>(
+                Context {
+                    world: false,
+                    objects,
+                    lights,
+                    object: 0,
+                },
+                lut,
+                i,
+                acc,
+                albedo,
+                normal,
+            );
         }
     }
 
     #[kernel]
     #[launch_bounds(128)]
     #[launch_contract(domain = 1, block = (128, 1, 1))]
-    pub fn fast_kifs(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+    pub fn fast_kifs(
+        lut: &[[f32; 4]],
+        objects: &[f32],
+        lights: &[f32],
+        mut accum: DisjointSlice<[f32; 4]>,
+        mut albedo: DisjointSlice<[f32; 4]>,
+        mut normal: DisjointSlice<[f32; 4]>,
+    ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let Some(acc) = accum.get_mut(idx) {
-            trace_pixel::<false, FAMILY_KIFS>(lut, i, acc);
+        if let (Some(acc), Some(albedo), Some(normal)) = (
+            accum.get_mut(idx),
+            albedo.get_mut(thread::index_1d()),
+            normal.get_mut(thread::index_1d()),
+        ) {
+            trace_pixel::<false, FAMILY_KIFS>(
+                Context {
+                    world: false,
+                    objects,
+                    lights,
+                    object: 0,
+                },
+                lut,
+                i,
+                acc,
+                albedo,
+                normal,
+            );
         }
     }
 
     #[kernel]
     #[launch_bounds(128)]
     #[launch_contract(domain = 1, block = (128, 1, 1))]
-    pub fn fast_kleinian(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+    pub fn fast_kleinian(
+        lut: &[[f32; 4]],
+        objects: &[f32],
+        lights: &[f32],
+        mut accum: DisjointSlice<[f32; 4]>,
+        mut albedo: DisjointSlice<[f32; 4]>,
+        mut normal: DisjointSlice<[f32; 4]>,
+    ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let Some(acc) = accum.get_mut(idx) {
-            trace_pixel::<false, FAMILY_KLEINIAN>(lut, i, acc);
+        if let (Some(acc), Some(albedo), Some(normal)) = (
+            accum.get_mut(idx),
+            albedo.get_mut(thread::index_1d()),
+            normal.get_mut(thread::index_1d()),
+        ) {
+            trace_pixel::<false, FAMILY_KLEINIAN>(
+                Context {
+                    world: false,
+                    objects,
+                    lights,
+                    object: 0,
+                },
+                lut,
+                i,
+                acc,
+                albedo,
+                normal,
+            );
         }
     }
 
     #[kernel]
     #[launch_bounds(128)]
     #[launch_contract(domain = 1, block = (128, 1, 1))]
-    pub fn fast_pseudo_kleinian(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+    pub fn fast_pseudo_kleinian(
+        lut: &[[f32; 4]],
+        objects: &[f32],
+        lights: &[f32],
+        mut accum: DisjointSlice<[f32; 4]>,
+        mut albedo: DisjointSlice<[f32; 4]>,
+        mut normal: DisjointSlice<[f32; 4]>,
+    ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let Some(acc) = accum.get_mut(idx) {
-            trace_pixel::<false, FAMILY_PSEUDO_KLEINIAN>(lut, i, acc);
+        if let (Some(acc), Some(albedo), Some(normal)) = (
+            accum.get_mut(idx),
+            albedo.get_mut(thread::index_1d()),
+            normal.get_mut(thread::index_1d()),
+        ) {
+            trace_pixel::<false, FAMILY_PSEUDO_KLEINIAN>(
+                Context {
+                    world: false,
+                    objects,
+                    lights,
+                    object: 0,
+                },
+                lut,
+                i,
+                acc,
+                albedo,
+                normal,
+            );
         }
     }
 
     #[kernel]
     #[launch_bounds(128)]
     #[launch_contract(domain = 1, block = (128, 1, 1))]
-    pub fn fast_apollonian(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+    pub fn fast_apollonian(
+        lut: &[[f32; 4]],
+        objects: &[f32],
+        lights: &[f32],
+        mut accum: DisjointSlice<[f32; 4]>,
+        mut albedo: DisjointSlice<[f32; 4]>,
+        mut normal: DisjointSlice<[f32; 4]>,
+    ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let Some(acc) = accum.get_mut(idx) {
-            trace_pixel::<false, FAMILY_APOLLONIAN>(lut, i, acc);
+        if let (Some(acc), Some(albedo), Some(normal)) = (
+            accum.get_mut(idx),
+            albedo.get_mut(thread::index_1d()),
+            normal.get_mut(thread::index_1d()),
+        ) {
+            trace_pixel::<false, FAMILY_APOLLONIAN>(
+                Context {
+                    world: false,
+                    objects,
+                    lights,
+                    object: 0,
+                },
+                lut,
+                i,
+                acc,
+                albedo,
+                normal,
+            );
         }
     }
 
     #[kernel]
     #[launch_bounds(128)]
     #[launch_contract(domain = 1, block = (128, 1, 1))]
-    pub fn fast_hybrid(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+    pub fn fast_hybrid(
+        lut: &[[f32; 4]],
+        objects: &[f32],
+        lights: &[f32],
+        mut accum: DisjointSlice<[f32; 4]>,
+        mut albedo: DisjointSlice<[f32; 4]>,
+        mut normal: DisjointSlice<[f32; 4]>,
+    ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let Some(acc) = accum.get_mut(idx) {
-            trace_pixel::<false, FAMILY_HYBRID>(lut, i, acc);
+        if let (Some(acc), Some(albedo), Some(normal)) = (
+            accum.get_mut(idx),
+            albedo.get_mut(thread::index_1d()),
+            normal.get_mut(thread::index_1d()),
+        ) {
+            trace_pixel::<false, FAMILY_HYBRID>(
+                Context {
+                    world: false,
+                    objects,
+                    lights,
+                    object: 0,
+                },
+                lut,
+                i,
+                acc,
+                albedo,
+                normal,
+            );
         }
     }
 
     #[kernel]
     #[launch_bounds(128)]
     #[launch_contract(domain = 1, block = (128, 1, 1))]
-    pub fn full_bulb(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+    pub fn full_bulb(
+        lut: &[[f32; 4]],
+        objects: &[f32],
+        lights: &[f32],
+        mut accum: DisjointSlice<[f32; 4]>,
+        mut albedo: DisjointSlice<[f32; 4]>,
+        mut normal: DisjointSlice<[f32; 4]>,
+    ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let Some(acc) = accum.get_mut(idx) {
-            trace_pixel::<true, FAMILY_BULB>(lut, i, acc);
+        if let (Some(acc), Some(albedo), Some(normal)) = (
+            accum.get_mut(idx),
+            albedo.get_mut(thread::index_1d()),
+            normal.get_mut(thread::index_1d()),
+        ) {
+            trace_pixel::<true, FAMILY_BULB>(
+                Context {
+                    world: false,
+                    objects,
+                    lights,
+                    object: 0,
+                },
+                lut,
+                i,
+                acc,
+                albedo,
+                normal,
+            );
         }
     }
 
     #[kernel]
     #[launch_bounds(128)]
     #[launch_contract(domain = 1, block = (128, 1, 1))]
-    pub fn full_box(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+    pub fn full_box(
+        lut: &[[f32; 4]],
+        objects: &[f32],
+        lights: &[f32],
+        mut accum: DisjointSlice<[f32; 4]>,
+        mut albedo: DisjointSlice<[f32; 4]>,
+        mut normal: DisjointSlice<[f32; 4]>,
+    ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let Some(acc) = accum.get_mut(idx) {
-            trace_pixel::<true, FAMILY_BOX>(lut, i, acc);
+        if let (Some(acc), Some(albedo), Some(normal)) = (
+            accum.get_mut(idx),
+            albedo.get_mut(thread::index_1d()),
+            normal.get_mut(thread::index_1d()),
+        ) {
+            trace_pixel::<true, FAMILY_BOX>(
+                Context {
+                    world: false,
+                    objects,
+                    lights,
+                    object: 0,
+                },
+                lut,
+                i,
+                acc,
+                albedo,
+                normal,
+            );
         }
     }
 
     #[kernel]
     #[launch_bounds(128)]
     #[launch_contract(domain = 1, block = (128, 1, 1))]
-    pub fn full_quat(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+    pub fn full_quat(
+        lut: &[[f32; 4]],
+        objects: &[f32],
+        lights: &[f32],
+        mut accum: DisjointSlice<[f32; 4]>,
+        mut albedo: DisjointSlice<[f32; 4]>,
+        mut normal: DisjointSlice<[f32; 4]>,
+    ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let Some(acc) = accum.get_mut(idx) {
-            trace_pixel::<true, FAMILY_QUAT>(lut, i, acc);
+        if let (Some(acc), Some(albedo), Some(normal)) = (
+            accum.get_mut(idx),
+            albedo.get_mut(thread::index_1d()),
+            normal.get_mut(thread::index_1d()),
+        ) {
+            trace_pixel::<true, FAMILY_QUAT>(
+                Context {
+                    world: false,
+                    objects,
+                    lights,
+                    object: 0,
+                },
+                lut,
+                i,
+                acc,
+                albedo,
+                normal,
+            );
         }
     }
 
     #[kernel]
     #[launch_bounds(128)]
     #[launch_contract(domain = 1, block = (128, 1, 1))]
-    pub fn full_kifs(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+    pub fn full_kifs(
+        lut: &[[f32; 4]],
+        objects: &[f32],
+        lights: &[f32],
+        mut accum: DisjointSlice<[f32; 4]>,
+        mut albedo: DisjointSlice<[f32; 4]>,
+        mut normal: DisjointSlice<[f32; 4]>,
+    ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let Some(acc) = accum.get_mut(idx) {
-            trace_pixel::<true, FAMILY_KIFS>(lut, i, acc);
+        if let (Some(acc), Some(albedo), Some(normal)) = (
+            accum.get_mut(idx),
+            albedo.get_mut(thread::index_1d()),
+            normal.get_mut(thread::index_1d()),
+        ) {
+            trace_pixel::<true, FAMILY_KIFS>(
+                Context {
+                    world: false,
+                    objects,
+                    lights,
+                    object: 0,
+                },
+                lut,
+                i,
+                acc,
+                albedo,
+                normal,
+            );
         }
     }
 
     #[kernel]
     #[launch_bounds(128)]
     #[launch_contract(domain = 1, block = (128, 1, 1))]
-    pub fn full_kleinian(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+    pub fn full_kleinian(
+        lut: &[[f32; 4]],
+        objects: &[f32],
+        lights: &[f32],
+        mut accum: DisjointSlice<[f32; 4]>,
+        mut albedo: DisjointSlice<[f32; 4]>,
+        mut normal: DisjointSlice<[f32; 4]>,
+    ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let Some(acc) = accum.get_mut(idx) {
-            trace_pixel::<true, FAMILY_KLEINIAN>(lut, i, acc);
+        if let (Some(acc), Some(albedo), Some(normal)) = (
+            accum.get_mut(idx),
+            albedo.get_mut(thread::index_1d()),
+            normal.get_mut(thread::index_1d()),
+        ) {
+            trace_pixel::<true, FAMILY_KLEINIAN>(
+                Context {
+                    world: false,
+                    objects,
+                    lights,
+                    object: 0,
+                },
+                lut,
+                i,
+                acc,
+                albedo,
+                normal,
+            );
         }
     }
 
     #[kernel]
     #[launch_bounds(128)]
     #[launch_contract(domain = 1, block = (128, 1, 1))]
-    pub fn full_pseudo_kleinian(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+    pub fn full_pseudo_kleinian(
+        lut: &[[f32; 4]],
+        objects: &[f32],
+        lights: &[f32],
+        mut accum: DisjointSlice<[f32; 4]>,
+        mut albedo: DisjointSlice<[f32; 4]>,
+        mut normal: DisjointSlice<[f32; 4]>,
+    ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let Some(acc) = accum.get_mut(idx) {
-            trace_pixel::<true, FAMILY_PSEUDO_KLEINIAN>(lut, i, acc);
+        if let (Some(acc), Some(albedo), Some(normal)) = (
+            accum.get_mut(idx),
+            albedo.get_mut(thread::index_1d()),
+            normal.get_mut(thread::index_1d()),
+        ) {
+            trace_pixel::<true, FAMILY_PSEUDO_KLEINIAN>(
+                Context {
+                    world: false,
+                    objects,
+                    lights,
+                    object: 0,
+                },
+                lut,
+                i,
+                acc,
+                albedo,
+                normal,
+            );
         }
     }
 
     #[kernel]
     #[launch_bounds(128)]
     #[launch_contract(domain = 1, block = (128, 1, 1))]
-    pub fn full_apollonian(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+    pub fn full_apollonian(
+        lut: &[[f32; 4]],
+        objects: &[f32],
+        lights: &[f32],
+        mut accum: DisjointSlice<[f32; 4]>,
+        mut albedo: DisjointSlice<[f32; 4]>,
+        mut normal: DisjointSlice<[f32; 4]>,
+    ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let Some(acc) = accum.get_mut(idx) {
-            trace_pixel::<true, FAMILY_APOLLONIAN>(lut, i, acc);
+        if let (Some(acc), Some(albedo), Some(normal)) = (
+            accum.get_mut(idx),
+            albedo.get_mut(thread::index_1d()),
+            normal.get_mut(thread::index_1d()),
+        ) {
+            trace_pixel::<true, FAMILY_APOLLONIAN>(
+                Context {
+                    world: false,
+                    objects,
+                    lights,
+                    object: 0,
+                },
+                lut,
+                i,
+                acc,
+                albedo,
+                normal,
+            );
         }
     }
 
     #[kernel]
     #[launch_bounds(128)]
     #[launch_contract(domain = 1, block = (128, 1, 1))]
-    pub fn full_hybrid(lut: &[[f32; 4]], mut accum: DisjointSlice<[f32; 4]>) {
+    pub fn full_hybrid(
+        lut: &[[f32; 4]],
+        objects: &[f32],
+        lights: &[f32],
+        mut accum: DisjointSlice<[f32; 4]>,
+        mut albedo: DisjointSlice<[f32; 4]>,
+        mut normal: DisjointSlice<[f32; 4]>,
+    ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let Some(acc) = accum.get_mut(idx) {
-            trace_pixel::<true, FAMILY_HYBRID>(lut, i, acc);
+        if let (Some(acc), Some(albedo), Some(normal)) = (
+            accum.get_mut(idx),
+            albedo.get_mut(thread::index_1d()),
+            normal.get_mut(thread::index_1d()),
+        ) {
+            trace_pixel::<true, FAMILY_HYBRID>(
+                Context {
+                    world: false,
+                    objects,
+                    lights,
+                    object: 0,
+                },
+                lut,
+                i,
+                acc,
+                albedo,
+                normal,
+            );
+        }
+    }
+
+    #[kernel]
+    #[launch_bounds(128)]
+    #[launch_contract(domain = 1, block = (128, 1, 1))]
+    pub fn world(
+        lut: &[[f32; 4]],
+        objects: &[f32],
+        lights: &[f32],
+        mut accum: DisjointSlice<[f32; 4]>,
+        mut albedo: DisjointSlice<[f32; 4]>,
+        mut normal: DisjointSlice<[f32; 4]>,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if let (Some(acc), Some(albedo), Some(normal)) = (
+            accum.get_mut(idx),
+            albedo.get_mut(thread::index_1d()),
+            normal.get_mut(thread::index_1d()),
+        ) {
+            trace_pixel::<false, FAMILY_WORLD>(
+                Context {
+                    world: true,
+                    objects,
+                    lights,
+                    object: 0,
+                },
+                lut,
+                i,
+                acc,
+                albedo,
+                normal,
+            );
         }
     }
 
@@ -1396,17 +2392,26 @@ pub mod kernels {
     pub fn tonemap(accum: &[[f32; 4]], mut out: DisjointSlice<[f32; 4]>) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        let width = pr(P_WIDTH) as u32;
+        let width = global(P_WIDTH) as u32;
         if let Some(px) = out.get_mut(idx) {
             let x = i % width;
             let y = i / width;
             let tile = (y / 4) * width.div_ceil(8) + x / 8;
             let a = accum[(tile * 32 + (y % 4) * 8 + x % 8) as usize];
-            let inv = if a[3] > 0.0 { pr(P_EXPOSURE) / a[3] } else { 0.0 };
+            let inv = if a[3] > 0.0 {
+                global(P_EXPOSURE) / a[3]
+            } else {
+                0.0
+            };
             let c = [a[0] * inv, a[1] * inv, a[2] * inv];
             let l = luminance(c);
-            let sat = pr(P_SATURATION);
-            *px = [l + (c[0] - l) * sat, l + (c[1] - l) * sat, l + (c[2] - l) * sat, 1.0];
+            let sat = global(P_SATURATION);
+            *px = [
+                l + (c[0] - l) * sat,
+                l + (c[1] - l) * sat,
+                l + (c[2] - l) * sat,
+                1.0,
+            ];
         }
     }
 }

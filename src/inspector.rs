@@ -273,11 +273,18 @@ pub fn camera(ui: &mut Ui, s: &mut Scene) {
         t.row("Yaw °")
             .default(defaults.yaw_degrees)
             .slider(&mut c.yaw_degrees, -180.0..=180.0);
-        t.row("Pitch °")
-            .default(defaults.pitch_degrees)
-            .slider(&mut c.pitch_degrees, if c.free_flight { -90.0..=90.0 } else { -89.0..=89.0 });
+        t.row("Pitch °").default(defaults.pitch_degrees).slider(
+            &mut c.pitch_degrees,
+            if c.free_flight {
+                -90.0..=90.0
+            } else {
+                -89.0..=89.0
+            },
+        );
         if c.free_flight {
-            t.row("Roll °").default(0.0).slider(&mut c.roll_degrees, -180.0..=180.0);
+            t.row("Roll °")
+                .default(0.0)
+                .slider(&mut c.roll_degrees, -180.0..=180.0);
         }
         t.row("Distance")
             .tip("Distance in formula framing radii")
@@ -298,8 +305,11 @@ pub fn camera(ui: &mut Ui, s: &mut Scene) {
     });
     vector(ui, "Target", &mut c.target, -10.0..=10.0);
     ui.small("LMB orbit · MMB pan · wheel zoom · RMB fly · ` / ~ switches flight mode");
-    ui.small(if c.free_flight { "Free: WASD · R/C up/down · Q/E roll · Shift boost" }
-        else { "Horizon: WASD · R/C up/down · Q/E enables roll · Shift boost" });
+    ui.small(if c.free_flight {
+        "Free: WASD · R/C up/down · Q/E roll · Shift boost"
+    } else {
+        "Horizon: WASD · R/C up/down · Q/E enables roll · Shift boost"
+    });
 }
 pub fn lighting(ui: &mut Ui, l: &mut Lighting) {
     let d = Lighting::default();
@@ -540,6 +550,26 @@ pub fn render(ui: &mut Ui, r: &mut Render, target: &mut u32, resolution: &mut f3
         t.row("Legacy Reinhard")
             .default(false)
             .checkbox(&mut r.reinhard);
+        t.row("OIDN denoise")
+            .default(true)
+            .checkbox(&mut r.denoise.enabled);
+        if r.denoise.enabled {
+            t.row("Denoise every N samples")
+                .tip("0 runs only the final pass; changing this preserves accumulated samples")
+                .default(128u32)
+                .int_slider(&mut r.denoise.interval, 0..=65536);
+            let modes: Vec<_> = crate::denoise::Mode::ALL
+                .iter()
+                .map(|v| (v.label(), *v))
+                .collect();
+            t.row("Denoise guides").combo(&mut r.denoise.mode, &modes);
+            let qualities: Vec<_> = crate::denoise::Quality::ALL
+                .iter()
+                .map(|v| (v.label(), *v))
+                .collect();
+            t.row("Denoise quality")
+                .combo(&mut r.denoise.quality, &qualities);
+        }
         t.row("Target samples")
             .default(1024u32)
             .int_slider(target, 1..=65536);

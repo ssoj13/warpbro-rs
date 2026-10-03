@@ -302,7 +302,13 @@ impl ExportController {
                 }
             });
             ui.checkbox(&mut self.settings.overwrite,"Overwrite existing output");
-            ui.label("The scene is frozen when export starts. Each frame uses independent samples; no animation track is configured.");
+            if ui.button("Use timeline range and FPS").clicked() {
+                self.settings.first = scene.animation.first;
+                self.settings.last = scene.animation.last;
+                self.settings.fps_num = (scene.animation.fps * 1000.0).round().clamp(1.0,120000.0) as u32;
+                self.settings.fps_den = 1000;
+            }
+            ui.label("Animation is sampled at each frame. The scene and keys are frozen when export starts.");
             let hint = schema.formats[if self.settings.format == ExportFormat::Exr {0} else {1}].codecs[0].hint.as_deref().unwrap_or("");
             ui.small(hint);
             let validation = self.settings.validate();
@@ -340,6 +346,7 @@ fn coordinate_export(
     let (reply, events) = mpsc::sync_channel(16);
     let result = (|| -> Result<bool, String> {
         for number in settings.first..=settings.last {
+            let frame_scene = scene.evaluated(f64::from(number))?;
             let id = first_id + u64::from(number - settings.first);
             loop {
                 if cancel.load(Ordering::Acquire) {
@@ -347,7 +354,7 @@ fn coordinate_export(
                 }
                 match port.try_command(Command::RenderExport {
                     id,
-                    scene: scene.clone(),
+                    scene: frame_scene.clone(),
                     width: settings.width,
                     height: settings.height,
                     spp: settings.samples,
@@ -778,6 +785,9 @@ mod tests {
             radiance: vec![[2., 0.5, 0.125, 1.]; width * height],
             hdr: false,
             colour_error: None,
+            denoised_samples: 0,
+            denoise_ms: 0.0,
+            denoise_error: None,
             samples: 4,
             last_ms: 1.,
             last_spp: 4,
@@ -865,7 +875,7 @@ mod tests {
     }
 
     #[test]
-    fn cuda_export_coordinator_writes_each_frame_once() {
+    fn cuda_export_coordinator_samples_animation_and_writes_each_frame_once() {
         let dir = temp_dir("cuda");
         let service = RenderService::spawn();
         let mut controller = ExportController::default();
@@ -875,9 +885,15 @@ mod tests {
         controller.settings.samples = 2;
         controller.settings.first = 3;
         controller.settings.last = 4;
-        controller
-            .start(&Scene::preset(crate::params::FAMILY_KIFS), &service)
-            .unwrap();
+        let mut scene = Scene::preset(crate::params::FAMILY_KIFS);
+        scene.render.denoise.enabled = false; // This test checks exact physical animation output.
+        scene.camera.target = [1000.0; 3];
+        scene.lighting.sun_intensity = 0.0;
+        scene.lighting.sky_intensity = 0.0;
+        scene.key_parameter("/lighting/sky_intensity", 3.0);
+        scene.lighting.sky_intensity = 2.0;
+        scene.key_parameter("/lighting/sky_intensity", 4.0);
+        controller.start(&scene, &service).unwrap();
         let until = std::time::Instant::now() + Duration::from_secs(90);
         // Deliberately never poll GUI events or call update while the pipeline runs.
         while !controller
@@ -901,6 +917,29 @@ mod tests {
         assert_eq!(controller.status, "Export complete");
         assert!(controller.settings.frame_path(3).exists());
         assert!(controller.settings.frame_path(4).exists());
+        let pixel = |number| {
+            exr::prelude::read_first_rgba_layer_from_file(
+                controller.settings.frame_path(number),
+                |resolution, _| {
+                    vec![
+                        vec![(0.0f32, 0.0f32, 0.0f32, 0.0f32); resolution.width()];
+                        resolution.height()
+                    ]
+                },
+                |pixels, position, rgba: (f32, f32, f32, f32)| {
+                    pixels[position.y()][position.x()] = rgba
+                },
+            )
+            .unwrap()
+            .layer_data
+            .channel_data
+            .pixels[0][0]
+        };
+        assert_eq!(pixel(3).0, 0.0);
+        assert!(
+            pixel(4).0 > 0.0,
+            "Each exported frame must evaluate its animation"
+        );
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
         std::fs::remove_dir_all(dir).unwrap();
     }

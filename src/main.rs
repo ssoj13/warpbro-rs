@@ -7,9 +7,14 @@
 //!   frac-rs --gallery DIR [W H SPP]          render every gallery preset to DIR/*.png
 //!   frac-rs --bench [W H SPP]                time every preset
 
+mod animation;
 mod app;
 mod color;
+mod denoise;
+mod environment;
 mod inspector;
+#[cfg(test)]
+mod timeline;
 // Keep the copied viewer API intact, including its CPU oracle used by tests.
 mod export;
 mod gpu;
@@ -24,6 +29,8 @@ mod render_service;
 mod scene;
 mod transfer;
 mod window;
+mod world;
+mod world_ui;
 
 use std::time::Instant;
 
@@ -63,12 +70,13 @@ fn headless(out: Option<&str>, w: usize, h: usize, spp: u32, hdr: bool, display_
             scene.colour.view = color::HDR_VIEW.into();
         }
         let mut t = gpu.target(w, h);
-        gpu.step(&mut t, &scene, 1, 0, None); // warm-up
+        gpu.step(&mut t, &scene, 1, 0, None, spp <= 1); // warm-up
         let batch = 8u32;
         let t0 = Instant::now();
         while t.samples < spp {
             let n = batch.min(spp - t.samples);
-            gpu.step(&mut t, &scene, n, 0, None);
+            let final_pass = t.samples + n >= spp;
+            gpu.step(&mut t, &scene, n, 0, None, final_pass);
         }
         let secs = t0.elapsed().as_secs_f64();
         let traced = (spp - 1).max(1) as f64;

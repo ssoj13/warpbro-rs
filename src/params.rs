@@ -16,6 +16,8 @@ macro_rules! slots {
 }
 
 slots! {
+    // World ABI v1: object/light buffers are immutable for each worker launch.
+    P_WORLD = 1, P_OBJECT_COUNT = 1, P_LIGHT_COUNT = 1,
     // frame
     P_WIDTH = 1, P_HEIGHT = 1, P_SAMPLE_BEGIN = 1, P_SPP = 1, P_SEED = 1,
     // camera (thin lens)
@@ -54,6 +56,8 @@ slots! {
     P_LIGHT_DIR = 3, P_LIGHT_COLOR = 3, P_LIGHT_INTENSITY = 1, P_SUN_ONE_MINUS_COS = 1,
     P_SUN_CONE_PDF = 1, P_SKY_INTENSITY = 1, P_SKY_HORIZON = 3, P_SKY_ZENITH = 3,
     P_BACKGROUND = 1,
+    // Lat-long HDR map appended to the palette buffer; host fills dimensions and mean.
+    P_ENV_WIDTH = 1, P_ENV_HEIGHT = 1, P_ENV_MEAN = 1, P_ENV_INTENSITY = 1, P_ENV_ROTATION = 1,
     // material (Standard Surface inputs; the fast model reads base/metal/specular/roughness)
     P_BASE = 1, P_BASE_TINT = 3, P_DIFFUSE_ROUGHNESS = 1, P_METALNESS = 1,
     P_SPECULAR = 1, P_SPECULAR_COLOR = 3, P_SPECULAR_ROUGHNESS = 1, P_SPECULAR_IOR = 1,
@@ -79,6 +83,16 @@ pub const FAMILY_KLEINIAN: u32 = 4;
 pub const FAMILY_PSEUDO_KLEINIAN: u32 = 5;
 pub const FAMILY_APOLLONIAN: u32 = 6;
 pub const FAMILY_HYBRID: u32 = 7;
+pub const FAMILY_WORLD: u32 = 8;
+
+/// Each object starts with the existing parameter layout, then a row-major inverse affine.
+pub const WORLD_ABI_VERSION: u32 = 1;
+pub const O_INVERSE: usize = P_COUNT;
+pub const O_DISTANCE_SCALE: usize = O_INVERSE + 12;
+pub const O_CLIP_RADIUS: usize = O_DISTANCE_SCALE + 1;
+pub const O_TANGENT: usize = O_CLIP_RADIUS + 1;
+pub const OBJECT_STRIDE: usize = O_TANGENT + 3;
+pub const LIGHT_STRIDE: usize = P_SKY_INTENSITY - P_LIGHT_DIR;
 
 /// Palette LUT entries (ofx-gen PALETTE_SAMPLES) plus the interior colour.
 pub const PALETTE_SAMPLES: usize = 1024;

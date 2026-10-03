@@ -40,6 +40,9 @@ pub struct Frame {
     pub radiance: Vec<[f32; 4]>,
     pub hdr: bool,
     pub colour_error: Option<String>,
+    pub denoised_samples: u32,
+    pub denoise_ms: f32,
+    pub denoise_error: Option<String>,
     pub samples: u32,
     pub last_ms: f32,
     pub last_spp: u32,
@@ -89,6 +92,13 @@ impl Frame {
             radiance: Vec::new(),
             hdr: target.hdr,
             colour_error: target.colour_error.clone(),
+            denoised_samples: if target.denoise.output.is_some() {
+                target.denoise.last_samples
+            } else {
+                0
+            },
+            denoise_ms: target.denoise.last_ms,
+            denoise_error: target.denoise.error.clone(),
             samples: target.samples,
             last_ms: target.last_ms,
             last_spp: target.last_spp,
@@ -445,6 +455,7 @@ fn trace_key(request: &ViewportRequest) -> Vec<f32> {
     ] {
         key[index] = 0.0;
     }
+    key.extend(crate::render::scene_trace_data(&request.scene));
     key
 }
 struct Viewport {
@@ -480,6 +491,7 @@ impl Viewport {
         let key = trace_key(&request);
         if key != self.key
             || request.scene.palette != self.request.scene.palette
+            || request.scene.environment.key() != self.request.scene.environment.key()
             || request.seed != self.request.seed
         {
             self.changed = Instant::now();
@@ -584,7 +596,9 @@ fn run_worker(shared: &Shared) {
             state.active_export_reply = None;
         }
         if let Some(request) = request {
-            if let Err(error) = validate_size(request.width, request.height, request.target_spp) {
+            if let Err(error) = validate_size(request.width, request.height, request.target_spp)
+                .and_then(|()| gpu.ensure_environment(&request.scene).map(|_| ()))
+            {
                 push_event(shared, RenderEvent::Error(error));
             } else if let Some(active) = &mut viewport {
                 active.update(request);
@@ -609,8 +623,14 @@ fn run_worker(shared: &Shared) {
                     spp,
                     reply,
                 } => {
-                    if let Err(error) = validate_size(width, height, spp) {
-                        push_event(shared, RenderEvent::Error(error));
+                    if let Err(error) = validate_size(width, height, spp)
+                        .and_then(|()| gpu.ensure_environment(&scene).map(|_| ()))
+                    {
+                        dispatch_export(
+                            shared,
+                            reply.as_ref(),
+                            RenderEvent::ExportFailed { id, error },
+                        );
                     } else {
                         {
                             let mut state = shared.state.lock().unwrap();
@@ -633,7 +653,16 @@ fn run_worker(shared: &Shared) {
                     height,
                     spp,
                 } => {
-                    if let Err(error) = validate_size(width, height, spp) {
+                    let scene = match thumbnail_snapshot(scene) {
+                        Ok(scene) => scene,
+                        Err(error) => {
+                            push_event(shared, RenderEvent::Error(error));
+                            continue;
+                        }
+                    };
+                    if let Err(error) = validate_size(width, height, spp)
+                        .and_then(|()| gpu.ensure_environment(&scene).map(|_| ()))
+                    {
                         push_event(shared, RenderEvent::Error(error));
                     } else {
                         thumbnail = Some(RenderJob {
@@ -656,7 +685,15 @@ fn run_worker(shared: &Shared) {
             background_batch_allowed(job.target.last_ms, job.target.last_spp, interactive)
         }) {
             let batch = batch_size(&job.target, job.spp.saturating_sub(job.target.samples));
-            gpu.step(&mut job.target, &job.scene, batch, job.id as u32, None);
+            let final_pass = job.target.samples.saturating_add(batch) >= job.spp;
+            gpu.step(
+                &mut job.target,
+                &job.scene,
+                batch,
+                job.id as u32,
+                None,
+                final_pass,
+            );
             worked = true;
             let cancelled = shared.state.lock().unwrap().cancel_export;
             if !cancelled {
@@ -691,7 +728,8 @@ fn run_worker(shared: &Shared) {
         if let Some(job) = &mut thumbnail {
             if !interactive && job.target.samples < job.spp {
                 let batch = batch_size(&job.target, job.spp.saturating_sub(job.target.samples));
-                gpu.step(&mut job.target, &job.scene, batch, 7, None);
+                let final_pass = job.target.samples.saturating_add(batch) >= job.spp;
+                gpu.step(&mut job.target, &job.scene, batch, 7, None, final_pass);
                 worked = true;
             }
             if job.target.samples >= job.spp
@@ -713,8 +751,18 @@ fn run_worker(shared: &Shared) {
         }
     }
 }
+fn thumbnail_snapshot(mut scene: Scene) -> Result<Scene, String> {
+    if let Some(document) = scene.document.take() {
+        scene = document.snapshot(document.first as f64)?;
+    }
+    scene.render.max_bounces = scene.render.max_bounces.min(3);
+    Ok(scene)
+}
+
 fn viewport_interactive(viewport: &Viewport) -> bool {
-    viewport.request.active && !viewport.request.paused && viewport.changed.elapsed() < PREVIEW_HOLD
+    viewport.request.active
+        && !viewport.request.paused
+        && (viewport.request.interactive || viewport.changed.elapsed() < PREVIEW_HOLD)
 }
 fn background_batch_allowed(last_ms: f32, last_spp: u32, interactive: bool) -> bool {
     // A CUDA kernel cannot be preempted here. If even one previously measured sample
@@ -738,7 +786,8 @@ fn step_viewport(gpu: &mut Gpu, active: &mut Viewport, shared: &Shared) -> bool 
     if !request.active {
         return false;
     }
-    let preview = !request.paused && active.changed.elapsed() < PREVIEW_HOLD;
+    let preview =
+        !request.paused && (request.interactive || active.changed.elapsed() < PREVIEW_HOLD);
     let (width, height) = if preview {
         ((request.width / 2).max(1), (request.height / 2).max(1))
     } else {
@@ -774,12 +823,14 @@ fn step_viewport(gpu: &mut Gpu, active: &mut Viewport, shared: &Shared) -> bool 
     if spp == 0 && !active.dirty && !fresh && active.last_preview == preview {
         return false;
     }
+    let final_pass = !preview && target.samples.saturating_add(spp) >= goal;
     gpu.step(
         target,
         &request.scene,
         spp,
         request.seed,
         preview.then_some(2),
+        final_pass,
     );
     if active.dirty
         || fresh
@@ -831,12 +882,74 @@ mod tests {
             radiance: Vec::new(),
             hdr: false,
             colour_error: None,
+            denoised_samples: 0,
+            denoise_ms: 0.0,
+            denoise_error: None,
             samples: 1,
             last_ms: 1.0,
             last_spp: 1,
             sdr_bytes: Arc::new(vec![0; 4]),
             hdr_bytes: Arc::new(Vec::new()),
         })
+    }
+
+    #[test]
+    #[ignore = "requires actual CUDA and shared wgpu OIDN inference"]
+    fn cuda_export_forces_oidn_below_interval_and_publishes_linear_result() {
+        let service = RenderService::spawn();
+        let mut scene = Scene::preset(crate::params::FAMILY_BULB);
+        scene.world_render = true;
+        scene.camera.target = [1000.0; 3];
+        scene.lighting.sun_intensity = 0.0;
+        scene.lighting.sky_intensity = 1.0;
+        scene.lighting.sky_horizon = [4.0, 2.0, 1.0];
+        scene.lighting.sky_zenith = [4.0, 2.0, 1.0];
+        scene.lighting.background = true;
+        scene.colour.on = false;
+        scene.render.reinhard = false;
+        scene.render.exposure_stops = 2.0;
+        scene.render.saturation = 1.0;
+        scene.render.denoise.enabled = true;
+        scene.render.denoise.interval = 128;
+        let (reply, receiver) = std::sync::mpsc::sync_channel(4);
+        service
+            .try_command(Command::RenderExport {
+                id: 401,
+                scene,
+                width: 33,
+                height: 25,
+                spp: 2,
+                reply: Some(reply),
+            })
+            .unwrap();
+        let until = Instant::now() + Duration::from_secs(90);
+        loop {
+            let event = receiver
+                .recv_timeout(until.saturating_duration_since(Instant::now()))
+                .expect("export completion");
+            match event {
+                RenderEvent::ExportFrame { id, frame } => {
+                    assert_eq!(id, 401);
+                    assert_eq!(frame.samples, 2);
+                    assert_eq!(frame.denoised_samples, 2);
+                    assert!(frame.denoise_error.is_none(), "{:?}", frame.denoise_error);
+                    assert!(frame.colour_error.is_none());
+                    assert_eq!(frame.radiance.len(), 33 * 25);
+                    assert!(frame.radiance.iter().flatten().all(|v| v.is_finite()));
+                    assert!(frame.radiance.iter().any(|p| p[0] > 1.0));
+                    for (light, radiance) in frame.light.iter().zip(&frame.radiance) {
+                        for k in 0..3 {
+                            assert!((light[k] - 4.0 * radiance[k]).abs() < 1e-4);
+                        }
+                    }
+                    break;
+                }
+                RenderEvent::ExportFailed { error, .. } | RenderEvent::Error(error) => {
+                    panic!("{error}")
+                }
+                _ => {}
+            }
+        }
     }
 
     #[test]
@@ -909,11 +1022,62 @@ mod tests {
         changed.scene.render.exposure_stops += 1.0;
         changed.scene.render.saturation = 0.5;
         changed.scene.colour.view = "another display".into();
+        changed.scene.render.denoise.enabled = false;
+        changed.scene.render.denoise.interval = 256;
+        changed.scene.render.denoise.quality = crate::denoise::Quality::High;
+        changed.scene.render.denoise.mode = crate::denoise::Mode::Color;
         changed.paused = true;
         changed.output_hdr = true;
         changed.white_nits = 200.0;
         assert_eq!(trace_key(&original), trace_key(&changed));
         changed.scene.camera.yaw_degrees += 1.0;
+        assert_ne!(trace_key(&original), trace_key(&changed));
+    }
+    #[test]
+    fn bookmark_thumbnail_evaluates_frozen_world_at_first_frame_before_quality_cap() {
+        let mut scene = Scene::preset(crate::params::FAMILY_BULB);
+        scene.render.max_bounces = 8;
+        let document = crate::world::WorldDocument::from_scene(&scene);
+        let expected = document.snapshot(document.first as f64).unwrap();
+        scene.document = Some(Box::new(document));
+        let thumbnail = thumbnail_snapshot(scene).unwrap();
+        assert!(thumbnail.document.is_none() && thumbnail.world_render);
+        assert_eq!(thumbnail.objects, expected.objects);
+        assert_eq!(thumbnail.lights, expected.lights);
+        assert_eq!(thumbnail.render.max_bounces, 3);
+        let mut legacy = Scene::preset(crate::params::FAMILY_BOX);
+        legacy.render.max_bounces = 7;
+        let legacy = thumbnail_snapshot(legacy).unwrap();
+        assert!(!legacy.world_render && legacy.objects.is_empty());
+        assert_eq!(legacy.render.max_bounces, 3);
+    }
+    #[test]
+    fn world_trace_key_tracks_evaluated_objects_and_lights_but_ignores_labels() {
+        let mut original = request();
+        original.scene.world_render = true;
+        original
+            .scene
+            .objects
+            .push(Scene::preset(crate::params::FAMILY_BULB));
+        original
+            .scene
+            .lights
+            .push(crate::scene::Lighting::default());
+        let mut changed = original.clone();
+        changed.scene.objects[0].name = "rename".into();
+        changed.scene.objects[0].material.preset = Some("label".into());
+        assert_eq!(trace_key(&original), trace_key(&changed));
+        changed.scene.objects[0].material.base += 0.1;
+        assert_ne!(trace_key(&original), trace_key(&changed));
+        changed = original.clone();
+        changed.scene.objects[0].object_world =
+            Some(glam::Mat4::from_translation(glam::Vec3::X).to_cols_array_2d());
+        assert_ne!(trace_key(&original), trace_key(&changed));
+        changed = original.clone();
+        changed.scene.lights[0].sun_azimuth += 1.0;
+        assert_ne!(trace_key(&original), trace_key(&changed));
+        changed = original.clone();
+        changed.scene.objects.clear();
         assert_ne!(trace_key(&original), trace_key(&changed));
     }
     #[test]
