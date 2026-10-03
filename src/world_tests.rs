@@ -1,4 +1,248 @@
 use super::*;
+
+fn drag_value(id: NodeId, value: f64) -> WorldCommand {
+    WorldCommand::SetAttribute {
+        id,
+        path: "/transform/position/0".into(),
+        value: json!(value),
+        frame: 0.0,
+    }
+}
+
+#[test]
+fn parameter_drag_is_live_but_commits_one_undo_on_release() {
+    let mut e = editor();
+    let id = find(&e, WorldKind::Fractal);
+    let original = e.document.clone();
+    for value in [1.0, 2.0, 3.0, 4.0] {
+        let revision = e.revision();
+        e.execute_edit(drag_value(id, value), Some(7)).unwrap();
+        assert!(e.revision() > revision);
+        assert_eq!(
+            e.document
+                .attribute_value(id, "/transform/position/0", 0.0)
+                .unwrap(),
+            json!(value)
+        );
+        assert_eq!(e.undo.len(), 0);
+        assert_eq!(e.active_edit(), Some(7));
+    }
+    e.finish_edit_unless(Some(7));
+    assert_eq!(e.undo.len(), 0);
+    e.finish_edit_unless(None);
+    assert_eq!(e.undo.len(), 1);
+    let final_document = e.document.clone();
+    assert!(e.undo());
+    assert_eq!(e.document, original);
+    assert!(!e.undo());
+    assert!(e.redo());
+    assert_eq!(e.document, final_document);
+}
+
+#[test]
+fn parameter_drag_returning_to_original_preserves_redo() {
+    let mut e = editor();
+    let id = find(&e, WorldKind::Fractal);
+    e.execute(drag_value(id, 9.0)).unwrap();
+    assert!(e.undo());
+    let original = e.document.clone();
+    let value = e
+        .document
+        .attribute_value(id, "/transform/position/0", 0.0)
+        .unwrap();
+    e.execute_edit(drag_value(id, 3.0), Some(11)).unwrap();
+    e.execute_edit(
+        WorldCommand::SetAttribute {
+            id,
+            path: "/transform/position/0".into(),
+            value,
+            frame: 0.0,
+        },
+        Some(11),
+    )
+    .unwrap();
+    assert!(!e.finish_edit());
+    assert_eq!(e.document, original);
+    assert_eq!(e.undo.len(), 0);
+    assert!(e.redo());
+    assert_eq!(
+        e.document
+            .attribute_value(id, "/transform/position/0", 0.0)
+            .unwrap(),
+        json!(9.0)
+    );
+}
+
+#[test]
+fn failed_live_edit_rolls_back_and_unrelated_command_stays_separate() {
+    let mut e = editor();
+    let id = find(&e, WorldKind::Fractal);
+    let original = e.document.clone();
+    e.execute_edit(drag_value(id, 2.0), Some(17)).unwrap();
+    let valid = e.document.clone();
+    assert!(
+        e.execute_edit(
+            WorldCommand::Batch(vec![
+                drag_value(id, 4.0),
+                WorldCommand::SetSpan {
+                    id,
+                    start: 5.0,
+                    end: 4.0
+                },
+            ]),
+            Some(17)
+        )
+        .is_err()
+    );
+    assert_eq!(e.document, valid);
+    assert_eq!(e.undo.len(), 0);
+    assert_eq!(e.active_edit(), Some(17));
+    e.execute(WorldCommand::Rename {
+        id,
+        name: "Separate rename".into(),
+    })
+    .unwrap();
+    assert_eq!(e.undo.len(), 2);
+    assert!(e.undo());
+    assert_eq!(e.document, valid);
+    assert!(e.undo());
+    assert_eq!(e.document, original);
+}
+
+#[test]
+fn render_settings_drag_shares_deferred_history_and_undo() {
+    let mut e = editor();
+    let original = e.document.clone();
+    for exposure in [1.0, 2.0, 3.0] {
+        let before = e.document.snapshot(0.0).unwrap();
+        let mut after = before.clone();
+        after.render.exposure_stops = exposure;
+        e.edit_snapshot_with_gesture(e.selection, &before, &after, 0.0, Some(23))
+            .unwrap();
+        assert_eq!(e.undo.len(), 0);
+        assert_eq!(
+            e.document.snapshot(0.0).unwrap().render.exposure_stops,
+            exposure
+        );
+    }
+    assert!(e.finish_edit());
+    assert_eq!(e.undo.len(), 1);
+    assert!(e.undo());
+    assert_eq!(e.document, original);
+}
+
+#[test]
+fn material_library_assignment_is_atomic_and_keeps_object_selection() {
+    let mut e = editor();
+    let fractal = find(&e, WorldKind::Fractal);
+    let original = e.document.clone();
+    let old_material = e.document.assigned_material(fractal).unwrap().unwrap();
+    let old_surface = e.document.node_scene(old_material, 0.0).unwrap().material;
+    let mut material = old_surface.clone();
+    crate::materials::PRESETS[1].apply(&mut material);
+    e.execute(WorldCommand::ApplyMaterial {
+        id: fractal,
+        material: material.clone(),
+        name: "Library metal".into(),
+        frame: 0.0,
+    })
+    .unwrap();
+    let assigned = e.document.assigned_material(fractal).unwrap().unwrap();
+    assert_ne!(assigned, old_material);
+    assert_eq!(e.selection, Some(fractal));
+    assert_eq!(
+        e.document.node_scene(old_material, 0.0).unwrap().material,
+        old_surface
+    );
+    assert_eq!(
+        e.document.snapshot(0.0).unwrap().objects[0].material,
+        material
+    );
+    assert_eq!(e.document.nodes().len(), original.nodes().len() + 1);
+    assert!(e.undo());
+    assert_eq!(e.document, original);
+    assert!(e.redo());
+    assert_eq!(
+        e.document.assigned_material(fractal).unwrap(),
+        Some(assigned)
+    );
+
+    // Editing a Material node keeps its identity and existing animation channels.
+    e.execute(WorldCommand::Key {
+        id: assigned,
+        path: "/material/specular_roughness".into(),
+        frame: 0.0,
+    })
+    .unwrap();
+    let mut edited = material.clone();
+    edited.specular_roughness = 0.8;
+    e.execute(WorldCommand::ApplyMaterial {
+        id: assigned,
+        material: edited.clone(),
+        name: "Unused rename".into(),
+        frame: 10.0,
+    })
+    .unwrap();
+    assert_eq!(
+        e.document.assigned_material(fractal).unwrap(),
+        Some(assigned)
+    );
+    let middle = e
+        .document
+        .attribute_value(assigned, "/material/specular_roughness", 5.0)
+        .unwrap()
+        .as_f64()
+        .unwrap();
+    assert!((middle - f64::from((material.specular_roughness + 0.8) * 0.5)).abs() < 1e-6);
+
+    set(&mut e, fractal, "/locked", json!(true), 0.0);
+    let locked = e.document.clone();
+    assert!(
+        e.execute(WorldCommand::ApplyMaterial {
+            id: fractal,
+            material: edited,
+            name: "Rejected".into(),
+            frame: 0.0
+        })
+        .is_err()
+    );
+    assert_eq!(e.document, locked);
+}
+#[test]
+fn editor_revision_invalidates_caches_on_edit_undo_and_redo_only() {
+    let mut e = editor();
+    let id = find(&e, WorldKind::Fractal);
+    assert_eq!(e.revision(), 0);
+    e.execute(WorldCommand::Batch(vec![])).unwrap();
+    assert_eq!(e.revision(), 0);
+    assert!(
+        e.execute(WorldCommand::SetSpan {
+            id,
+            start: 10.0,
+            end: 5.0
+        })
+        .is_err()
+    );
+    assert_eq!(e.revision(), 0);
+    e.execute(WorldCommand::Rename {
+        id,
+        name: "Changed".into(),
+    })
+    .unwrap();
+    let revision = e.revision();
+    assert!(revision > 0);
+    assert!(e.undo());
+    assert!(e.revision() > revision);
+    let revision = e.revision();
+    assert!(e.redo());
+    assert!(e.revision() > revision);
+    let before = e.document.snapshot(0.0).unwrap();
+    let mut after = before.clone();
+    after.render.max_steps += 1;
+    let revision = e.revision();
+    e.edit_snapshot(Some(id), &before, &after, 0.0).unwrap();
+    assert!(e.revision() > revision);
+}
 #[test]
 fn legacy_object_rotation_migrates_to_playa_cw_axes_without_changing_pose() {
     let mut scene = Scene::preset(0);

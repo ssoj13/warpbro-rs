@@ -33,7 +33,7 @@ impl Panel {
             Self::Gallery => "Gallery",
             Self::Bookmarks => "Bookmarks",
             Self::Materials => "Materials",
-            Self::Inspector => "Inspector",
+            Self::Inspector => "Attribute Editor",
             Self::Settings => "Settings",
             Self::Export => "Render / Encode",
             Self::Timeline => "Timeline",

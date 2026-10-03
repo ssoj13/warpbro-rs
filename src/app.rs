@@ -98,6 +98,8 @@ pub(crate) struct App {
     scene: Scene,
     world: crate::world::WorldEditor,
     world_ui: crate::world_ui::WorldUi,
+    evaluated_world: Option<(playa_graph::NodeId, u64, u64)>,
+    load_revision: u64,
     /// The preset / bookmark the scene came from, for "Reset".
     origin: Scene,
 
@@ -114,6 +116,9 @@ pub(crate) struct App {
     viewport_visible: bool,
     config_picker: egui_file_dialog::FileDialog,
     saved_settings: String,
+    status_layout: egui_statusbar::StatusBarLayout,
+    status_resizable: bool,
+    render_editor: crate::inspector::RenderEditor,
     gallery: Vec<Entry>,
     bookmarks: Vec<Entry>,
 
@@ -248,6 +253,9 @@ struct Settings {
     layouts: egui_layout_manager::LayoutStore,
     export: crate::export::ExportSettings,
     gui_fps: u32,
+    status_layout: egui_statusbar::StatusBarLayout,
+    status_resizable: bool,
+    attribute_metrics: crate::ui_style::AttributeMetrics,
     #[serde(default)]
     timeline_initialized: bool,
     #[serde(default)]
@@ -266,6 +274,9 @@ impl Default for Settings {
             layouts: Default::default(),
             export: Default::default(),
             gui_fps: 60,
+            status_layout: Default::default(),
+            status_resizable: true,
+            attribute_metrics: Default::default(),
             timeline_initialized: true,
             world_layout_initialized: true,
         }
@@ -310,6 +321,8 @@ impl App {
             scene: scene.clone(),
             world: crate::world::WorldEditor::new(crate::world::WorldDocument::from_scene(&scene)),
             world_ui: Default::default(),
+            evaluated_world: None,
+            load_revision: 0,
 
             showing_preview: false,
             hdr_view: std::sync::Arc::new(std::sync::Mutex::new(egui_hdr_view::HdrView::new())),
@@ -324,6 +337,9 @@ impl App {
             viewport_visible: false,
             config_picker: egui_file_dialog::FileDialog::new(),
             saved_settings: String::new(),
+            status_layout: Default::default(),
+            status_resizable: true,
+            render_editor: Default::default(),
             gallery,
             bookmarks: load_bookmarks(),
 
@@ -366,6 +382,9 @@ impl App {
             self.layouts.store = settings.layouts;
             self.export.restore(settings.export);
             self.gui_fps = settings.gui_fps.clamp(15, 240);
+            self.status_layout = settings.status_layout;
+            self.status_resizable = settings.status_resizable;
+            self.world_ui.attribute_metrics = settings.attribute_metrics.normalized();
             self.fonts = settings.fonts;
             if let Some(blob) = settings.layout {
                 match egui_dock_layout::from_blob(&blob) {
@@ -461,6 +480,18 @@ impl App {
                             t.row("Mouse sensitivity").default(1.0).slider(&mut self.controls.look_sensitivity, 0.1..=5.0);
                             t.row("Flight speed ×").default(1.0).slider(&mut self.controls.fly_speed, 0.02..=50.0);
                         });
+                        egui_prefs2::section_header(ui, "Attribute controls");
+                        let defaults = crate::ui_style::AttributeMetrics::default();
+                        let metrics = &mut self.world_ui.attribute_metrics;
+                        egui_attr_table::attr_table(ui, |table| {
+                            table.row("Field height").default(defaults.field_height).slider(&mut metrics.field_height, crate::ui_style::AttributeMetrics::FIELD_HEIGHT_RANGE);
+                            table.row("Numeric field width").default(defaults.numeric_width).slider(&mut metrics.numeric_width, crate::ui_style::AttributeMetrics::NUMERIC_WIDTH_RANGE);
+                            table.row("Icon size").default(defaults.icon_side).slider(&mut metrics.icon_side, crate::ui_style::AttributeMetrics::ICON_SIDE_RANGE);
+                            table.row("Row spacing").default(defaults.row_gap).slider(&mut metrics.row_gap, crate::ui_style::AttributeMetrics::ROW_GAP_RANGE);
+                            table.row("Component spacing").default(defaults.component_gap).slider(&mut metrics.component_gap, crate::ui_style::AttributeMetrics::COMPONENT_GAP_RANGE);
+                        });
+                        *metrics = metrics.normalized();
+                        ui.label("Attribute Editor, Timeline and Render Settings share these sizes.");
                         ui.label("RMB: fly · wheel: flight speed · `: horizon/free flight");
                         ui.label("H: restore camera · F: frame bounds (without RMB)");
                     }
@@ -479,6 +510,7 @@ impl App {
                 self.fonts = Default::default();
             } else {
                 self.controls = Default::default();
+                self.world_ui.attribute_metrics = Default::default();
             }
         }
         if let Some(idx) = destination {
@@ -540,6 +572,9 @@ impl App {
             layouts: self.layouts.store.clone(),
             export: self.export.settings().clone(),
             gui_fps: self.gui_fps,
+            status_layout: self.status_layout.clone(),
+            status_resizable: self.status_resizable,
+            attribute_metrics: self.world_ui.attribute_metrics,
             timeline_initialized: true,
             world_layout_initialized: true,
         };
@@ -596,6 +631,8 @@ impl App {
     }
 
     fn load(&mut self, mut scene: Scene) {
+        self.evaluated_world = None;
+        self.load_revision = self.load_revision.wrapping_add(1);
         let document = crate::world::WorldDocument::from_scene(&scene);
         self.world_ui.reset();
         self.world_ui.seek(document.first);
@@ -671,33 +708,68 @@ impl App {
 
     fn materials_tab(&mut self, ui: &mut egui::Ui) {
         use crate::materials::{CATEGORIES, PRESETS};
-        ui.label(
-            RichText::new("usd-rs material library · click to apply")
-                .small()
-                .weak(),
-        );
-        let material_scene = self
+        use crate::world::WorldKind;
+        let target = self
             .world
             .selection
+            .and_then(|id| self.world.document.info(id).ok())
+            .filter(|info| matches!(info.kind, WorldKind::Fractal | WorldKind::Material));
+        if let Some(target) = &target {
+            ui.label(
+                RichText::new(format!(
+                    "{}: {}",
+                    if target.kind == WorldKind::Fractal {
+                        "Assign to"
+                    } else {
+                        "Edit material"
+                    },
+                    target.name
+                ))
+                .small()
+                .strong(),
+            );
+            ui.label(
+                RichText::new(if target.kind == WorldKind::Fractal {
+                    "Click a preset to create and assign a material."
+                } else {
+                    "Click a preset to update this material."
+                })
+                .small()
+                .weak(),
+            );
+        } else {
+            ui.label("Select a fractal or material in the Outliner.");
+        }
+        let material_id = target.as_ref().and_then(|target| {
+            if target.kind == WorldKind::Material {
+                Some(target.id)
+            } else {
+                self.world
+                    .document
+                    .assigned_material(target.id)
+                    .ok()
+                    .flatten()
+            }
+        });
+        let current = material_id
             .and_then(|id| {
                 self.world
                     .document
-                    .node_scene(id, f64::from(self.world_ui.playhead))
+                    .attribute_value(id, "/material/preset", f64::from(self.world_ui.playhead))
                     .ok()
             })
-            .unwrap_or_else(|| self.scene.clone());
-        let current = material_scene.material.preset.clone();
+            .and_then(|value| value.as_str().map(str::to_owned));
         let mut apply: Option<usize> = None;
         let size = Vec2::splat(((ui.available_width() - 12.0) / 2.0).min(SWATCH as f32));
         egui::ScrollArea::vertical().show(ui, |ui| {
             for cat in CATEGORIES {
-                let items: Vec<usize> = (0..PRESETS.len()).filter(|&i| PRESETS[i].category == cat).collect();
-                if items.is_empty() {
+                let count = PRESETS.iter().filter(|preset| preset.category == cat).count();
+                if count == 0 {
                     continue;
                 }
-                egui::CollapsingHeader::new(format!("{cat} ({})", items.len())).default_open(true).show(ui, |ui| {
+                egui::CollapsingHeader::new(format!("{cat} ({count})")).default_open(true).show(ui, |ui| {
                     egui::Grid::new(("mat-grid", cat)).spacing([6.0, 6.0]).show(ui, |ui| {
-                        for (k, &i) in items.iter().enumerate() {
+                        for (k, (i, _)) in PRESETS.iter().enumerate().filter(|(_, preset)| preset.category == cat).enumerate() {
                             let p = &PRESETS[i];
                             let selected = current.as_deref() == Some(p.name());
                             let resp = ui
@@ -719,26 +791,25 @@ impl App {
                                 })
                                 .response
                                 .interact(Sense::click());
-                            let mut tip = format!(
-                                "{}\nroughness {:.2} · metallic {:.0} · IOR {:.2}",
-                                p.name(),
-                                p.roughness,
-                                p.metallic,
-                                p.ior
-                            );
-                            if p.sheen.is_some() {
-                                tip += "\n+ sheen (Standard Surface)";
-                            }
-                            if p.anisotropy.is_some() {
-                                tip += "\n+ anisotropy (Standard Surface)";
-                            }
-                            if p.facing.is_some() {
-                                tip += "\n+ facing mix";
-                            }
-                            if p.opacity < 1.0 {
-                                tip += "\nglass: rendered opaque (no refraction on DE fractals)";
-                            }
-                            if resp.on_hover_text(tip).clicked() {
+                            let resp = resp.on_hover_ui(|ui| {
+                                ui.label(format!(
+                                    "{}\nroughness {:.2} · metallic {:.0} · IOR {:.2}",
+                                    p.name(), p.roughness, p.metallic, p.ior
+                                ));
+                                if p.sheen.is_some() {
+                                    ui.label("+ sheen (Standard Surface)");
+                                }
+                                if p.anisotropy.is_some() {
+                                    ui.label("+ anisotropy (Standard Surface)");
+                                }
+                                if p.facing.is_some() {
+                                    ui.label("+ facing mix");
+                                }
+                                if p.opacity < 1.0 {
+                                    ui.label("glass: rendered opaque (no refraction on DE fractals)");
+                                }
+                            });
+                            if resp.clicked() && target.is_some() {
                                 apply = Some(i);
                             }
                             if k % 2 == 1 {
@@ -749,16 +820,25 @@ impl App {
                 });
             }
         });
-        if let Some(i) = apply {
-            let before = material_scene;
-            let mut after = before.clone();
-            PRESETS[i].apply(&mut after.material);
-            self.status = match self.world.edit_snapshot(
-                self.world.selection,
-                &before,
-                &after,
-                f64::from(self.world_ui.playhead),
-            ) {
+        if let (Some(i), Some(target)) = (apply, target) {
+            let mut material = material_id
+                .and_then(|id| {
+                    self.world
+                        .document
+                        .node_scene(id, f64::from(self.world_ui.playhead))
+                        .ok()
+                })
+                .map(|scene| scene.material)
+                .unwrap_or_default();
+            PRESETS[i].apply(&mut material);
+            self.status = match self
+                .world
+                .execute(crate::world::WorldCommand::ApplyMaterial {
+                    id: target.id,
+                    material,
+                    name: PRESETS[i].name().into(),
+                    frame: f64::from(self.world_ui.playhead),
+                }) {
                 Ok(()) => format!("Material: {}", PRESETS[i].name()),
                 Err(error) => error,
             };
@@ -1411,21 +1491,131 @@ impl App {
     }
 
     fn inspector(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("Render settings").show(ui, |ui| {
-            crate::inspector::render(
-                ui,
-                &mut self.scene.render,
-                &mut self.target_spp,
-                &mut self.resolution,
-            );
-            if ui.button("New noise seed").clicked() {
-                self.seed = self.seed.wrapping_add(7920);
-            }
-        });
+        let section_id = ui.id().with("render_settings_open");
+        let open = ui.data(|data| data.get_temp::<bool>(section_id).unwrap_or(false));
+        let response = egui_titlebar::CollapsingSection::new("Render settings")
+            .id_salt("render_settings")
+            .open(open)
+            .tint(Color32::from_rgb(70, 130, 200), 0.28)
+            .show(ui, |ui| {
+                crate::inspector::render(
+                    ui,
+                    &mut self.render_editor,
+                    &mut self.scene.render,
+                    &mut self.target_spp,
+                    &mut self.resolution,
+                    &mut self.seed,
+                    &mut self.world_ui.attribute_label_width,
+                    self.world_ui.attribute_metrics,
+                );
+                if ui.button("New noise seed").clicked() {
+                    self.seed = self.seed.wrapping_add(7920);
+                }
+            });
+        ui.data_mut(|data| data.insert_temp(section_id, response.header.open));
         self.world_ui.inspector(ui, &mut self.world);
+        if std::mem::take(&mut self.world_ui.material_library_requested) {
+            self.panels_to_open.push(dock::Panel::Materials);
+        }
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
+        ui.scope(|ui| {
+            if self.status_resizable {
+                self.resizable_status_bar(ui);
+            } else {
+                self.fixed_status_bar(ui);
+            }
+        })
+        .response
+        .context_menu(|ui| {
+            ui.checkbox(&mut self.status_resizable, "Resizable sections");
+            if ui.button("Reset section widths").clicked() {
+                self.status_layout = Default::default();
+                ui.close();
+            }
+        });
+    }
+
+    fn resizable_status_bar(&mut self, ui: &mut egui::Ui) {
+        // Fixed section identity/count: transient frame and OIDN states never
+        // move widths onto another indicator. Rendering uses only mailbox data.
+        const WIDTHS: [f32; 9] = [200.0, 95.0, 95.0, 220.0, 130.0, 100.0, 170.0, 80.0, 0.0];
+        let frame = self.frame.as_deref();
+        let preview = self.showing_preview;
+        let target_spp = self.target_spp;
+        egui_statusbar::StatusBar::new().show_with(
+            ui,
+            &mut self.status_layout,
+            &WIDTHS,
+            |index, ui| {
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                match index {
+                    0 => {
+                        ui.label(RichText::new(&self.gpu_name).weak())
+                            .on_hover_text(&self.gpu_name);
+                    }
+                    1 => {
+                        ui.label(if self.scene.camera.free_flight {
+                            "Free flight · `"
+                        } else {
+                            "Horizon · `"
+                        });
+                    }
+                    2 => {
+                        if let Some(frame) = frame {
+                            ui.label(format!("{}×{}", frame.width, frame.height));
+                        }
+                    }
+                    3 => {
+                        if let Some(frame) = frame {
+                            if preview {
+                                ui.colored_label(Color32::from_rgb(230, 180, 60), "preview");
+                            } else {
+                                ui.label(format!("{} / {} spp", frame.samples, target_spp));
+                                ui.add(
+                                    egui::ProgressBar::new(
+                                        frame.samples as f32 / target_spp.max(1) as f32,
+                                    )
+                                    .desired_width((ui.available_width() - 4.0).max(0.0)),
+                                );
+                            }
+                        }
+                    }
+                    4 => {
+                        if let Some(frame) = frame {
+                            ui.label(format!("{:.1} Msamples/s", frame.msamples_per_s()));
+                        }
+                    }
+                    5 => {
+                        ui.label(format!("{} spp/batch", self.spp_per_frame));
+                    }
+                    6 => {
+                        if let Some(frame) = frame {
+                            if let Some(error) = &frame.denoise_error {
+                                ui.colored_label(Color32::from_rgb(230, 180, 60), "OIDN failed")
+                                    .on_hover_text(error);
+                            } else if frame.denoised_samples > 0 {
+                                ui.label(format!(
+                                    "OIDN {} spp · {:.1} ms",
+                                    frame.denoised_samples, frame.denoise_ms
+                                ));
+                            }
+                        }
+                    }
+                    7 => {
+                        ui.label(format!("UI {:.0} fps", 1000.0 / self.frame_ms.max(0.1)));
+                    }
+                    _ => {
+                        ui.label(RichText::new(&self.status).weak())
+                            .on_hover_text(&self.status);
+                    }
+                }
+            },
+        );
+    }
+
+    fn fixed_status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
             ui.label(RichText::new(&self.gpu_name).weak());
@@ -1573,6 +1763,21 @@ impl App {
 }
 
 impl App {
+    /// Evaluate the world only after a domain edit, seek, playback step or load.
+    /// Idle repaint never rebuilds serialized nodes or render scene vectors.
+    fn refresh_scene(&mut self) -> Result<(), String> {
+        let frame = f64::from(self.world_ui.playhead);
+        let key = (
+            playa_graph::NodeId(self.world.document.graph.id),
+            self.world.revision(),
+            frame.to_bits(),
+        );
+        if self.evaluated_world != Some(key) {
+            self.scene = self.world.document.snapshot(frame)?;
+            self.evaluated_world = Some(key);
+        }
+        Ok(())
+    }
     pub(crate) fn ui(&mut self, root: &mut egui::Ui) {
         let ctx = root.ctx().clone();
         self.apply_fonts(&ctx);
@@ -1580,19 +1785,12 @@ impl App {
         let dt = ctx.input(|i| i.stable_dt).max(1.0e-4);
         self.frame_ms = self.frame_ms * 0.9 + dt * 1000.0 * 0.1;
         self.world_ui.advance(dt, &self.world);
-        match self
-            .world
-            .document
-            .snapshot(f64::from(self.world_ui.playhead))
-        {
-            Ok(snapshot) => self.scene = snapshot,
-            Err(error) => {
-                self.world_ui.playing = false;
-                self.status = error;
-            }
+        if let Err(error) = self.refresh_scene() {
+            self.world_ui.playing = false;
+            self.status = error;
         }
         let edit_frame = f64::from(self.world_ui.playhead);
-        let edit_origin = self.origin.clone();
+        let edit_origin = self.load_revision;
         let before = self.scene.clone();
         if !ctx.text_edit_focused() {
             if ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
@@ -1637,20 +1835,32 @@ impl App {
             self.fly = None;
             ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
         }
-        if self.origin == edit_origin && self.scene != before {
-            if let Err(error) =
+        if self.load_revision == edit_origin && self.scene != before {
+            let gesture = crate::world_ui::parameter_gesture(&ctx).or_else(|| {
+                ctx.input(|input| input.pointer.primary_released())
+                    .then(|| self.world.active_edit())
+                    .flatten()
+            });
+            let result = if gesture.is_some() {
+                self.world.edit_snapshot_with_gesture(
+                    self.world.selection,
+                    &before,
+                    &self.scene,
+                    edit_frame,
+                    gesture,
+                )
+            } else {
                 self.world
                     .edit_snapshot(self.world.selection, &before, &self.scene, edit_frame)
-            {
+            };
+            if let Err(error) = result {
                 self.status = error;
             }
         }
-        if let Ok(snapshot) = self
-            .world
-            .document
-            .snapshot(f64::from(self.world_ui.playhead))
-        {
-            self.scene = snapshot;
+        self.world
+            .finish_edit_unless(crate::world_ui::parameter_gesture(&ctx));
+        if let Err(error) = self.refresh_scene() {
+            self.status = error;
         }
         self.save_settings(&ctx);
         if let Some(error) = self.current().and_then(|t| t.colour_error.as_deref()) {
@@ -1671,6 +1881,61 @@ fn exists(p: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cached_scene_reuses_idle_vectors_and_invalidates_edit_seek_undo_and_load() {
+        let mut app = App::new();
+        app.refresh_scene().unwrap();
+        let objects = app.scene.objects.as_ptr();
+        let key = app.evaluated_world;
+        for _ in 0..32 {
+            app.refresh_scene().unwrap();
+            assert_eq!(app.scene.objects.as_ptr(), objects);
+            assert_eq!(app.evaluated_world, key);
+        }
+        let camera = app.world.document.active_camera.unwrap();
+        let old_fov = app.scene.camera.fov_y_degrees;
+        app.world
+            .execute(crate::world::WorldCommand::SetAttribute {
+                id: camera,
+                path: "/camera/fov_y_degrees".into(),
+                value: serde_json::json!(75.0),
+                frame: 0.0,
+            })
+            .unwrap();
+        app.refresh_scene().unwrap();
+        assert_eq!(app.scene.camera.fov_y_degrees, 75.0);
+        assert_ne!(app.evaluated_world, key);
+        assert!(app.world.undo());
+        app.refresh_scene().unwrap();
+        assert_eq!(app.scene.camera.fov_y_degrees, old_fov);
+        assert!(app.world.redo());
+        app.world
+            .execute(crate::world::WorldCommand::Key {
+                id: camera,
+                path: "/camera/fov_y_degrees".into(),
+                frame: 0.0,
+            })
+            .unwrap();
+        app.world
+            .execute(crate::world::WorldCommand::SetAttribute {
+                id: camera,
+                path: "/camera/fov_y_degrees".into(),
+                value: serde_json::json!(100.0),
+                frame: 10.0,
+            })
+            .unwrap();
+        app.world_ui.seek(5);
+        app.refresh_scene().unwrap();
+        assert!((app.scene.camera.fov_y_degrees - 87.5).abs() < 1e-5);
+        let revision = app.load_revision;
+        let mut reload = app.scene.clone();
+        reload.document = Some(Box::new(app.world.document.clone()));
+        app.load(reload);
+        assert!(app.evaluated_world.is_none());
+        assert_ne!(app.load_revision, revision);
+        app.refresh_scene().unwrap();
+    }
 
     #[test]
     fn status_text_never_changes_workspace_height() {

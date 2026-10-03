@@ -15,7 +15,7 @@ playa-engine = { git = "ssh://git@github.com/ssoj13/playa.git", rev = "6b1c6c7d5
 playa-time = { git = "ssh://git@github.com/ssoj13/playa.git", rev = "6b1c6c7d53522b696f859af400e0b141aaab2ba5" }
 playa-coord = { git = "ssh://git@github.com/ssoj13/playa.git", rev = "6b1c6c7d53522b696f859af400e0b141aaab2ba5" }
 playa-events = { git = "ssh://git@github.com/ssoj13/playa.git", rev = "6b1c6c7d53522b696f859af400e0b141aaab2ba5" }
-egui-outliner = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
+egui-outliner = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", rev = "e953b2cc6836db2bb47aa44bb7995d9696636034" }
 # Our Windows fork includes the Rust 1.99 backend fixes.
 cuda-device = { git = "ssh://git@github.com/ssoj13/cuda-oxide-windows.git", rev = "f3f1098a776a630d8003f2229934e0563cdec252" }
 cuda-host = { git = "ssh://git@github.com/ssoj13/cuda-oxide-windows.git", rev = "f3f1098a776a630d8003f2229934e0563cdec252" }
@@ -23,8 +23,8 @@ cuda-host = { git = "ssh://git@github.com/ssoj13/cuda-oxide-windows.git", rev = 
 cuda-core = { git = "ssh://git@github.com/ansidium/cutile-rs.git", rev = "b4eae9b2a783eba8e18587aa2b760f985a07f866" }
 egui = "0.36"
 egui_dock = { version = "0.21", features = ["serde"] }
-egui-dock-layout = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
-egui-viewport-toolbar = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
+egui-dock-layout = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", rev = "e953b2cc6836db2bb47aa44bb7995d9696636034" }
+egui-viewport-toolbar = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", rev = "e953b2cc6836db2bb47aa44bb7995d9696636034" }
 egui-wgpu = "0.36"
 egui-winit = "0.36"
 wgpu = "30"
@@ -32,12 +32,12 @@ winit = "0.30"
 bytemuck = "1"
 anyhow = "1"
 vfx-ocio = { git = "ssh://git@github.com/ssoj13/oiio-rs.git", branch = "main", features = ["gpu", "parallel"] }
-egui-display = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
-egui-hdr-view = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
+egui-display = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", rev = "e953b2cc6836db2bb47aa44bb7995d9696636034" }
+egui-hdr-view = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", rev = "e953b2cc6836db2bb47aa44bb7995d9696636034" }
 gpu-info = { package = "gpu-info-rs", git = "ssh://git@github.com/ssoj13/gpu-info-rs.git", branch = "main", default-features = false, features = ["wgpu"] }
 exr = "1.74"
-egui-encode-dialog = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
-egui-layout-manager = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
+egui-encode-dialog = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", rev = "e953b2cc6836db2bb47aa44bb7995d9696636034" }
+egui-layout-manager = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", rev = "e953b2cc6836db2bb47aa44bb7995d9696636034" }
 av-codec = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main", default-features = false, features = ["enc-hevc"] }
 av-codec-core = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
 av-format-core = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
@@ -59,16 +59,18 @@ cam-viewport = { git = "ssh://git@github.com/ssoj13/gitnexus-rs.git", rev = "268
 log = "0.4"
 rayon = "1"
 egui-file-dialog = "0.15"
-egui-file-field = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
-egui-prefs2 = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
+egui-file-field = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", rev = "e953b2cc6836db2bb47aa44bb7995d9696636034" }
+egui-prefs2 = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", rev = "e953b2cc6836db2bb47aa44bb7995d9696636034" }
 egui-phosphor = { git = "ssh://git@github.com/ssoj13/egui-phosphor.git", branch = "main" }
 
 env_logger = "0.11"
 
-egui-attr-grid = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
-egui-attr-table = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
-egui-titlebar = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
-egui-track-timeline = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
+egui-attr-grid = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", rev = "e953b2cc6836db2bb47aa44bb7995d9696636034" }
+egui-attr-table = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", rev = "e953b2cc6836db2bb47aa44bb7995d9696636034" }
+egui-titlebar = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", rev = "e953b2cc6836db2bb47aa44bb7995d9696636034" }
+egui-statusbar = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", rev = "e953b2cc6836db2bb47aa44bb7995d9696636034" }
+egui-widgets-config = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", rev = "e953b2cc6836db2bb47aa44bb7995d9696636034" }
+egui-track-timeline = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", rev = "e953b2cc6836db2bb47aa44bb7995d9696636034" }
 curves = { git = "ssh://git@github.com/ssoj13/curves-rs.git", branch = "main", features = ["serde"] }
 box-rs = { git = "ssh://git@github.com/ssoj13/box-rs.git", branch = "main" }
 image = { version = "0.25", default-features = false, features = ["hdr", "exr"] }

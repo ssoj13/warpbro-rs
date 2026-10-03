@@ -122,6 +122,13 @@ pub enum WorldCommand {
         id: NodeId,
         material: Option<NodeId>,
     },
+    /// Instantiate and assign to a fractal, or edit a selected material node.
+    ApplyMaterial {
+        id: NodeId,
+        material: crate::scene::Material,
+        name: String,
+        frame: f64,
+    },
     SetActiveCamera(NodeId),
     SetActiveEnvironment(NodeId),
     ReloadEnvironment(NodeId),
@@ -153,13 +160,23 @@ pub enum WorldCommand {
         frame: f64,
     },
 }
+type WorldEditSnapshot = (WorldDocument, Option<NodeId>, Vec<NodeId>);
+
+#[derive(Clone, Debug)]
+struct PendingWorldEdit {
+    gesture: u64,
+    original: WorldEditSnapshot,
+}
+
 #[derive(Clone, Debug)]
 pub struct WorldEditor {
     pub document: WorldDocument,
     pub selection: Option<NodeId>,
     pub selected: Vec<NodeId>,
-    undo: Vec<(WorldDocument, Option<NodeId>, Vec<NodeId>)>,
-    redo: Vec<(WorldDocument, Option<NodeId>, Vec<NodeId>)>,
+    undo: Vec<WorldEditSnapshot>,
+    redo: Vec<WorldEditSnapshot>,
+    pending_edit: Option<PendingWorldEdit>,
+    revision: u64,
 }
 impl WorldEditor {
     pub fn new(document: WorldDocument) -> Self {
@@ -174,23 +191,95 @@ impl WorldEditor {
             selected: selection.into_iter().collect(),
             undo: vec![],
             redo: vec![],
+            revision: 0,
+            pending_edit: None,
         }
     }
+    /// Cache invalidation token, combined with the document UUID by consumers.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
     pub fn execute(&mut self, command: WorldCommand) -> Result<(), String> {
-        let before = (self.document.clone(), self.selection, self.selected.clone());
-        if let Err(e) = self.apply(command) {
-            self.document = before.0;
-            self.selection = before.1;
-            self.selected = before.2;
-            return Err(e);
+        self.execute_edit(command, None)
+    }
+
+    /// Apply live edits, deferring their single Undo step until the gesture finishes.
+    pub fn execute_edit(
+        &mut self,
+        command: WorldCommand,
+        gesture: Option<u64>,
+    ) -> Result<(), String> {
+        self.apply_edit(gesture, |editor| editor.apply(command))
+    }
+
+    pub fn active_edit(&self) -> Option<u64> {
+        self.pending_edit.as_ref().map(|pending| pending.gesture)
+    }
+
+    /// Commit the gesture's original snapshot only when its final state differs.
+    /// A gesture returned to its original state preserves the existing redo stack.
+    pub fn finish_edit(&mut self) -> bool {
+        let Some(pending) = self.pending_edit.take() else {
+            return false;
+        };
+        if !self.differs_from(&pending.original) {
+            return false;
         }
-        if self.document != before.0 || self.selection != before.1 || self.selected != before.2 {
+        self.undo.push(pending.original);
+        self.redo.clear();
+        true
+    }
+
+    pub fn finish_edit_unless(&mut self, active: Option<u64>) -> bool {
+        if self.active_edit() != active {
+            self.finish_edit()
+        } else {
+            false
+        }
+    }
+
+    fn differs_from(&self, snapshot: &WorldEditSnapshot) -> bool {
+        self.document != snapshot.0 || self.selection != snapshot.1 || self.selected != snapshot.2
+    }
+
+    fn record_edit(&mut self, before: WorldEditSnapshot, gesture: Option<u64>) {
+        if !self.differs_from(&before) {
+            return;
+        }
+        self.revision = self.revision.wrapping_add(1);
+        if let Some(gesture) = gesture {
+            if self.pending_edit.is_none() {
+                self.pending_edit = Some(PendingWorldEdit {
+                    gesture,
+                    original: before,
+                });
+            }
+        } else {
             self.undo.push(before);
             self.redo.clear();
         }
+    }
+
+    fn apply_edit(
+        &mut self,
+        gesture: Option<u64>,
+        apply: impl FnOnce(&mut Self) -> Result<(), String>,
+    ) -> Result<(), String> {
+        self.finish_edit_unless(gesture);
+        // This rollback snapshot is temporary; only the first changed edit's snapshot
+        // is retained for the gesture's history entry.
+        let before = (self.document.clone(), self.selection, self.selected.clone());
+        if let Err(error) = apply(self) {
+            self.document = before.0;
+            self.selection = before.1;
+            self.selected = before.2;
+            return Err(error);
+        }
+        self.record_edit(before, gesture);
         Ok(())
     }
     pub fn undo(&mut self) -> bool {
+        self.finish_edit();
         if let Some((d, s, selected)) = self.undo.pop() {
             self.redo.push((
                 std::mem::replace(&mut self.document, d),
@@ -199,12 +288,14 @@ impl WorldEditor {
             ));
             self.selection = s;
             self.selected = selected;
+            self.revision = self.revision.wrapping_add(1);
             true
         } else {
             false
         }
     }
     pub fn redo(&mut self) -> bool {
+        self.finish_edit();
         if let Some((d, s, selected)) = self.redo.pop() {
             self.undo.push((
                 std::mem::replace(&mut self.document, d),
@@ -213,6 +304,7 @@ impl WorldEditor {
             ));
             self.selection = s;
             self.selected = selected;
+            self.revision = self.revision.wrapping_add(1);
             true
         } else {
             false
@@ -439,6 +531,48 @@ impl WorldEditor {
                 self.document.last = last;
                 self.document.fps = fps;
             }
+            WorldCommand::ApplyMaterial {
+                id,
+                material,
+                name,
+                frame,
+            } => {
+                if !frame.is_finite() {
+                    return Err("Invalid material frame".into());
+                }
+                self.document.assert_unlocked(id)?;
+                match self.document.info(id)?.kind {
+                    WorldKind::Fractal => {
+                        let mut scene = self.document.snapshot(frame)?;
+                        scene.material = material;
+                        let material =
+                            self.document
+                                .insert(WorldKind::Material, &name, &scene, None)?;
+                        self.apply(WorldCommand::AssignMaterial {
+                            id,
+                            material: Some(material),
+                        })?;
+                    }
+                    WorldKind::Material => {
+                        let value = serde_json::to_value(material).map_err(|e| e.to_string())?;
+                        let mut replacements = Attrs::new();
+                        discover(&value, "/material", &mut replacements);
+                        for (path, value) in replacements.iter() {
+                            self.document.set_attribute(
+                                id,
+                                path,
+                                attr_json(value.clone()),
+                                frame,
+                                false,
+                                CurveKind::Linear,
+                            )?;
+                        }
+                    }
+                    _ => {
+                        return Err("Select a fractal or material to apply a library preset".into());
+                    }
+                }
+            }
             WorldCommand::AssignMaterial { id, material } => {
                 self.document.assert_unlocked(id)?;
                 if self.document.info(id)?.kind != WorldKind::Fractal {
@@ -638,6 +772,19 @@ impl WorldEditor {
         after: &Scene,
         frame: f64,
     ) -> Result<(), String> {
+        self.edit_snapshot_with_gesture(selected, before, after, frame, None)
+    }
+
+    /// Bridge legacy/global controls into the same deferred gesture transaction.
+    pub fn edit_snapshot_with_gesture(
+        &mut self,
+        selected: Option<NodeId>,
+        before: &Scene,
+        after: &Scene,
+        frame: f64,
+        gesture: Option<u64>,
+    ) -> Result<(), String> {
+        self.finish_edit_unless(gesture);
         let before = scene_json(before)?;
         let after = scene_json(after)?;
         let mut commands = vec![];
@@ -710,23 +857,21 @@ impl WorldEditor {
                 }
             }
         }
-        // Global render/colour settings live inside the world settings box.
-        let old = (self.document.clone(), self.selection, self.selected.clone());
-        self.execute(WorldCommand::Batch(commands))?;
-        for key in ["render", "colour", "name"] {
-            if before.get(key) != after.get(key) {
-                self.document
-                    .graph
-                    .bus_slots
-                    .get_mut("world")
-                    .ok_or("Missing settings")?[key] = after[key].clone();
+        // Commands and global settings share one atomic rollback/history snapshot.
+        self.apply_edit(gesture, |editor| {
+            editor.apply(WorldCommand::Batch(commands))?;
+            for key in ["render", "colour", "name"] {
+                if before.get(key) != after.get(key) {
+                    editor
+                        .document
+                        .graph
+                        .bus_slots
+                        .get_mut("world")
+                        .ok_or("Missing settings")?[key] = after[key].clone();
+                }
             }
-        }
-        if self.document != old.0 && self.undo.last().is_none_or(|entry| entry.0 != old.0) {
-            self.undo.push(old);
-            self.redo.clear();
-        }
-        Ok(())
+            Ok(())
+        })
     }
 }
 fn attribute_choices(path: &str) -> Vec<Value> {
@@ -1118,6 +1263,21 @@ impl WorldDocument {
             start: f64::from(a.get_float_or("/start", 0.0)),
             end: f64::from(a.get_float_or("/end", self.last as f32 + 1.0)),
         })
+    }
+    /// Resolve a fractal's material UUID without building a scene snapshot.
+    pub fn assigned_material(&self, id: NodeId) -> Result<Option<NodeId>, String> {
+        let data = self.node(id)?;
+        let material = data["material"].as_str().and_then(NodeId::parse);
+        if let Some(material) = material {
+            let target = self.node(material)?;
+            if serde_json::from_value::<WorldKind>(target["type"].clone())
+                .map_err(|e| e.to_string())?
+                != WorldKind::Material
+            {
+                return Err("Assigned UUID is not a material".into());
+            }
+        }
+        Ok(material)
     }
     pub fn nodes(&self) -> Vec<WorldNodeInfo> {
         let mut nodes: Vec<_> = self

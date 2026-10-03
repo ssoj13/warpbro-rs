@@ -17,7 +17,7 @@ or shader DSL: host code and tracing kernels live in the same crate and are buil
   groups and materials, with parent transforms, visibility, layer spans, lock and solo.
   Multiple fractals take part in primary rays, shadows and reflections; multiple directional
   lights and one active HDR/EXR environment illuminate the same world.
-- **Object animation:** an Outliner, Inspector and AE-style Timeline share selection and
+- **Object animation:** an Outliner, Attribute Editor and AE-style Timeline share selection and
   transactional undo/redo. Numeric components and discrete properties use Playa animation.
 - **Unidirectional path tracing:** sun-cone, sky and HDR next-event estimation, MIS with the
   power heuristic, and Russian roulette. A thin-lens camera gives depth of field.
@@ -54,7 +54,7 @@ or shader DSL: host code and tracing kernels live in the same crate and are buil
 - **The browser:**
   - an 18-preset gallery with GPU-rendered thumbnails;
   - bookmarks (scenes saved as JSON);
-  - an inspector for every parameter;
+  - an Attribute Editor for object parameters;
   - a progressive viewport that switches to a half-resolution, 2-bounce preview while you drag;
   - screenshots;
   - final PNG renders up to 4K.
@@ -149,8 +149,24 @@ and toolbar position are saved between runs. **Settings → Fonts** (also **Wind
 Fonts…**) selects the built-in font family, body/control, small, heading and monospace text sizes,
 and UI scale.
 
-The scene inspector uses `egui-widgets-rs`: `egui-attr-table` for typed controls and
-reset/copy/paste actions, `egui-attr-grid` for vectors, and `egui-titlebar` for sections.
+The **Attribute Editor** follows Playa's original composition: `egui-attr-grid` inside
+`egui-titlebar::CollapsingSection`, with typed property controls from `egui-widgets-rs`.
+Short labels keep rows compact; tooltips retain full property paths. Shared attribute metrics
+set label/value columns, numeric component widths, square icon buttons and vertical alignment
+across the editor and Timeline. **Settings → Controls** adjusts these compact layout metrics.
+Numeric gestures defer their undo transaction until completion.
+
+One status bar provides resizable sections. The Materials library can be opened for browsing
+and assigns a chosen material to the selected object through the existing World workflow.
+Toolkit changes are published at `e953b2cc6836db2bb47aa44bb7995d9696636034` over GitHub SSH;
+40 toolkit tests and strict Clippy for five crates passed. The grid and Timeline use the same
+label/value/row geometry. Narrow panels now shrink labels to preserve numeric editor space
+without changing the saved splitter width. The preceding 8aad revision passed 118 host CPU/GPU
+tests and a release build; native inspection found narrow-panel clipping at 150% scale,
+which prompted this shared-widget fix. Final e953 validation passed all 118 CPU/GPU tests
+with `--include-ignored` and the release build. Cargo.lock uses this one SSH revision for all
+21 widget sources. The new scaled snapshot, manual interactions and UI latency remain pending in
+[the UI layout plan](plans/plan1.md).
 
 The **Outliner** uses `egui-outliner` for the parent tree. The **Timeline** shows the same
 objects as layers with spans, property groups and component lanes; stopwatch and diamond
@@ -214,7 +230,8 @@ a final denoise pass when enabled, even below the periodic threshold. Release va
 passed 92 regular tests and all three explicitly enabled GPU tests (95 total) after the
 final SSH dependency switch, including
 HDR preservation, unchanged raw samples and final denoising below the interval.
-Build, GPU/export and window verification details are in [plan1.md](plan1.md).
+The final release test logs are [the regular suite](target/verification/ssh-final-tests.out)
+and [the explicitly enabled GPU suite](target/verification/ssh-final-gpu-tests.out).
 
 Screenshot / Render PNG saves the selected rendering: SDR sRGB/selected monitor codes as
 8-bit PNG, or HDR10 BT.2020/PQ as 16-bit PNG with `cICP`, `mDCV`, and measured `cLLI` metadata.
@@ -312,7 +329,7 @@ The timings above predate this bridge, the World tracer and OIDN integration.
 src/gpu.rs        the kernels (#[cuda_module]): estimates, march, normals, lighting, integrator, tonemap
 src/scene.rs      evaluated Scene, legacy serde, formulas, presets and parameter packing
 src/world.rs      Playa World document, migration, evaluator, commands and undo/redo
-src/world_ui.rs   Outliner, object Inspector and layered component Timeline
+src/world_ui.rs   Outliner, object Attribute Editor and layered component Timeline
 src/params.rs     parameter-block slots shared by host and device
 src/render.rs     CUDA context, progressive targets, kernel dispatch, PNG output
 src/app.rs        the egui browser, shared Settings panel and viewport toolbar
