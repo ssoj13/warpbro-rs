@@ -1,0 +1,17 @@
+[package]
+name = "frac-mp4-quality"
+version = "0.1.0"
+edition = "2024"
+
+[workspace]
+
+[dependencies]
+av-codec = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", rev = "7524123cb6dddb7f3009aa06208f4012673c5958", default-features = false, features = ["enc-hevc"] }
+av-codec-core = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", rev = "7524123cb6dddb7f3009aa06208f4012673c5958", default-features = false }
+av-format-core = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", rev = "7524123cb6dddb7f3009aa06208f4012673c5958", default-features = false }
+av-format-movenc = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", rev = "7524123cb6dddb7f3009aa06208f4012673c5958", default-features = false }
+av-format-mov = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", rev = "7524123cb6dddb7f3009aa06208f4012673c5958", default-features = false }
+av-swscale = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", rev = "7524123cb6dddb7f3009aa06208f4012673c5958", default-features = false }
+av-util-core = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", rev = "7524123cb6dddb7f3009aa06208f4012673c5958", default-features = false }
+av-util-frame = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", rev = "7524123cb6dddb7f3009aa06208f4012673c5958", default-features = false }
+av-util-pixfmt = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", rev = "7524123cb6dddb7f3009aa06208f4012673c5958", default-features = false }

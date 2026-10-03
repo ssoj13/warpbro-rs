@@ -50,6 +50,20 @@ pub struct Frame {
     /// Extended-sRGB encoded RGBA32F, prepared with the requested output reference white.
     pub hdr_bytes: Arc<Vec<u8>>,
 }
+fn hdr_canvas_bytes(light: &[[f32; 4]], gain: f32) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(light.len() * std::mem::size_of::<[f32; 4]>());
+    for pixel in light {
+        for value in [
+            crate::color::oetf(pixel[0] * gain),
+            crate::color::oetf(pixel[1] * gain),
+            crate::color::oetf(pixel[2] * gain),
+            1.0,
+        ] {
+            bytes.extend_from_slice(&value.to_ne_bytes());
+        }
+    }
+    bytes
+}
 impl Frame {
     fn snapshot(
         target: &Target,
@@ -67,18 +81,7 @@ impl Frame {
             1.0
         };
         let hdr_bytes = if output_hdr {
-            let canvas: Vec<[f32; 4]> = light
-                .iter()
-                .map(|p| {
-                    [
-                        crate::color::oetf(p[0] * gain),
-                        crate::color::oetf(p[1] * gain),
-                        crate::color::oetf(p[2] * gain),
-                        1.0,
-                    ]
-                })
-                .collect();
-            Arc::new(bytemuck::cast_slice(&canvas).to_vec())
+            Arc::new(hdr_canvas_bytes(&light, gain))
         } else {
             Arc::new(Vec::new())
         };
@@ -597,7 +600,7 @@ fn run_worker(shared: &Shared) {
         }
         if let Some(request) = request {
             if let Err(error) = validate_size(request.width, request.height, request.target_spp)
-                .and_then(|()| gpu.ensure_environment(&request.scene).map(|_| ()))
+                .and_then(|()| gpu.prepare_scene(&request.scene, request.width, request.height))
             {
                 push_event(shared, RenderEvent::Error(error));
             } else if let Some(active) = &mut viewport {
@@ -624,7 +627,7 @@ fn run_worker(shared: &Shared) {
                     reply,
                 } => {
                     if let Err(error) = validate_size(width, height, spp)
-                        .and_then(|()| gpu.ensure_environment(&scene).map(|_| ()))
+                        .and_then(|()| gpu.prepare_scene(&scene, width, height))
                     {
                         dispatch_export(
                             shared,
@@ -661,7 +664,7 @@ fn run_worker(shared: &Shared) {
                         }
                     };
                     if let Err(error) = validate_size(width, height, spp)
-                        .and_then(|()| gpu.ensure_environment(&scene).map(|_| ()))
+                        .and_then(|()| gpu.prepare_scene(&scene, width, height))
                     {
                         push_event(shared, RenderEvent::Error(error));
                     } else {
@@ -856,6 +859,28 @@ fn step_viewport(gpu: &mut Gpu, active: &mut Viewport, shared: &Shared) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hdr_canvas_direct_bytes_match_original_float_canvas() {
+        let pixels = [[-2.0, 0.0031308, 7.0, 0.0], [0.0, 1.0, 0.25, 0.5]];
+        for gain in [1.0, 0.5, 100.0 / 203.0] {
+            let original: Vec<[f32; 4]> = pixels
+                .iter()
+                .map(|p| {
+                    [
+                        crate::color::oetf(p[0] * gain),
+                        crate::color::oetf(p[1] * gain),
+                        crate::color::oetf(p[2] * gain),
+                        1.0,
+                    ]
+                })
+                .collect();
+            assert_eq!(
+                hdr_canvas_bytes(&pixels, gain),
+                bytemuck::cast_slice::<_, u8>(&original)
+            );
+        }
+    }
     fn request() -> ViewportRequest {
         ViewportRequest {
             generation: 1,

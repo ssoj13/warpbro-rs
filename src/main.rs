@@ -9,6 +9,7 @@
 
 mod animation;
 mod app;
+mod camera_orbit;
 mod color;
 mod denoise;
 mod environment;
@@ -24,6 +25,7 @@ mod materials;
 mod ocio;
 mod palette;
 mod params;
+mod presets;
 mod render;
 mod render_service;
 mod scene;
@@ -99,10 +101,101 @@ fn headless(out: Option<&str>, w: usize, h: usize, spp: u32, hdr: bool, display_
     }
 }
 
+fn animated_fixtures(
+    dir: &str,
+    width: usize,
+    height: usize,
+    samples: u32,
+    all_frames: bool,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        width > 0
+            && height > 0
+            && width <= 16384
+            && height <= 16384
+            && width.checked_mul(height).is_some_and(|n| n <= 67_108_864),
+        "Invalid fixture resolution"
+    );
+    anyhow::ensure!(
+        samples > 0 && samples <= 1_000_000,
+        "Invalid fixture samples"
+    );
+    std::fs::create_dir_all(dir)?;
+    let mut gpu = render::Gpu::new().map_err(anyhow::Error::msg)?;
+    for (index, descriptor) in presets::ANIMATED.iter().enumerate() {
+        let scene = presets::scene(index).map_err(anyhow::Error::msg)?;
+        let document = scene
+            .document
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Preset has no document"))?;
+        let output = std::path::Path::new(dir).join(slug(descriptor.name));
+        std::fs::create_dir_all(&output)?;
+        serde_json::to_writer_pretty(
+            std::fs::File::create(output.join("scene.frac.json"))?,
+            document,
+        )?;
+        let frames: Vec<u32> = if all_frames {
+            (document.first..=document.last).collect()
+        } else {
+            vec![
+                document.first,
+                (document.first + document.last) / 2,
+                document.last,
+            ]
+        };
+        let mut target = gpu.target(width, height);
+        for frame in frames {
+            let evaluated = document
+                .snapshot(f64::from(frame))
+                .map_err(anyhow::Error::msg)?;
+            let start = Instant::now();
+            // Fixed seed keeps regression images repeatable. One target is reused between frames.
+            for first_sample in (0..samples).step_by(8) {
+                let count = 8.min(samples - first_sample);
+                gpu.step(
+                    &mut target,
+                    &evaluated,
+                    count,
+                    0,
+                    None,
+                    first_sample + count == samples,
+                );
+                if let Some(error) = &target.colour_error {
+                    anyhow::bail!("{error}");
+                }
+            }
+            anyhow::ensure!(
+                target.samples == samples,
+                "Fixture accumulation did not complete"
+            );
+            target
+                .save_png(&output.join(format!("frame.{frame:06}.png")))
+                .map_err(anyhow::Error::msg)?;
+            println!(
+                "{} frame {}: {:.3}s",
+                descriptor.name,
+                frame,
+                start.elapsed().as_secs_f64()
+            );
+        }
+    }
+    println!("Preparation: {:?}", gpu.preparation_stats());
+    Ok(())
+}
+
 fn main() -> anyhow::Result<()> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
+        Some("--animated-fixtures") => animated_fixtures(
+            args.get(2)
+                .map(String::as_str)
+                .unwrap_or("animated-fixtures"),
+            arg(&args, 3, 640),
+            arg(&args, 4, 360),
+            arg(&args, 5, 32),
+            args.iter().any(|a| a == "--all-frames"),
+        ),
         Some("--gallery") => {
             let dir = args.get(2).cloned().unwrap_or_else(|| "gallery".into());
             headless(

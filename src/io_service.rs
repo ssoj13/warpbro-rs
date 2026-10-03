@@ -17,16 +17,52 @@ pub enum Command {
         text: String,
     },
     Delete(PathBuf),
+    OpenScene {
+        id: u64,
+        path: PathBuf,
+    },
+    SaveScene {
+        id: u64,
+        path: PathBuf,
+        document: Box<crate::world::WorldDocument>,
+    },
 }
+pub struct SceneEvent {
+    pub id: u64,
+    pub path: PathBuf,
+    pub result: Result<Option<Box<crate::scene::Scene>>, String>,
+}
+
+pub(crate) fn decode_scene(text: &str) -> Result<crate::scene::Scene, String> {
+    let document = match serde_json::from_str::<crate::world::WorldDocument>(text) {
+        Ok(document) => document,
+        Err(world_error) => {
+            let legacy =
+                serde_json::from_str::<crate::scene::Scene>(text).map_err(|legacy_error| {
+                    format!("Invalid scene: {world_error}; legacy scene: {legacy_error}")
+                })?;
+            crate::world::WorldDocument::from_scene(&legacy)
+        }
+    };
+    let mut scene = document.snapshot(f64::from(document.first))?;
+    scene.animation.first = document.first;
+    scene.animation.last = document.last;
+    scene.animation.fps = document.fps;
+    scene.document = Some(Box::new(document));
+    Ok(scene)
+}
+
 pub struct IoService {
     tx: mpsc::SyncSender<Command>,
     settings: Arc<Mutex<Option<(PathBuf, String)>>>,
     events: mpsc::Receiver<Result<String, String>>,
+    scene_events: mpsc::Receiver<SceneEvent>,
 }
 impl IoService {
     pub fn spawn() -> Self {
         let (tx, rx) = mpsc::sync_channel(8);
         let (done, events) = mpsc::channel();
+        let (scene_done, scene_events) = mpsc::channel();
         let settings = Arc::new(Mutex::new(None::<(PathBuf, String)>));
         let pending = settings.clone();
         thread::Builder::new()
@@ -58,6 +94,22 @@ impl IoService {
                                     .map_err(|e| e.to_string()),
                             );
                         }
+                        Ok(Command::OpenScene { id, path }) => {
+                            let result = std::fs::read_to_string(&path)
+                                .map_err(|error| error.to_string())
+                                .and_then(|text| decode_scene(&text))
+                                .map(|scene| Some(Box::new(scene)));
+                            let _ = scene_done.send(SceneEvent { id, path, result });
+                        }
+                        Ok(Command::SaveScene { id, path, document }) => {
+                            let result = serde_json::to_string_pretty(&document)
+                                .map_err(|error| error.to_string())
+                                .and_then(|text| {
+                                    write(&path, &text).map_err(|error| error.to_string())
+                                })
+                                .map(|_| None);
+                            let _ = scene_done.send(SceneEvent { id, path, result });
+                        }
                         Ok(Command::Delete(path)) => {
                             if let Err(e) = std::fs::remove_file(path) {
                                 let _ = done.send(Err(e.to_string()));
@@ -84,6 +136,7 @@ impl IoService {
             tx,
             settings,
             events,
+            scene_events,
         }
     }
     pub fn send(&self, cmd: Command) -> Result<(), String> {
@@ -94,6 +147,9 @@ impl IoService {
     pub fn settings(&self, path: PathBuf, json: String) {
         *self.settings.lock().unwrap() = Some((path, json));
     }
+    pub fn poll_scene(&self) -> Option<SceneEvent> {
+        self.scene_events.try_recv().ok()
+    }
     pub fn poll(&self) -> Option<Result<String, String>> {
         self.events.try_recv().ok()
     }
@@ -102,6 +158,103 @@ impl IoService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scene_file_worker_roundtrips_authoring_keys_materials_and_metadata() {
+        use crate::world::{WorldCommand, WorldDocument, WorldEditor, WorldKind};
+        let mut editor = WorldEditor::new(WorldDocument::from_scene(&crate::scene::Scene::preset(
+            crate::params::FAMILY_BULB,
+        )));
+        editor
+            .execute(WorldCommand::SetTimeRange {
+                first: 7,
+                last: 256,
+                fps: 30.0,
+            })
+            .unwrap();
+        let object = editor.selection.unwrap();
+        editor
+            .execute(WorldCommand::SetMetadata {
+                id: object,
+                path: "/asset".into(),
+                value: serde_json::json!({"owner":"artist","nested":[1,true]}),
+            })
+            .unwrap();
+        editor
+            .execute(WorldCommand::Key {
+                id: object,
+                path: "/transform/position/0".into(),
+                frame: 12.25,
+            })
+            .unwrap();
+        editor
+            .execute(WorldCommand::Create {
+                kind: WorldKind::Material,
+                name: "Saved material".into(),
+                parent: None,
+            })
+            .unwrap();
+        let material = editor.selection.unwrap();
+        editor
+            .execute(WorldCommand::AssignMaterial {
+                id: object,
+                material: Some(material),
+            })
+            .unwrap();
+        let expected = serde_json::to_value(&editor.document).unwrap();
+        let path =
+            std::env::temp_dir().join(format!("frac-scene-{}.frac.json", std::process::id()));
+        let io = IoService::spawn();
+        io.send(Command::SaveScene {
+            id: 1,
+            path: path.clone(),
+            document: Box::new(editor.document),
+        })
+        .unwrap();
+        fn wait(io: &IoService) -> SceneEvent {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Some(event) = io.poll_scene() {
+                    return event;
+                }
+                assert!(std::time::Instant::now() < until);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        let saved = wait(&io);
+        assert_eq!(saved.id, 1);
+        assert!(saved.result.unwrap().is_none());
+        io.send(Command::OpenScene {
+            id: 2,
+            path: path.clone(),
+        })
+        .unwrap();
+        let loaded = wait(&io).result.unwrap().unwrap();
+        assert_eq!(
+            (
+                loaded.animation.first,
+                loaded.animation.last,
+                loaded.animation.fps
+            ),
+            (7, 256, 30.0)
+        );
+        assert_eq!(
+            serde_json::to_value(loaded.document.as_ref().unwrap()).unwrap(),
+            expected
+        );
+        std::fs::remove_file(&path).unwrap();
+        io.send(Command::OpenScene { id: 3, path }).unwrap();
+        assert!(wait(&io).result.is_err());
+    }
+
+    #[test]
+    fn scene_decoder_migrates_legacy_and_rejects_invalid_input() {
+        let legacy = crate::scene::Scene::preset(crate::params::FAMILY_BOX);
+        let decoded = decode_scene(&serde_json::to_string(&legacy).unwrap()).unwrap();
+        let document = decoded.document.as_ref().unwrap();
+        assert_eq!(document.snapshot(0.0).unwrap().formula, legacy.formula);
+        assert!(decode_scene("{broken json").is_err());
+    }
+
     #[test]
     fn coalesced_settings_flush_on_shutdown_and_explicit_save_reports_failure() {
         let dir = std::env::temp_dir().join(format!("frac-io-{}", std::process::id()));

@@ -2233,6 +2233,8 @@ fn component_label(index: usize) -> &'static str {
 fn property_label(path: &str) -> String {
     match path {
         "/material_id" => return "Material".into(),
+        crate::world::CAMERA_ORBIT_SPEED => return "Orbit speed (°/s)".into(),
+        crate::world::CAMERA_ORBIT_PHASE => return "Orbit phase (°)".into(),
         "/transform/position" => return "Translate".into(),
         "/transform/rotation" | "/transform/rotation_degrees" => return "Rotate".into(),
         "/transform/scale" => return "Scale".into(),

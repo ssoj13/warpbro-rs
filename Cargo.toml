@@ -75,6 +75,9 @@ curves = { git = "ssh://git@github.com/ssoj13/curves-rs.git", branch = "main", f
 box-rs = { git = "ssh://git@github.com/ssoj13/box-rs.git", branch = "main" }
 image = { version = "0.25", default-features = false, features = ["hdr", "exr"] }
 
+[dev-dependencies]
+av-format-mov = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
+
 # Keep transitive Git dependencies on the same pinned SSH sources.
 
 [patch."https://github.com/tracel-ai/burn"]

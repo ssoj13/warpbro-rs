@@ -169,16 +169,123 @@ impl TabViewer for Viewer<'_> {
     }
 }
 
+/// A reusable, exact stamp of authored layout state. Pixel rectangles of docked
+/// leaves are derived during painting; floating outer rectangles are authored.
+#[derive(Default)]
+pub(super) struct LayoutCache {
+    stamp: Vec<u64>,
+    scratch: Vec<u64>,
+    window_ids: Vec<egui::Id>,
+    pub blob: Option<String>,
+    pub revision: u64,
+    #[cfg(test)]
+    pub serializations: usize,
+}
+impl LayoutCache {
+    pub fn refresh(
+        &mut self,
+        state: &DockState<Panel>,
+        ctx: &egui::Context,
+    ) -> Result<(), egui_dock_layout::Error> {
+        let stamp = &mut self.scratch;
+        stamp.clear();
+        let focused = state.focused_leaf();
+        stamp.extend([
+            focused.map_or(u64::MAX, |p| p.surface.0 as u64),
+            focused.map_or(u64::MAX, |p| p.node.0 as u64),
+        ]);
+        for (index, surface) in state.iter_surfaces_indexed() {
+            stamp.extend([
+                index.0 as u64,
+                match surface {
+                    egui_dock::Surface::Empty => 0,
+                    egui_dock::Surface::Main(_) => 1,
+                    egui_dock::Surface::Window(_, _) => 2,
+                },
+            ]);
+            let Some(tree) = surface.node_tree() else {
+                continue;
+            };
+            stamp.push(tree.focused_leaf().map_or(u64::MAX, |p| p.0 as u64));
+            for node in surface.iter_nodes() {
+                match node {
+                    egui_dock::Node::Empty => stamp.push(0),
+                    egui_dock::Node::Leaf(leaf) => {
+                        stamp.extend([
+                            1,
+                            leaf.tabs.len() as u64,
+                            leaf.active.0 as u64,
+                            leaf.scroll.to_bits() as u64,
+                            leaf.collapsed as u64,
+                            leaf.tab_bar_hidden as u64,
+                        ]);
+                        stamp.extend(leaf.tabs.iter().map(|panel| *panel as u64));
+                    }
+                    egui_dock::Node::Horizontal(split) | egui_dock::Node::Vertical(split) => {
+                        stamp.extend([
+                            if matches!(node, egui_dock::Node::Horizontal(_)) {
+                                2
+                            } else {
+                                3
+                            },
+                            split.fraction.to_bits() as u64,
+                            split.fully_collapsed as u64,
+                            split.collapsed_leaf_count as u64,
+                        ]);
+                    }
+                }
+            }
+            stamp.push(u64::MAX - 1);
+            if let egui_dock::Surface::Window(_, window) = surface {
+                while self.window_ids.len() <= index.0 {
+                    let surface = egui_dock::SurfaceIndex(self.window_ids.len());
+                    self.window_ids
+                        .push(egui::Id::new(format!("window {surface:?}")));
+                }
+                let rect = egui::AreaState::load(ctx, self.window_ids[index.0])
+                    .map(|area| area.rect())
+                    .filter(|rect| rect.is_finite() && rect.is_positive())
+                    .unwrap_or_else(|| window.rect());
+                stamp.extend([
+                    rect.min.x.to_bits() as u64,
+                    rect.min.y.to_bits() as u64,
+                    rect.max.x.to_bits() as u64,
+                    rect.max.y.to_bits() as u64,
+                ]);
+            }
+        }
+        if self.blob.is_some() && self.stamp == self.scratch {
+            return Ok(());
+        }
+        let blob = layout_blob(state, ctx)?;
+        #[cfg(test)]
+        {
+            self.serializations += 1;
+        }
+        if self.blob.as_ref() != Some(&blob) {
+            self.revision = self.revision.wrapping_add(1);
+            self.blob = Some(blob);
+        }
+        std::mem::swap(&mut self.stamp, &mut self.scratch);
+        Ok(())
+    }
+    pub fn invalidate(&mut self) {
+        self.stamp.clear();
+    }
+}
+
 /// Persistent presets are separate from transient widget state.
 pub(super) struct Layouts {
     pub store: LayoutStore,
     manager: LayoutManager,
+    pub cache: LayoutCache,
 }
 impl Default for Layouts {
     fn default() -> Self {
         Self {
             store: LayoutStore::new(),
             manager: LayoutManager::new().with_combo_width(140.0),
+            cache: LayoutCache::default(),
         }
     }
 }
@@ -195,25 +302,25 @@ fn restore_layout(blob: &str) -> Result<DockState<Panel>, String> {
 impl App {
     /// The host places this inline in the top-right of its main toolbar.
     pub(super) fn layout_manager_ui(&mut self, ui: &mut egui::Ui) {
-        let blob = match layout_blob(&self.dock, ui.ctx()) {
-            Ok(blob) => blob,
-            Err(error) => {
-                ui.label("Layouts unavailable")
-                    .on_hover_text(error.to_string());
-                return;
-            }
-        };
+        let mut cache = std::mem::take(&mut self.layouts.cache);
+        if let Err(error) = cache.refresh(&self.dock, ui.ctx()) {
+            self.layouts.cache = cache;
+            ui.label("Layouts unavailable")
+                .on_hover_text(error.to_string());
+            return;
+        }
+        let blob = cache.blob.as_deref().unwrap_or_default();
+        let mut restored = false;
         let previous = self.layouts.store.current().to_owned();
         ui.push_id("frac-layout-manager", |ui| {
             if let Some(LayoutAction::Restore(saved)) =
-                self.layouts
-                    .manager
-                    .show(ui, &mut self.layouts.store, &blob)
+                self.layouts.manager.show(ui, &mut self.layouts.store, blob)
             {
                 match restore_layout(&saved) {
                     Ok(state) => {
                         self.dock = state;
                         self.panels_to_open.clear();
+                        restored = true;
                     }
                     Err(error) => {
                         if !previous.is_empty() {
@@ -229,16 +336,21 @@ impl App {
                     .add_enabled(!selected.is_empty(), egui::Button::new("Update selected"))
                     .clicked()
                 {
-                    self.layouts.store.save(selected, blob.clone());
+                    self.layouts.store.save(selected, blob.to_owned());
                     ui.close();
                 }
                 if ui.button("Reset to default").clicked() {
                     self.dock = default_layout();
                     self.panels_to_open.clear();
+                    restored = true;
                     ui.close();
                 }
             });
         });
+        if restored {
+            cache.invalidate();
+        }
+        self.layouts.cache = cache;
     }
 
     pub(super) fn window_menu(&mut self, ui: &mut egui::Ui) {
@@ -465,6 +577,37 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn layout_cache_reuses_idle_blob_and_observes_authored_edits() {
+        let ctx = egui::Context::default();
+        let mut state = default_layout();
+        let mut cache = LayoutCache::default();
+        cache.refresh(&state, &ctx).unwrap();
+        let pointer = cache.blob.as_ref().unwrap().as_ptr();
+        let revision = cache.revision;
+        for _ in 0..32 {
+            cache.refresh(&state, &ctx).unwrap();
+        }
+        assert_eq!(cache.serializations, 1);
+        assert_eq!(cache.revision, revision);
+        assert_eq!(cache.blob.as_ref().unwrap().as_ptr(), pointer);
+        let path = state.find_tab(&Panel::Timeline).unwrap();
+        state[path.surface][path.node]
+            .get_leaf_mut()
+            .unwrap()
+            .tab_bar_hidden = true;
+        cache.refresh(&state, &ctx).unwrap();
+        assert_eq!(cache.serializations, 2);
+        assert_ne!(cache.revision, revision);
+        open_panel(&mut state, Panel::Export);
+        cache.refresh(&state, &ctx).unwrap();
+        let restored = restore_layout(cache.blob.as_deref().unwrap()).unwrap();
+        assert!(restored.find_tab(&Panel::Export).is_some());
+        let count = cache.serializations;
+        cache.refresh(&state, &ctx).unwrap();
+        assert_eq!(cache.serializations, count);
+    }
+
     #[test]
     fn fresh_and_floating_layouts_restore_and_tabs_do_not_duplicate() {
         let mut state = default_layout();

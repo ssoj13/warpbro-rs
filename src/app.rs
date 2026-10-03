@@ -8,6 +8,7 @@ use egui::{self, Color32, ColorImage, RichText, Sense, TextureHandle, TextureOpt
 
 use crate::render_service::{Command, Frame, RenderEvent, RenderService, ViewportRequest};
 use crate::scene::*;
+use crate::world::WorldDocument;
 use std::sync::Arc;
 
 #[path = "dock.rs"]
@@ -115,7 +116,17 @@ pub(crate) struct App {
     applied_fonts: Option<dock::Fonts>,
     viewport_visible: bool,
     config_picker: egui_file_dialog::FileDialog,
-    saved_settings: String,
+    scene_picker: Option<(bool, egui_file_dialog::FileDialog)>,
+    scene_file_path: Option<PathBuf>,
+    scene_file_sequence: u64,
+    scene_file_pending: Option<(u64, u64)>,
+    persisted_settings: Option<Settings>,
+    persisted_layout_revision: u64,
+    legacy_before: Option<Scene>,
+    #[cfg(test)]
+    settings_serializations: usize,
+    #[cfg(test)]
+    legacy_snapshots: usize,
     status_layout: egui_statusbar::StatusBarLayout,
     status_resizable: bool,
     render_editor: crate::inspector::RenderEditor,
@@ -291,6 +302,15 @@ fn settings_path() -> PathBuf {
         .join("frac-rs/settings.json")
 }
 
+fn freeze_world_scene(scene: &Scene, document: &WorldDocument) -> Scene {
+    let mut scene = scene.clone();
+    scene.document = Some(Box::new(document.clone()));
+    scene.animation.first = document.first;
+    scene.animation.last = document.last;
+    scene.animation.fps = document.fps;
+    scene
+}
+
 impl App {
     pub(crate) fn new() -> Self {
         let gallery: Vec<Entry> = Scene::gallery()
@@ -336,7 +356,17 @@ impl App {
             applied_fonts: None,
             viewport_visible: false,
             config_picker: egui_file_dialog::FileDialog::new(),
-            saved_settings: String::new(),
+            scene_picker: None,
+            scene_file_path: None,
+            scene_file_sequence: 0,
+            scene_file_pending: None,
+            persisted_settings: None,
+            persisted_layout_revision: 0,
+            legacy_before: None,
+            #[cfg(test)]
+            settings_serializations: 0,
+            #[cfg(test)]
+            legacy_snapshots: 0,
             status_layout: Default::default(),
             status_resizable: true,
             render_editor: Default::default(),
@@ -551,13 +581,58 @@ impl App {
             }
             let _ = self.renderer.try_command(Command::ReloadColour);
         }
-        let layout = match dock::layout_blob(&self.dock, ctx) {
-            Ok(blob) => Some(blob),
-            Err(e) => {
-                self.status = format!("Layout save failed: {e}");
-                return;
+        match self.changed_settings_json(ctx) {
+            Ok(Some(json)) => {
+                self.io.settings(settings_path(), json);
             }
-        };
+            Ok(None) => {}
+            Err(error) => self.status = error,
+        }
+    }
+
+    fn settings_match(&self, saved: &Settings) -> bool {
+        let export = self.export.settings();
+        let previous = &saved.export;
+        saved.display == self.display
+            && saved.colour == self.scene.colour
+            && saved.panel == self.prefs
+            && saved.controls.look_sensitivity == self.controls.look_sensitivity
+            && saved.controls.fly_speed == self.controls.fly_speed
+            && saved.toolbar == self.toolbar
+            && saved.fonts == self.fonts
+            && saved.layouts == self.layouts.store
+            && saved.gui_fps == self.gui_fps
+            && saved.status_layout == self.status_layout
+            && saved.status_resizable == self.status_resizable
+            && saved.attribute_metrics == self.world_ui.attribute_metrics
+            && export.format == previous.format
+            && export.output == previous.output
+            && export.width == previous.width
+            && export.height == previous.height
+            && export.samples == previous.samples
+            && export.first == previous.first
+            && export.last == previous.last
+            && export.fps_num == previous.fps_num
+            && export.fps_den == previous.fps_den
+            && export.qp == previous.qp
+            && export.preset == previous.preset
+            && export.overwrite == previous.overwrite
+    }
+
+    fn changed_settings_json(&mut self, ctx: &egui::Context) -> Result<Option<String>, String> {
+        self.layouts
+            .cache
+            .refresh(&self.dock, ctx)
+            .map_err(|error| format!("Layout save failed: {error}"))?;
+        if self.persisted_layout_revision == self.layouts.cache.revision
+            && self
+                .persisted_settings
+                .as_ref()
+                .is_some_and(|saved| self.settings_match(saved))
+        {
+            return Ok(None);
+        }
+        let layout = self.layouts.cache.blob.clone();
         let settings = Settings {
             display: self.display,
             colour: self.scene.colour.clone(),
@@ -578,13 +653,14 @@ impl App {
             timeline_initialized: true,
             world_layout_initialized: true,
         };
-        if let Ok(json) = serde_json::to_string_pretty(&settings)
-            && self.saved_settings != json
+        let json = serde_json::to_string_pretty(&settings).map_err(|error| error.to_string())?;
+        #[cfg(test)]
         {
-            let path = settings_path();
-            self.io.settings(path, json.clone());
-            self.saved_settings = json;
+            self.settings_serializations += 1;
         }
+        self.persisted_settings = Some(settings);
+        self.persisted_layout_revision = self.layouts.cache.revision;
+        Ok(Some(json))
     }
 
     fn with_snap_preset(mut self) -> Self {
@@ -630,7 +706,88 @@ impl App {
         ctx.request_repaint();
     }
 
+    fn scene_file_dialog(&mut self, save: bool) {
+        let mut dialog = egui_file_dialog::FileDialog::new()
+            .add_file_filter_extensions("Fractal scene", vec!["json"])
+            .default_file_name(&format!("{}.frac.json", crate::slug(&self.scene.name)));
+        if let Some(parent) = self.scene_file_path.as_ref().and_then(|path| path.parent()) {
+            dialog = dialog.initial_directory(parent.to_path_buf());
+        }
+        if save {
+            dialog.save_file();
+        } else {
+            dialog.pick_file();
+        }
+        self.scene_picker = Some((save, dialog));
+    }
+
+    fn submit_scene_file(&mut self, mut path: PathBuf, save: bool) {
+        self.world.finish_edit();
+        if save && path.extension().is_none() {
+            path.set_extension("frac.json");
+        }
+        let id = self.scene_file_sequence.wrapping_add(1);
+        let command = if save {
+            crate::io_service::Command::SaveScene {
+                id,
+                path: path.clone(),
+                document: Box::new(self.world.document.clone()),
+            }
+        } else {
+            crate::io_service::Command::OpenScene {
+                id,
+                path: path.clone(),
+            }
+        };
+        match self.io.send(command) {
+            Ok(()) => {
+                self.scene_file_sequence = id;
+                self.scene_file_pending = Some((id, self.load_revision));
+                self.status = format!(
+                    "{} {}",
+                    if save { "Saving" } else { "Opening" },
+                    path.display()
+                );
+            }
+            Err(error) => self.status = error,
+        }
+    }
+
+    fn update_scene_picker(&mut self, ctx: &egui::Context) {
+        let picked = if let Some((save, picker)) = &mut self.scene_picker {
+            picker.update(ctx);
+            picker.take_picked().map(|path| (*save, path))
+        } else {
+            None
+        };
+        if let Some((save, path)) = picked {
+            self.scene_picker = None;
+            self.submit_scene_file(path, save);
+        }
+    }
+
+    fn scene_file_event(&mut self, event: crate::io_service::SceneEvent) {
+        if self.scene_file_pending != Some((event.id, self.load_revision)) {
+            return;
+        }
+        self.scene_file_pending = None;
+        match event.result {
+            Ok(Some(scene)) => {
+                self.load(*scene);
+                self.scene_file_path = Some(event.path.clone());
+                self.status = format!("Opened {}", event.path.display());
+            }
+            Ok(None) => {
+                self.scene_file_path = Some(event.path.clone());
+                self.status = format!("Saved {}", event.path.display());
+            }
+            Err(error) => self.status = format!("Scene file {}: {error}", event.path.display()),
+        }
+    }
+
     fn load(&mut self, mut scene: Scene) {
+        self.scene_file_path = None;
+        self.scene_file_pending = None;
         self.evaluated_world = None;
         self.load_revision = self.load_revision.wrapping_add(1);
         let document = crate::world::WorldDocument::from_scene(&scene);
@@ -1037,6 +1194,9 @@ impl App {
                 _ => {}
             }
         }
+        while let Some(event) = self.io.poll_scene() {
+            self.scene_file_event(event);
+        }
         while let Some(result) = self.io.poll() {
             self.status = result.unwrap_or_else(|e| e);
         }
@@ -1045,18 +1205,21 @@ impl App {
         self.gui_fps.clamp(15, 240)
     }
     fn frozen_world_scene(&self) -> Scene {
-        let mut scene = self.scene.clone();
-        scene.document = Some(Box::new(self.world.document.clone()));
-        scene.animation.first = self.world.document.first;
-        scene.animation.last = self.world.document.last;
-        scene.animation.fps = self.world.document.fps;
-        scene
+        freeze_world_scene(&self.scene, &self.world.document)
     }
-
     fn export_ui(&mut self, ui: &mut egui::Ui) {
-        let frozen = self.frozen_world_scene();
+        let timeline = (
+            self.world.document.first,
+            self.world.document.last,
+            self.world.document.fps,
+        );
+        let scene = &self.scene;
+        let world = &mut self.world;
         ui.add_enabled_ui(self.job.is_none(), |ui| {
-            self.export.ui(ui, &frozen, &self.renderer)
+            self.export.ui(ui, timeline, &self.renderer, || {
+                world.finish_edit();
+                freeze_world_scene(scene, &world.document)
+            });
         });
     }
 
@@ -1299,6 +1462,38 @@ impl App {
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
+                if ui.button("Open scene…").clicked() {
+                    self.scene_file_dialog(false);
+                    ui.close();
+                }
+                if ui.button("Save scene").clicked() {
+                    if let Some(path) = self.scene_file_path.clone() {
+                        self.submit_scene_file(path, true);
+                    } else {
+                        self.scene_file_dialog(true);
+                    }
+                    ui.close();
+                }
+                if ui.button("Save scene as…").clicked() {
+                    self.scene_file_dialog(true);
+                    ui.close();
+                }
+                ui.menu_button("Animation presets", |ui| {
+                    for (index, preset) in crate::presets::ANIMATED.iter().enumerate() {
+                        if ui
+                            .button(preset.name)
+                            .on_hover_text(preset.description)
+                            .clicked()
+                        {
+                            match crate::presets::scene(index) {
+                                Ok(scene) => self.load(scene),
+                                Err(error) => self.status = error,
+                            }
+                            ui.close();
+                        }
+                    }
+                });
+                ui.separator();
                 if ui.button("Save bookmark").clicked() {
                     self.save_bookmark();
                     ui.close();
@@ -1775,12 +1970,18 @@ impl App {
         if self.evaluated_world != Some(key) {
             self.scene = self.world.document.snapshot(frame)?;
             self.evaluated_world = Some(key);
+            self.legacy_before = Some(self.scene.clone());
+            #[cfg(test)]
+            {
+                self.legacy_snapshots += 1;
+            }
         }
         Ok(())
     }
     pub(crate) fn ui(&mut self, root: &mut egui::Ui) {
         let ctx = root.ctx().clone();
         self.apply_fonts(&ctx);
+        self.update_scene_picker(&ctx);
         self.colour.poll();
         let dt = ctx.input(|i| i.stable_dt).max(1.0e-4);
         self.frame_ms = self.frame_ms * 0.9 + dt * 1000.0 * 0.1;
@@ -1791,7 +1992,6 @@ impl App {
         }
         let edit_frame = f64::from(self.world_ui.playhead);
         let edit_origin = self.load_revision;
-        let before = self.scene.clone();
         if !ctx.text_edit_focused() {
             if ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
                 self.show_ui = !self.show_ui;
@@ -1808,6 +2008,10 @@ impl App {
             }
         }
 
+        if let Err(error) = self.refresh_scene() {
+            self.status = error;
+        }
+        let before = self.legacy_before.take();
         let thumbs_pending = self.render_one_thumbnail(&ctx);
         self.poll_events(&ctx);
         self.export.update(&self.renderer);
@@ -1835,7 +2039,12 @@ impl App {
             self.fly = None;
             ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
         }
-        if self.load_revision == edit_origin && self.scene != before {
+        if let Some(before) = before.as_ref()
+            && self.load_revision == edit_origin
+            && (self.scene.camera != before.camera
+                || self.scene.render != before.render
+                || self.scene.colour != before.colour)
+        {
             let gesture = crate::world_ui::parameter_gesture(&ctx).or_else(|| {
                 ctx.input(|input| input.pointer.primary_released())
                     .then(|| self.world.active_edit())
@@ -1844,19 +2053,20 @@ impl App {
             let result = if gesture.is_some() {
                 self.world.edit_snapshot_with_gesture(
                     self.world.selection,
-                    &before,
+                    before,
                     &self.scene,
                     edit_frame,
                     gesture,
                 )
             } else {
                 self.world
-                    .edit_snapshot(self.world.selection, &before, &self.scene, edit_frame)
+                    .edit_snapshot(self.world.selection, before, &self.scene, edit_frame)
             };
             if let Err(error) = result {
                 self.status = error;
             }
         }
+        self.legacy_before = before;
         self.world
             .finish_edit_unless(crate::world_ui::parameter_gesture(&ctx));
         if let Err(error) = self.refresh_scene() {
@@ -1881,6 +2091,108 @@ fn exists(p: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn file_load_completion_preserves_document_and_discards_stale_requests() {
+        let mut app = App::new();
+        let mut scene = Scene::preset(crate::params::FAMILY_BOX);
+        let document = crate::world::WorldDocument::from_scene(&scene);
+        let expected = serde_json::to_value(&document).unwrap();
+        scene.document = Some(Box::new(document));
+        app.scene_file_pending = Some((7, app.load_revision));
+        app.scene_file_event(crate::io_service::SceneEvent {
+            id: 7,
+            path: PathBuf::from("opened.frac.json"),
+            result: Ok(Some(Box::new(scene))),
+        });
+        assert_eq!(serde_json::to_value(&app.world.document).unwrap(), expected);
+        assert_eq!(
+            app.scene_file_path.as_deref(),
+            Some(Path::new("opened.frac.json"))
+        );
+        app.refresh_scene().unwrap();
+        let revision = app.world.revision();
+        let clones = app.legacy_snapshots;
+        app.refresh_scene().unwrap();
+        assert_eq!(app.world.revision(), revision);
+        assert_eq!(app.legacy_snapshots, clones);
+        app.scene_file_pending = Some((8, app.load_revision));
+        app.load(Scene::preset(crate::params::FAMILY_BULB));
+        app.scene_file_event(crate::io_service::SceneEvent {
+            id: 8,
+            path: PathBuf::from("stale.frac.json"),
+            result: Ok(Some(Box::new(Scene::preset(crate::params::FAMILY_BOX)))),
+        });
+        assert!(matches!(
+            app.scene.formula,
+            crate::scene::Formula::Mandelbulb(_)
+        ));
+        assert!(app.scene_file_path.is_none());
+    }
+
+    #[test]
+    fn export_panel_does_not_freeze_scene_during_idle_or_playback() {
+        let mut app = App::new();
+        let ctx = egui::Context::default();
+        for frame in 0..32 {
+            let _ = ctx.run_ui(egui::RawInput::default(), |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    app.export
+                        .ui(ui, (frame, frame + 250, 24.0), &app.renderer, || {
+                            panic!("An idle export panel must not clone the authoring document")
+                        });
+                });
+            });
+        }
+    }
+
+    #[test]
+    fn settings_and_layouts_serialize_only_after_actual_changes() {
+        let mut app = App::new();
+        let ctx = egui::Context::default();
+        app.refresh_scene().unwrap();
+        assert!(app.changed_settings_json(&ctx).unwrap().is_some());
+        let serializations = app.settings_serializations;
+        let dock_serializations = app.layouts.cache.serializations;
+        let baseline = app.legacy_before.as_ref().unwrap().objects.as_ptr();
+        let snapshots = app.legacy_snapshots;
+        for _ in 0..32 {
+            app.refresh_scene().unwrap();
+            assert!(app.changed_settings_json(&ctx).unwrap().is_none());
+            assert_eq!(
+                app.legacy_before.as_ref().unwrap().objects.as_ptr(),
+                baseline
+            );
+        }
+        assert_eq!(app.settings_serializations, serializations);
+        assert_eq!(app.layouts.cache.serializations, dock_serializations);
+        assert_eq!(app.legacy_snapshots, snapshots);
+        app.world_ui.attribute_metrics.numeric_width = 64.0;
+        app.fonts.face = "Custom face".into();
+        app.status_layout.widths = vec![210.0, 100.0];
+        app.gui_fps = 144;
+        let mut export = app.export.settings().clone();
+        export.output = "renders/new.exr".into();
+        export.qp = 19;
+        app.export.restore(export);
+        let json = app.changed_settings_json(&ctx).unwrap().unwrap();
+        let saved: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(saved.attribute_metrics.numeric_width, 64.0);
+        assert_eq!(saved.fonts.face, "Custom face");
+        assert_eq!(saved.status_layout.widths, [210.0, 100.0]);
+        assert_eq!(saved.gui_fps, 144);
+        assert_eq!(saved.export.output, "renders/new.exr");
+        assert_eq!(saved.export.qp, 19);
+        assert!(app.changed_settings_json(&ctx).unwrap().is_none());
+        app.layouts.store.save(
+            "Edited workspace",
+            app.layouts.cache.blob.as_ref().unwrap().clone(),
+        );
+        let json = app.changed_settings_json(&ctx).unwrap().unwrap();
+        let saved: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(saved.layouts.current(), "Edited workspace");
+        assert!(app.changed_settings_json(&ctx).unwrap().is_none());
+    }
 
     #[test]
     fn cached_scene_reuses_idle_vectors_and_invalidates_edit_seek_undo_and_load() {

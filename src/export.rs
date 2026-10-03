@@ -17,6 +17,8 @@ use std::{
 };
 
 const PRESETS: [&str; 5] = ["ultrafast", "veryfast", "fast", "medium", "slow"];
+const HIGH_QUALITY_QP: u8 = 18;
+const HIGH_QUALITY_PRESET: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExportFormat {
@@ -51,8 +53,8 @@ impl Default for ExportSettings {
             last: 1,
             fps_num: 24,
             fps_den: 1,
-            qp: 27,
-            preset: 1,
+            qp: HIGH_QUALITY_QP,
+            preset: HIGH_QUALITY_PRESET,
             overwrite: false,
         }
     }
@@ -116,40 +118,43 @@ impl ExportSettings {
 }
 
 /// Same schema used by Playa's reusable encoder widget; only supported sinks are advertised.
-pub fn schema() -> EncodeSchema {
-    EncodeSchema::new([
-        Format::new(
-            "exr",
-            "EXR sequence",
-            "exr",
-            [Codec::new(
+pub fn schema() -> &'static EncodeSchema {
+    static SCHEMA: std::sync::OnceLock<EncodeSchema> = std::sync::OnceLock::new();
+    SCHEMA.get_or_init(|| {
+        EncodeSchema::new([
+            Format::new(
                 "exr",
-                "Linear float RGB",
-                [EncodeOption::int(
-                    "samples",
-                    "Samples / frame",
-                    256,
-                    1,
-                    1_000_000,
-                )],
-            )
-            .hint("Scene-linear Rec.709; no display transform or exposure baked in.")],
-        ),
-        Format::new(
-            "mp4",
-            "Video",
-            "mp4",
-            [Codec::new(
-                "hevc",
-                "HEVC / ffmpeg-rs",
-                [
-                    EncodeOption::int("qp", "QP", 27, 0, 51),
-                    EncodeOption::choice("preset", "Preset", PRESETS, 1),
-                ],
-            )
-            .hint("Software Kvazaar, 8-bit sRGB / Rec.709 SDR, display transform baked in.")],
-        ),
-    ])
+                "EXR sequence",
+                "exr",
+                [Codec::new(
+                    "exr",
+                    "Linear float RGB",
+                    [EncodeOption::int(
+                        "samples",
+                        "Samples / frame",
+                        256,
+                        1,
+                        1_000_000,
+                    )],
+                )
+                .hint("Scene-linear Rec.709; no display transform or exposure baked in.")],
+            ),
+            Format::new(
+                "mp4",
+                "Video",
+                "mp4",
+                [Codec::new(
+                    "hevc",
+                    "HEVC / ffmpeg-rs",
+                    [
+                        EncodeOption::int("qp", "QP", i64::from(HIGH_QUALITY_QP), 0, 51),
+                        EncodeOption::choice("preset", "Preset", PRESETS, HIGH_QUALITY_PRESET),
+                    ],
+                )
+                .hint("Software Kvazaar, 8-bit sRGB / Rec.709 SDR, display transform baked in.")],
+            ),
+        ])
+    })
 }
 
 pub struct ExportController {
@@ -269,7 +274,13 @@ impl ExportController {
             self.status = "Cancelling export…".into();
         }
     }
-    pub fn ui(&mut self, ui: &mut egui::Ui, scene: &Scene, service: &RenderService) {
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        timeline: (u32, u32, f64),
+        service: &RenderService,
+        freeze: impl FnOnce() -> Scene,
+    ) {
         if let Some(picker) = &mut self.browse {
             picker.update(ui.ctx());
             if let Some(path) = picker.take_picked() {
@@ -297,15 +308,22 @@ impl ExportController {
                 ui.label("Frame range"); ui.horizontal(|ui| { ui.add(egui::DragValue::new(&mut self.settings.first).range(0..=u32::MAX)); ui.label("…"); ui.add(egui::DragValue::new(&mut self.settings.last).range(0..=u32::MAX)); }); ui.end_row();
                 if self.settings.format == ExportFormat::Hevc {
                     ui.label("FPS"); ui.horizontal(|ui| { ui.add(egui::DragValue::new(&mut self.settings.fps_num).range(1..=120000)); ui.label("/"); ui.add(egui::DragValue::new(&mut self.settings.fps_den).range(1..=10000)); }); ui.end_row();
-                    ui.label("QP"); ui.add(egui::Slider::new(&mut self.settings.qp,0..=51)); ui.end_row();
+                    ui.label("Quality"); ui.horizontal(|ui| {
+                        ui.add(egui::Slider::new(&mut self.settings.qp,0..=51).text("QP"))
+                            .on_hover_text("Lower QP preserves more detail and produces larger files.");
+                        if ui.button("High quality").clicked() {
+                            self.settings.qp = HIGH_QUALITY_QP;
+                            self.settings.preset = HIGH_QUALITY_PRESET;
+                        }
+                    }); ui.end_row();
                     ui.label("Preset"); egui::ComboBox::from_id_salt("export_preset").selected_text(PRESETS[self.settings.preset.min(4)]).show_ui(ui, |ui| { for (index,name) in PRESETS.iter().enumerate() { ui.selectable_value(&mut self.settings.preset,index,*name); } }); ui.end_row();
                 }
             });
             ui.checkbox(&mut self.settings.overwrite,"Overwrite existing output");
             if ui.button("Use timeline range and FPS").clicked() {
-                self.settings.first = scene.animation.first;
-                self.settings.last = scene.animation.last;
-                self.settings.fps_num = (scene.animation.fps * 1000.0).round().clamp(1.0,120000.0) as u32;
+                self.settings.first = timeline.0;
+                self.settings.last = timeline.1;
+                self.settings.fps_num = (timeline.2 * 1000.0).round().clamp(1.0,120000.0) as u32;
                 self.settings.fps_den = 1000;
             }
             ui.label("Animation is sampled at each frame. The scene and keys are frozen when export starts.");
@@ -313,7 +331,10 @@ impl ExportController {
             ui.small(hint);
             let validation = self.settings.validate();
             if let Err(error) = &validation { ui.colored_label(egui::Color32::LIGHT_RED,error); }
-            if ui.add_enabled(validation.is_ok(),egui::Button::new("Start render")).clicked() && let Err(error) = self.start(scene,service) { self.status = error; }
+            if ui.add_enabled(validation.is_ok(),egui::Button::new("Start render")).clicked() {
+                let scene = freeze();
+                if let Err(error) = self.start(&scene,service) { self.status = error; }
+            }
         });
         if running {
             let total = self
@@ -603,7 +624,45 @@ struct HevcSink {
     fps: (u32, u32),
     frames: i64,
     header: bool,
+    timing: VideoTiming,
 }
+
+/// Presentation interval on MovWriter's implicit decode clock. B-frame reordering
+/// must not introduce a leading empty edit into a clip that starts at frame zero.
+#[derive(Default)]
+struct VideoTiming {
+    first_dts: Option<i64>,
+    bounds: Option<(i64, i64)>,
+}
+impl VideoTiming {
+    fn record(&mut self, pts: i64, dts: i64, duration: i64) -> Result<(), String> {
+        if duration <= 0 {
+            return Err("Invalid HEVC packet duration".into());
+        }
+        let end = pts.checked_add(duration).ok_or("HEVC timestamp overflow")?;
+        self.first_dts.get_or_insert(dts);
+        self.bounds = Some(match self.bounds {
+            Some((first, last)) => (first.min(pts), last.max(end)),
+            None => (pts, end),
+        });
+        Ok(())
+    }
+    fn window(&self) -> Result<(i64, i64), String> {
+        let origin = self.first_dts.ok_or("HEVC output has no packets")?;
+        let (first, last) = self
+            .bounds
+            .ok_or("HEVC output has no presentation interval")?;
+        let start = first
+            .checked_sub(origin)
+            .ok_or("HEVC edit start overflow")?;
+        let end = last.checked_sub(origin).ok_or("HEVC edit end overflow")?;
+        if start < 0 || end <= start {
+            return Err("Invalid HEVC presentation interval".into());
+        }
+        Ok((start, end))
+    }
+}
+
 fn av_error(error: impl std::fmt::Debug) -> String {
     format!("{error:?}")
 }
@@ -645,6 +704,7 @@ impl HevcSink {
             fps: (settings.fps_num, settings.fps_den),
             frames: 0,
             header: false,
+            timing: VideoTiming::default(),
         };
         if !sink.ctx.extradata.is_empty() {
             sink.header(&sink.ctx.extradata.clone())?;
@@ -721,8 +781,18 @@ impl HevcSink {
                     if !self.header {
                         self.header(packet.data())?;
                     }
-                    let delta = i32::try_from(packet.pts - packet.dts)
-                        .map_err(|_| "HEVC composition timestamp exceeds i32")?;
+                    self.timing
+                        .record(packet.pts, packet.dts, packet.duration)?;
+                    if packet.duration != i64::from(self.fps.1) {
+                        return Err("Unexpected HEVC packet duration".into());
+                    }
+                    let delta = i32::try_from(
+                        packet
+                            .pts
+                            .checked_sub(packet.dts)
+                            .ok_or("HEVC composition timestamp overflow")?,
+                    )
+                    .map_err(|_| "HEVC composition timestamp exceeds i32")?;
                     if delta < 0 {
                         return Err("HEVC packet has PTS before DTS".into());
                     }
@@ -754,6 +824,11 @@ impl HevcSink {
         if cancel.load(Ordering::Acquire) {
             return Ok(());
         }
+        self.writer
+            .as_mut()
+            .ok_or("HEVC writer closed")?
+            .set_video_edits(&[self.timing.window()?])
+            .map_err(av_error)?;
         self.writer
             .take()
             .ok_or("HEVC writer closed")?
@@ -871,6 +946,39 @@ mod tests {
         sink.finish(&AtomicBool::new(true)).unwrap();
         assert!(!Path::new(&settings.output).exists());
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn reordered_hevc_clips_start_at_zero_with_exact_rational_frame_timing() {
+        let dir = temp_dir("hevc-timing");
+        for preset in [1, HIGH_QUALITY_PRESET] {
+            let settings = ExportSettings {
+                format: ExportFormat::Hevc,
+                output: dir.join(format!("clip-{preset}.mp4")).display().to_string(),
+                width: 66,
+                height: 50,
+                preset,
+                fps_num: 24000,
+                fps_den: 1001,
+                ..ExportSettings::default()
+            };
+            let mut sink = HevcSink::new(&settings).unwrap();
+            for _ in 0..32 {
+                sink.write(&frame(66, 50)).unwrap();
+            }
+            sink.finish(&AtomicBool::new(false)).unwrap();
+            let demux = av_format_mov::Demuxer::open(Path::new(&settings.output)).unwrap();
+            assert_eq!(demux.sample_count(), 32);
+            assert_eq!(demux.timescale(), 24000);
+            assert_eq!(demux.start_time(), 0);
+            assert_eq!(demux.presented_duration().unwrap(), 32 * 1001);
+            assert_eq!(demux.presented_frame_count().unwrap(), 32);
+            assert!(demux.edit_list().iter().all(|e| e.media_time >= 0));
+            let mut pts: Vec<_> = (0..32).map(|i| demux.display_pts(i).unwrap()).collect();
+            pts.sort_unstable();
+            assert_eq!(pts, (0..32).map(|n| n * 1001).collect::<Vec<_>>());
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 

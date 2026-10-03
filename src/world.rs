@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 
+pub(crate) const CAMERA_ORBIT_SPEED: &str = "/camera/orbit_speed_degrees";
+pub(crate) const CAMERA_ORBIT_PHASE: &str = "/camera/orbit_phase_degrees";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorldKind {
     Fractal,
@@ -819,8 +822,25 @@ impl WorldEditor {
                     if a != b {
                         commands.push(WorldCommand::SetAttribute {
                             id: node.id,
-                            path: attr.path,
-                            value: b.clone(),
+                            path: attr.path.clone(),
+                            // Viewport controls edit the evaluated camera. Preserve the
+                            // authored yaw while applying their delta; orbital motion is
+                            // already included in both snapshots and must not be baked in.
+                            value: if node.kind == WorldKind::Camera
+                                && attr.path == "/camera/yaw_degrees"
+                            {
+                                let authored = self
+                                    .document
+                                    .attribute_value(node.id, &attr.path, frame)?
+                                    .as_f64()
+                                    .ok_or("Invalid camera yaw")?;
+                                json!(
+                                    authored + b.as_f64().ok_or("Invalid camera yaw")?
+                                        - a.as_f64().ok_or("Invalid camera yaw")?
+                                )
+                            } else {
+                                b.clone()
+                            },
                             frame,
                         });
                     }
@@ -1243,7 +1263,18 @@ impl WorldDocument {
             .ok_or_else(|| format!("Node {id} no longer exists"))
     }
     fn attrs(&self, id: NodeId) -> Result<Attrs, String> {
-        serde_json::from_value(self.node(id)?["host"].clone()).map_err(|e| e.to_string())
+        let node = self.node(id)?;
+        let mut attrs: Attrs =
+            serde_json::from_value(node["host"].clone()).map_err(|e| e.to_string())?;
+        // Old documents acquire neutral orbit controls without changing their saved poses or IDs.
+        if node["type"].as_str() == Some("Camera") {
+            for path in [CAMERA_ORBIT_SPEED, CAMERA_ORBIT_PHASE] {
+                if !attrs.contains(path) {
+                    attrs.set(path, to_attr(&json!(0.0)));
+                }
+            }
+        }
+        Ok(attrs)
     }
     fn store_attrs(&mut self, id: NodeId, attrs: &Attrs) -> Result<(), String> {
         self.node_mut(id)?["host"] = serde_json::to_value(attrs).map_err(|e| e.to_string())?;
@@ -1769,6 +1800,77 @@ impl WorldDocument {
         }
         Ok(scene)
     }
+    /// Integrate the effective scalar track, following the same attribute connections as evaluation.
+    fn integrated_scalar(
+        &self,
+        id: NodeId,
+        path: &str,
+        from: f64,
+        to: f64,
+        visiting: &mut HashSet<(NodeId, String)>,
+    ) -> Result<f64, String> {
+        if !visiting.insert((id, path.into())) {
+            return Err("Attribute connection cycle".into());
+        }
+        let (storage_path, component) = self
+            .component_path(id, path)?
+            .unwrap_or_else(|| (path.into(), 0));
+        let attrs = self.attrs(id)?;
+        if let Some(conn) = attrs.conn(&storage_path) {
+            let source_path = if storage_path != path {
+                format!("{}/{}", conn.source_key, component)
+            } else {
+                conn.source_key.clone()
+            };
+            return self.integrated_scalar(
+                NodeId(conn.source_layer),
+                &source_path,
+                from,
+                to,
+                visiting,
+            );
+        }
+        if let Some(channel) = attrs
+            .anim(&storage_path)
+            .and_then(|a| a.channels.get(component))
+            .filter(|channel| !channel.is_empty())
+        {
+            return Ok(crate::camera_orbit::integrate(channel, from, to));
+        }
+        let value = self
+            .attribute_value(id, path, from)?
+            .as_f64()
+            .filter(|value| value.is_finite())
+            .ok_or("Orbit speed must be a finite number")?;
+        Ok(value * (to - from))
+    }
+
+    /// Offset from the document's first frame, independent of playback direction or wall-clock time.
+    fn camera_orbit_angle(&self, id: NodeId, frame: f64) -> Result<f32, String> {
+        if !self.fps.is_finite() || self.fps <= 0.0 {
+            return Err("FPS must be positive and finite".into());
+        }
+        let phase = self
+            .attribute_value(id, CAMERA_ORBIT_PHASE, frame)?
+            .as_f64()
+            .filter(|v| v.is_finite())
+            .ok_or("Orbit phase must be a finite number")?;
+        let angle = phase
+            + self.integrated_scalar(
+                id,
+                CAMERA_ORBIT_SPEED,
+                f64::from(self.first),
+                frame,
+                &mut HashSet::new(),
+            )? / self.fps;
+        let angle = angle as f32;
+        if angle.is_finite() {
+            Ok(angle)
+        } else {
+            Err("Camera orbit angle overflow".into())
+        }
+    }
+
     pub fn snapshot(&self, frame: f64) -> Result<Scene, String> {
         if !frame.is_finite() {
             return Err("Invalid frame".into());
@@ -1808,6 +1910,7 @@ impl WorldDocument {
                 serde_json::from_value(self.node(id)?["gpu"]["formula"].clone())
                     .map_err(|e| e.to_string())?;
             scene.camera_reference = Some(reference.framing_radius());
+            scene.camera.yaw_degrees += self.camera_orbit_angle(id, frame)?;
             let m = self.world_matrix(id, frame, &mut HashSet::new())?;
             if m != glam::Mat4::IDENTITY {
                 let orientation = scene.camera.orientation();

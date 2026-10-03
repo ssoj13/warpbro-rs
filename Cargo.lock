@@ -3936,6 +3936,7 @@ dependencies = [
  "av-codec",
  "av-codec-core",
  "av-format-core",
+ "av-format-mov",
  "av-format-movenc",
  "av-swscale",
  "av-util-core",

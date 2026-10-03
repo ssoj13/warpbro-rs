@@ -1,5 +1,95 @@
 use super::*;
 
+#[test]
+fn camera_orbit_defaults_preserve_old_documents_and_camera_pose() {
+    let scene = Scene::preset(0);
+    let e = editor();
+    let id = find(&e, WorldKind::Camera);
+    let before = serde_json::to_value(&e.document).unwrap();
+    for frame in [0.0, 12.5, 200.0] {
+        assert_eq!(e.document.snapshot(frame).unwrap().camera, scene.camera);
+        assert_eq!(
+            e.document
+                .attribute_value(id, CAMERA_ORBIT_SPEED, frame)
+                .unwrap(),
+            json!(0.0)
+        );
+        assert!(
+            e.document
+                .attributes(id, frame)
+                .unwrap()
+                .iter()
+                .any(|a| a.path == CAMERA_ORBIT_SPEED && a.keyable)
+        );
+    }
+    assert_eq!(serde_json::to_value(&e.document).unwrap(), before);
+}
+
+#[test]
+fn camera_orbit_is_frame_based_signed_and_survives_save_load() {
+    let mut e = editor();
+    let id = find(&e, WorldKind::Camera);
+    e.execute(WorldCommand::SetTimeRange {
+        first: 12,
+        last: 249,
+        fps: 24.0,
+    })
+    .unwrap();
+    set(&mut e, id, CAMERA_ORBIT_SPEED, json!(-12.0), 12.0);
+    set(&mut e, id, CAMERA_ORBIT_PHASE, json!(7.0), 12.0);
+    let saved: WorldDocument =
+        serde_json::from_str(&serde_json::to_string(&e.document).unwrap()).unwrap();
+    for frame in [249.0, 12.0, 36.5, 0.0, 36.5] {
+        let camera = e.document.snapshot(frame).unwrap().camera;
+        let expected = 35.0 + 7.0 - 12.0 * ((frame - 12.0) / 24.0) as f32;
+        assert!((camera.yaw_degrees - expected).abs() < 0.0001);
+        assert_eq!(camera, saved.snapshot(frame).unwrap().camera);
+    }
+    e.document.fps = 48.0;
+    assert!((e.document.snapshot(60.0).unwrap().camera.yaw_degrees - 30.0).abs() < 0.0001);
+}
+
+#[test]
+fn camera_animated_orbit_speed_integrates_the_curve_instead_of_multiplying_current_speed() {
+    let mut e = editor();
+    let id = find(&e, WorldKind::Camera);
+    set(&mut e, id, CAMERA_ORBIT_SPEED, json!(0.0), 0.0);
+    e.execute(WorldCommand::Key {
+        id,
+        path: CAMERA_ORBIT_SPEED.into(),
+        frame: 0.0,
+    })
+    .unwrap();
+    set(&mut e, id, CAMERA_ORBIT_SPEED, json!(90.0), 24.0);
+    assert!((e.document.snapshot(24.0).unwrap().camera.yaw_degrees - 80.0).abs() < 0.0001);
+    assert!((e.document.snapshot(12.0).unwrap().camera.yaw_degrees - 46.25).abs() < 0.0001);
+    assert_eq!(
+        e.document.snapshot(12.0).unwrap().camera,
+        e.document.snapshot(12.0).unwrap().camera
+    );
+}
+
+#[test]
+fn viewport_yaw_edits_preserve_authored_yaw_under_active_orbit_and_undo() {
+    let mut e = editor();
+    let camera = find(&e, WorldKind::Camera);
+    set(&mut e, camera, CAMERA_ORBIT_SPEED, json!(12.0), 0.0);
+    let original = e.document.clone();
+    let before = e.document.snapshot(48.0).unwrap();
+    let mut after = before.clone();
+    after.camera.yaw_degrees += 10.0;
+    e.edit_snapshot(None, &before, &after, 48.0).unwrap();
+    assert_eq!(
+        e.document
+            .attribute_value(camera, "/camera/yaw_degrees", 48.0)
+            .unwrap(),
+        json!(45.0)
+    );
+    assert_eq!(e.document.snapshot(48.0).unwrap().camera, after.camera);
+    assert!(e.undo());
+    assert_eq!(e.document, original);
+}
+
 fn drag_value(id: NodeId, value: f64) -> WorldCommand {
     WorldCommand::SetAttribute {
         id,

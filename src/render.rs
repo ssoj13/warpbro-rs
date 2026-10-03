@@ -18,6 +18,336 @@ const TONEMAP_ONLY: [usize; 3] = [P_EXPOSURE, P_SATURATION, P_TONEMAP];
 /// Slots that change every launch.
 const PER_LAUNCH: [usize; 3] = [P_SAMPLE_BEGIN, P_SPP, P_SEED];
 
+/// Worker-local counters; uploads count only completed host-to-device copies.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PreparationStats {
+    pub builds: u64,
+    pub hits: u64,
+    pub environment_decodes: u64,
+    pub lut_uploads: u64,
+    pub object_uploads: u64,
+    pub light_uploads: u64,
+    pub upload_bytes: u64,
+}
+
+/// Typed runtime inputs. Authoring documents, animation curves and display settings
+/// are not packed by CUDA and never require a preparation-cache rebuild.
+struct PreparationInputs {
+    world_render: bool,
+    camera_reference: Option<f32>,
+    object_world: Option<[[f32; 4]; 4]>,
+    formula: crate::scene::Formula,
+    julia: Option<[f32; 3]>,
+    object: crate::scene::ObjectTransform,
+    camera: crate::scene::Camera,
+    lighting: crate::scene::Lighting,
+    material: crate::scene::Material,
+    palette: PaletteScheme,
+    coloring: crate::scene::Coloring,
+    trap_point: [f32; 3],
+    trap_axis: u32,
+    trap_scale: f32,
+    render: crate::scene::Render,
+    environment: crate::environment::Environment,
+    objects: Vec<PreparationInputs>,
+    lights: Vec<crate::scene::Lighting>,
+}
+fn preparation_render(scene: &Scene, root: bool) -> crate::scene::Render {
+    let mut render = scene.render;
+    render.denoise = Default::default();
+    if root {
+        render.exposure_stops = 0.0;
+        render.saturation = 0.0;
+        render.reinhard = false;
+    }
+    render
+}
+fn same_material(a: &crate::scene::Material, b: &crate::scene::Material) -> bool {
+    macro_rules! equal {
+        ($($field:ident),+ $(,)?) => { true $(&& a.$field == b.$field)+ };
+    }
+    equal!(
+        model,
+        color_source,
+        base_color,
+        facing,
+        base,
+        base_tint,
+        diffuse_roughness,
+        metalness,
+        specular,
+        specular_color,
+        specular_roughness,
+        specular_ior,
+        specular_anisotropy,
+        specular_rotation,
+        sheen,
+        sheen_color,
+        sheen_roughness,
+        coat,
+        coat_color,
+        coat_roughness,
+        coat_ior,
+        coat_affect_color,
+        coat_affect_roughness,
+        thin_film_thickness,
+        thin_film_ior,
+        emission,
+        emission_color
+    )
+}
+impl PreparationInputs {
+    fn new(scene: &Scene, root: bool) -> Self {
+        Self {
+            world_render: scene.world_render,
+            camera_reference: scene.camera_reference,
+            object_world: scene.object_world,
+            formula: scene.formula,
+            julia: scene.julia,
+            object: scene.object,
+            camera: scene.camera,
+            lighting: scene.lighting,
+            material: scene.material.clone(),
+            palette: scene.palette,
+            coloring: scene.coloring,
+            trap_point: scene.trap_point,
+            trap_axis: scene.trap_axis,
+            trap_scale: scene.trap_scale,
+            render: preparation_render(scene, root),
+            environment: scene.environment.clone(),
+            objects: scene
+                .objects
+                .iter()
+                .map(|object| Self::new(object, false))
+                .collect(),
+            lights: scene.lights.clone(),
+        }
+    }
+    fn matches(&self, scene: &Scene, root: bool) -> bool {
+        self.world_render == scene.world_render
+            && self.camera_reference == scene.camera_reference
+            && self.object_world == scene.object_world
+            && self.formula == scene.formula
+            && self.julia == scene.julia
+            && self.object == scene.object
+            && self.camera == scene.camera
+            && self.lighting == scene.lighting
+            && same_material(&self.material, &scene.material)
+            && self.palette == scene.palette
+            && self.coloring == scene.coloring
+            && self.trap_point == scene.trap_point
+            && self.trap_axis == scene.trap_axis
+            && self.trap_scale == scene.trap_scale
+            && self.render == preparation_render(scene, root)
+            && self.environment == scene.environment
+            && self.lights == scene.lights
+            && self.objects.len() == scene.objects.len()
+            && self
+                .objects
+                .iter()
+                .zip(&scene.objects)
+                .all(|(input, object)| input.matches(object, false))
+    }
+}
+struct PreparedScene {
+    upload: WorldUpload,
+    trace: Vec<f32>,
+    palettes: Vec<PaletteScheme>,
+    environment: Option<(String, u64)>,
+}
+impl PreparedScene {
+    fn new(scene: &Scene, width: u32, height: u32) -> Result<Self, String> {
+        Ok(Self {
+            upload: WorldUpload::new(scene, width, height)?,
+            trace: scene_trace_data(scene),
+            palettes: std::iter::once(scene.palette)
+                .chain(
+                    scene
+                        .objects
+                        .iter()
+                        .filter(|_| scene.world_render)
+                        .map(|object| object.palette),
+                )
+                .collect(),
+            environment: scene.environment.key(),
+        })
+    }
+    fn params(&self, scene: &Scene, bounces_cap: Option<u32>) -> [f32; P_COUNT] {
+        let mut params: [f32; P_COUNT] = self
+            .upload
+            .params
+            .as_slice()
+            .try_into()
+            .expect("parameter block size");
+        params[P_EXPOSURE] = 2f32.powf(scene.render.exposure_stops);
+        params[P_SATURATION] = scene.render.saturation;
+        params[P_TONEMAP] = scene.render.reinhard as u32 as f32;
+        if let Some(cap) = bounces_cap {
+            params[P_MAX_BOUNCES] = params[P_MAX_BOUNCES].min(cap as f32);
+        }
+        params
+    }
+}
+struct PreparationEntry {
+    inputs: PreparationInputs,
+    width: u32,
+    height: u32,
+    result: Result<Arc<PreparedScene>, String>,
+}
+#[derive(Default)]
+struct PreparationCache {
+    entries: [Option<PreparationEntry>; 4],
+    next: usize,
+    builds: u64,
+    hits: u64,
+}
+impl PreparationCache {
+    fn get(
+        &mut self,
+        scene: &Scene,
+        width: u32,
+        height: u32,
+    ) -> Result<Arc<PreparedScene>, String> {
+        if let Some(entry) = self.entries.iter().flatten().find(|entry| {
+            entry.width == width && entry.height == height && entry.inputs.matches(scene, true)
+        }) {
+            self.hits += 1;
+            return entry.result.clone();
+        }
+        self.builds += 1;
+        let result = PreparedScene::new(scene, width, height).map(Arc::new);
+        self.entries[self.next] = Some(PreparationEntry {
+            inputs: PreparationInputs::new(scene, true),
+            width,
+            height,
+            result: result.clone(),
+        });
+        self.next = (self.next + 1) % self.entries.len();
+        result
+    }
+}
+
+/// This state belongs to the shared Gpu, never to an individual progressive target.
+/// Failed uploads invalidate identity because a copy may have partially changed device data.
+struct Resident<K> {
+    key: Option<K>,
+}
+impl<K> Default for Resident<K> {
+    fn default() -> Self {
+        Self { key: None }
+    }
+}
+impl<K: PartialEq> Resident<K> {
+    fn update(
+        &mut self,
+        key: K,
+        upload: impl FnOnce() -> Result<(), String>,
+    ) -> Result<bool, String> {
+        if self.key.as_ref() == Some(&key) {
+            return Ok(false);
+        }
+        if let Err(error) = upload() {
+            self.key = None;
+            return Err(error);
+        }
+        self.key = Some(key);
+        Ok(true)
+    }
+}
+struct LutResidentKey(Arc<PreparedScene>);
+impl PartialEq for LutResidentKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.palettes == other.0.palettes && self.0.environment == other.0.environment
+    }
+}
+struct ObjectResidentKey(Arc<PreparedScene>);
+impl PartialEq for ObjectResidentKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.upload.objects == other.0.upload.objects
+    }
+}
+struct LightResidentKey(Arc<PreparedScene>);
+impl PartialEq for LightResidentKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.upload.lights == other.0.upload.lights
+    }
+}
+#[derive(Default)]
+struct DenoiseScratch {
+    tiled: Vec<[f32; 4]>,
+    color: Vec<[f32; 4]>,
+    albedo: Vec<[f32; 4]>,
+    normal: Vec<[f32; 4]>,
+}
+fn untile_into(
+    tiled: &[[f32; 4]],
+    width: usize,
+    height: usize,
+    normalize: bool,
+    output: &mut Vec<[f32; 4]>,
+) {
+    output.resize(width * height, [0.0; 4]);
+    let tiles_per_row = width.div_ceil(8);
+    for y in 0..height {
+        for x in 0..width {
+            let tile = (y / 4) * tiles_per_row + x / 8;
+            let pixel = tiled[tile * 32 + (y % 4) * 8 + x % 8];
+            output[y * width + x] = if normalize {
+                let inv = if pixel[3] > 0.0 {
+                    pixel[3].recip()
+                } else {
+                    0.0
+                };
+                [pixel[0] * inv, pixel[1] * inv, pixel[2] * inv, 1.0]
+            } else {
+                pixel
+            };
+        }
+    }
+}
+fn read_tiled_into(
+    stream: &Arc<CudaStream>,
+    buffer: &DeviceBuffer<[f32; 4]>,
+    width: usize,
+    height: usize,
+    normalize: bool,
+    tiled: &mut Vec<[f32; 4]>,
+    output: &mut Vec<[f32; 4]>,
+) {
+    tiled.resize(buffer.len(), [0.0; 4]);
+    buffer
+        .copy_to_host(stream, tiled)
+        .expect("scene / guide readback");
+    untile_into(tiled, width, height, normalize, output);
+}
+
+#[derive(Clone, PartialEq)]
+struct DisplayKey {
+    exposure: f32,
+    saturation: f32,
+    reinhard: bool,
+    colour_revision: u64,
+    colour: crate::ocio::Sel,
+}
+impl DisplayKey {
+    fn matches(&self, scene: &Scene, colour_revision: u64) -> bool {
+        self.exposure == scene.render.exposure_stops
+            && self.saturation == scene.render.saturation
+            && self.reinhard == scene.render.reinhard
+            && self.colour_revision == colour_revision
+            && self.colour == scene.colour
+    }
+    fn new(scene: &Scene, colour_revision: u64) -> Self {
+        Self {
+            exposure: scene.render.exposure_stops,
+            saturation: scene.render.saturation,
+            reinhard: scene.render.reinhard,
+            colour_revision,
+            colour: scene.colour.clone(),
+        }
+    }
+}
+
 pub struct Gpu {
     _ctx: Arc<CudaContext>,
     stream: Arc<CudaStream>,
@@ -25,8 +355,13 @@ pub struct Gpu {
     lut: DeviceBuffer<[f32; 4]>,
     objects: DeviceBuffer<f32>,
     lights: DeviceBuffer<f32>,
-    lut_scheme: Option<PaletteScheme>,
-    lut_environment: Option<(String, u64)>,
+    preparation: PreparationCache,
+    lut_resident: Resident<LutResidentKey>,
+    object_resident: Resident<ObjectResidentKey>,
+    light_resident: Resident<LightResidentKey>,
+    lut_staging: Vec<[f32; 4]>,
+    denoise_scratch: DenoiseScratch,
+    stats: PreparationStats,
     environments:
         std::collections::BTreeMap<(String, u64), Result<Arc<crate::environment::Map>, String>>,
     pub name: String,
@@ -52,7 +387,7 @@ pub struct Target {
     raw: Vec<[f32; 4]>,
     pub hdr: bool,
     pub colour_error: Option<String>,
-    display_key: Option<(f32, f32, bool, String)>,
+    display_key: Option<DisplayKey>,
     pub samples: u32,
     key: Vec<f32>,
     palette: Option<PaletteScheme>,
@@ -82,8 +417,13 @@ impl Gpu {
             lut,
             objects: DeviceBuffer::zeroed(&stream, 1).map_err(|e| format!("objects: {e:?}"))?,
             lights: DeviceBuffer::zeroed(&stream, 1).map_err(|e| format!("lights: {e:?}"))?,
-            lut_scheme: None,
-            lut_environment: None,
+            preparation: Default::default(),
+            lut_resident: Default::default(),
+            object_resident: Default::default(),
+            light_resident: Default::default(),
+            lut_staging: Vec::new(),
+            denoise_scratch: Default::default(),
+            stats: Default::default(),
             environments: Default::default(),
             name,
             colour: crate::color::ColorPipeline::new(),
@@ -130,25 +470,17 @@ impl Gpu {
     }
 
     pub fn raw_scene_linear(&self, target: &Target) -> Vec<[f32; 4]> {
-        let mut tiled = vec![[0.0; 4]; target.accum.len()];
-        target
-            .accum
-            .copy_to_host(&self.stream, &mut tiled)
-            .expect("scene-linear readback");
-        let mut radiance = vec![[0.0; 4]; target.width * target.height];
-        for y in 0..target.height {
-            for x in 0..target.width {
-                let tile = (y / 4) * target.width.div_ceil(8) + x / 8;
-                let value = tiled[tile * 32 + (y % 4) * 8 + x % 8];
-                let inv = if value[3] > 0.0 {
-                    value[3].recip()
-                } else {
-                    0.0
-                };
-                radiance[y * target.width + x] =
-                    [value[0] * inv, value[1] * inv, value[2] * inv, 1.0];
-            }
-        }
+        let mut tiled = Vec::new();
+        let mut radiance = Vec::new();
+        read_tiled_into(
+            &self.stream,
+            &target.accum,
+            target.width,
+            target.height,
+            true,
+            &mut tiled,
+            &mut radiance,
+        );
         radiance
     }
 
@@ -160,31 +492,36 @@ impl Gpu {
         scene: &Scene,
         bounces_cap: Option<u32>,
     ) -> bool {
-        let upload = match WorldUpload::new(scene, target.width as u32, target.height as u32) {
-            Ok(upload) => upload,
+        let prepared = match self
+            .preparation
+            .get(scene, target.width as u32, target.height as u32)
+        {
+            Ok(prepared) => prepared,
             Err(error) => {
                 target.colour_error = Some(error);
                 return false;
             }
         };
-        let mut p = upload.params.clone();
-        if let Some(cap) = bounces_cap {
-            p[P_MAX_BOUNCES] = p[P_MAX_BOUNCES].min(cap as f32);
-        }
-        // Environment dimensions affect the launch, but source identity belongs to
-        // the accumulation key even before the worker has decoded that source.
-        self.reset_target_for_params(target, scene, &p)
+        let params = prepared.params(scene, bounces_cap);
+        self.reset_target_for_params(target, scene, &prepared, &params)
     }
 
-    fn reset_target_for_params(&self, target: &mut Target, scene: &Scene, params: &[f32]) -> bool {
-        let mut key = params.to_vec();
-        key.extend(scene_trace_data(scene));
+    fn reset_target_for_params(
+        &self,
+        target: &mut Target,
+        scene: &Scene,
+        prepared: &PreparedScene,
+        params: &[f32; P_COUNT],
+    ) -> bool {
+        let mut key = *params;
         for i in TONEMAP_ONLY.iter().chain(PER_LAUNCH.iter()) {
             key[*i] = 0.0;
         }
-        if key == target.key
+        if target.key.len() == P_COUNT + prepared.trace.len()
+            && target.key[..P_COUNT] == key
+            && target.key[P_COUNT..] == prepared.trace
             && target.palette == Some(scene.palette)
-            && target.environment == scene.environment.key()
+            && target.environment == prepared.environment
         {
             return false;
         }
@@ -204,30 +541,126 @@ impl Gpu {
         target.denoise_selected = false;
         target.samples = 0;
         target.display_key = None;
-        target.key = key;
+        target.key.clear();
+        target.key.extend_from_slice(&key);
+        target.key.extend_from_slice(&prepared.trace);
         target.palette = Some(scene.palette);
-        target.environment = scene.environment.key();
+        target.environment.clone_from(&prepared.environment);
         true
     }
 
-    /// Called on the CUDA worker, never the GUI thread. Cache failures too so a bad
-    /// file cannot make every repaint start another decode; Reload bumps revision.
-    pub fn ensure_environment(
+    /// Validate and prepare the exact requested dimensions on the worker. Subsequent
+    /// scheduler and launch preparation share this entry instead of packing it again.
+    pub fn prepare_scene(
         &mut self,
         scene: &Scene,
+        width: usize,
+        height: usize,
+    ) -> Result<(), String> {
+        let prepared = self.preparation.get(scene, width as u32, height as u32)?;
+        self.environment_for(prepared.environment.as_ref())?;
+        Ok(())
+    }
+
+    fn upload_prepared(
+        &mut self,
+        prepared: &Arc<PreparedScene>,
+        env: Option<&crate::environment::Map>,
+        world: bool,
+    ) -> Result<(), String> {
+        let stream = &self.stream;
+        let table = &mut self.lut_staging;
+        let lut = &mut self.lut;
+        let changed = self
+            .lut_resident
+            .update(LutResidentKey(prepared.clone()), || {
+                table.clear();
+                for palette in &prepared.palettes {
+                    table.extend(build_lut(*palette));
+                }
+                if let Some(env) = env {
+                    table.extend_from_slice(&env.texels);
+                }
+                if lut.len() != table.len() {
+                    *lut = DeviceBuffer::zeroed(stream, table.len())
+                        .map_err(|e| format!("environment allocation: {e:?}"))?;
+                }
+                lut.copy_from_host(stream, table)
+                    .map_err(|e| format!("palette / environment upload: {e:?}"))
+            })?;
+        if changed {
+            self.stats.lut_uploads += 1;
+            self.stats.upload_bytes += (table.len() * std::mem::size_of::<[f32; 4]>()) as u64;
+        }
+        if world {
+            let objects = &mut self.objects;
+            let data = &prepared.upload.objects;
+            let changed =
+                self.object_resident
+                    .update(ObjectResidentKey(prepared.clone()), || {
+                        if objects.len() != data.len().max(1) {
+                            *objects = DeviceBuffer::zeroed(stream, data.len().max(1))
+                                .map_err(|e| format!("world object allocation: {e:?}"))?;
+                        }
+                        if !data.is_empty() {
+                            objects
+                                .copy_from_host(stream, data)
+                                .map_err(|e| format!("world objects upload: {e:?}"))?;
+                        }
+                        Ok(())
+                    })?;
+            if changed && !data.is_empty() {
+                self.stats.object_uploads += 1;
+                self.stats.upload_bytes += (data.len() * std::mem::size_of::<f32>()) as u64;
+            }
+            let lights = &mut self.lights;
+            let data = &prepared.upload.lights;
+            let changed = self
+                .light_resident
+                .update(LightResidentKey(prepared.clone()), || {
+                    if lights.len() != data.len().max(1) {
+                        *lights = DeviceBuffer::zeroed(stream, data.len().max(1))
+                            .map_err(|e| format!("world light allocation: {e:?}"))?;
+                    }
+                    if !data.is_empty() {
+                        lights
+                            .copy_from_host(stream, data)
+                            .map_err(|e| format!("world lights upload: {e:?}"))?;
+                    }
+                    Ok(())
+                })?;
+            if changed && !data.is_empty() {
+                self.stats.light_uploads += 1;
+                self.stats.upload_bytes += (data.len() * std::mem::size_of::<f32>()) as u64;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn preparation_stats(&self) -> PreparationStats {
+        PreparationStats {
+            builds: self.preparation.builds,
+            hits: self.preparation.hits,
+            ..self.stats
+        }
+    }
+
+    fn environment_for(
+        &mut self,
+        key: Option<&(String, u64)>,
     ) -> Result<Option<Arc<crate::environment::Map>>, String> {
-        validate_world(scene)?;
-        let Some(key) = scene.environment.key() else {
+        let Some(key) = key else {
             return Ok(None);
         };
-        if !self.environments.contains_key(&key) {
+        if !self.environments.contains_key(key) {
             if self.environments.len() >= 2 {
                 self.environments.clear();
             }
+            self.stats.environment_decodes += 1;
             let loaded = crate::environment::Map::load(std::path::Path::new(&key.0)).map(Arc::new);
             self.environments.insert(key.clone(), loaded);
         }
-        self.environments[&key].clone().map(Some)
+        self.environments[key].clone().map(Some)
     }
 
     /// Add `spp` samples (0 = only re-tonemap) and refresh `target.pixels`. Restarts the
@@ -241,84 +674,39 @@ impl Gpu {
         bounces_cap: Option<u32>,
         final_pass: bool,
     ) {
-        let upload = match WorldUpload::new(scene, target.width as u32, target.height as u32) {
-            Ok(upload) => upload,
+        let prepared = match self
+            .preparation
+            .get(scene, target.width as u32, target.height as u32)
+        {
+            Ok(prepared) => prepared,
             Err(error) => {
                 target.colour_error = Some(error);
                 return;
             }
         };
-        let mut p = upload.params.clone();
-        if let Some(cap) = bounces_cap {
-            p[P_MAX_BOUNCES] = p[P_MAX_BOUNCES].min(cap as f32);
-        }
-        self.reset_target_for_params(target, scene, &p);
-        let env = match self.ensure_environment(scene) {
+        let mut p = prepared.params(scene, bounces_cap);
+        self.reset_target_for_params(target, scene, &prepared, &p);
+        let env = match self.environment_for(prepared.environment.as_ref()) {
             Ok(env) => env,
             Err(error) => {
                 target.colour_error = Some(error);
                 return;
             }
         };
-        let environment_key = scene.environment.key();
-        if scene.world_render
-            || self.lut_scheme != Some(scene.palette)
-            || self.lut_environment != environment_key
-        {
-            let mut table = build_lut(scene.palette);
-            if scene.world_render {
-                for object in &scene.objects {
-                    table.extend(build_lut(object.palette));
-                }
-            }
-            if let Some(env) = &env {
-                table.extend_from_slice(&env.texels);
-            }
-            if self.lut.len() != table.len() {
-                self.lut = DeviceBuffer::zeroed(&self.stream, table.len())
-                    .expect("environment allocation");
-            }
-            self.lut
-                .copy_from_host(&self.stream, &table)
-                .expect("palette / environment upload");
-            self.lut_scheme = if scene.world_render {
-                None
-            } else {
-                Some(scene.palette)
-            };
-            self.lut_environment = environment_key;
+        if let Err(error) = self.upload_prepared(&prepared, env.as_deref(), scene.world_render) {
+            target.colour_error = Some(error);
+            return;
         }
         if let Some(env) = env {
             p[P_ENV_WIDTH] = env.width as f32;
             p[P_ENV_HEIGHT] = env.height as f32;
             p[P_ENV_MEAN] = env.mean_luminance;
         }
-        if scene.world_render {
-            if self.objects.len() != upload.objects.len().max(1) {
-                self.objects = DeviceBuffer::zeroed(&self.stream, upload.objects.len().max(1))
-                    .expect("world object allocation");
-            }
-            if self.lights.len() != upload.lights.len().max(1) {
-                self.lights = DeviceBuffer::zeroed(&self.stream, upload.lights.len().max(1))
-                    .expect("world light allocation");
-            }
-            if !upload.objects.is_empty() {
-                self.objects
-                    .copy_from_host(&self.stream, &upload.objects)
-                    .expect("world objects upload");
-            }
-            if !upload.lights.is_empty() {
-                self.lights
-                    .copy_from_host(&self.stream, &upload.lights)
-                    .expect("world lights upload");
-            }
-        }
         p[P_SAMPLE_BEGIN] = target.samples as f32;
         p[P_SPP] = spp as f32;
         p[P_SEED] = seed as f32;
-        let block: [f32; P_COUNT] = p.as_slice().try_into().expect("parameter block size");
         self.module
-            .set_params(&self.stream, &block)
+            .set_params(&self.stream, &p)
             .expect("params upload");
 
         let t0 = Instant::now();
@@ -372,17 +760,11 @@ impl Gpu {
             target.samples += spp;
         }
         let denoise_changed = self.process_denoise(target, scene, final_pass);
-        let display_key = (
-            scene.render.exposure_stops,
-            scene.render.saturation,
-            scene.render.reinhard,
-            format!(
-                "{}:{}",
-                self.colour_revision,
-                serde_json::to_string(&scene.colour).expect("colour settings")
-            ),
-        );
-        if spp == 0 && !denoise_changed && target.display_key.as_ref() == Some(&display_key) {
+        let display_changed = !target
+            .display_key
+            .as_ref()
+            .is_some_and(|key| key.matches(scene, self.colour_revision));
+        if spp == 0 && !denoise_changed && !display_changed {
             return;
         }
         if target.denoise_selected {
@@ -428,7 +810,9 @@ impl Gpu {
                 target.light = light;
                 target.hdr = absolute;
                 target.colour_error = None;
-                target.display_key = Some(display_key);
+                if display_changed {
+                    target.display_key = Some(DisplayKey::new(scene, self.colour_revision));
+                }
                 for (p, l) in target.pixels.iter_mut().zip(&encoded) {
                     let code = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
                     *p = u32::from_le_bytes([code(l[0]), code(l[1]), code(l[2]), 255]);
@@ -442,20 +826,20 @@ impl Gpu {
         }
     }
 
+    #[cfg(test)]
     fn guide_sums(&self, target: &Target, buffer: &DeviceBuffer<[f32; 4]>) -> Vec<[f32; 4]> {
-        let mut tiled = vec![[0.0; 4]; buffer.len()];
-        buffer
-            .copy_to_host(&self.stream, &mut tiled)
-            .expect("guide readback");
-        (0..target.height)
-            .flat_map(|y| {
-                let tiled = &tiled;
-                (0..target.width).map(move |x| {
-                    let tile = (y / 4) * target.width.div_ceil(8) + x / 8;
-                    tiled[tile * 32 + (y % 4) * 8 + x % 8]
-                })
-            })
-            .collect()
+        let mut tiled = Vec::new();
+        let mut guides = Vec::new();
+        read_tiled_into(
+            &self.stream,
+            buffer,
+            target.width,
+            target.height,
+            false,
+            &mut tiled,
+            &mut guides,
+        );
+        guides
     }
 
     fn process_denoise(&mut self, target: &mut Target, scene: &Scene, final_pass: bool) -> bool {
@@ -463,11 +847,44 @@ impl Gpu {
         let previous = target.denoise_selected;
         let due = target.denoise.due(settings, target.samples, final_pass);
         if due {
-            let color = self.raw_scene_linear(target);
-            let albedo = (settings.mode != crate::denoise::Mode::Color)
-                .then(|| self.guide_sums(target, &target.albedo));
-            let normal = (settings.mode == crate::denoise::Mode::ColorAlbedoNormal)
-                .then(|| self.guide_sums(target, &target.normal));
+            let scratch = &mut self.denoise_scratch;
+            read_tiled_into(
+                &self.stream,
+                &target.accum,
+                target.width,
+                target.height,
+                true,
+                &mut scratch.tiled,
+                &mut scratch.color,
+            );
+            let albedo = if settings.mode != crate::denoise::Mode::Color {
+                read_tiled_into(
+                    &self.stream,
+                    &target.albedo,
+                    target.width,
+                    target.height,
+                    false,
+                    &mut scratch.tiled,
+                    &mut scratch.albedo,
+                );
+                Some(scratch.albedo.as_slice())
+            } else {
+                None
+            };
+            let normal = if settings.mode == crate::denoise::Mode::ColorAlbedoNormal {
+                read_tiled_into(
+                    &self.stream,
+                    &target.normal,
+                    target.width,
+                    target.height,
+                    false,
+                    &mut scratch.tiled,
+                    &mut scratch.normal,
+                );
+                Some(scratch.normal.as_slice())
+            } else {
+                None
+            };
             let processor = self
                 .denoiser
                 .get_or_insert_with(crate::denoise::Processor::new);
@@ -475,9 +892,9 @@ impl Gpu {
                 Ok(processor) => processor.process(
                     target.width,
                     target.height,
-                    &color,
-                    albedo.as_deref(),
-                    normal.as_deref(),
+                    &scratch.color,
+                    albedo,
+                    normal,
                     settings,
                     target.samples,
                 ),
@@ -583,6 +1000,7 @@ fn inverse_object(object: &Scene, index: usize) -> Result<glam::Mat4, String> {
     Ok(inverse)
 }
 
+#[cfg(test)]
 pub(crate) fn validate_world(scene: &Scene) -> Result<(), String> {
     if scene.world_render {
         WorldUpload::new(scene, 1, 1)?;
@@ -766,6 +1184,337 @@ fn pq16(nits: f32) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preparation_reuses_display_edits_and_invalidates_runtime_geometry() {
+        let mut cache = PreparationCache::default();
+        let mut scene = dark_world();
+        scene.objects.push(world_object(
+            FAMILY_BULB,
+            [0.0; 3],
+            [1.0; 3],
+            [0.8, 0.2, 0.1],
+        ));
+        scene.lights.push(scene.lighting);
+        let first = cache.get(&scene, 320, 180).unwrap();
+        scene.name = "renamed".into();
+        scene.render.exposure_stops += 1.25;
+        scene.render.saturation += 0.2;
+        scene.render.reinhard = !scene.render.reinhard;
+        scene.render.denoise.enabled = !scene.render.denoise.enabled;
+        scene.render.denoise.interval = 7;
+        scene.render.denoise.mode = crate::denoise::Mode::Color;
+        scene.colour.on = !scene.colour.on;
+        scene.material.preset = Some("authoring label".into());
+        let display = cache.get(&scene, 320, 180).unwrap();
+        assert!(Arc::ptr_eq(&first, &display));
+        assert_eq!(
+            display.params(&scene, None).as_slice(),
+            WorldUpload::new(&scene, 320, 180).unwrap().params
+        );
+        let original = scene.clone();
+        for change in 0..9 {
+            let mut scene = original.clone();
+            match change {
+                0 => scene.objects[0].object_world.as_mut().unwrap()[3][0] += 0.25,
+                1 => scene.objects[0].material.base_color[0] += 0.1,
+                2 => scene.objects[0].formula = crate::scene::Formula::preset(FAMILY_BOX),
+                3 => scene.lights[0].sun_azimuth += 1.0,
+                4 => scene.camera.yaw_degrees += 2.0,
+                5 => scene.camera_reference = Some(7.0),
+                6 => scene.objects[0].render.iterations += 1,
+                7 => scene.environment.revision += 1,
+                _ => scene.objects.clear(),
+            }
+            let prepared = cache.get(&scene, 320, 180).unwrap();
+            assert!(!Arc::ptr_eq(&first, &prepared), "change={change}");
+            let fresh = WorldUpload::new(&scene, 320, 180).unwrap();
+            assert_eq!(prepared.params(&scene, None).as_slice(), fresh.params);
+            assert_eq!(prepared.upload.objects, fresh.objects);
+            assert_eq!(prepared.upload.lights, fresh.lights);
+        }
+        assert_eq!(cache.builds, 10);
+        assert_eq!(cache.hits, 1);
+        assert_eq!(cache.entries.iter().flatten().count(), 4);
+    }
+
+    #[test]
+    fn preparation_preview_full_and_all_formula_packs_remain_exact() {
+        let mut cache = PreparationCache::default();
+        for family in 0..=FAMILY_HYBRID {
+            let mut scene = Scene::preset(family);
+            scene.render.max_bounces = 4;
+            for world in [false, true] {
+                scene.world_render = world;
+                scene.objects = if world {
+                    vec![world_object(
+                        family,
+                        [0.2, -0.1, 0.3],
+                        [0.8, 1.2, 0.6],
+                        [0.3; 3],
+                    )]
+                } else {
+                    Vec::new()
+                };
+                let full = cache.get(&scene, 320, 180).unwrap();
+                let preview = cache.get(&scene, 160, 90).unwrap();
+                let mut expected = WorldUpload::new(&scene, 160, 90).unwrap().params;
+                expected[P_MAX_BOUNCES] = expected[P_MAX_BOUNCES].min(2.0);
+                assert_eq!(preview.params(&scene, Some(2)).as_slice(), expected);
+                assert!(Arc::ptr_eq(&full, &cache.get(&scene, 320, 180).unwrap()));
+                assert_eq!(
+                    full.params(&scene, None).as_slice(),
+                    WorldUpload::new(&scene, 320, 180).unwrap().params
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn preparation_failures_are_cached_until_actual_inputs_change() {
+        let mut scene = dark_world();
+        scene
+            .objects
+            .push(world_object(FAMILY_BULB, [0.0; 3], [0.0; 3], [0.4; 3]));
+        let mut cache = PreparationCache::default();
+        let first_error = cache.get(&scene, 320, 180).err().unwrap();
+        assert_eq!(cache.get(&scene, 320, 180).err().unwrap(), first_error);
+        assert_eq!((cache.builds, cache.hits), (1, 1));
+        scene.objects[0].object_world = Some(glam::Mat4::IDENTITY.to_cols_array_2d());
+        assert!(cache.get(&scene, 320, 180).is_ok());
+        assert_eq!((cache.builds, cache.hits), (2, 1));
+    }
+
+    #[test]
+    fn resident_upload_identity_restores_a_after_b_and_retries_failure() {
+        let mut resident = Resident::<u32>::default();
+        let mut copies = Vec::new();
+        for key in [1, 1, 2, 2, 1] {
+            resident
+                .update(key, || {
+                    copies.push(key);
+                    Ok(())
+                })
+                .unwrap();
+        }
+        assert_eq!(copies, [1, 2, 1]);
+        assert!(
+            resident
+                .update(2, || Err("failed partial upload".into()))
+                .is_err()
+        );
+        assert_eq!(resident.key, None);
+        assert!(
+            resident
+                .update(1, || {
+                    copies.push(1);
+                    Ok(())
+                })
+                .unwrap()
+        );
+        assert!(
+            resident
+                .update(2, || {
+                    copies.push(2);
+                    Ok(())
+                })
+                .unwrap()
+        );
+        assert_eq!(copies, [1, 2, 1, 1, 2]);
+    }
+
+    #[test]
+    fn texel_identity_ignores_environment_gain_rotation_but_tracks_reload_and_palettes() {
+        let mut scene = dark_world();
+        scene.environment.enabled = true;
+        scene.environment.path = "fixture.exr".into();
+        scene.objects.push(Scene::preset(FAMILY_BULB));
+        let first = Arc::new(PreparedScene::new(&scene, 320, 180).unwrap());
+        scene.environment.intensity += 0.5;
+        scene.environment.rotation_degrees += 19.0;
+        let adjusted = Arc::new(PreparedScene::new(&scene, 320, 180).unwrap());
+        assert!(LutResidentKey(first.clone()) == LutResidentKey(adjusted));
+        scene.environment.revision += 1;
+        assert!(
+            LutResidentKey(first.clone())
+                != LutResidentKey(Arc::new(PreparedScene::new(&scene, 320, 180).unwrap()))
+        );
+        scene.environment.revision -= 1;
+        scene.objects.clear();
+        assert!(
+            LutResidentKey(first)
+                != LutResidentKey(Arc::new(PreparedScene::new(&scene, 320, 180).unwrap()))
+        );
+    }
+
+    #[test]
+    fn padded_readback_reuses_storage_and_preserves_normalization_and_guide_counts() {
+        let (width, height) = (9usize, 5usize);
+        let mut tiled = vec![[f32::NAN; 4]; width.div_ceil(8) * height.div_ceil(4) * 32];
+        let expected: Vec<_> = (0..width * height)
+            .map(|i| [i as f32, -2.0, 4.0, if i == 0 { 0.0 } else { 2.0 }])
+            .collect();
+        for y in 0..height {
+            for x in 0..width {
+                let tile = (y / 4) * width.div_ceil(8) + x / 8;
+                tiled[tile * 32 + (y % 4) * 8 + x % 8] = expected[y * width + x];
+            }
+        }
+        let mut output = Vec::new();
+        untile_into(&tiled, width, height, false, &mut output);
+        assert_eq!(output, expected);
+        let pointer = output.as_ptr();
+        let capacity = output.capacity();
+        untile_into(&tiled, width, height, true, &mut output);
+        assert_eq!(output[0], [0.0, -0.0, 0.0, 1.0]);
+        for (i, pixel) in output.iter().enumerate().skip(1) {
+            assert_eq!(*pixel, [i as f32 * 0.5, -1.0, 2.0, 1.0]);
+        }
+        assert_eq!(output.as_ptr(), pointer);
+        assert_eq!(output.capacity(), capacity);
+        untile_into(&tiled, width, height, false, &mut output);
+        assert_eq!(output, expected);
+        assert_eq!(output.as_ptr(), pointer);
+    }
+
+    #[test]
+    fn typed_display_key_tracks_colour_and_revision_without_denoise() {
+        let mut scene = Scene::preset(FAMILY_BULB);
+        let key = DisplayKey::new(&scene, 0);
+        scene.render.denoise.interval += 1;
+        assert!(key.matches(&scene, 0));
+        assert!(!key.matches(&scene, 1));
+        scene.render.exposure_stops += 0.25;
+        assert!(!key.matches(&scene, 0));
+        scene.render.exposure_stops -= 0.25;
+        scene.colour.on = !scene.colour.on;
+        assert!(!key.matches(&scene, 0));
+    }
+
+    #[test]
+    #[ignore = "CPU preparation timing; run explicitly with --ignored --nocapture"]
+    fn preparation_benchmark() {
+        const ITERATIONS: u64 = 10_000;
+        let mut scene = dark_world();
+        scene.objects = vec![
+            world_object(FAMILY_BULB, [-0.8, 0.0, 0.0], [0.7; 3], [0.8, 0.2, 0.1]),
+            world_object(FAMILY_BOX, [0.8, 0.0, 0.0], [0.3; 3], [0.1, 0.3, 0.8]),
+        ];
+        scene.lights.push(scene.lighting);
+        let start = Instant::now();
+        for _ in 0..ITERATIONS {
+            std::hint::black_box(PreparedScene::new(&scene, 320, 180).unwrap());
+        }
+        let uncached = start.elapsed();
+        let mut cache = PreparationCache::default();
+        cache.get(&scene, 320, 180).unwrap();
+        let start = Instant::now();
+        for _ in 0..ITERATIONS {
+            std::hint::black_box(cache.get(&scene, 320, 180).unwrap());
+        }
+        let cached = start.elapsed();
+        assert_eq!((cache.builds, cache.hits), (1, ITERATIONS));
+        eprintln!(
+            "preparation_cpu iterations={ITERATIONS} uncached_us={} cached_us={} builds={} hits={}",
+            uncached.as_micros(),
+            cached.as_micros(),
+            cache.builds,
+            cache.hits
+        );
+    }
+
+    #[test]
+    fn cuda_resident_world_restore_matches_uninterrupted_reference() {
+        let mut gpu = Gpu::new().unwrap();
+        let mut a = dark_world();
+        a.objects.push(world_object(
+            FAMILY_BULB,
+            [0.0; 3],
+            [1.0; 3],
+            [0.8, 0.1, 0.2],
+        ));
+        a.lights.push(a.lighting);
+        let mut b = a.clone();
+        b.objects[0].object_world.as_mut().unwrap()[3][0] += 0.25;
+        b.objects[0].material.base_color = [0.1, 0.8, 0.2];
+        b.objects.push(world_object(
+            FAMILY_BOX,
+            [0.6, 0.0, 0.0],
+            [0.2; 3],
+            [0.1, 0.2, 0.9],
+        ));
+        b.lights[0].sun_azimuth += 20.0;
+        let mut target_a = gpu.target(33, 25);
+        let mut target_b = gpu.target(33, 25);
+        gpu.step(&mut target_a, &a, 1, 19, None, false);
+        let before = gpu.preparation_stats();
+        gpu.step(&mut target_a, &a, 1, 19, None, false);
+        let idle = gpu.preparation_stats();
+        assert_eq!(
+            (idle.lut_uploads, idle.object_uploads, idle.light_uploads),
+            (
+                before.lut_uploads,
+                before.object_uploads,
+                before.light_uploads
+            )
+        );
+        gpu.step(&mut target_b, &b, 1, 19, None, false);
+        gpu.step(&mut target_a, &a, 1, 19, None, false);
+        let restored = gpu.raw_scene_linear(&target_a);
+        let stats = gpu.preparation_stats();
+        assert_eq!(
+            (stats.lut_uploads, stats.object_uploads, stats.light_uploads),
+            (3, 3, 3)
+        );
+        assert_eq!(stats.builds, 2);
+        let mut reference = gpu.target(33, 25);
+        for _ in 0..3 {
+            gpu.step(&mut reference, &a, 1, 19, None, false);
+        }
+        assert_eq!(restored, gpu.raw_scene_linear(&reference));
+        assert_eq!(target_a.samples, 3);
+        assert!(target_a.colour_error.is_none());
+    }
+
+    #[test]
+    fn cuda_failed_environment_reload_keeps_resident_identity_and_caches_decode_error() {
+        let mut gpu = Gpu::new().unwrap();
+        let mut scene = dark_world();
+        scene
+            .objects
+            .push(world_object(FAMILY_BULB, [0.0; 3], [1.0; 3], [0.4; 3]));
+        let mut target = gpu.target(9, 5);
+        gpu.step(&mut target, &scene, 1, 1, None, false);
+        let resident = gpu.lut_resident.key.as_ref().unwrap().0.clone();
+        let before = gpu.preparation_stats();
+        scene.environment.enabled = true;
+        scene.environment.path = std::env::temp_dir()
+            .join("frac-missing-preparation-fixture.exr")
+            .to_string_lossy()
+            .into_owned();
+        assert!(!std::path::Path::new(&scene.environment.path).exists());
+        for _ in 0..2 {
+            gpu.step(&mut target, &scene, 1, 1, None, false);
+        }
+        assert!(target.colour_error.is_some());
+        assert!(Arc::ptr_eq(
+            &resident,
+            &gpu.lut_resident.key.as_ref().unwrap().0
+        ));
+        let failed = gpu.preparation_stats();
+        assert_eq!(failed.environment_decodes, before.environment_decodes + 1);
+        assert_eq!(failed.lut_uploads, before.lut_uploads);
+        scene.environment.revision += 1;
+        gpu.step(&mut target, &scene, 1, 1, None, false);
+        assert_eq!(
+            gpu.preparation_stats().environment_decodes,
+            failed.environment_decodes + 1
+        );
+        scene.environment.enabled = false;
+        gpu.step(&mut target, &scene, 1, 1, None, false);
+        assert!(target.colour_error.is_none());
+        assert_eq!(gpu.preparation_stats().lut_uploads, before.lut_uploads);
+    }
 
     fn world_object(family: u32, translation: [f32; 3], scale: [f32; 3], color: [f32; 3]) -> Scene {
         let mut object = Scene::preset(family);
