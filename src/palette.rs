@@ -25,43 +25,6 @@ pub enum PaletteScheme {
     Twilight,
 }
 
-impl PaletteScheme {
-    pub const ALL: [Self; 14] = [
-        Self::Classic,
-        Self::Fire,
-        Self::Ice,
-        Self::Mono,
-        Self::Sunset,
-        Self::Aurora,
-        Self::Ocean,
-        Self::Ember,
-        Self::Amethyst,
-        Self::Verdant,
-        Self::Copper,
-        Self::Neon,
-        Self::RoseGold,
-        Self::Twilight,
-    ];
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Classic => "Classic",
-            Self::Fire => "Fire",
-            Self::Ice => "Ice",
-            Self::Mono => "Monochrome",
-            Self::Sunset => "Sunset",
-            Self::Aurora => "Aurora",
-            Self::Ocean => "Ocean",
-            Self::Ember => "Ember",
-            Self::Amethyst => "Amethyst",
-            Self::Verdant => "Verdant",
-            Self::Copper => "Copper",
-            Self::Neon => "Neon",
-            Self::RoseGold => "Rose Gold",
-            Self::Twilight => "Twilight",
-        }
-    }
-}
 
 #[derive(Clone, Copy)]
 struct Gradient {

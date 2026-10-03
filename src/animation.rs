@@ -20,6 +20,7 @@ fn box_path(pointer: &str) -> String {
         .collect()
 }
 
+#[cfg(test)]
 pub fn set_parameter(scene: &mut Scene, path: &str, value: Value) -> Result<(), String> {
     let mut doc = RustBox::from_json_value(
         serde_json::to_value(&*scene).map_err(|e| e.to_string())?,
@@ -93,6 +94,7 @@ impl Track {
         }
         true
     }
+    #[cfg(test)]
     pub fn set(&mut self, frame: f64, value: Value) {
         let interpolation = self
             .keys
@@ -105,9 +107,7 @@ impl Track {
             interpolation,
         });
     }
-    pub fn remove(&mut self, frame: f64) {
-        self.keys.retain(|k| k.frame != frame);
-    }
+    #[cfg(test)]
     pub fn move_keys(&mut self, frames: &[f64], delta: f64) {
         if !delta.is_finite() || frames.iter().any(|f| !(f + delta).is_finite()) {
             return;
@@ -231,6 +231,7 @@ impl Default for Animation {
 
 /// Parameter discovery follows the scene's serialization rather than a hand-maintained
 /// list. New render parameters automatically become keyable. Config and labels are not keys.
+#[cfg(test)]
 pub fn parameters(scene: &Scene) -> Vec<(String, Value)> {
     fn visit(v: &Value, path: &str, out: &mut Vec<(String, Value)>) {
         if parameter_value(v) {
@@ -300,13 +301,7 @@ impl Scene {
         evaluated.environment.revision = self.environment.revision;
         Ok(evaluated)
     }
-    pub fn apply_animation(&mut self, frame: f64) -> Result<(), String> {
-        let animation = self.animation.clone();
-        let mut evaluated = self.evaluated(frame)?;
-        evaluated.animation = animation;
-        *self = evaluated;
-        Ok(())
-    }
+    #[cfg(test)]
     pub fn key_parameter(&mut self, path: &str, frame: f64) {
         if let Some((_, value)) = parameters(self).into_iter().find(|(p, _)| p == path) {
             self.animation
@@ -318,6 +313,7 @@ impl Scene {
     }
     /// Editing an animated value (including viewport camera gestures) creates/updates
     /// its key at the playhead. Unanimated values stay static.
+    #[cfg(test)]
     pub fn record_edits(&mut self, before: &[(String, Value)], frame: f64) {
         for (path, value) in parameters(self) {
             if let Some(track) = self.animation.tracks.get_mut(&path) {

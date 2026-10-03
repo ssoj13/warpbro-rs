@@ -7,7 +7,9 @@ use curves::CurveKind;
 use playa_engine::entities::anim::{Animation, Channel, Keyframe};
 use playa_engine::entities::{AttrValue, Attrs};
 pub use playa_graph::NodeId;
-use playa_graph::{Graph, Node, RustBox, SubnetFile};
+use playa_graph::SubnetFile;
+#[cfg(test)]
+use playa_graph::{Graph, Node, RustBox};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -20,26 +22,6 @@ pub enum WorldKind {
     Environment,
     Group,
     Material,
-}
-impl WorldKind {
-    pub const ALL: [Self; 6] = [
-        Self::Fractal,
-        Self::Camera,
-        Self::DirectionalLight,
-        Self::Environment,
-        Self::Group,
-        Self::Material,
-    ];
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Fractal => "Fractal",
-            Self::Camera => "Camera",
-            Self::DirectionalLight => "Directional Light",
-            Self::Environment => "Environment",
-            Self::Group => "Group",
-            Self::Material => "Material",
-        }
-    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WorldDocument {
@@ -75,7 +57,6 @@ pub struct WorldAttribute {
     pub frames: Vec<f64>,
     pub keyable: bool,
     pub component: Option<usize>,
-    pub group: String,
     pub choices: Vec<Value>,
     pub range: Option<(f64, f64)>,
 }
@@ -145,14 +126,17 @@ pub enum WorldCommand {
     SetActiveEnvironment(NodeId),
     ReloadEnvironment(NodeId),
     Batch(Vec<WorldCommand>),
+    #[cfg(test)]
     SetVisible {
         id: NodeId,
         visible: bool,
     },
+    #[cfg(test)]
     SetLocked {
         id: NodeId,
         locked: bool,
     },
+    #[cfg(test)]
     SetSolo {
         id: NodeId,
         solo: bool,
@@ -234,26 +218,27 @@ impl WorldEditor {
             false
         }
     }
+    #[cfg(test)]
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
-    pub fn can_redo(&self) -> bool {
-        !self.redo.is_empty()
-    }
     fn apply(&mut self, command: WorldCommand) -> Result<(), String> {
         match command {
+            #[cfg(test)]
             WorldCommand::SetVisible { id, visible } => self.apply(WorldCommand::SetAttribute {
                 id,
                 path: "/visible".into(),
                 value: json!(visible),
                 frame: 0.0,
             })?,
+            #[cfg(test)]
             WorldCommand::SetLocked { id, locked } => self.apply(WorldCommand::SetAttribute {
                 id,
                 path: "/locked".into(),
                 value: json!(locked),
                 frame: 0.0,
             })?,
+            #[cfg(test)]
             WorldCommand::SetSolo { id, solo } => self.apply(WorldCommand::SetAttribute {
                 id,
                 path: "/solo".into(),
@@ -1033,16 +1018,6 @@ impl WorldDocument {
         }
         document
     }
-    pub fn frame_seconds(&self, frame: f64) -> f64 {
-        frame * playa_time::Fps::from_f32_lossy(self.fps as f32).frame_duration_secs()
-    }
-    pub fn empty(scene: &Scene) -> Self {
-        let mut d = Self::from_scene(scene);
-        d.graph.nodes.clear();
-        d.active_camera = None;
-        d.active_environment = None;
-        d
-    }
     fn insert(
         &mut self,
         kind: WorldKind,
@@ -1093,6 +1068,7 @@ impl WorldDocument {
         }
         Ok(id)
     }
+    #[cfg(test)]
     pub fn runtime_graph(&self) -> Result<Graph, String> {
         let mut graph = Graph::new();
         graph.id = self.graph.id;
@@ -1198,12 +1174,6 @@ impl WorldDocument {
                 frames: attrs.key_frames(path),
                 keyable: !matches!(path.as_str(), "/locked" | "/solo" | "/start" | "/end"),
                 component: None,
-                group: path
-                    .trim_start_matches('/')
-                    .split('/')
-                    .next()
-                    .unwrap_or("Custom")
-                    .into(),
                 choices: attribute_choices(path),
                 range: attribute_range(path),
             });
@@ -1216,7 +1186,6 @@ impl WorldDocument {
                 frames: vec![],
                 keyable: false,
                 component: None,
-                group: "Material".into(),
                 choices: self
                     .nodes()
                     .into_iter()
