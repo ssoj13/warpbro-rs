@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-bootstrap.py - Unified local build/run/check script for frac-rs.
+bootstrap.py - Unified local build/run/check script for WarpBro.
 
 Cross-platform-ish (Linux / WSL2), Python 3, stdlib only. Adapted from the gitnexus-rs
 bootstrap.
 
-frac-rs builds through cuda-oxide: its GPU kernels (src/gpu.rs) are Rust compiled to PTX by the
+WarpBro builds through cuda-oxide: its GPU kernels (src/gpu.rs) are Rust compiled to PTX by the
 rustc_codegen_cuda backend, which `cargo oxide` enables. Plain `cargo build` cannot link them
 (build.rs stops it with an explanation). This script checks the toolchain first, then drives
 `cargo oxide`.
@@ -19,12 +19,12 @@ Toolchain (see README.md):
 
 Commands:
     d(octor)      Check the toolchain (--fix installs the rustup / cargo-oxide parts)
-    b(uild)       cargo oxide build  -> target/release/frac-rs
-    r(un)         Build, then run the browser (args after `--` go to frac-rs)
+    b(uild)       cargo oxide build  -> target/release/WarpBro
+    r(un)         Build, then run the browser (args after `--` go to WarpBro)
     g(allery)     Render every preset:  g [DIR [W H SPP]]   (default gallery 1920 1080 256)
     bench         Time every preset:    bench [W H SPP]     (default 960 540 32)
     docs          Rebuild the README images in docs/ (needs uv for Pillow)
-    i(nstall)     Copy the release binary to ~/.local/bin/frac-rs
+    i(nstall)     Copy the release binary to ~/.local/bin/WarpBro
     c(heck)       cargo fmt --check + cargo clippy
     cl(ean)       cargo clean (+ stray *.ll / *.ptx dumps in the repo root)
     h(elp)        Print help
@@ -56,7 +56,7 @@ ROOT_DIR = Path(__file__).parent.resolve()
 IS_WINDOWS = platform.system() == "Windows"
 IS_WSL = "microsoft" in platform.release().lower()
 
-BIN_NAME = "frac-rs.exe" if IS_WINDOWS else "frac-rs"
+BIN_NAME = "WarpBro.exe" if IS_WINDOWS else "WarpBro"
 RELEASE_BIN = ROOT_DIR / "target" / "release" / BIN_NAME
 INSTALL_DIR = Path.home() / ".local" / "bin"
 
@@ -528,8 +528,8 @@ Direct cargo aliases require an already configured Developer PowerShell.
 COMMANDS
   d       doctor: check driver, CUDA, LLVM, clang, stable toolchain, cargo-oxide
             --fix   install the missing rustup toolchain / components / cargo-oxide
-  b       build (cargo oxide build) -> target/release/frac-rs
-  r       build + run the browser; arguments after `--` go to frac-rs
+  b       build (cargo oxide build) -> target/release/WarpBro
+  r       build + run the browser; arguments after `--` go to WarpBro
   g       render every preset:  g [DIR [W H SPP]]    (gallery 1920 1080 256)
   bench   time every preset:    bench [W H SPP]      (960 540 32)
   docs    regenerate docs/ (README images, bench table)
@@ -572,7 +572,7 @@ def main() -> int:
         argv, app_args = argv[:i], argv[i + 1:]
 
     parser = argparse.ArgumentParser(
-        description="frac-rs build system",
+        description="WarpBro build system",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("command", nargs="?", choices=COMMANDS, default="h", help=", ".join(COMMANDS))

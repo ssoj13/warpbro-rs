@@ -49,7 +49,7 @@ impl Native {
         let window = Arc::new(
             events.create_window(
                 Window::default_attributes()
-                    .with_title("frac-rs — path-traced fractals on CUDA (Rust)")
+                    .with_title("WarpBro")
                     .with_theme(Some(winit::window::Theme::Dark))
                     .with_inner_size(winit::dpi::LogicalSize::new(1600.0, 940.0))
                     .with_min_inner_size(winit::dpi::LogicalSize::new(900.0, 560.0)),

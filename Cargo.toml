@@ -1,20 +1,25 @@
 [package]
-name = "frac-rs"
+name = "warpbro"
 version = "0.1.0"
 edition = "2024"
+
+[[bin]]
+name = "WarpBro"
+path = "src/main.rs"
 
 [workspace]
 
 [dependencies]
+playa-player = { git = "ssh://git@github.com/ssoj13/playa.git", rev = "00d90428d6c931b69b7117fd2a4cdf143d075413", default-features = false }
 pt-denoise-oidn = { git = "ssh://git@github.com/ssoj13/squarebob-rs.git", rev = "3dedf872cddb06b4aa5689f5cfe022468cdb6f3b" }
 render-core = { git = "ssh://git@github.com/ssoj13/squarebob-rs.git", rev = "3dedf872cddb06b4aa5689f5cfe022468cdb6f3b" }
 # Share the wrapper's branch source; Cargo.lock pins its exact commit.
 oidn-rs = { git = "ssh://git@github.com/ssoj13/oidn-rs.git", branch = "main" }
-playa-graph = { git = "ssh://git@github.com/ssoj13/playa.git", rev = "6b1c6c7d53522b696f859af400e0b141aaab2ba5" }
-playa-engine = { git = "ssh://git@github.com/ssoj13/playa.git", rev = "6b1c6c7d53522b696f859af400e0b141aaab2ba5", default-features = false }
-playa-time = { git = "ssh://git@github.com/ssoj13/playa.git", rev = "6b1c6c7d53522b696f859af400e0b141aaab2ba5" }
-playa-coord = { git = "ssh://git@github.com/ssoj13/playa.git", rev = "6b1c6c7d53522b696f859af400e0b141aaab2ba5" }
-playa-events = { git = "ssh://git@github.com/ssoj13/playa.git", rev = "6b1c6c7d53522b696f859af400e0b141aaab2ba5" }
+playa-graph = { git = "ssh://git@github.com/ssoj13/playa.git", rev = "00d90428d6c931b69b7117fd2a4cdf143d075413" }
+playa-engine = { git = "ssh://git@github.com/ssoj13/playa.git", rev = "00d90428d6c931b69b7117fd2a4cdf143d075413", default-features = false }
+playa-time = { git = "ssh://git@github.com/ssoj13/playa.git", rev = "00d90428d6c931b69b7117fd2a4cdf143d075413" }
+playa-coord = { git = "ssh://git@github.com/ssoj13/playa.git", rev = "00d90428d6c931b69b7117fd2a4cdf143d075413" }
+playa-events = { git = "ssh://git@github.com/ssoj13/playa.git", rev = "00d90428d6c931b69b7117fd2a4cdf143d075413" }
 egui-outliner = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", rev = "e953b2cc6836db2bb47aa44bb7995d9696636034" }
 # Our Windows fork includes the Rust 1.99 backend fixes.
 cuda-device = { git = "ssh://git@github.com/ssoj13/cuda-oxide-windows.git", rev = "f3f1098a776a630d8003f2229934e0563cdec252" }

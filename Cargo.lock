@@ -3929,74 +3929,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "frac-rs"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "av-codec",
- "av-codec-core",
- "av-format-core",
- "av-format-mov",
- "av-format-movenc",
- "av-swscale",
- "av-util-core",
- "av-util-frame",
- "av-util-pixfmt",
- "box-rs",
- "bytemuck",
- "cam-controls",
- "cam-viewport",
- "cuda-core",
- "cuda-device",
- "cuda-host",
- "curves",
- "dirs 7.0.0",
- "egui",
- "egui-attr-grid",
- "egui-attr-table",
- "egui-display",
- "egui-dock-layout",
- "egui-encode-dialog",
- "egui-file-dialog",
- "egui-file-field",
- "egui-hdr-view",
- "egui-layout-manager",
- "egui-outliner",
- "egui-phosphor",
- "egui-prefs2",
- "egui-statusbar",
- "egui-titlebar",
- "egui-track-timeline",
- "egui-viewport-toolbar",
- "egui-wgpu",
- "egui-widgets-config",
- "egui-winit",
- "egui_dock",
- "env_logger",
- "exr",
- "glam",
- "gpu-info-rs",
- "image",
- "log",
- "oidn-rs",
- "playa-coord",
- "playa-engine",
- "playa-events",
- "playa-graph",
- "playa-time",
- "png",
- "pt-denoise-oidn",
- "rayon",
- "render-core",
- "serde",
- "serde_json",
- "standard-surface-bsdf",
- "vfx-ocio",
- "wgpu",
- "winit",
-]
-
-[[package]]
 name = "futures-channel"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6623,7 +6555,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 [[package]]
 name = "playa-coord"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?rev=6b1c6c7d53522b696f859af400e0b141aaab2ba5#6b1c6c7d53522b696f859af400e0b141aaab2ba5"
+source = "git+ssh://git@github.com/ssoj13/playa.git?rev=00d90428d6c931b69b7117fd2a4cdf143d075413#00d90428d6c931b69b7117fd2a4cdf143d075413"
 dependencies = [
  "glam",
 ]
@@ -6631,7 +6563,7 @@ dependencies = [
 [[package]]
 name = "playa-engine"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?rev=6b1c6c7d53522b696f859af400e0b141aaab2ba5#6b1c6c7d53522b696f859af400e0b141aaab2ba5"
+source = "git+ssh://git@github.com/ssoj13/playa.git?rev=00d90428d6c931b69b7117fd2a4cdf143d075413#00d90428d6c931b69b7117fd2a4cdf143d075413"
 dependencies = [
  "alembic-rs",
  "anyhow",
@@ -6680,7 +6612,7 @@ dependencies = [
 [[package]]
 name = "playa-events"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?rev=6b1c6c7d53522b696f859af400e0b141aaab2ba5#6b1c6c7d53522b696f859af400e0b141aaab2ba5"
+source = "git+ssh://git@github.com/ssoj13/playa.git?rev=00d90428d6c931b69b7117fd2a4cdf143d075413#00d90428d6c931b69b7117fd2a4cdf143d075413"
 dependencies = [
  "log",
  "serde",
@@ -6691,7 +6623,7 @@ dependencies = [
 [[package]]
 name = "playa-graph"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/playa.git?rev=6b1c6c7d53522b696f859af400e0b141aaab2ba5#6b1c6c7d53522b696f859af400e0b141aaab2ba5"
+source = "git+ssh://git@github.com/ssoj13/playa.git?rev=00d90428d6c931b69b7117fd2a4cdf143d075413#00d90428d6c931b69b7117fd2a4cdf143d075413"
 dependencies = [
  "box-rs",
  "flex-geom",
@@ -6708,7 +6640,7 @@ dependencies = [
 [[package]]
 name = "playa-io"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?rev=6b1c6c7d53522b696f859af400e0b141aaab2ba5#6b1c6c7d53522b696f859af400e0b141aaab2ba5"
+source = "git+ssh://git@github.com/ssoj13/playa.git?rev=00d90428d6c931b69b7117fd2a4cdf143d075413#00d90428d6c931b69b7117fd2a4cdf143d075413"
 dependencies = [
  "audio-decode",
  "av-format-core",
@@ -6726,9 +6658,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "playa-player"
+version = "0.1.143"
+source = "git+ssh://git@github.com/ssoj13/playa.git?rev=00d90428d6c931b69b7117fd2a4cdf143d075413#00d90428d6c931b69b7117fd2a4cdf143d075413"
+dependencies = [
+ "log",
+ "lru",
+ "playa-io",
+ "sysinfo 0.39.6",
+]
+
+[[package]]
 name = "playa-time"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?rev=6b1c6c7d53522b696f859af400e0b141aaab2ba5#6b1c6c7d53522b696f859af400e0b141aaab2ba5"
+source = "git+ssh://git@github.com/ssoj13/playa.git?rev=00d90428d6c931b69b7117fd2a4cdf143d075413#00d90428d6c931b69b7117fd2a4cdf143d075413"
 dependencies = [
  "glam",
  "serde",
@@ -9420,6 +9363,75 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bfa7760aed19e106de2c7c0b581b509f2f25d3dacaf737cb82ac61bc6d760b0e"
 dependencies = [
  "try-lock",
+]
+
+[[package]]
+name = "warpbro"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "av-codec",
+ "av-codec-core",
+ "av-format-core",
+ "av-format-mov",
+ "av-format-movenc",
+ "av-swscale",
+ "av-util-core",
+ "av-util-frame",
+ "av-util-pixfmt",
+ "box-rs",
+ "bytemuck",
+ "cam-controls",
+ "cam-viewport",
+ "cuda-core",
+ "cuda-device",
+ "cuda-host",
+ "curves",
+ "dirs 7.0.0",
+ "egui",
+ "egui-attr-grid",
+ "egui-attr-table",
+ "egui-display",
+ "egui-dock-layout",
+ "egui-encode-dialog",
+ "egui-file-dialog",
+ "egui-file-field",
+ "egui-hdr-view",
+ "egui-layout-manager",
+ "egui-outliner",
+ "egui-phosphor",
+ "egui-prefs2",
+ "egui-statusbar",
+ "egui-titlebar",
+ "egui-track-timeline",
+ "egui-viewport-toolbar",
+ "egui-wgpu",
+ "egui-widgets-config",
+ "egui-winit",
+ "egui_dock",
+ "env_logger",
+ "exr",
+ "glam",
+ "gpu-info-rs",
+ "image",
+ "log",
+ "oidn-rs",
+ "playa-coord",
+ "playa-engine",
+ "playa-events",
+ "playa-graph",
+ "playa-player",
+ "playa-time",
+ "png",
+ "pt-denoise-oidn",
+ "rayon",
+ "render-core",
+ "serde",
+ "serde_json",
+ "standard-surface-bsdf",
+ "vfx-ocio",
+ "wgpu",
+ "winit",
 ]
 
 [[package]]

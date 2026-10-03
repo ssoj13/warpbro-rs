@@ -179,9 +179,9 @@ pub fn scene(index: usize) -> Result<Scene, String> {
         object,
         "/transform/position",
         [
-            json!([0.0, -0.025, 0.0]),
-            json!([0.035, 0.035, -0.02]),
-            json!([-0.02, 0.0, 0.025]),
+            json!([0.0, 0.0, 0.0]),
+            json!([0.0, 0.0, 0.0]),
+            json!([0.0, 0.0, 0.0]),
         ],
     );
     track(
@@ -190,8 +190,8 @@ pub fn scene(index: usize) -> Result<Scene, String> {
         "/transform/rotation_degrees",
         [
             json!([0.0, -8.0, 0.0]),
-            json!([4.0, 5.0, -3.0]),
-            json!([-2.0, 18.0, 2.0]),
+            json!([0.0, 5.0, 0.0]),
+            json!([0.0, 18.0, 0.0]),
         ],
     );
     track(
@@ -199,8 +199,8 @@ pub fn scene(index: usize) -> Result<Scene, String> {
         object,
         "/transform/scale",
         [
-            json!([0.98, 0.98, 0.98]),
-            json!([1.03, 1.03, 1.03]),
+            json!([1.0, 1.0, 1.0]),
+            json!([1.0, 1.0, 1.0]),
             json!([1.0, 1.0, 1.0]),
         ],
     );
@@ -211,29 +211,46 @@ pub fn scene(index: usize) -> Result<Scene, String> {
         "/camera/distance",
         [
             json!(distance),
-            json!(distance * 0.95),
-            json!(distance * 1.02),
+            json!(distance * 1.05),
+            json!(distance * 1.10),
         ],
     );
     track(
         &mut commands,
         camera,
         "/camera/pitch_degrees",
-        [json!(14.0), json!(22.0), json!(17.0)],
+        [json!(14.0), json!(17.0), json!(20.0)],
+    );
+    let iterations = match index {
+        0 => [6, 13, 20],
+        1 => [6, 10, 14],
+        _ => [3, 8, 14],
+    };
+    track(
+        &mut commands,
+        object,
+        "/render/iterations",
+        iterations.map(|n| json!(n)),
     );
     match index {
         0 => {
             track(
                 &mut commands,
                 object,
+                "/formula/Mandelbulb/angle_scale",
+                [json!([0.5, 0.5]), json!([1.0, 1.0]), json!([1.5, 1.5])],
+            );
+            track(
+                &mut commands,
+                object,
                 "/formula/Mandelbulb/power",
-                [json!(7.4), json!(8.5), json!(7.8)],
+                [json!(3.0), json!(5.5), json!(8.0)],
             );
             track(
                 &mut commands,
                 object,
                 "/formula/Mandelbulb/angle_phase_degrees/0",
-                [json!(-5.0), json!(8.0), json!(2.0)],
+                [json!(0.0), json!(3.0), json!(6.0)],
             );
         }
         1 => {
@@ -241,13 +258,13 @@ pub fn scene(index: usize) -> Result<Scene, String> {
                 &mut commands,
                 object,
                 "/formula/Mandelbox/scale",
-                [json!(-1.55), json!(-1.45), json!(-1.5)],
+                [json!(-1.45), json!(-1.5), json!(-1.55)],
             );
             track(
                 &mut commands,
                 object,
                 "/formula/Mandelbox/min_radius_ratio",
-                [json!(0.46), json!(0.53), json!(0.49)],
+                [json!(0.5), json!(0.4), json!(0.3)],
             );
         }
         2 => {
@@ -255,13 +272,13 @@ pub fn scene(index: usize) -> Result<Scene, String> {
                 &mut commands,
                 object,
                 "/formula/QuaternionJulia/constant/0",
-                [json!(-0.2), json!(-0.26), json!(-0.22)],
+                [json!(-0.12), json!(-0.20), json!(-0.28)],
             );
             track(
                 &mut commands,
                 object,
                 "/formula/QuaternionJulia/slice_w",
-                [json!(-0.07), json!(0.09), json!(0.02)],
+                [json!(-0.07), json!(0.0), json!(0.07)],
             );
         }
         3 => {
@@ -269,13 +286,13 @@ pub fn scene(index: usize) -> Result<Scene, String> {
                 &mut commands,
                 object,
                 "/formula/Kifs/scale",
-                [json!(1.96), json!(2.05), json!(2.01)],
+                [json!(1.75), json!(1.9), json!(2.05)],
             );
             track(
                 &mut commands,
                 object,
                 "/formula/Kifs/rotation_degrees/1",
-                [json!(-3.0), json!(4.0), json!(1.5)],
+                [json!(-3.0), json!(0.5), json!(4.0)],
             );
         }
         _ => {
@@ -283,13 +300,13 @@ pub fn scene(index: usize) -> Result<Scene, String> {
                 &mut commands,
                 object,
                 "/formula/Apollonian/scale",
-                [json!(1.27), json!(1.34), json!(1.3)],
+                [json!(1.2), json!(1.3), json!(1.4)],
             );
             track(
                 &mut commands,
                 object,
                 "/trap_scale",
-                [json!(1.0), json!(1.65), json!(1.3)],
+                [json!(1.0), json!(1.325), json!(1.65)],
             );
         }
     }
@@ -363,6 +380,41 @@ mod tests {
             }
         }
         assert!(scene(ANIMATED.len()).is_err());
+    }
+
+    #[test]
+    fn unfolding_controls_are_monotonic_across_the_whole_work_area() {
+        for index in 0..ANIMATED.len() {
+            let preset = scene(index).unwrap();
+            let document = preset.document.unwrap();
+            let mut previous = document.snapshot(0.0).unwrap();
+            for frame in 1..250 {
+                let current = document.snapshot(f64::from(frame)).unwrap();
+                assert!(current.render.iterations >= previous.render.iterations);
+                assert!(current.camera.distance >= previous.camera.distance);
+                assert!(current.camera.pitch_degrees >= previous.camera.pitch_degrees);
+                match (&previous.formula, &current.formula) {
+                    (Formula::Mandelbulb(a), Formula::Mandelbulb(b)) => {
+                        assert!(b.power >= a.power);
+                        for axis in 0..2 {
+                            assert!(b.angle_scale[axis] >= a.angle_scale[axis]);
+                        }
+                    }
+                    (Formula::Mandelbox(a), Formula::Mandelbox(b)) => {
+                        assert!(b.scale <= a.scale);
+                        assert!(b.min_radius_ratio <= a.min_radius_ratio);
+                    }
+                    (Formula::QuaternionJulia(a), Formula::QuaternionJulia(b)) => {
+                        assert!(b.constant[0] <= a.constant[0]);
+                        assert!(b.slice_w >= a.slice_w);
+                    }
+                    (Formula::Kifs(a), Formula::Kifs(b)) => assert!(b.scale >= a.scale),
+                    (Formula::Apollonian(a), Formula::Apollonian(b)) => assert!(b.scale >= a.scale),
+                    _ => panic!("Preset changed formula family"),
+                }
+                previous = current;
+            }
+        }
     }
 
     #[test]

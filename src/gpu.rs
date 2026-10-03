@@ -1066,12 +1066,18 @@ pub mod kernels {
     }
 
     #[inline(always)]
-    fn map_index(ctx: Context<'_>, dir: V3) -> usize {
-        let w = pr(ctx, P_ENV_WIDTH) as usize;
-        let h = pr(ctx, P_ENV_HEIGHT) as usize;
+    fn map_uv(ctx: Context<'_>, dir: V3) -> [f32; 2] {
         let u =
             (0.5 + (dir[0].atan2(dir[2]) - pr(ctx, P_ENV_ROTATION)) / (2.0 * PI)).rem_euclid(1.0);
         let v = dir[1].clamp(-1.0, 1.0).acos() / PI;
+        [u, v]
+    }
+
+    #[inline(always)]
+    fn map_index(ctx: Context<'_>, dir: V3) -> usize {
+        let w = pr(ctx, P_ENV_WIDTH) as usize;
+        let h = pr(ctx, P_ENV_HEIGHT) as usize;
+        let [u, v] = map_uv(ctx, dir);
         ((v * h as f32) as usize).min(h - 1) * w + ((u * w as f32) as usize).min(w - 1)
     }
 
@@ -1088,6 +1094,36 @@ pub mod kernels {
                     + i,
             )
         }
+    }
+
+    #[inline(always)]
+    fn map_radiance(ctx: Context<'_>, lut: &[[f32; 4]], dir: V3) -> V3 {
+        let w = pr(ctx, P_ENV_WIDTH) as usize;
+        let h = pr(ctx, P_ENV_HEIGHT) as usize;
+        let [u, v] = map_uv(ctx, dir);
+        // Texel-centred bilinear reconstruction: longitude wraps, poles clamp.
+        // The fourth LUT component is the importance CDF and is never interpolated.
+        let x = (u * w as f32 - 0.5).rem_euclid(w as f32);
+        let y = (v * h as f32 - 0.5).clamp(0.0, (h - 1) as f32);
+        let x0 = (x as usize).min(w - 1);
+        let x1 = (x0 + 1) % w;
+        let y0 = (y as usize).min(h - 1);
+        let y1 = (y0 + 1).min(h - 1);
+        let tx = x - x0 as f32;
+        let ty = y - y0 as f32;
+        let a = map_texel(ctx, lut, y0 * w + x0);
+        let b = map_texel(ctx, lut, y0 * w + x1);
+        let c = map_texel(ctx, lut, y1 * w + x0);
+        let d = map_texel(ctx, lut, y1 * w + x1);
+        let mut color = [0.0; 3];
+        let mut channel = 0;
+        while channel < 3 {
+            let top = a[channel] + (b[channel] - a[channel]) * tx;
+            let bottom = c[channel] + (d[channel] - c[channel]) * tx;
+            color[channel] = top + (bottom - top) * ty;
+            channel += 1;
+        }
+        color
     }
 
     #[inline(always)]
@@ -1211,8 +1247,7 @@ pub mod kernels {
     fn env_radiance(ctx: Context<'_>, lut: &[[f32; 4]], dir: V3) -> V3 {
         if ctx.world {
             let mut radiance = if pr(ctx, P_ENV_WIDTH) > 0.0 {
-                let p = map_texel(ctx, lut, map_index(ctx, dir));
-                mul([p[0], p[1], p[2]], pr(ctx, P_ENV_INTENSITY))
+                mul(map_radiance(ctx, lut, dir), pr(ctx, P_ENV_INTENSITY))
             } else {
                 sky_radiance(ctx, dir)
             };
@@ -1234,8 +1269,7 @@ pub mod kernels {
         }
 
         if pr(ctx, P_ENV_WIDTH) > 0.0 {
-            let p = map_texel(ctx, lut, map_index(ctx, dir));
-            let map = mul([p[0], p[1], p[2]], pr(ctx, P_ENV_INTENSITY));
+            let map = mul(map_radiance(ctx, lut, dir), pr(ctx, P_ENV_INTENSITY));
             return if sun_contains(ctx, dir) {
                 add(
                     map,

@@ -51,6 +51,14 @@ const SWATCH_SPP: u32 = 32;
 /// The scene a material-library swatch is rendered with: the preset on a unit sphere (a
 /// quaternion Julia set with c = 0 is exactly the unit ball), three-quarter light, sky behind.
 fn swatch_scene(preset: &crate::materials::MaterialPreset) -> Scene {
+    let mut material = Material::default();
+    preset.apply(&mut material);
+    material.model = MaterialModel::StandardSurface;
+    material_preview_scene(material)
+}
+
+/// Render the evaluated Material-node value; the card never owns authoring state.
+fn material_preview_scene(material: Material) -> Scene {
     let mut s = Scene::preset(crate::params::FAMILY_QUAT);
     if let Formula::QuaternionJulia(q) = &mut s.formula {
         q.constant = [0.0; 4];
@@ -69,9 +77,7 @@ fn swatch_scene(preset: &crate::materials::MaterialPreset) -> Scene {
     s.lighting.sky_horizon = [0.03, 0.03, 0.03];
     s.lighting.sky_zenith = [0.14, 0.14, 0.14];
     s.lighting.sky_intensity = 5.0;
-    s.material.model = MaterialModel::StandardSurface;
-    preset.apply(&mut s.material);
-    s.material.model = MaterialModel::StandardSurface;
+    s.material = material;
     s
 }
 
@@ -88,6 +94,7 @@ pub(crate) struct App {
     io: crate::io_service::IoService,
     gpu_name: String,
     frame: Option<Arc<Frame>>,
+    frame_from_cache: bool,
     request: Option<ViewportRequest>,
     generation: u64,
     staged_frame: Option<Arc<Frame>>,
@@ -99,6 +106,10 @@ pub(crate) struct App {
     scene: Scene,
     world: crate::world::WorldEditor,
     world_ui: crate::world_ui::WorldUi,
+    preview: crate::preview::PreviewController,
+    preview_key: Option<(playa_graph::NodeId, u64, bool, u32, u32)>,
+    preview_sequence: u64,
+    preview_progress: Option<(u32, u32, usize)>,
     evaluated_world: Option<(playa_graph::NodeId, u64, u64)>,
     load_revision: u64,
     /// The preset / bookmark the scene came from, for "Reset".
@@ -115,6 +126,7 @@ pub(crate) struct App {
     fonts: dock::Fonts,
     applied_fonts: Option<dock::Fonts>,
     viewport_visible: bool,
+    viewport_rect: Option<egui::Rect>,
     config_picker: egui_file_dialog::FileDialog,
     scene_picker: Option<(bool, egui_file_dialog::FileDialog)>,
     scene_file_path: Option<PathBuf>,
@@ -134,6 +146,7 @@ pub(crate) struct App {
     bookmarks: Vec<Entry>,
 
     swatches: Vec<Option<TextureHandle>>,
+    material_gallery: crate::material_gallery::MaterialGallery,
     tab: Tab,
     target_spp: u32,
     spp_per_frame: u32,
@@ -267,6 +280,7 @@ struct Settings {
     status_layout: egui_statusbar::StatusBarLayout,
     status_resizable: bool,
     attribute_metrics: crate::ui_style::AttributeMetrics,
+    auto_key: bool,
     #[serde(default)]
     timeline_initialized: bool,
     #[serde(default)]
@@ -288,6 +302,7 @@ impl Default for Settings {
             status_layout: Default::default(),
             status_resizable: true,
             attribute_metrics: Default::default(),
+            auto_key: false,
             timeline_initialized: true,
             world_layout_initialized: true,
         }
@@ -328,6 +343,7 @@ impl App {
             io: crate::io_service::IoService::spawn(),
             gpu_name: "Initializing CUDA…".into(),
             frame: None,
+            frame_from_cache: false,
             request: None,
             generation: 0,
             staged_frame: None,
@@ -341,6 +357,10 @@ impl App {
             scene: scene.clone(),
             world: crate::world::WorldEditor::new(crate::world::WorldDocument::from_scene(&scene)),
             world_ui: Default::default(),
+            preview: Default::default(),
+            preview_key: None,
+            preview_sequence: 0,
+            preview_progress: None,
             evaluated_world: None,
             load_revision: 0,
 
@@ -355,6 +375,7 @@ impl App {
             fonts: Default::default(),
             applied_fonts: None,
             viewport_visible: false,
+            viewport_rect: None,
             config_picker: egui_file_dialog::FileDialog::new(),
             scene_picker: None,
             scene_file_path: None,
@@ -374,6 +395,7 @@ impl App {
             bookmarks: load_bookmarks(),
 
             swatches: (0..crate::materials::PRESETS.len()).map(|_| None).collect(),
+            material_gallery: Default::default(),
             tab: Tab::Gallery,
             target_spp: 1024,
             spp_per_frame: 1,
@@ -415,6 +437,7 @@ impl App {
             self.status_layout = settings.status_layout;
             self.status_resizable = settings.status_resizable;
             self.world_ui.attribute_metrics = settings.attribute_metrics.normalized();
+            self.world_ui.auto_key = settings.auto_key;
             self.fonts = settings.fonts;
             if let Some(blob) = settings.layout {
                 match egui_dock_layout::from_blob(&blob) {
@@ -605,6 +628,7 @@ impl App {
             && saved.status_layout == self.status_layout
             && saved.status_resizable == self.status_resizable
             && saved.attribute_metrics == self.world_ui.attribute_metrics
+            && saved.auto_key == self.world_ui.auto_key
             && export.format == previous.format
             && export.output == previous.output
             && export.width == previous.width
@@ -650,6 +674,7 @@ impl App {
             status_layout: self.status_layout.clone(),
             status_resizable: self.status_resizable,
             attribute_metrics: self.world_ui.attribute_metrics,
+            auto_key: self.world_ui.auto_key,
             timeline_initialized: true,
             world_layout_initialized: true,
         };
@@ -786,6 +811,8 @@ impl App {
     }
 
     fn load(&mut self, mut scene: Scene) {
+        self.preview.cancel();
+        self.preview_key = None;
         self.scene_file_path = None;
         self.scene_file_pending = None;
         self.evaluated_world = None;
@@ -794,6 +821,7 @@ impl App {
         self.world_ui.reset();
         self.world_ui.seek(document.first);
         self.world = crate::world::WorldEditor::new(document.clone());
+        self.material_gallery.invalidate();
         self.origin = scene.clone();
         scene.document = Some(Box::new(document));
         self.colour.sel = scene.colour.clone();
@@ -806,40 +834,59 @@ impl App {
     }
 
     fn render_one_thumbnail(&mut self, _ctx: &egui::Context) -> bool {
+        if let Err(error) = self
+            .material_gallery
+            .refresh(&self.world, f64::from(self.world_ui.playhead))
+        {
+            self.status = error;
+        }
         if self.thumb_pending.is_some() {
             return true;
         }
-        let item = self
-            .gallery
-            .iter()
-            .enumerate()
-            .find(|(_, e)| e.thumb.is_none())
-            .map(|(i, e)| (i as u64, e.scene.clone(), THUMB_W, THUMB_H, THUMB_SPP))
+        let material_request = self.material_gallery.next_thumbnail();
+        let item = material_request
+            .map(|request| {
+                let _node = request.node;
+                (
+                    request.id,
+                    material_preview_scene(request.material),
+                    SWATCH,
+                    SWATCH,
+                    SWATCH_SPP,
+                )
+            })
             .or_else(|| {
-                self.bookmarks
+                self.gallery
                     .iter()
                     .enumerate()
                     .find(|(_, e)| e.thumb.is_none())
-                    .map(|(i, e)| {
-                        (
-                            1_000_000 + i as u64,
-                            e.scene.clone(),
-                            THUMB_W,
-                            THUMB_H,
-                            THUMB_SPP,
-                        )
+                    .map(|(i, e)| (i as u64, e.scene.clone(), THUMB_W, THUMB_H, THUMB_SPP))
+                    .or_else(|| {
+                        self.bookmarks
+                            .iter()
+                            .enumerate()
+                            .find(|(_, e)| e.thumb.is_none())
+                            .map(|(i, e)| {
+                                (
+                                    1_000_000 + i as u64,
+                                    e.scene.clone(),
+                                    THUMB_W,
+                                    THUMB_H,
+                                    THUMB_SPP,
+                                )
+                            })
                     })
-            })
-            .or_else(|| {
-                self.swatches.iter().position(Option::is_none).map(|i| {
-                    (
-                        2_000_000 + i as u64,
-                        swatch_scene(&crate::materials::PRESETS[i]),
-                        SWATCH,
-                        SWATCH,
-                        SWATCH_SPP,
-                    )
-                })
+                    .or_else(|| {
+                        self.swatches.iter().position(Option::is_none).map(|i| {
+                            (
+                                2_000_000 + i as u64,
+                                swatch_scene(&crate::materials::PRESETS[i]),
+                                SWATCH,
+                                SWATCH,
+                                SWATCH_SPP,
+                            )
+                        })
+                    })
             });
         let Some((id, mut scene, width, height, spp)) = item else {
             return false;
@@ -859,146 +906,244 @@ impl App {
             .is_ok()
         {
             self.thumb_pending = Some((id, scene));
+        } else if id & crate::material_gallery::THUMBNAIL_ID_MASK != 0 {
+            self.material_gallery.retry_thumbnail(id);
         }
         true
     }
 
+    /// Selection and assignment are separate: cards refer to authored node UUIDs.
+    fn select_material_node(&mut self, id: crate::world::NodeId) {
+        self.world.finish_edit();
+        self.world.selection = Some(id);
+        self.world.selected.clear();
+        self.world.selected.push(id);
+        self.panels_to_open.push(dock::Panel::Inspector);
+    }
+
+    fn material_assignment_targets(&self) -> Vec<crate::world::NodeId> {
+        let selected: &[crate::world::NodeId] = if self.world.selected.is_empty() {
+            self.world.selection.as_slice()
+        } else {
+            &self.world.selected
+        };
+        selected
+            .iter()
+            .copied()
+            .filter(|id| {
+                self.world
+                    .document
+                    .info(*id)
+                    .is_ok_and(|node| node.kind == crate::world::WorldKind::Fractal)
+            })
+            .collect()
+    }
+
+    fn assign_gallery_material(&mut self, material: crate::world::NodeId) -> Result<(), String> {
+        let commands = self
+            .material_assignment_targets()
+            .into_iter()
+            .map(|id| crate::world::WorldCommand::AssignMaterial {
+                id,
+                material: Some(material),
+            })
+            .collect::<Vec<_>>();
+        if commands.is_empty() {
+            return Err("Select an object that supports materials".into());
+        }
+        self.world
+            .execute(crate::world::WorldCommand::Batch(commands))
+    }
+
     fn materials_tab(&mut self, ui: &mut egui::Ui) {
         use crate::materials::{CATEGORIES, PRESETS};
-        use crate::world::WorldKind;
-        let target = self
-            .world
-            .selection
-            .and_then(|id| self.world.document.info(id).ok())
-            .filter(|info| matches!(info.kind, WorldKind::Fractal | WorldKind::Material));
-        if let Some(target) = &target {
-            ui.label(
-                RichText::new(format!(
-                    "{}: {}",
-                    if target.kind == WorldKind::Fractal {
-                        "Assign to"
-                    } else {
-                        "Edit material"
-                    },
-                    target.name
-                ))
-                .small()
-                .strong(),
-            );
-            ui.label(
-                RichText::new(if target.kind == WorldKind::Fractal {
-                    "Click a preset to create and assign a material."
-                } else {
-                    "Click a preset to update this material."
-                })
+        use crate::world::WorldCommand;
+        if let Err(error) = self
+            .material_gallery
+            .refresh(&self.world, f64::from(self.world_ui.playhead))
+        {
+            self.status = error;
+        }
+        let mut create = None;
+        let mut create_default = false;
+        ui.horizontal_wrapped(|ui| {
+            create_default = ui.button("+ New material").clicked();
+            ui.menu_button("Create from preset", |ui| {
+                for category in CATEGORIES {
+                    ui.menu_button(category, |ui| {
+                        for (index, preset) in PRESETS
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, preset)| preset.category == category)
+                        {
+                            if ui.button(preset.name()).clicked() {
+                                create = Some(index);
+                                ui.close();
+                            }
+                        }
+                    });
+                }
+            });
+        });
+        ui.label(
+            RichText::new("Click to edit · right-click to assign to selected objects")
                 .small()
                 .weak(),
-            );
-        } else {
-            ui.label("Select a fractal or material in the Outliner.");
-        }
-        let material_id = target.as_ref().and_then(|target| {
-            if target.kind == WorldKind::Material {
-                Some(target.id)
-            } else {
-                self.world
-                    .document
-                    .assigned_material(target.id)
-                    .ok()
-                    .flatten()
-            }
-        });
-        let current = material_id
-            .and_then(|id| {
-                self.world
-                    .document
-                    .attribute_value(id, "/material/preset", f64::from(self.world_ui.playhead))
-                    .ok()
-            })
-            .and_then(|value| value.as_str().map(str::to_owned));
-        let mut apply: Option<usize> = None;
-        let size = Vec2::splat(((ui.available_width() - 12.0) / 2.0).min(SWATCH as f32));
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            for cat in CATEGORIES {
-                let count = PRESETS.iter().filter(|preset| preset.category == cat).count();
-                if count == 0 {
-                    continue;
-                }
-                egui::CollapsingHeader::new(format!("{cat} ({count})")).default_open(true).show(ui, |ui| {
-                    egui::Grid::new(("mat-grid", cat)).spacing([6.0, 6.0]).show(ui, |ui| {
-                        for (k, (i, _)) in PRESETS.iter().enumerate().filter(|(_, preset)| preset.category == cat).enumerate() {
-                            let p = &PRESETS[i];
-                            let selected = current.as_deref() == Some(p.name());
-                            let resp = ui
-                                .vertical(|ui| {
-                                    match &self.swatches[i] {
-                                        Some(t) => {
-                                            ui.add(egui::Image::new((t.id(), size)).corner_radius(6.0));
+        );
+        let mut select = None;
+        let mut assign = None;
+        let mut refresh = None;
+        let mut apply_preset = None;
+        let mut command = None;
+        egui::ScrollArea::vertical()
+            .id_salt("material_nodes")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let gap = 6.0;
+                let columns = ((ui.available_width() + gap) / (SWATCH as f32 + gap))
+                    .floor()
+                    .max(1.0) as usize;
+                let size = Vec2::splat(
+                    ((ui.available_width() - gap * (columns - 1) as f32) / columns as f32)
+                        .clamp(1.0, SWATCH as f32),
+                );
+                egui::Grid::new("material-node-grid")
+                    .spacing([gap, gap])
+                    .show(ui, |ui| {
+                        for (index, entry) in self.material_gallery.entries.iter().enumerate() {
+                            let response = ui
+                                .push_id(entry.id, |ui| {
+                                    ui.vertical(|ui| {
+                                        ui.set_width(size.x);
+                                        if let Some(texture) = &entry.thumb {
+                                            ui.add(
+                                                egui::Image::new((texture.id(), size))
+                                                    .corner_radius(6.0),
+                                            );
+                                        } else {
+                                            let (rect, _) =
+                                                ui.allocate_exact_size(size, Sense::hover());
+                                            ui.painter().rect_filled(
+                                                rect,
+                                                6.0,
+                                                ui.visuals().extreme_bg_color,
+                                            );
                                         }
-                                        None => {
-                                            let (r, _) = ui.allocate_exact_size(size, Sense::hover());
-                                            ui.painter().rect_filled(r, 6.0, ui.visuals().extreme_bg_color);
+                                        let mut label = RichText::new(&entry.name).small();
+                                        if self.world.selection == Some(entry.id) {
+                                            label = label
+                                                .strong()
+                                                .color(ui.visuals().selection.stroke.color);
                                         }
-                                    }
-                                    let mut label = RichText::new(p.name()).small();
-                                    if selected {
-                                        label = label.strong().color(ui.visuals().selection.stroke.color);
-                                    }
-                                    ui.label(label);
+                                        ui.add(egui::Label::new(label).truncate());
+                                    })
+                                    .response
+                                    .interact(Sense::click())
                                 })
-                                .response
-                                .interact(Sense::click());
-                            let resp = resp.on_hover_ui(|ui| {
-                                ui.label(format!(
-                                    "{}\nroughness {:.2} · metallic {:.0} · IOR {:.2}",
-                                    p.name(), p.roughness, p.metallic, p.ior
-                                ));
-                                if p.sheen.is_some() {
-                                    ui.label("+ sheen (Standard Surface)");
+                                .inner;
+                            if response.clicked() {
+                                select = Some(entry.id);
+                            }
+                            if let Some(error) = &entry.error {
+                                response.clone().on_hover_text(error);
+                            }
+                            response.context_menu(|ui| {
+                                let eligible = !self.material_assignment_targets().is_empty();
+                                if ui
+                                    .add_enabled(
+                                        eligible,
+                                        egui::Button::new("Assign to selected objects"),
+                                    )
+                                    .clicked()
+                                {
+                                    assign = Some(entry.id);
+                                    ui.close();
                                 }
-                                if p.anisotropy.is_some() {
-                                    ui.label("+ anisotropy (Standard Surface)");
+                                if ui.button("Select / Edit").clicked() {
+                                    select = Some(entry.id);
+                                    ui.close();
                                 }
-                                if p.facing.is_some() {
-                                    ui.label("+ facing mix");
+                                if ui.button("Refresh preview").clicked() {
+                                    refresh = Some(entry.id);
+                                    ui.close();
                                 }
-                                if p.opacity < 1.0 {
-                                    ui.label("glass: rendered opaque (no refraction on DE fractals)");
+                                ui.menu_button("Apply preset to this material", |ui| {
+                                    for category in CATEGORIES {
+                                        ui.menu_button(category, |ui| {
+                                            for preset in PRESETS
+                                                .iter()
+                                                .filter(|preset| preset.category == category)
+                                            {
+                                                if ui.button(preset.name()).clicked() {
+                                                    let mut material = entry.material.clone();
+                                                    preset.apply(&mut material);
+                                                    apply_preset =
+                                                        Some((entry.id, material, preset.name()));
+                                                    ui.close();
+                                                }
+                                            }
+                                        });
+                                    }
+                                });
+                                if ui.button("Duplicate").clicked() {
+                                    command = Some(WorldCommand::Duplicate(entry.id));
+                                    ui.close();
+                                }
+                                if ui.button("Delete").clicked() {
+                                    command = Some(WorldCommand::Delete(entry.id));
+                                    ui.close();
                                 }
                             });
-                            if resp.clicked() && target.is_some() {
-                                apply = Some(i);
-                            }
-                            if k % 2 == 1 {
+                            if (index + 1) % columns == 0 {
                                 ui.end_row();
                             }
                         }
                     });
-                });
-            }
-        });
-        if let (Some(i), Some(target)) = (apply, target) {
-            let mut material = material_id
-                .and_then(|id| {
-                    self.world
-                        .document
-                        .node_scene(id, f64::from(self.world_ui.playhead))
-                        .ok()
-                })
-                .map(|scene| scene.material)
-                .unwrap_or_default();
-            PRESETS[i].apply(&mut material);
-            self.status = match self
-                .world
-                .execute(crate::world::WorldCommand::ApplyMaterial {
-                    id: target.id,
-                    material,
-                    name: PRESETS[i].name().into(),
-                    frame: f64::from(self.world_ui.playhead),
-                }) {
-                Ok(()) => format!("Material: {}", PRESETS[i].name()),
+            });
+        if let Some(id) = refresh {
+            self.material_gallery.invalidate_thumbnail(id);
+        }
+        if let Some((id, material, name)) = apply_preset {
+            command = Some(WorldCommand::ApplyMaterial {
+                id,
+                material,
+                name: name.into(),
+                frame: f64::from(self.world_ui.playhead),
+            });
+        }
+        if let Some(id) = select {
+            self.select_material_node(id);
+        }
+        if let Some(id) = assign {
+            self.status = match self.assign_gallery_material(id) {
+                Ok(()) => "Material assigned to selected objects".into(),
                 Err(error) => error,
             };
+        }
+        if let Some(command) = command
+            && let Err(error) = self.world.execute(command)
+        {
+            self.status = error;
+        }
+        if create_default || create.is_some() {
+            let mut material = Material::default();
+            let name = if let Some(index) = create {
+                PRESETS[index].apply(&mut material);
+                PRESETS[index].name()
+            } else {
+                "Material"
+            };
+            match self.world.execute(WorldCommand::CreateMaterial {
+                material,
+                name: name.into(),
+            }) {
+                Ok(()) => {
+                    if let Some(id) = self.world.selection {
+                        self.select_material_node(id);
+                    }
+                }
+                Err(error) => self.status = error,
+            }
         }
     }
 
@@ -1132,12 +1277,30 @@ impl App {
         self.request = Some(req);
     }
     fn poll_events(&mut self, ctx: &egui::Context) {
-        if let Some(frame) = self.renderer.take_latest_frame() {
+        if let Some(frame) = self.renderer.take_latest_frame()
+            && self.preview.position().is_none()
+        {
             self.showing_preview = frame.preview;
             self.spp_per_frame = frame.last_spp;
-            self.frame = Some(frame);
+            if let Some(old) = self.frame.replace(frame)
+                && self.frame_from_cache
+            {
+                self.preview.recycle(old);
+            }
+            self.frame_from_cache = false;
         }
         for event in self.renderer.drain_events() {
+            if let Some(frame) = self.preview.handle(&event) {
+                self.showing_preview = true;
+                if let Some(old) = self.frame.replace(frame)
+                    && self.frame_from_cache
+                {
+                    self.preview.recycle(old);
+                }
+                self.frame_from_cache = true;
+            } else if let RenderEvent::PreviewFrame { frame, .. } = &event {
+                self.preview.recycle(frame.clone());
+            }
             self.export.handle(&event, &self.renderer);
             match event {
                 RenderEvent::Ready { name } => self.gpu_name = name,
@@ -1146,18 +1309,49 @@ impl App {
                     self.status = format!("Render failed: {error}");
                 }
                 RenderEvent::Error(error) => {
+                    if let Some((id, _)) = self.thumb_pending.take() {
+                        self.material_gallery.fail_thumbnail(id, error.clone());
+                    }
                     self.status = error;
-                    self.thumb_pending = None;
                     self.job = None;
                 }
                 RenderEvent::Thumbnail { id, frame } => {
-                    let pending = self.thumb_pending.take();
+                    let pending = if self
+                        .thumb_pending
+                        .as_ref()
+                        .is_some_and(|(pending_id, _)| *pending_id == id)
+                    {
+                        self.thumb_pending.take()
+                    } else {
+                        None
+                    };
+                    let material_thumb = id & crate::material_gallery::THUMBNAIL_ID_MASK != 0;
+                    if material_thumb {
+                        if let Err(error) = self
+                            .material_gallery
+                            .refresh(&self.world, f64::from(self.world_ui.playhead))
+                        {
+                            self.material_gallery.retry_thumbnail(id);
+                            self.status = error;
+                            continue;
+                        }
+                        if !self.material_gallery.is_pending(id) {
+                            continue;
+                        }
+                        if let Some(error) = &frame.colour_error {
+                            self.material_gallery.fail_thumbnail(id, error.clone());
+                            self.status = error.clone();
+                            continue;
+                        }
+                    }
                     let texture = ctx.load_texture(
                         format!("thumb-{id}"),
                         to_image(&frame),
                         TextureOptions::LINEAR,
                     );
-                    if id >= 2_000_000 {
+                    if material_thumb {
+                        self.material_gallery.accept_thumbnail(id, texture);
+                    } else if id >= 2_000_000 {
                         if let Some(slot) = self.swatches.get_mut((id - 2_000_000) as usize) {
                             *slot = Some(texture);
                         }
@@ -1208,6 +1402,10 @@ impl App {
         freeze_world_scene(&self.scene, &self.world.document)
     }
     fn export_ui(&mut self, ui: &mut egui::Ui) {
+        egui::CollapsingHeader::new("Still image · PNG")
+            .default_open(true)
+            .show(ui, |ui| self.still_image_ui(ui));
+        ui.separator();
         let timeline = (
             self.world.document.first,
             self.world.document.last,
@@ -1221,6 +1419,33 @@ impl App {
                 freeze_world_scene(scene, &world.document)
             });
         });
+    }
+
+    fn still_image_ui(&mut self, ui: &mut egui::Ui) {
+        egui::ComboBox::from_id_salt("final_size")
+            .selected_text(FINAL_SIZES[self.final_size].2)
+            .show_ui(ui, |ui| {
+                for (i, size) in FINAL_SIZES.iter().enumerate() {
+                    ui.selectable_value(&mut self.final_size, i, size.2);
+                }
+            });
+        ui.add(
+            egui::DragValue::new(&mut self.final_spp)
+                .range(1..=65536)
+                .suffix(" spp"),
+        );
+        if let Some(job) = &self.job {
+            ui.add(egui::ProgressBar::new(job.samples as f32 / job.spp as f32).show_percentage());
+            if ui.button("Cancel image render").clicked() {
+                let _ = self.renderer.try_command(Command::CancelExport);
+                self.job = None;
+            }
+        } else if ui
+            .add_enabled(!self.export.is_running(), egui::Button::new("Render PNG"))
+            .clicked()
+        {
+            self.start_job();
+        }
     }
 
     /// Unreal-style flight: hold RMB in the viewport, mouse looks, WASD moves, R/C up/down, Q/E rolls,
@@ -1559,37 +1784,6 @@ impl App {
                     self.panels_to_open.push(dock::Panel::Export);
                     ui.close();
                 }
-                ui.separator();
-                ui.label("Quick PNG");
-                egui::ComboBox::from_id_salt("final_size")
-                    .selected_text(FINAL_SIZES[self.final_size].2)
-                    .show_ui(ui, |ui| {
-                        for (i, size) in FINAL_SIZES.iter().enumerate() {
-                            ui.selectable_value(&mut self.final_size, i, size.2);
-                        }
-                    });
-                ui.add(
-                    egui::DragValue::new(&mut self.final_spp)
-                        .range(1..=65536)
-                        .suffix(" spp"),
-                );
-                if let Some(job) = &self.job {
-                    ui.add(
-                        egui::ProgressBar::new(job.samples as f32 / job.spp as f32)
-                            .show_percentage(),
-                    );
-                    if ui.button("Cancel").clicked() {
-                        let _ = self.renderer.try_command(Command::CancelExport);
-                        self.job = None;
-                        ui.close();
-                    }
-                } else if ui
-                    .add_enabled(!self.export.is_running(), egui::Button::new("Render PNG"))
-                    .clicked()
-                {
-                    self.start_job();
-                    ui.close();
-                }
             });
             self.window_menu(ui);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1863,6 +2057,7 @@ impl App {
         self.viewport_visible = true;
         let avail = ui.available_size();
         let (rect, resp) = ui.allocate_exact_size(avail, Sense::click_and_drag());
+        self.viewport_rect = Some(rect);
         let toolbar = self.viewport_toolbar(ui, rect);
         if !toolbar.contains_pointer || self.fly.is_some() {
             self.fly_camera(ui, &resp);
@@ -1910,7 +2105,9 @@ impl App {
             .data(|d| d.get_temp::<egui_display::DisplayState>(egui_display::state_id()));
         let output_hdr = state.as_ref().is_some_and(|s| s.output.is_hdr());
         let white = state.as_ref().map_or(100.0, |s| s.target.white);
-        self.step_viewport(w, h, output_hdr, white);
+        if self.preview.position().is_none() {
+            self.step_viewport(w, h, output_hdr, white);
+        }
         if let Some(t) = self.frame.clone() {
             if (!output_hdr || !t.hdr_bytes.is_empty())
                 && (self.staged_output != Some((output_hdr, white))
@@ -1958,9 +2155,161 @@ impl App {
 }
 
 impl App {
-    /// Evaluate the world only after a domain edit, seek, playback step or load.
-    /// Idle repaint never rebuilds serialized nodes or render scene vectors.
+    /// Identify cached render content without serializing the document on repaint.
+    fn preview_identity(&self, ctx: &egui::Context) -> (playa_graph::NodeId, u64, bool, u32, u32) {
+        let state =
+            ctx.data(|d| d.get_temp::<egui_display::DisplayState>(egui_display::state_id()));
+        (
+            playa_graph::NodeId(self.world.document.graph.id),
+            self.world.revision(),
+            state.as_ref().is_some_and(|s| s.output.is_hdr()),
+            state.as_ref().map_or(100.0, |s| s.target.white).to_bits(),
+            self.seed,
+        )
+    }
+
+    fn begin_preview(&mut self, first: u32, last: u32, cache_all: bool, ctx: &egui::Context) {
+        self.world.finish_edit();
+        self.preview_sequence = self.preview_sequence.wrapping_add(1);
+        let key = self.preview_identity(ctx);
+        let (width, height) = self.request.as_ref().map_or((640, 360), |r| {
+            let scale = (640.0 / r.width.max(r.height) as f64).min(1.0);
+            (
+                (r.width as f64 * scale).round().max(16.0) as usize,
+                (r.height as f64 * scale).round().max(16.0) as usize,
+            )
+        });
+        let request = crate::preview::PreviewRequest {
+            generation: self.preview_sequence,
+            scene: Arc::new(self.frozen_world_scene()),
+            first,
+            last,
+            fps: self.world.document.fps as f32,
+            width,
+            height,
+            spp: 8,
+            seed: self.seed,
+            output_hdr: key.2,
+            white_nits: f32::from_bits(key.3),
+            cache_fraction: 0.05,
+            reserve_gb: 2.0,
+        };
+        match self.preview.start(request, cache_all) {
+            Ok(()) => {
+                self.preview_key = Some(key);
+                self.preview_progress = None;
+                self.world_ui.seek(first);
+                self.world_ui.playing = true;
+                if let Some(request) = &mut self.request {
+                    request.active = false;
+                    self.renderer.request_viewport(request.clone());
+                }
+            }
+            Err(error) => {
+                self.world_ui.playing = false;
+                self.status = error;
+            }
+        }
+    }
+
+    fn sync_preview(&mut self, dt: f32, ctx: &egui::Context) {
+        self.preview.set_loop(self.world_ui.looping);
+        let navigating = self.viewport_rect.is_some_and(|rect| {
+            ctx.input(|input| {
+                input.pointer.hover_pos().is_some_and(|p| rect.contains(p))
+                    && (input.pointer.any_down()
+                        || input.smooth_scroll_delta.y != 0.0
+                        || [egui::Key::G, egui::Key::H, egui::Key::F]
+                            .iter()
+                            .any(|k| input.key_pressed(*k)))
+            })
+        });
+        if navigating && self.preview.position().is_some() {
+            self.preview.pause();
+            self.world_ui.playing = false;
+        }
+        if self
+            .preview_key
+            .is_some_and(|key| key != self.preview_identity(ctx))
+        {
+            self.preview.cancel();
+            self.preview_key = None;
+            self.world_ui.playing = false;
+        }
+        if let Some(position) = self.preview.position() {
+            if self.world_ui.playhead != position {
+                self.preview.seek(self.world_ui.playhead);
+            }
+            if self.world_ui.playing != self.preview.running() {
+                if self.world_ui.playing {
+                    self.preview.resume();
+                } else {
+                    self.preview.pause();
+                }
+            }
+        }
+        if let Some(number) = self.preview.update(dt, &self.renderer) {
+            self.world_ui.seek(number);
+        }
+        if self.preview.position().is_some() {
+            self.world_ui.playing = self.preview.running();
+        }
+        if self.preview.caching() {
+            let progress = self.preview.progress();
+            if self.preview_progress != Some(progress) {
+                self.preview_progress = Some(progress);
+                self.status = format!(
+                    "Caching preview: {}/{} frames · {} MiB",
+                    progress.0,
+                    progress.1,
+                    progress.2 / 1048576
+                );
+            }
+        }
+        if let Some(error) = self.preview.error() {
+            if self.status != error {
+                self.status.clear();
+                self.status.push_str(error);
+            }
+            self.world_ui.playing = false;
+        }
+    }
+
+    fn process_preview_intent(&mut self, ctx: &egui::Context) {
+        match self.world_ui.take_preview_action() {
+            Some(crate::world_ui::PreviewAction::Play { first, last }) => {
+                self.begin_preview(first, last, false, ctx)
+            }
+            Some(crate::world_ui::PreviewAction::CacheThenPlay { first, last }) => {
+                self.begin_preview(first, last, true, ctx)
+            }
+            None if self.preview.position().is_none() && self.world_ui.playing => {
+                let head = self.world_ui.playhead;
+                let (first, last) = self
+                    .world_ui
+                    .playback_range
+                    .unwrap_or((self.world.document.first, self.world.document.last));
+                self.begin_preview(first, last, false, ctx);
+                self.preview.seek(head.clamp(first, last));
+                self.world_ui.seek(head.clamp(first, last));
+            }
+            None => {}
+        }
+        self.sync_preview(0.0, ctx);
+    }
+
     fn refresh_scene(&mut self) -> Result<(), String> {
+        // Cached playback presents worker-owned frames; keep the frozen scene instead
+        // of rebuilding serialized world data on every clock tick. An edit or paused
+        // navigation evaluates the current pose before any authoring takes place.
+        if self.preview.running()
+            && self.preview_key.is_some_and(|key| {
+                key.0 == playa_graph::NodeId(self.world.document.graph.id)
+                    && key.1 == self.world.revision()
+            })
+        {
+            return Ok(());
+        }
         let frame = f64::from(self.world_ui.playhead);
         let key = (
             playa_graph::NodeId(self.world.document.graph.id),
@@ -1985,7 +2334,10 @@ impl App {
         self.colour.poll();
         let dt = ctx.input(|i| i.stable_dt).max(1.0e-4);
         self.frame_ms = self.frame_ms * 0.9 + dt * 1000.0 * 0.1;
-        self.world_ui.advance(dt, &self.world);
+        self.sync_preview(dt, &ctx);
+        if self.preview.position().is_none() {
+            self.world_ui.advance(dt, &self.world);
+        }
         if let Err(error) = self.refresh_scene() {
             self.world_ui.playing = false;
             self.status = error;
@@ -1995,9 +2347,6 @@ impl App {
         if !ctx.text_edit_focused() {
             if ctx.input(|i| i.key_pressed(egui::Key::Tab)) {
                 self.show_ui = !self.show_ui;
-            }
-            if ctx.input(|i| i.key_pressed(egui::Key::Space)) {
-                self.world_ui.playing = !self.world_ui.playing;
             }
             if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Z)) {
                 if ctx.input(|i| i.modifiers.shift) {
@@ -2031,6 +2380,13 @@ impl App {
                 }
             });
 
+        if !ctx.text_edit_focused()
+            && !ctx.input(|i| i.pointer.secondary_down())
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Space))
+        {
+            self.world_ui.playing = !self.world_ui.playing;
+        }
+
         if !self.viewport_visible {
             if let Some(request) = &mut self.request {
                 request.active = false;
@@ -2039,17 +2395,36 @@ impl App {
             self.fly = None;
             ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
         }
+        let camera_gesture =
+            (self.fly.is_some() || ctx.input(|i| i.pointer.any_down())).then(|| {
+                egui::Id::new(("viewport_camera_edit", self.world.document.active_camera)).value()
+            });
         if let Some(before) = before.as_ref()
             && self.load_revision == edit_origin
             && (self.scene.camera != before.camera
                 || self.scene.render != before.render
                 || self.scene.colour != before.colour)
         {
-            let gesture = crate::world_ui::parameter_gesture(&ctx).or_else(|| {
-                ctx.input(|input| input.pointer.primary_released())
-                    .then(|| self.world.active_edit())
-                    .flatten()
-            });
+            if self.scene.camera != before.camera {
+                if let Err(error) = self.world.navigate_camera(
+                    &self.scene,
+                    edit_frame,
+                    self.world_ui.auto_key,
+                    camera_gesture,
+                ) {
+                    // Rejected navigation must not leave an unauthored viewport pose or inertia.
+                    self.evaluated_world = None;
+                    self.fly = None;
+                    self.status = error;
+                }
+            }
+            let gesture = crate::world_ui::parameter_gesture(&ctx)
+                .or(camera_gesture)
+                .or_else(|| {
+                    ctx.input(|input| input.pointer.primary_released())
+                        .then(|| self.world.active_edit())
+                        .flatten()
+                });
             let result = if gesture.is_some() {
                 self.world.edit_snapshot_with_gesture(
                     self.world.selection,
@@ -2067,8 +2442,9 @@ impl App {
             }
         }
         self.legacy_before = before;
+        self.process_preview_intent(&ctx);
         self.world
-            .finish_edit_unless(crate::world_ui::parameter_gesture(&ctx));
+            .finish_edit_unless(crate::world_ui::parameter_gesture(&ctx).or(camera_gesture));
         if let Err(error) = self.refresh_scene() {
             self.status = error;
         }
@@ -2091,6 +2467,232 @@ fn exists(p: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn material_library_adapts_columns_to_available_panel_width() {
+        fn labels(shape: &egui::epaint::Shape, found: &mut Vec<(String, egui::Pos2)>) {
+            match shape {
+                egui::epaint::Shape::Text(text) => {
+                    found.push((text.galley.text().to_owned(), text.pos))
+                }
+                egui::epaint::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        labels(shape, found);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (width, columns) in [(145.0, 1), (245.0, 2), (545.0, 5)] {
+            let mut app = App::new();
+            let previous: Vec<_> = app
+                .world
+                .document
+                .nodes()
+                .into_iter()
+                .filter(|node| node.kind == crate::world::WorldKind::Material)
+                .map(|node| node.id)
+                .collect();
+            for id in previous {
+                app.world
+                    .execute(crate::world::WorldCommand::Delete(id))
+                    .unwrap();
+            }
+            for name in [
+                "Metal",
+                "MetalChrome",
+                "MetalGold",
+                "MetalCopper",
+                "MetalBrass",
+            ] {
+                app.world
+                    .execute(crate::world::WorldCommand::CreateMaterial {
+                        material: Material::default(),
+                        name: name.into(),
+                    })
+                    .unwrap();
+            }
+            app.world.selection = None;
+            app.world.selected.clear();
+            let ctx = egui::Context::default();
+            let mut found = Vec::new();
+            for _ in 0..3 {
+                let output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(width, 900.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| app.materials_tab(ui),
+                );
+                found.clear();
+                for shape in &output.shapes {
+                    labels(&shape.shape, &mut found);
+                }
+            }
+            let positions: Vec<_> = ["Metal", "MetalChrome", "MetalGold"]
+                .iter()
+                .map(|name| found.iter().find(|(text, _)| text == name).unwrap().1)
+                .collect();
+            assert!(positions[0].x < width);
+            if columns == 1 {
+                assert!(
+                    positions[1].y > positions[0].y,
+                    "width {width}, positions {positions:?}"
+                );
+            } else {
+                assert!((positions[1].y - positions[0].y).abs() < 1.0);
+                assert!(positions[1].x > positions[0].x);
+            }
+            if columns == 2 {
+                assert!(positions[2].y > positions[0].y);
+            } else if columns > 2 {
+                assert!((positions[2].y - positions[0].y).abs() < 1.0);
+            }
+        }
+    }
+
+    #[test]
+    fn material_card_selects_existing_attribute_editor_without_assignment() {
+        let mut app = App::new();
+        let object = app.world.selection.unwrap();
+        let assignment = app.world.document.assigned_material(object).unwrap();
+        app.world
+            .execute(crate::world::WorldCommand::CreateMaterial {
+                material: Material::default(),
+                name: "Gallery test material".into(),
+            })
+            .unwrap();
+        let material = app.world.selection.unwrap();
+        app.world.selection = Some(object);
+        app.world.selected = vec![object];
+        app.panels_to_open.clear();
+        let before = serde_json::to_value(&app.world.document).unwrap();
+        let ctx = egui::Context::default();
+        let mut point = egui::Pos2::ZERO;
+        let mut frame = |app: &mut App, events| {
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(420.0, 400.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| app.materials_tab(ui),
+            );
+            for shape in output.shapes {
+                if let egui::epaint::Shape::Text(text) = shape.shape
+                    && text.galley.text() == "Gallery test material"
+                {
+                    point = text.pos + egui::vec2(20.0, -40.0);
+                }
+            }
+            point
+        };
+        frame(&mut app, vec![]);
+        let point = frame(&mut app, vec![]);
+        frame(&mut app, vec![egui::Event::PointerMoved(point)]);
+        for pressed in [true, false] {
+            frame(
+                &mut app,
+                vec![egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+        }
+        assert_eq!(app.world.selection, Some(material));
+        assert_eq!(app.world.selected, [material]);
+        assert!(app.panels_to_open.contains(&dock::Panel::Inspector));
+        assert_eq!(
+            app.world.document.assigned_material(object).unwrap(),
+            assignment
+        );
+        assert_eq!(serde_json::to_value(&app.world.document).unwrap(), before);
+    }
+
+    #[test]
+    fn gallery_assignment_and_object_material_field_share_uuid_and_undo() {
+        use crate::world::WorldCommand;
+        let mut app = App::new();
+        let object = app.world.selection.unwrap();
+        app.world
+            .execute(WorldCommand::CreateMaterial {
+                material: Material::default(),
+                name: "Shared gallery material".into(),
+            })
+            .unwrap();
+        let material = app.world.selection.unwrap();
+        let count = app.world.document.nodes().len();
+        app.world.selection = Some(object);
+        app.world.selected = vec![object];
+        let old = app.world.document.assigned_material(object).unwrap();
+        app.assign_gallery_material(material).unwrap();
+        assert_eq!(
+            app.world.document.assigned_material(object).unwrap(),
+            Some(material)
+        );
+        assert_eq!(app.world.selection, Some(object));
+        assert_eq!(app.world.document.nodes().len(), count);
+        assert!(app.world.undo());
+        assert_eq!(app.world.document.assigned_material(object).unwrap(), old);
+        app.world
+            .execute(WorldCommand::SetAttribute {
+                id: object,
+                path: "/material_id".into(),
+                value: serde_json::json!(material.0.to_string()),
+                frame: 0.0,
+            })
+            .unwrap();
+        assert_eq!(
+            app.world.document.assigned_material(object).unwrap(),
+            Some(material)
+        );
+        assert_eq!(app.world.document.nodes().len(), count);
+    }
+
+    #[test]
+    fn auto_key_preference_serializes_once_and_defaults_off() {
+        let mut app = App::new();
+        let ctx = egui::Context::default();
+        assert!(!serde_json::from_str::<Settings>("{}").unwrap().auto_key);
+        app.changed_settings_json(&ctx).unwrap();
+        app.world_ui.auto_key = true;
+        let json = app.changed_settings_json(&ctx).unwrap().unwrap();
+        assert!(serde_json::from_str::<Settings>(&json).unwrap().auto_key);
+        for _ in 0..16 {
+            assert!(app.changed_settings_json(&ctx).unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn cached_preview_skips_world_evaluation_until_pause() {
+        let mut app = App::new();
+        let ctx = egui::Context::default();
+        app.refresh_scene().unwrap();
+        let key = app.evaluated_world;
+        let objects = app.scene.objects.as_ptr();
+        let snapshots = app.legacy_snapshots;
+        assert!(app.request.is_none());
+        app.begin_preview(0, 10, false, &ctx);
+        for frame in 1..=10 {
+            app.world_ui.seek(frame);
+            app.refresh_scene().unwrap();
+            assert_eq!(app.evaluated_world, key);
+            assert_eq!(app.scene.objects.as_ptr(), objects);
+            assert_eq!(app.legacy_snapshots, snapshots);
+        }
+        app.preview.pause();
+        app.world_ui.playing = false;
+        app.refresh_scene().unwrap();
+        assert_ne!(app.evaluated_world, key);
+    }
 
     #[test]
     fn file_load_completion_preserves_document_and_discards_stale_requests() {

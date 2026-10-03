@@ -125,6 +125,11 @@ pub enum WorldCommand {
         id: NodeId,
         material: Option<NodeId>,
     },
+    /// Create and select a standalone material without changing object assignments.
+    CreateMaterial {
+        material: crate::scene::Material,
+        name: String,
+    },
     /// Instantiate and assign to a fractal, or edit a selected material node.
     ApplyMaterial {
         id: NodeId,
@@ -377,7 +382,9 @@ impl WorldEditor {
                             .cloned()
                             .map(attr_json)
                             .ok_or("Missing component")?;
-                        base[index] = held.clone();
+                        base[index] =
+                            self.document
+                                .without_navigation_offset(id, &path, held.clone())?;
                         attrs.set(&parent, to_attr(&base));
                         if let Some(anim) = attrs.anim_mut(&parent) {
                             anim.channels[index] = Channel::new();
@@ -534,6 +541,17 @@ impl WorldEditor {
                 self.document.last = last;
                 self.document.fps = fps;
             }
+            WorldCommand::CreateMaterial { material, name } => {
+                let scene = Scene {
+                    material,
+                    ..Scene::preset(0)
+                };
+                let id = self
+                    .document
+                    .insert(WorldKind::Material, &name, &scene, None)?;
+                self.selection = Some(id);
+                self.selected = vec![id];
+            }
             WorldCommand::ApplyMaterial {
                 id,
                 material,
@@ -546,6 +564,14 @@ impl WorldEditor {
                 self.document.assert_unlocked(id)?;
                 match self.document.info(id)?.kind {
                     WorldKind::Fractal => {
+                        if let Some(assigned) = self.document.assigned_material(id)? {
+                            return self.apply(WorldCommand::ApplyMaterial {
+                                id: assigned,
+                                material,
+                                name,
+                                frame,
+                            });
+                        }
                         let mut scene = self.document.snapshot(frame)?;
                         scene.material = material;
                         let material =
@@ -673,7 +699,9 @@ impl WorldEditor {
                             .cloned()
                             .map(attr_json)
                             .ok_or("Missing component")?;
-                        base[*index] = held.clone();
+                        base[*index] =
+                            self.document
+                                .without_navigation_offset(id, &path, held.clone())?;
                         attrs.set(parent, to_attr(&base));
                     }
                     if attrs.anim(parent).is_some_and(Animation::is_empty) {
@@ -767,7 +795,53 @@ impl WorldEditor {
         self.document.rebuild_children();
         Ok(())
     }
-    /// Bridge typed inspector/gesture edits once a control reports a change.
+    /// Author viewport navigation on the active Camera layer, without implicit key creation.
+    pub fn navigate_camera(
+        &mut self,
+        after: &Scene,
+        frame: f64,
+        auto_key: bool,
+        gesture: Option<u64>,
+    ) -> Result<(), String> {
+        let id = self.document.active_camera.ok_or("No active camera")?;
+        let writes = self.document.camera_navigation_pose(id, after, frame)?;
+        self.apply_edit(gesture, |editor| {
+            editor.document.assert_unlocked(id)?;
+            let mut attrs = editor.document.attrs(id)?;
+            let mut changed = false;
+            for (path, value) in writes {
+                changed |= editor
+                    .document
+                    .write_navigation_value(id, &mut attrs, path, value, frame, auto_key)?;
+            }
+            // Navigation mode is a static preference on the camera, never a generated key.
+            if attrs.is_animated("/camera/free_flight")
+                || attrs.conn("/camera/free_flight").is_some()
+            {
+                if editor
+                    .document
+                    .attribute_value(id, "/camera/free_flight", frame)?
+                    != json!(after.camera.free_flight)
+                {
+                    return Err("Camera navigation mode is animated or connected".into());
+                }
+            } else if attrs.get("/camera/free_flight").cloned().map(attr_json)
+                != Some(json!(after.camera.free_flight))
+            {
+                attrs.set(
+                    "/camera/free_flight",
+                    to_attr(&json!(after.camera.free_flight)),
+                );
+                changed = true;
+            }
+            if changed {
+                editor.document.store_attrs(id, &attrs)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Bridge typed inspector edits once a control reports a change.
     pub fn edit_snapshot(
         &mut self,
         selected: Option<NodeId>,
@@ -805,7 +879,8 @@ impl WorldEditor {
             {
                 continue;
             }
-            if node.kind == WorldKind::Camera && Some(node.id) != self.document.active_camera {
+            if node.kind == WorldKind::Camera {
+                // Viewport navigation has explicit Auto Key semantics in navigate_camera().
                 continue;
             }
             if node.kind == WorldKind::Environment
@@ -823,24 +898,7 @@ impl WorldEditor {
                         commands.push(WorldCommand::SetAttribute {
                             id: node.id,
                             path: attr.path.clone(),
-                            // Viewport controls edit the evaluated camera. Preserve the
-                            // authored yaw while applying their delta; orbital motion is
-                            // already included in both snapshots and must not be baked in.
-                            value: if node.kind == WorldKind::Camera
-                                && attr.path == "/camera/yaw_degrees"
-                            {
-                                let authored = self
-                                    .document
-                                    .attribute_value(node.id, &attr.path, frame)?
-                                    .as_f64()
-                                    .ok_or("Invalid camera yaw")?;
-                                json!(
-                                    authored + b.as_f64().ok_or("Invalid camera yaw")?
-                                        - a.as_f64().ok_or("Invalid camera yaw")?
-                                )
-                            } else {
-                                b.clone()
-                            },
+                            value: b.clone(),
                             frame,
                         });
                     }
@@ -1352,6 +1410,9 @@ impl WorldDocument {
         let kind = self.info(id)?.kind;
         let mut out = vec![];
         for (path, _) in attrs.iter() {
+            if path.starts_with("/_navigation/") {
+                continue;
+            }
             if kind == WorldKind::Fractal
                 && path.starts_with("/render/")
                 && path != "/render/iterations"
@@ -1433,7 +1494,8 @@ impl WorldDocument {
                 .cloned()
                 .ok_or("Invalid component".into());
         }
-        self.resolve_attribute(id, path, frame, &mut HashSet::new())
+        let value = self.resolve_attribute(id, path, frame, &mut HashSet::new())?;
+        self.with_navigation_offset(id, path, value)
     }
     fn resolve_attribute(
         &self,
@@ -1463,12 +1525,9 @@ impl WorldDocument {
             }
         }
         if let Some(conn) = a.conn(path) {
-            return self.resolve_attribute(
-                NodeId(conn.source_layer),
-                &conn.source_key,
-                frame,
-                visiting,
-            );
+            let source = NodeId(conn.source_layer);
+            let value = self.resolve_attribute(source, &conn.source_key, frame, visiting)?;
+            return self.with_navigation_offset(source, &conn.source_key, value);
         }
         let value = a
             .eval_at(path, frame)
@@ -1537,9 +1596,10 @@ impl WorldDocument {
         if !frame.is_finite() {
             return Err("Invalid key time".into());
         }
+        let value = self.without_navigation_offset(id, path, value)?;
         if let Some((parent, component)) = self.component_path(id, path)? {
             let mut a = self.attrs(id)?;
-            let mut vector = self.attribute_value(id, &parent, frame)?;
+            let mut vector = self.resolve_attribute(id, &parent, frame, &mut HashSet::new())?;
             vector[component] = value.clone();
             if key
                 || a.anim(&parent)
@@ -1704,6 +1764,274 @@ impl WorldDocument {
         }
         Ok(v)
     }
+    fn camera_navigation_pose(
+        &self,
+        id: NodeId,
+        after: &Scene,
+        frame: f64,
+    ) -> Result<Vec<(&'static str, Value)>, String> {
+        use glam::{Mat3, Mat4, Quat, Vec3};
+        if !frame.is_finite() || !after.camera.distance.is_finite() || after.camera.distance <= 0.0
+        {
+            return Err("Invalid camera navigation pose".into());
+        }
+        let parent = self
+            .info(id)?
+            .parent
+            .map(|parent| self.world_matrix(parent, frame, &mut HashSet::new()))
+            .transpose()?
+            .unwrap_or(Mat4::IDENTITY);
+        if !parent.is_finite() || parent.determinant().abs() < 1e-10 {
+            return Err("Camera parent transform is singular".into());
+        }
+        let inverse = parent.inverse();
+        let vector = |path| -> Result<Vec3, String> {
+            let value = self.attribute_value(id, path, frame)?;
+            let items = value
+                .as_array()
+                .filter(|v| v.len() == 3)
+                .ok_or("Invalid camera transform")?;
+            let v = Vec3::new(
+                items[0].as_f64().ok_or("Invalid camera transform")? as f32,
+                items[1].as_f64().ok_or("Invalid camera transform")? as f32,
+                items[2].as_f64().ok_or("Invalid camera transform")? as f32,
+            );
+            if !v.is_finite() {
+                return Err("Invalid camera transform".into());
+            }
+            Ok(v)
+        };
+        let scale = vector("/transform/scale")?;
+        let pivot = vector("/transform/pivot")?;
+        if scale.abs().min_element() < 1e-8 {
+            return Err("Camera transform is singular".into());
+        }
+        let mut canonical: crate::scene::Camera =
+            serde_json::from_value(self.evaluated_node(id, frame)?["camera"].clone())
+                .map_err(|error| error.to_string())?;
+        canonical.yaw_degrees += self.camera_orbit_angle(id, frame)?;
+        let canonical_q = canonical.orientation();
+        let desired_q = after.camera.orientation();
+        let basis = |back: Vec3, up: Vec3| -> Result<Quat, String> {
+            let back = back.normalize_or_zero();
+            let right = up.cross(back).normalize_or_zero();
+            let up = back.cross(right).normalize_or_zero();
+            if !back.is_finite() || !up.is_finite() || right.length_squared() < 0.5 {
+                return Err("Camera orientation is singular".into());
+            }
+            Ok(Quat::from_mat3(&Mat3::from_cols(right, up, back)).normalize())
+        };
+        // Recover the local orthogonal basis from the same Gram-Schmidt projection used
+        // by snapshot(). Inverse-parent up can contain a back component, removed here.
+        let desired_local = basis(
+            inverse.transform_vector3(desired_q * Vec3::Z),
+            inverse.transform_vector3(desired_q * Vec3::Y),
+        )?;
+        let scaled_canonical = basis(
+            scale * (canonical_q * Vec3::Z),
+            scale * (canonical_q * Vec3::Y),
+        )?;
+        let rotation = (desired_local * scaled_canonical.inverse()).normalize();
+        let (z, y, x) = rotation.to_euler(glam::EulerRot::ZYX);
+        // Playa uses clockwise-positive ZYX rotation, unlike Camera's YXZ orbit basis.
+        let mut degrees = [-x.to_degrees(), -y.to_degrees(), -z.to_degrees()];
+        let previous = vector("/transform/rotation_degrees")?;
+        for (angle, previous) in degrees.iter_mut().zip(previous.to_array()) {
+            *angle = previous + (*angle - previous + 180.0).rem_euclid(360.0) - 180.0;
+        }
+        let target = Vec3::from(after.camera.target);
+        if !target.is_finite() {
+            return Err("Invalid camera target".into());
+        }
+        // Playa: T(position) * R * S * T(-pivot); pivot is not translated back.
+        let position = inverse.transform_point3(target)
+            + rotation * (scale * (pivot - Vec3::from(canonical.target)));
+        let back_scale = parent
+            .transform_vector3(rotation * (scale * (canonical_q * Vec3::Z)))
+            .length();
+        if !back_scale.is_finite() || back_scale < 1e-8 {
+            return Err("Camera transform is singular".into());
+        }
+        Ok(vec![
+            ("/transform/position", json!(position.to_array())),
+            ("/transform/rotation_degrees", json!(degrees)),
+            (
+                "/camera/distance",
+                json!(after.camera.distance / back_scale),
+            ),
+            ("/camera/fov_y_degrees", json!(after.camera.fov_y_degrees)),
+            ("/camera/aperture", json!(after.camera.aperture)),
+            ("/camera/focus_distance", json!(after.camera.focus_distance)),
+        ])
+    }
+
+    fn with_navigation_offset(
+        &self,
+        id: NodeId,
+        path: &str,
+        mut value: Value,
+    ) -> Result<Value, String> {
+        if let Some(offset) = self.navigation_offset(id, path)? {
+            if let Some(items) = value.as_array_mut() {
+                for (index, item) in items.iter_mut().enumerate() {
+                    *item = json!(
+                        item.as_f64().ok_or("Invalid navigation channel")?
+                            + offset[index].as_f64().unwrap_or(0.0)
+                    );
+                }
+            } else {
+                value = json!(
+                    value.as_f64().ok_or("Invalid navigation channel")?
+                        + offset.as_f64().unwrap_or(0.0)
+                );
+            }
+        }
+        Ok(value)
+    }
+    fn navigation_offset(&self, id: NodeId, path: &str) -> Result<Option<Value>, String> {
+        if self.node(id)?["type"].as_str() != Some("Camera")
+            || !matches!(
+                path,
+                "/transform/position"
+                    | "/transform/rotation_degrees"
+                    | "/camera/distance"
+                    | "/camera/fov_y_degrees"
+                    | "/camera/aperture"
+                    | "/camera/focus_distance"
+            )
+        {
+            return Ok(None);
+        }
+        Ok(self
+            .attrs(id)?
+            .get(&format!("/_navigation{path}"))
+            .cloned()
+            .map(attr_json))
+    }
+
+    fn without_navigation_offset(
+        &self,
+        id: NodeId,
+        path: &str,
+        mut value: Value,
+    ) -> Result<Value, String> {
+        if let Some((parent, component)) = self.component_path(id, path)? {
+            if let Some(offset) = self.navigation_offset(id, &parent)? {
+                value = json!(
+                    value.as_f64().ok_or("Invalid navigation channel")?
+                        - offset[component].as_f64().unwrap_or(0.0)
+                );
+            }
+        } else if let Some(offset) = self.navigation_offset(id, path)? {
+            if let Some(items) = value.as_array_mut() {
+                for (index, item) in items.iter_mut().enumerate() {
+                    *item = json!(
+                        item.as_f64().ok_or("Invalid navigation channel")?
+                            - offset[index].as_f64().unwrap_or(0.0)
+                    );
+                }
+            } else {
+                value = json!(
+                    value.as_f64().ok_or("Invalid navigation channel")?
+                        - offset.as_f64().unwrap_or(0.0)
+                );
+            }
+        }
+        Ok(value)
+    }
+
+    fn write_navigation_value(
+        &self,
+        id: NodeId,
+        attrs: &mut Attrs,
+        path: &str,
+        desired: Value,
+        frame: f64,
+        auto_key: bool,
+    ) -> Result<bool, String> {
+        let sampled = self.resolve_attribute(id, path, frame, &mut HashSet::new())?;
+        let mut base = attrs
+            .get(path)
+            .cloned()
+            .map(attr_json)
+            .ok_or("Missing camera channel")?;
+        let offset_path = format!("/_navigation{path}");
+        let mut offset = attrs
+            .get(&offset_path)
+            .cloned()
+            .map(attr_json)
+            .unwrap_or_else(|| {
+                if desired.is_array() {
+                    json!([0.0, 0.0, 0.0])
+                } else {
+                    json!(0.0)
+                }
+            });
+        let arity = desired.as_array().map_or(1, Vec::len);
+        let mut base_changed = false;
+        let mut offset_changed = false;
+        let mut keys_changed = false;
+        for component in 0..arity {
+            let lane = |v: &Value| -> Result<f64, String> {
+                (if arity == 1 { v } else { &v[component] })
+                    .as_f64()
+                    .ok_or_else(|| "Invalid camera channel".to_string())
+            };
+            let wanted = lane(&desired)?;
+            let raw = lane(&sampled)?;
+            let added = lane(&offset)?;
+            if !wanted.is_finite() || !raw.is_finite() || !added.is_finite() {
+                return Err("Invalid camera navigation value".into());
+            }
+            if (wanted - raw - added).abs() < 1e-5 {
+                continue;
+            }
+            if attrs.conn(path).is_some() {
+                return Err("Camera navigation channel is connected".into());
+            }
+            let animated = attrs
+                .anim(path)
+                .and_then(|a| a.channels.get(component))
+                .is_some_and(|channel| !channel.is_empty());
+            if auto_key {
+                keys_changed = true;
+                if attrs.anim(path).is_none() {
+                    attrs.set_anim(path, Some(Animation::with_arity(arity)));
+                }
+                attrs
+                    .anim_mut(path)
+                    .and_then(|a| a.channels.get_mut(component))
+                    .ok_or("Invalid camera animation arity")?
+                    .upsert_key(Keyframe::with_interp(
+                        frame,
+                        (wanted - added) as f32,
+                        CurveKind::Linear,
+                    ));
+            } else if animated {
+                if arity == 1 {
+                    offset = json!(wanted - raw);
+                } else {
+                    offset[component] = json!(wanted - raw);
+                }
+                offset_changed = true;
+            } else {
+                if arity == 1 {
+                    base = json!(wanted - added);
+                } else {
+                    base[component] = json!(wanted - added);
+                }
+                base_changed = true;
+            }
+        }
+        if base_changed {
+            attrs.set(path, to_attr(&base));
+        }
+        if offset_changed {
+            attrs.set(&offset_path, to_attr(&offset));
+        }
+        Ok(base_changed || offset_changed || keys_changed)
+    }
+
     fn world_matrix(
         &self,
         id: NodeId,
@@ -1764,6 +2092,18 @@ impl WorldDocument {
             Ok(true)
         }
     }
+    /// Evaluate one authoritative material payload without building a world snapshot.
+    pub fn material(&self, id: NodeId, frame: f64) -> Result<crate::scene::Material, String> {
+        if !frame.is_finite() {
+            return Err("Invalid material frame".into());
+        }
+        if self.info(id)?.kind != WorldKind::Material {
+            return Err("Select a material layer".into());
+        }
+        serde_json::from_value(self.evaluated_node(id, frame)?["material"].clone())
+            .map_err(|error| error.to_string())
+    }
+    #[cfg(test)]
     pub fn node_scene(&self, id: NodeId, frame: f64) -> Result<Scene, String> {
         let mut scene: Scene =
             serde_json::from_value(self.evaluated_node(id, frame)?).map_err(|e| e.to_string())?;

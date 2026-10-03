@@ -1,11 +1,11 @@
 #![recursion_limit = "256"]
-//! frac-rs: a path-traced 3D fractal browser. Rust CUDA kernels (cuda-oxide) port ofx-rs
+//! WarpBro: a path-traced 3D fractal browser. Rust CUDA kernels (cuda-oxide) port ofx-rs
 //! `ofx-fractal` (eight distance-estimated families, DE sphere tracing) and render-rs
 //! (`pt-integrator` path tracing, `standard-surface-bsdf`); the UI is egui.
 //!
-//!   frac-rs                                  the browser
-//!   frac-rs --gallery DIR [W H SPP]          render every gallery preset to DIR/*.png
-//!   frac-rs --bench [W H SPP]                time every preset
+//!   WarpBro                                  the browser
+//!   WarpBro --gallery DIR [W H SPP]          render every gallery preset to DIR/*.png
+//!   WarpBro --bench [W H SPP]                time every preset
 
 mod animation;
 mod app;
@@ -20,12 +20,14 @@ mod timeline;
 mod export;
 mod gpu;
 mod io_service;
+mod material_gallery;
 mod materials;
 #[allow(dead_code)]
 mod ocio;
 mod palette;
 mod params;
 mod presets;
+mod preview;
 mod render;
 mod render_service;
 mod scene;

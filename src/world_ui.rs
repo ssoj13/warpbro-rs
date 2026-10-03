@@ -36,6 +36,56 @@ fn value_gesture_eligible(attr: &WorldAttribute, value: &Value) -> bool {
         || (value.is_string() && attr.choices.is_empty() && attr.path != "/material_id")
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreviewAction {
+    Play { first: u32, last: u32 },
+    CacheThenPlay { first: u32, last: u32 },
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+struct PropertyFilter(u8);
+impl PropertyFilter {
+    const POSITION: u8 = 1;
+    const ROTATION: u8 = 2;
+    const SCALE: u8 = 4;
+    const KEYED: u8 = 8;
+    fn matches(self, attr: &WorldAttribute) -> bool {
+        self.0 == 0
+            || (self.0 & Self::POSITION != 0 && attr.path == "/transform/position")
+            || (self.0 & Self::ROTATION != 0 && attr.path == "/transform/rotation_degrees")
+            || (self.0 & Self::SCALE != 0 && attr.path == "/transform/scale")
+            || (self.0 & Self::KEYED != 0 && !attr.frames.is_empty())
+    }
+    fn toggle(&mut self, bit: u8, additive: bool) {
+        self.0 = if additive {
+            self.0 ^ bit
+        } else if self.0 == bit {
+            0
+        } else {
+            bit
+        };
+    }
+}
+
+fn selection_bounds(nodes: &[WorldNodeInfo], e: &WorldEditor) -> (u32, u32) {
+    let mut first = f64::INFINITY;
+    let mut last = f64::NEG_INFINITY;
+    for node in nodes.iter().filter(|node| {
+        e.selected.contains(&node.id) || (e.selected.is_empty() && e.selection == Some(node.id))
+    }) {
+        let start = node.start.ceil().max(f64::from(e.document.first));
+        let end = (node.end.ceil() - 1.0).min(f64::from(e.document.last));
+        if start <= end {
+            first = first.min(start);
+            last = last.max(end);
+        }
+    }
+    if first.is_finite() && last.is_finite() {
+        (first as u32, last as u32)
+    } else {
+        (e.document.first, e.document.last.max(e.document.first))
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct KeyIdentity {
     node: NodeId,
@@ -131,10 +181,16 @@ struct GridSectionCache {
 pub struct WorldUi {
     pub playhead: u32,
     pub playing: bool,
+    pub auto_key: bool,
     pub looping: bool,
     pub attribute_label_width: f32,
     pub attribute_metrics: AttributeMetrics,
     pub material_library_requested: bool,
+    pub preview_action: Option<PreviewAction>,
+    pub playback_range: Option<(u32, u32)>,
+    property_filters: HashMap<NodeId, PropertyFilter>,
+    timeline_focus: Option<egui::Id>,
+    timeline_rect: Option<Rect>,
     fraction: f64,
     view: TimelineView,
     expanded: HashSet<NodeId>,
@@ -164,10 +220,16 @@ impl Default for WorldUi {
         Self {
             playhead: 0,
             playing: false,
+            auto_key: false,
             looping: true,
             attribute_label_width: 180.0,
             attribute_metrics: AttributeMetrics::default(),
             material_library_requested: false,
+            preview_action: None,
+            playback_range: None,
+            property_filters: HashMap::new(),
+            timeline_focus: None,
+            timeline_rect: None,
             fraction: 0.0,
             view: TimelineView::default(),
             expanded: HashSet::new(),
@@ -285,6 +347,110 @@ fn tree(nodes: &[WorldNodeInfo], parent: Option<NodeId>, depth: usize) -> Vec<Tr
         .collect()
 }
 impl WorldUi {
+    pub fn take_preview_action(&mut self) -> Option<PreviewAction> {
+        self.preview_action.take()
+    }
+    pub fn shortcuts_active(&self, ctx: &egui::Context) -> bool {
+        !ctx.text_edit_focused()
+            && !ctx.input(|input| {
+                input.pointer.secondary_down()
+                    || input.modifiers.alt
+                    || input.modifiers.ctrl
+                    || input.modifiers.command
+            })
+            && (self
+                .timeline_rect
+                .is_some_and(|rect| ctx.pointer_hover_pos().is_some_and(|p| rect.contains(p)))
+                || self
+                    .timeline_focus
+                    .is_some_and(|id| ctx.memory(|memory| memory.focused()) == Some(id)))
+    }
+    fn timeline_shortcuts(&mut self, ui: &egui::Ui, e: &WorldEditor, nodes: &[WorldNodeInfo]) {
+        let focus = ui.id().with("world-timeline-keyboard");
+        // Registration can surrender focus on a release outside the row. A press inside
+        // owns panel focus until another press or a child editor explicitly takes it.
+        let had_focus = ui.ctx().memory(|memory| memory.focused()) == Some(focus);
+        ui.interact(ui.max_rect(), focus, Sense::focusable_noninteractive());
+        if had_focus
+            && !ui.input(|input| input.pointer.primary_pressed())
+            && ui.ctx().memory(|memory| memory.focused()).is_none()
+            && !ui.ctx().text_edit_focused()
+        {
+            ui.ctx().memory_mut(|memory| memory.request_focus(focus));
+        }
+        self.timeline_focus = Some(focus);
+        self.timeline_rect = Some(ui.max_rect());
+        if ui.input(|input| input.pointer.primary_pressed()) {
+            if ui.rect_contains_pointer(ui.max_rect()) {
+                if !ui.ctx().text_edit_focused() {
+                    ui.ctx().memory_mut(|memory| memory.request_focus(focus));
+                }
+            } else {
+                ui.ctx().memory_mut(|memory| memory.surrender_focus(focus));
+            }
+        }
+        if !self.shortcuts_active(ui.ctx()) {
+            return;
+        }
+        let modifiers = ui.input(|input| input.modifiers);
+        let pressed = |key| {
+            ui.input(|input| input.events.iter().any(|event| matches!(event,
+                egui::Event::Key { key: event_key, pressed: true, repeat: false, .. } if *event_key == key)))
+                && ui.input_mut(|input| input.consume_key(modifiers, key))
+        };
+        for (key, bit) in [
+            (egui::Key::P, PropertyFilter::POSITION),
+            (egui::Key::T, PropertyFilter::POSITION),
+            (egui::Key::R, PropertyFilter::ROTATION),
+            (egui::Key::S, PropertyFilter::SCALE),
+            (egui::Key::U, PropertyFilter::KEYED),
+        ] {
+            if pressed(key) {
+                for id in e
+                    .selected
+                    .iter()
+                    .copied()
+                    .chain(e.selection.filter(|_| e.selected.is_empty()))
+                {
+                    self.property_filters
+                        .entry(id)
+                        .or_default()
+                        .toggle(bit, modifiers.shift);
+                    self.expanded.insert(id);
+                }
+            }
+        }
+        let jump_in = pressed(egui::Key::I);
+        let jump_out = pressed(egui::Key::O);
+        let preview = pressed(egui::Key::Insert);
+        if jump_in || jump_out || preview {
+            let bounds = selection_bounds(nodes, e);
+            if jump_in {
+                self.seek(bounds.0);
+            }
+            if jump_out {
+                self.seek(bounds.1);
+            }
+            if preview {
+                self.seek(bounds.0);
+                self.playing = false;
+                self.preview_action = Some(if modifiers.shift {
+                    PreviewAction::CacheThenPlay {
+                        first: bounds.0,
+                        last: bounds.1,
+                    }
+                } else {
+                    PreviewAction::Play {
+                        first: bounds.0,
+                        last: bounds.1,
+                    }
+                });
+            }
+        }
+        if pressed(egui::Key::Space) {
+            self.playing = !self.playing;
+        }
+    }
     pub fn seek(&mut self, frame: u32) {
         self.playhead = frame;
         self.fraction = 0.0;
@@ -292,16 +458,23 @@ impl WorldUi {
     pub fn reset(&mut self) {
         let attribute_metrics = self.attribute_metrics;
         let attribute_label_width = self.attribute_label_width;
+        let auto_key = self.auto_key;
         *self = Self::default();
         self.attribute_metrics = attribute_metrics;
         self.attribute_label_width = attribute_label_width;
+        self.auto_key = auto_key;
     }
     pub fn advance(&mut self, dt: f32, editor: &WorldEditor) -> bool {
         if !self.playing {
             return false;
         }
-        let first = editor.document.first;
-        let last = editor.document.last.max(first);
+        let work_first = editor.document.first;
+        let work_last = editor.document.last.max(work_first);
+        let (first, last) = self
+            .playback_range
+            .map(|(first, last)| (first.max(work_first), last.min(work_last)))
+            .filter(|(first, last)| first <= last)
+            .unwrap_or((work_first, work_last));
         self.fraction += f64::from(dt.max(0.0)) * editor.document.fps.max(1.0);
         let step = self.fraction.floor() as u32;
         self.fraction -= f64::from(step);
@@ -781,11 +954,17 @@ impl WorldUi {
         }
     }
     fn lanes(&self, id: NodeId, attrs: &[WorldAttribute]) -> Vec<Lane> {
+        let filter = self.property_filters.get(&id).copied().unwrap_or_default();
         let mut lanes = Vec::new();
         for group in ATTRIBUTE_GROUPS {
             let parents: Vec<_> = attrs
                 .iter()
-                .filter(|a| a.keyable && a.component.is_none() && category(&a.path) == group)
+                .filter(|a| {
+                    a.keyable
+                        && a.component.is_none()
+                        && category(&a.path) == group
+                        && filter.matches(a)
+                })
                 .collect();
             if parents.is_empty() {
                 continue;
@@ -799,7 +978,7 @@ impl WorldUi {
                 group: true,
                 attr: None,
             });
-            if !self.groups.contains(&(id, format!("@{group}"))) {
+            if filter.0 == 0 && !self.groups.contains(&(id, format!("@{group}"))) {
                 continue;
             }
             for a in parents {
@@ -815,6 +994,7 @@ impl WorldUi {
                 if self.components_open(id, &a.path, &attrs) {
                     for child in attrs.iter().filter(|child| {
                         child.component.is_some()
+                            && (filter.0 != PropertyFilter::KEYED || !child.frames.is_empty())
                             && child
                                 .path
                                 .rsplit_once('/')
@@ -840,11 +1020,17 @@ impl WorldUi {
         self.status(ui);
         let cache = self.take_cache(e);
         let nodes = &cache.nodes;
+        self.timeline_shortcuts(ui, e, nodes);
         let mut timeline = std::mem::take(&mut self.timeline_cache);
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         for node in nodes {
             node.id.hash(&mut hash);
             self.expanded.contains(&node.id).hash(&mut hash);
+            self.property_filters
+                .get(&node.id)
+                .copied()
+                .unwrap_or_default()
+                .hash(&mut hash);
             for group in ATTRIBUTE_GROUPS {
                 self.groups
                     .iter()
@@ -1002,6 +1188,8 @@ impl WorldUi {
                     egui::FontId::proportional(11.0),
                     ui.visuals().weak_text_color(),
                 );
+                ui.interact(header, ui.id().with("timeline-shortcuts-help"), Sense::hover())
+                    .on_hover_text("P / T: Translate · R: Rotate · S: Scale · U: Keyed properties\nShift + property shortcut: add / remove filter\nI / O: selection In / Out · Space: Play / pause\nInsert: Play selection · Shift + Insert: Cache selection, then play");
                 for (ti, n) in nodes.iter().enumerate() {
                     let y = resp.track_tops[ti];
                     let row = Rect::from_min_size(
@@ -1138,27 +1326,36 @@ impl WorldUi {
             );
             let name_rect =
                 Rect::from_min_max(Pos2::new(x.min(body.right()), body.top()), body.max);
-            let payload = LayerDrag {
-                id: n.id,
-                order: self.drag_order.clone(),
-            };
-            let source = cell_ui(ui, name_rect, "layer_name", |ui| {
-                ui.dnd_drag_source(ui.id().with(("layer_drag", wid(n.id))), payload, |ui| {
-                    ui.add_sized(
-                        name_rect.size(),
-                        egui::Button::new(())
-                            .left_text(&n.name)
-                            .truncate()
-                            .selected(e.selected.contains(&n.id))
-                            .frame(false),
-                    )
-                })
-            })
-            .inner;
-            if source.response.drag_started() && self.drag_order.is_none() {
+            let source = ui
+                .interact(
+                    name_rect,
+                    ui.id().with("layer_name"),
+                    Sense::click_and_drag(),
+                )
+                .on_hover_cursor(egui::CursorIcon::Grab);
+            ui.painter()
+                .with_clip_rect(ui.clip_rect().intersect(name_rect))
+                .text(
+                    name_rect.left_center() + Vec2::new(2.0, 0.0),
+                    egui::Align2::LEFT_CENTER,
+                    &n.name,
+                    egui::TextStyle::Body.resolve(ui.style()),
+                    ui.visuals().text_color(),
+                );
+            if source.drag_started_by(egui::PointerButton::Primary) && self.drag_order.is_none() {
                 self.drag_order = Some(std::sync::Arc::new(nodes.iter().map(|n| n.id).collect()));
             }
-            if source.inner.clicked() {
+            if source.dragged_by(egui::PointerButton::Primary) {
+                egui::DragAndDrop::set_payload(
+                    ui.ctx(),
+                    LayerDrag {
+                        id: n.id,
+                        order: self.drag_order.clone(),
+                    },
+                );
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+            }
+            if source.clicked() {
                 let modifiers = ui.input(|i| i.modifiers);
                 self.select(
                     e,
@@ -1168,6 +1365,40 @@ impl WorldUi {
                     nodes,
                 );
             }
+            if source.secondary_clicked() && !e.selected.contains(&n.id) {
+                self.select(e, n.id, false, false, nodes);
+            }
+            source.context_menu(|ui| {
+                if ui
+                    .add_enabled(!n.locked, egui::Button::new("Duplicate"))
+                    .clicked()
+                {
+                    self.command(e, WorldCommand::Duplicate(n.id));
+                    ui.close();
+                }
+                let unlocked = e
+                    .selected
+                    .iter()
+                    .all(|id| nodes.iter().any(|node| node.id == *id && !node.locked));
+                if ui
+                    .add_enabled(
+                        unlocked && !n.locked,
+                        egui::Button::new("Delete selected layers"),
+                    )
+                    .clicked()
+                {
+                    let ids = if e.selected.contains(&n.id) {
+                        e.selected.clone()
+                    } else {
+                        vec![n.id]
+                    };
+                    self.command(
+                        e,
+                        WorldCommand::Batch(ids.into_iter().map(WorldCommand::Delete).collect()),
+                    );
+                    ui.close();
+                }
+            });
             let target = ui.interact(r, ui.id().with("layer_drop"), Sense::hover());
             if let Some(payload) = target.dnd_hover_payload::<LayerDrag>() {
                 if payload.id != n.id {
@@ -1616,6 +1847,8 @@ impl WorldUi {
                 ],
                 egui::DragValue::new(&mut last).range(first..=100000),
             );
+            ui.checkbox(&mut self.auto_key, "Auto Key")
+                .on_hover_text("Key camera navigation only when Auto Key is enabled; otherwise preserve existing animation keys.");
             ui.checkbox(&mut self.snap, "Snap");
             if ui.small_button("Fit").clicked() {
                 self.view.pan_offset = e.document.first as f32;
@@ -1754,6 +1987,15 @@ impl WorldUi {
         }
     }
     pub fn inspector(&mut self, ui: &mut egui::Ui, e: &mut WorldEditor) {
+        let Some(id) = e.selection else {
+            ui.label("Select an object to edit its properties.");
+            return;
+        };
+        self.attribute_editor(ui, e, id);
+    }
+
+    /// The same editor can display a referenced node without changing selection.
+    pub fn attribute_editor(&mut self, ui: &mut egui::Ui, e: &mut WorldEditor, id: NodeId) {
         self.attribute_metrics.apply(ui);
         if let Some((id, picker)) = &mut self.picker {
             picker.update(ui.ctx());
@@ -1781,10 +2023,6 @@ impl WorldUi {
             }
         }
         self.status(ui);
-        let Some(id) = e.selection else {
-            ui.label("Select an object to edit its properties.");
-            return;
-        };
         let mut cache = self.take_cache(e);
         let Some(node) = cache.nodes.iter().find(|n| n.id == id) else {
             self.cache = cache;
@@ -1794,7 +2032,7 @@ impl WorldUi {
             ui.colored_label(kind_color(node.kind), kind_icon(node.kind));
             ui.heading(&node.name);
         });
-        if e.selected.len() > 1 {
+        if e.selection == Some(id) && e.selected.len() > 1 {
             ui.weak(format!(
                 "{} objects selected; editing {}",
                 e.selected.len(),
@@ -1851,6 +2089,7 @@ impl WorldUi {
         let frame = cache.frame;
         egui::ScrollArea::vertical()
             .id_salt(("world_inspector", wid(id)))
+            .auto_shrink([false, false])
             .show(ui, |ui| {
                 for group in ATTRIBUTE_GROUPS {
                     if !attrs
@@ -2610,6 +2849,460 @@ mod tests {
             crate::params::FAMILY_BULB,
         )))
     }
+
+    fn shortcut_frame(
+        ctx: &egui::Context,
+        state: &mut WorldUi,
+        e: &WorldEditor,
+        mut events: Vec<egui::Event>,
+    ) {
+        let nodes = e.document.nodes();
+        let modifiers = events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                egui::Event::Key { modifiers, .. } => Some(*modifiers),
+                _ => None,
+            })
+            .unwrap_or(egui::Modifiers::NONE);
+        events.insert(0, egui::Event::ModifiersChanged(modifiers));
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0))),
+                events,
+                ..Default::default()
+            },
+            |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    state.timeline_shortcuts(ui, e, &nodes);
+                });
+            },
+        );
+    }
+    fn shortcut_key(key: egui::Key, shift: bool) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers {
+                shift,
+                ..Default::default()
+            },
+        }
+    }
+    #[test]
+    fn timeline_keyboard_focus_survives_pointer_exit_and_clears_on_outside_click() {
+        let e = editor();
+        let object = e.selection.unwrap();
+        let ctx = egui::Context::default();
+        let mut state = WorldUi::default();
+        shortcut_frame(&ctx, &mut state, &e, vec![]);
+        let inside = Pos2::new(80.0, 80.0);
+        let outside = Pos2::new(1100.0, 750.0);
+        shortcut_frame(
+            &ctx,
+            &mut state,
+            &e,
+            vec![egui::Event::PointerMoved(inside)],
+        );
+        shortcut_frame(
+            &ctx,
+            &mut state,
+            &e,
+            vec![
+                egui::Event::PointerMoved(inside),
+                egui::Event::PointerButton {
+                    pos: inside,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        shortcut_frame(
+            &ctx,
+            &mut state,
+            &e,
+            vec![
+                egui::Event::PointerButton {
+                    pos: inside,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerMoved(outside),
+            ],
+        );
+        assert_eq!(ctx.memory(|memory| memory.focused()), state.timeline_focus);
+        for _ in 0..3 {
+            shortcut_frame(&ctx, &mut state, &e, vec![]);
+            assert_eq!(ctx.memory(|memory| memory.focused()), state.timeline_focus);
+        }
+        shortcut_frame(
+            &ctx,
+            &mut state,
+            &e,
+            vec![shortcut_key(egui::Key::P, false)],
+        );
+        assert_eq!(state.property_filters[&object].0, PropertyFilter::POSITION);
+        shortcut_frame(
+            &ctx,
+            &mut state,
+            &e,
+            vec![egui::Event::PointerButton {
+                pos: outside,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(!state.shortcuts_active(&ctx));
+        shortcut_frame(
+            &ctx,
+            &mut state,
+            &e,
+            vec![shortcut_key(egui::Key::S, false)],
+        );
+        assert_eq!(state.property_filters[&object].0, PropertyFilter::POSITION);
+    }
+
+    #[test]
+    fn timeline_shortcuts_filter_selected_properties_without_authoring_edits() {
+        let mut e = editor();
+        let object = e.selection.unwrap();
+        e.execute(WorldCommand::Key {
+            id: object,
+            path: "/transform/position/0".into(),
+            frame: 12.25,
+        })
+        .unwrap();
+        let revision = e.revision();
+        let ctx = egui::Context::default();
+        let mut state = WorldUi::default();
+        shortcut_frame(
+            &ctx,
+            &mut state,
+            &e,
+            vec![
+                egui::Event::PointerMoved(Pos2::new(80.0, 80.0)),
+                shortcut_key(egui::Key::P, false),
+            ],
+        );
+        let attrs = e.document.attributes(object, 0.0).unwrap();
+        let lanes = state.lanes(object, &attrs);
+        assert!(state.expanded.contains(&object));
+        assert!(
+            lanes
+                .iter()
+                .any(|lane| lane.path.as_deref() == Some("/transform/position"))
+        );
+        assert!(
+            !lanes
+                .iter()
+                .any(|lane| lane.path.as_deref() == Some("/transform/scale"))
+        );
+        shortcut_frame(&ctx, &mut state, &e, vec![shortcut_key(egui::Key::R, true)]);
+        assert_eq!(
+            state.property_filters[&object].0,
+            PropertyFilter::POSITION | PropertyFilter::ROTATION
+        );
+        shortcut_frame(
+            &ctx,
+            &mut state,
+            &e,
+            vec![shortcut_key(egui::Key::U, false)],
+        );
+        assert!(
+            state
+                .lanes(object, &attrs)
+                .iter()
+                .filter(|lane| !lane.group)
+                .all(|lane| !lane.frames.is_empty())
+        );
+        assert_eq!(e.revision(), revision);
+        let camera = e.document.active_camera.unwrap();
+        assert!(!state.property_filters.contains_key(&camera));
+        let count = state.property_filters.len();
+        // Hold S before emitting its repeat: egui derives repeat from its key-down set.
+        shortcut_frame(
+            &ctx,
+            &mut state,
+            &e,
+            vec![shortcut_key(egui::Key::S, false)],
+        );
+        let mut release_u = shortcut_key(egui::Key::U, false);
+        if let egui::Event::Key { pressed, .. } = &mut release_u {
+            *pressed = false;
+        }
+        shortcut_frame(
+            &ctx,
+            &mut state,
+            &e,
+            vec![release_u, shortcut_key(egui::Key::U, false)],
+        );
+        shortcut_frame(
+            &ctx,
+            &mut state,
+            &e,
+            vec![egui::Event::Key {
+                key: egui::Key::S,
+                physical_key: Some(egui::Key::S),
+                pressed: true,
+                repeat: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert_eq!(state.property_filters.len(), count);
+        assert_eq!(state.property_filters[&object].0, PropertyFilter::KEYED);
+    }
+    #[test]
+    fn selection_preview_shortcuts_use_full_union_and_emit_distinct_nonblocking_intents() {
+        let mut e = editor();
+        let object = e.selection.unwrap();
+        let camera = e.document.active_camera.unwrap();
+        e.execute(WorldCommand::Batch(vec![
+            WorldCommand::SetSpan {
+                id: object,
+                start: 23.2,
+                end: 50.5,
+            },
+            WorldCommand::SetSpan {
+                id: camera,
+                start: 5.1,
+                end: 80.5,
+            },
+            WorldCommand::SetTimeRange {
+                first: 10,
+                last: 70,
+                fps: 24.0,
+            },
+        ]))
+        .unwrap();
+        e.selected = vec![object, camera];
+        let ctx = egui::Context::default();
+        let mut state = WorldUi::default();
+        shortcut_frame(
+            &ctx,
+            &mut state,
+            &e,
+            vec![
+                egui::Event::PointerMoved(Pos2::new(80.0, 80.0)),
+                shortcut_key(egui::Key::O, false),
+            ],
+        );
+        assert_eq!(state.playhead, 70);
+        shortcut_frame(
+            &ctx,
+            &mut state,
+            &e,
+            vec![shortcut_key(egui::Key::I, false)],
+        );
+        assert_eq!(state.playhead, 10);
+        shortcut_frame(
+            &ctx,
+            &mut state,
+            &e,
+            vec![shortcut_key(egui::Key::Insert, false)],
+        );
+        assert_eq!(
+            state.take_preview_action(),
+            Some(PreviewAction::Play {
+                first: 10,
+                last: 70
+            })
+        );
+        assert!(state.take_preview_action().is_none());
+        let mut release_insert = shortcut_key(egui::Key::Insert, false);
+        if let egui::Event::Key { pressed, .. } = &mut release_insert {
+            *pressed = false;
+        }
+        shortcut_frame(&ctx, &mut state, &e, vec![release_insert]);
+        shortcut_frame(
+            &ctx,
+            &mut state,
+            &e,
+            vec![shortcut_key(egui::Key::Insert, true)],
+        );
+        assert_eq!(
+            state.take_preview_action(),
+            Some(PreviewAction::CacheThenPlay {
+                first: 10,
+                last: 70
+            })
+        );
+        assert!(!state.playing);
+        assert_eq!(state.playhead, 10);
+        e.selected.clear();
+        e.selection = None;
+        assert_eq!(selection_bounds(&e.document.nodes(), &e), (10, 70));
+    }
+    #[test]
+    fn timeline_keyboard_does_not_intercept_text_entry_or_right_mouse_flight() {
+        let e = editor();
+        let ctx = egui::Context::default();
+        let mut state = WorldUi::default();
+        let focus = egui::Id::new("timeline-shortcut-text");
+        let mut text = String::new();
+        let draw = |events, state: &mut WorldUi, text: &mut String| {
+            let nodes = e.document.nodes();
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0))),
+                    events,
+                    ..Default::default()
+                },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        ui.add(egui::TextEdit::singleline(text).id(focus))
+                            .request_focus();
+                        state.timeline_shortcuts(ui, &e, &nodes);
+                    });
+                },
+            );
+        };
+        draw(
+            vec![egui::Event::PointerMoved(Pos2::new(80.0, 80.0))],
+            &mut state,
+            &mut text,
+        );
+        draw(
+            vec![
+                shortcut_key(egui::Key::T, false),
+                shortcut_key(egui::Key::Space, false),
+                shortcut_key(egui::Key::Insert, true),
+            ],
+            &mut state,
+            &mut text,
+        );
+        assert!(state.property_filters.is_empty());
+        assert!(!state.playing);
+        assert!(state.preview_action.is_none());
+        ctx.memory_mut(|memory| memory.surrender_focus(focus));
+        shortcut_frame(
+            &ctx,
+            &mut state,
+            &e,
+            vec![
+                egui::Event::PointerButton {
+                    pos: Pos2::new(80.0, 80.0),
+                    button: egui::PointerButton::Secondary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                shortcut_key(egui::Key::S, false),
+            ],
+        );
+        assert!(state.property_filters.is_empty());
+    }
+
+    #[test]
+    fn filtered_timeline_reuses_idle_projection_and_preserves_key_identity() {
+        let mut e = editor();
+        let object = e.selection.unwrap();
+        e.execute(WorldCommand::Key {
+            id: object,
+            path: "/transform/position/0".into(),
+            frame: 12.25,
+        })
+        .unwrap();
+        let mut state = WorldUi::default();
+        state
+            .property_filters
+            .insert(object, PropertyFilter(PropertyFilter::POSITION));
+        state.expanded.insert(object);
+        let ctx = egui::Context::default();
+        {
+            let mut draw = || {
+                let _ = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            Pos2::ZERO,
+                            Vec2::new(1000.0, 700.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |root| {
+                        egui::CentralPanel::default().show(root, |ui| state.timeline(ui, &mut e));
+                    },
+                );
+            };
+            draw();
+        }
+        let lanes = state.timeline_cache.lanes.as_ptr();
+        let tracks = state.timeline_cache.model.tracks.as_ptr();
+        let projection = state.timeline_cache.projection;
+        for _ in 0..16 {
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0))),
+                    ..Default::default()
+                },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| state.timeline(ui, &mut e));
+                },
+            );
+            assert_eq!(state.timeline_cache.lanes.as_ptr(), lanes);
+            assert_eq!(state.timeline_cache.model.tracks.as_ptr(), tracks);
+            assert_eq!(state.timeline_cache.projection, projection);
+        }
+        let track = state
+            .cache
+            .nodes
+            .iter()
+            .position(|node| node.id == object)
+            .unwrap();
+        let lane = state.timeline_cache.lanes[track]
+            .iter()
+            .position(|lane| lane.path.as_deref() == Some("/transform/position/0"))
+            .unwrap();
+        let identity = WorldUi::key_identity(
+            &state.cache.nodes,
+            &state.timeline_cache.lanes,
+            KeyPos {
+                track,
+                lane,
+                frame: 12.25,
+            },
+        )
+        .unwrap();
+        assert_eq!(identity.node, object);
+        assert_eq!(identity.path, "/transform/position/0");
+        assert_eq!(f64::from_bits(identity.frame), 12.25);
+    }
+    #[test]
+    fn transient_selection_playback_range_loops_and_resets_without_document_edits() {
+        let mut e = editor();
+        e.execute(WorldCommand::SetTimeRange {
+            first: 0,
+            last: 30,
+            fps: 10.0,
+        })
+        .unwrap();
+        let revision = e.revision();
+        let mut state = WorldUi {
+            playhead: 12,
+            playing: true,
+            playback_range: Some((10, 12)),
+            ..Default::default()
+        };
+        assert!(state.advance(0.1, &e));
+        assert_eq!(state.playhead, 10);
+        state.looping = false;
+        state.seek(12);
+        state.advance(0.1, &e);
+        assert_eq!(state.playhead, 12);
+        assert!(!state.playing);
+        assert_eq!(e.revision(), revision);
+        state.preview_action = Some(PreviewAction::Play {
+            first: 10,
+            last: 12,
+        });
+        state.reset();
+        assert!(state.playback_range.is_none());
+        assert!(state.preview_action.is_none());
+    }
+
     #[test]
     fn resetting_document_ui_preserves_appearance_preferences() {
         let metrics = AttributeMetrics {
@@ -2620,6 +3313,7 @@ mod tests {
         let mut state = WorldUi {
             attribute_metrics: metrics,
             attribute_label_width: 237.0,
+            auto_key: true,
             playhead: 90,
             playing: true,
             ..Default::default()
@@ -2627,6 +3321,7 @@ mod tests {
         state.reset();
         assert_eq!(state.attribute_metrics, metrics);
         assert_eq!(state.attribute_label_width, 237.0);
+        assert!(state.auto_key);
         assert_eq!(state.playhead, 0);
         assert!(!state.playing);
     }
@@ -2782,6 +3477,176 @@ mod tests {
         assert_eq!(numeric_value(&json!(-12i32), -13.75), json!(-14i32));
         assert_eq!(numeric_value(&json!(12.5), 13.75), json!(13.75));
     }
+    #[test]
+    fn layer_secondary_click_opens_menu_without_moving_name_or_starting_drag() {
+        fn texts(output: &egui::FullOutput) -> Vec<(String, Pos2)> {
+            output
+                .shapes
+                .iter()
+                .filter_map(|shape| {
+                    if let egui::epaint::Shape::Text(text) = &shape.shape {
+                        Some((text.galley.job.text.clone(), text.pos))
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        }
+        let mut e = editor();
+        let nodes = e.document.nodes();
+        let node = nodes
+            .iter()
+            .find(|n| n.kind == WorldKind::Material)
+            .unwrap();
+        let ctx = egui::Context::default();
+        let mut state = WorldUi::default();
+        let mut draw = |events| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 400.0))),
+                    events,
+                    ..Default::default()
+                },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        state.layer_row(
+                            ui,
+                            &mut e,
+                            node,
+                            &nodes,
+                            Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::new(400.0, 24.0)),
+                        );
+                    });
+                },
+            )
+        };
+        let before = texts(&draw(vec![]));
+        let position = before
+            .iter()
+            .find(|(text, _)| text == &node.name)
+            .unwrap()
+            .1;
+        let click = Pos2::new(180.0, 30.0);
+        draw(vec![egui::Event::PointerMoved(click)]);
+        draw(vec![egui::Event::PointerButton {
+            pos: click,
+            button: egui::PointerButton::Secondary,
+            pressed: true,
+            modifiers: Default::default(),
+        }]);
+        draw(vec![egui::Event::PointerButton {
+            pos: click,
+            button: egui::PointerButton::Secondary,
+            pressed: false,
+            modifiers: Default::default(),
+        }]);
+        let after = texts(&draw(vec![]));
+        assert_eq!(
+            after.iter().find(|(text, _)| text == &node.name).unwrap().1,
+            position
+        );
+        assert!(
+            after
+                .iter()
+                .any(|(text, _)| text == "Delete selected layers")
+        );
+        assert_eq!(e.selection, Some(node.id));
+        assert!(state.drag_order.is_none());
+        assert!(ctx.dragged_id().is_none());
+    }
+
+    #[test]
+    fn layer_primary_drag_reorders_with_one_undo() {
+        let mut e = editor();
+        let nodes = e.document.nodes();
+        let original = e.document.clone();
+        let fractal = nodes
+            .iter()
+            .position(|n| n.kind == WorldKind::Fractal)
+            .unwrap();
+        let camera = nodes
+            .iter()
+            .position(|n| n.kind == WorldKind::Camera)
+            .unwrap();
+        let ctx = egui::Context::default();
+        let mut state = WorldUi::default();
+        let mut draw = |events| {
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 400.0))),
+                    events,
+                    ..Default::default()
+                },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        for (i, node) in nodes.iter().enumerate() {
+                            state.layer_row(
+                                ui,
+                                &mut e,
+                                node,
+                                &nodes,
+                                Rect::from_min_size(
+                                    Pos2::new(20.0, 20.0 + 24.0 * i as f32),
+                                    Vec2::new(400.0, 24.0),
+                                ),
+                            );
+                        }
+                    });
+                },
+            );
+        };
+        let from = Pos2::new(180.0, 32.0 + 24.0 * fractal as f32);
+        let to = Pos2::new(180.0, 40.0 + 24.0 * camera as f32);
+        draw(vec![]);
+        draw(vec![egui::Event::PointerMoved(from)]);
+        draw(vec![egui::Event::PointerButton {
+            pos: from,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: Default::default(),
+        }]);
+        draw(vec![egui::Event::PointerMoved(to)]);
+        draw(vec![]);
+        draw(vec![egui::Event::PointerButton {
+            pos: to,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: Default::default(),
+        }]);
+        let order = e.document.nodes();
+        assert!(
+            order
+                .iter()
+                .position(|n| n.id == nodes[fractal].id)
+                .unwrap()
+                > order.iter().position(|n| n.id == nodes[camera].id).unwrap()
+        );
+        assert!(e.undo());
+        assert_eq!(e.document, original);
+        assert!(!e.undo());
+    }
+
+    #[test]
+    fn referenced_material_editor_keeps_fractal_selection() {
+        let mut e = editor();
+        let selected = e.selection;
+        let material = e
+            .document
+            .assigned_material(selected.unwrap())
+            .unwrap()
+            .unwrap();
+        let original = e.document.clone();
+        let ctx = egui::Context::default();
+        let mut state = WorldUi::default();
+        let _ = ctx.run_ui(Default::default(), |root| {
+            egui::CentralPanel::default()
+                .show(root, |ui| state.attribute_editor(ui, &mut e, material));
+        });
+        assert_eq!(e.selection, selected);
+        assert_eq!(e.document, original);
+        assert!(state.cache.sections.contains_key(&(material, "Material")));
+    }
+
     #[test]
     fn transport_wraps_within_nonzero_work_area() {
         let mut e = editor();

@@ -7,7 +7,10 @@ fn main() {
     println!("cargo::rerun-if-env-changed=FRAC_ALLOW_PLAIN_CARGO");
     // Type-checking front ends never link, so they need no backend: clippy, rust-analyzer, and
     // an explicit opt-out for plain `cargo check`.
-    if ["CLIPPY_ARGS", "RA_RUSTC_WRAPPER", "FRAC_ALLOW_PLAIN_CARGO"].iter().any(|v| std::env::var_os(v).is_some()) {
+    if ["CLIPPY_ARGS", "RA_RUSTC_WRAPPER", "FRAC_ALLOW_PLAIN_CARGO"]
+        .iter()
+        .any(|v| std::env::var_os(v).is_some())
+    {
         return;
     }
     let flags = std::env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
@@ -16,8 +19,8 @@ fn main() {
         .any(|f| f.contains("codegen-backend") && f.contains("rustc_codegen_cuda"));
     if !oxide {
         panic!(
-            "\n\nfrac-rs must be built with cuda-oxide (its GPU kernels are Rust compiled to PTX):\n\
-             \n    cargo oxide build     # -> target/release/frac-rs   (alias: cargo ob)\
+            "\n\nWarpBro must be built with cuda-oxide (its GPU kernels are Rust compiled to PTX):\n\
+             \n    cargo oxide build     # -> target/release/WarpBro   (alias: cargo ob)\
              \n    cargo oxide run       #                             (alias: cargo or)\
              \n    python bootstrap.py b # checks the toolchain first\n\
              \nPlain `cargo build` / `cargo run` does not enable the CUDA codegen backend.\n\

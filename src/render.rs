@@ -1930,6 +1930,37 @@ mod tests {
     }
 
     #[test]
+    fn hdr_background_interpolates_texels_instead_of_showing_nearest_blocks() {
+        let path = std::env::temp_dir().join(format!("frac-env-filter-{}.exr", std::process::id()));
+        exr::prelude::write_rgb_file(&path, 2, 2, |x, y| {
+            (8.0f32 * x as f32, 4.0f32 * y as f32, 2.0f32)
+        })
+        .unwrap();
+        let mut gpu = Gpu::new().unwrap();
+        let mut target = gpu.target(64, 32);
+        let mut scene = Scene::preset(FAMILY_QUAT);
+        scene.environment.path = path.to_string_lossy().into_owned();
+        scene.lighting.sun_intensity = 0.0;
+        scene.render.denoise.enabled = false;
+        scene.render.max_bounces = 0;
+        scene.camera.target = [1000.0, 0.0, 0.0];
+        gpu.step(&mut target, &scene, 1, 0, None, false);
+        let raw = gpu.scene_linear(&target);
+        assert!(raw.iter().any(|p| p[0] > 1.0 && p[0] < 7.0));
+        assert!(raw.iter().any(|p| p[1] > 0.2 && p[1] < 3.8));
+        assert!(raw.iter().all(|p| p[0] >= 0.0
+            && p[0] <= 8.0
+            && p[1] >= 0.0
+            && p[1] <= 4.0
+            && p[2] == 2.0));
+        scene.world_render = true;
+        scene.objects.clear();
+        gpu.step(&mut target, &scene, 1, 0, None, false);
+        assert_eq!(gpu.scene_linear(&target), raw);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
     fn hdr_environment_lights_surfaces_and_preserves_background_radiance() {
         let path = std::env::temp_dir().join(format!("frac-env-gpu-{}.exr", std::process::id()));
         exr::prelude::write_rgb_file(&path, 8, 4, |_, _| (4.0f32, 2.0f32, 1.0f32)).unwrap();

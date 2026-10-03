@@ -771,7 +771,7 @@ impl State {
             combo(ui, "ocio.input", &mut self.sel.input, &inputs, "scene_linear (role)");
             ui.end_row();
             ui.label("Display").on_hover_text(
-                "The target display for rendering and export. HDR targets remain selectable on SDR screens; frac-rs presents an SDR preview there. Settings > Display selects the actual window output.",
+                "The target display for rendering and export. HDR targets remain selectable on SDR screens; WarpBro presents an SDR preview there. Settings > Display selects the actual window output.",
             );
             let d_before = self.sel.display.clone();
             combo(ui, "ocio.display", &mut self.sel.display, &displays, &dflt(|n| &n.display));

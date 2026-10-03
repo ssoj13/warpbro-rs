@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::mpsc::{SyncSender, TrySendError};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -50,7 +50,7 @@ pub struct Frame {
     /// Extended-sRGB encoded RGBA32F, prepared with the requested output reference white.
     pub hdr_bytes: Arc<Vec<u8>>,
 }
-fn hdr_canvas_bytes(light: &[[f32; 4]], gain: f32) -> Vec<u8> {
+pub(crate) fn hdr_canvas_bytes(light: &[[f32; 4]], gain: f32) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(light.len() * std::mem::size_of::<[f32; 4]>());
     for pixel in light {
         for value in [
@@ -65,7 +65,7 @@ fn hdr_canvas_bytes(light: &[[f32; 4]], gain: f32) -> Vec<u8> {
     bytes
 }
 impl Frame {
-    fn snapshot(
+    pub(crate) fn snapshot(
         target: &Target,
         generation: u64,
         preview: bool,
@@ -198,15 +198,62 @@ pub enum Command {
     },
     CancelExport,
     ReloadColour,
+    BeginPreview {
+        request: crate::preview::PreviewRequest,
+        cache_all: bool,
+    },
+    SeekPreview {
+        generation: u64,
+        number: u32,
+    },
+    CancelPreview {
+        generation: u64,
+    },
+    RecyclePreviewFrame {
+        frame: Arc<Frame>,
+    },
 }
 #[derive(Clone)]
 pub enum RenderEvent {
-    Ready { name: String },
+    Ready {
+        name: String,
+    },
     Error(String),
-    Thumbnail { id: u64, frame: Arc<Frame> },
-    ExportProgress { id: u64, samples: u32, total: u32 },
-    ExportFrame { id: u64, frame: Arc<Frame> },
-    ExportFailed { id: u64, error: String },
+    Thumbnail {
+        id: u64,
+        frame: Arc<Frame>,
+    },
+    ExportProgress {
+        id: u64,
+        samples: u32,
+        total: u32,
+    },
+    ExportFrame {
+        id: u64,
+        frame: Arc<Frame>,
+    },
+    ExportFailed {
+        id: u64,
+        error: String,
+    },
+    PreviewFrame {
+        generation: u64,
+        number: u32,
+        frame: Arc<Frame>,
+    },
+    PreviewProgress {
+        generation: u64,
+        completed: u32,
+        total: u32,
+        bytes: usize,
+    },
+    PreviewReady {
+        generation: u64,
+    },
+    PreviewFailed {
+        generation: u64,
+        error: String,
+    },
 }
 
 #[derive(Default)]
@@ -225,6 +272,12 @@ struct Mailbox {
     pending_export: Option<RenderEvent>,
     pending_failure: Option<RenderEvent>,
     last_error: Option<String>,
+    preview_generation: Option<u64>,
+    preview_control: Option<Command>,
+    preview_seek: Option<(u64, u32)>,
+    pending_preview_frame: Option<RenderEvent>,
+    pending_preview_status: Option<RenderEvent>,
+    recycled_preview: [Option<Arc<Frame>>; 3],
 }
 struct Shared {
     state: Mutex<Mailbox>,
@@ -298,9 +351,24 @@ impl RenderService {
         events.extend(state.pending_export.take());
         events.extend(state.pending_failure.take());
         events.extend(state.last_error.take().map(RenderEvent::Error));
+        events.extend(state.pending_preview_frame.take());
+        events.extend(state.pending_preview_status.take());
         self.shared.wake.notify_one();
         events
     }
+    /// Replaceable preview intents never wait for a renderer/cache mutex on the UI.
+    pub fn try_preview_command(&self, command: Command) -> Result<(), Command> {
+        queue_preview_command(&self.shared, command)
+    }
+
+    pub(crate) fn preview_stopped(&self) -> bool {
+        match self.shared.state.try_lock() {
+            Ok(state) => state.stopping,
+            Err(TryLockError::Poisoned(error)) => error.into_inner().stopping,
+            Err(TryLockError::WouldBlock) => false,
+        }
+    }
+
     pub fn port(&self) -> RenderPort {
         RenderPort {
             shared: self.shared.clone(),
@@ -309,6 +377,58 @@ impl RenderService {
     pub fn try_command(&self, command: Command) -> Result<(), String> {
         self.port().try_command(command)
     }
+}
+
+fn queue_preview_command(shared: &Shared, command: Command) -> Result<(), Command> {
+    let mut state = match shared.state.try_lock() {
+        Ok(state) => state,
+        Err(TryLockError::Poisoned(error)) => error.into_inner(),
+        Err(TryLockError::WouldBlock) => return Err(command),
+    };
+    if state.stopping {
+        return Err(command);
+    }
+    match command {
+        command @ Command::BeginPreview { .. } => {
+            if let Command::BeginPreview { request, .. } = &command {
+                state.preview_generation = Some(request.generation);
+            }
+            state.preview_control = Some(command);
+            state.preview_seek = None;
+        }
+        Command::SeekPreview { generation, number } => {
+            if state.preview_generation == Some(generation) {
+                state.preview_seek = Some((generation, number));
+            }
+        }
+        command @ Command::CancelPreview { generation } => {
+            if state.preview_generation == Some(generation) {
+                state.preview_generation = None;
+                state.preview_control = Some(command);
+                state.preview_seek = None;
+            }
+        }
+        Command::RecyclePreviewFrame { frame } => {
+            if !state
+                .recycled_preview
+                .iter()
+                .flatten()
+                .any(|old| Arc::ptr_eq(old, &frame))
+            {
+                let Some(slot) = state
+                    .recycled_preview
+                    .iter_mut()
+                    .find(|slot| slot.is_none())
+                else {
+                    return Err(Command::RecyclePreviewFrame { frame });
+                };
+                *slot = Some(frame);
+            }
+        }
+        other => return Err(other),
+    }
+    shared.wake.notify_one();
+    Ok(())
 }
 
 /// A command producer for background coordinators. Dropping it never stops rendering.
@@ -337,7 +457,18 @@ impl RenderPort {
             | Command::RenderExport {
                 width, height, spp, ..
             } => validate_size(*width, *height, *spp)?,
+            Command::BeginPreview { request, .. } => request.validate()?,
             _ => {}
+        }
+        if matches!(
+            &command,
+            Command::BeginPreview { .. }
+                | Command::SeekPreview { .. }
+                | Command::CancelPreview { .. }
+                | Command::RecyclePreviewFrame { .. }
+        ) {
+            return queue_preview_command(&self.shared, command)
+                .map_err(|_| "Renderer mailbox is busy; retry next UI tick".to_string());
         }
         let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
         if state.stopping {
@@ -369,8 +500,58 @@ impl Drop for RenderService {
         // Do not join on the UI thread; the worker finishes its bounded CUDA batch and exits.
     }
 }
+fn recycle_mailbox_frame(state: &mut Mailbox, frame: Arc<Frame>) {
+    if state
+        .recycled_preview
+        .iter()
+        .flatten()
+        .any(|old| Arc::ptr_eq(old, &frame))
+    {
+        return;
+    }
+    if let Some(slot) = state
+        .recycled_preview
+        .iter_mut()
+        .find(|slot| slot.is_none())
+    {
+        *slot = Some(frame);
+    }
+}
 fn push_event(shared: &Shared, event: RenderEvent) {
     let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+    match &event {
+        RenderEvent::PreviewFrame { generation, .. } => {
+            if state.preview_generation == Some(*generation) {
+                if let Some(RenderEvent::PreviewFrame { frame, .. }) =
+                    state.pending_preview_frame.replace(event)
+                {
+                    recycle_mailbox_frame(&mut state, frame);
+                }
+            } else if let RenderEvent::PreviewFrame { frame, .. } = event {
+                recycle_mailbox_frame(&mut state, frame);
+            }
+            return;
+        }
+        RenderEvent::PreviewReady { generation }
+        | RenderEvent::PreviewFailed { generation, .. } => {
+            if state.preview_generation == Some(*generation) {
+                state.pending_preview_status = Some(event);
+            }
+            return;
+        }
+        RenderEvent::PreviewProgress { generation, .. } => {
+            if state.preview_generation != Some(*generation) {
+                return;
+            }
+            if let Some(index) = state.events.iter().position(|e| matches!(e, RenderEvent::PreviewProgress { generation: other, .. } if other == generation)) {
+                state.events[index] = event; return;
+            }
+            if state.events.len() >= QUEUE_LIMIT {
+                return;
+            }
+        }
+        _ => {}
+    }
     if let RenderEvent::ExportProgress { id, .. } = &event {
         if let Some(index) = state
             .events
@@ -519,7 +700,252 @@ struct RenderJob {
     spp: u32,
     reply: Option<SyncSender<RenderEvent>>,
 }
-fn validate_size(width: usize, height: usize, spp: u32) -> Result<(), String> {
+
+struct PreviewSession {
+    cache: crate::preview::PreviewCache,
+    wanted: Option<u32>,
+    next_fill: u32,
+    fill: bool,
+    job: Option<(u32, u64, RenderJob)>,
+    target: Option<Target>,
+}
+
+/// Three presentations cover the UI frame, upload staging, and the worker. Reuse
+/// waits for both frame and byte ownership; never clone an in-flight pixel buffer.
+#[derive(Default)]
+struct PresentationPool {
+    slots: [Option<Arc<Frame>>; 3],
+    created: usize,
+}
+impl PresentationPool {
+    fn acquire(&mut self) -> Option<Arc<Frame>> {
+        if let Some(index) = self.slots.iter().position(|slot| {
+            slot.as_ref().is_some_and(|frame| {
+                Arc::strong_count(frame) == 1
+                    && Arc::strong_count(&frame.sdr_bytes) == 1
+                    && Arc::strong_count(&frame.hdr_bytes) == 1
+            })
+        }) {
+            return self.slots[index].take();
+        }
+        if self.created >= self.slots.len() {
+            return None;
+        }
+        self.created += 1;
+        Some(Arc::new(empty_presentation()))
+    }
+    fn recycle(&mut self, frame: Arc<Frame>) {
+        if self
+            .slots
+            .iter()
+            .flatten()
+            .any(|old| Arc::ptr_eq(old, &frame))
+        {
+            return;
+        }
+        if let Some(slot) = self.slots.iter_mut().find(|slot| slot.is_none()) {
+            *slot = Some(frame);
+        }
+    }
+}
+fn empty_presentation() -> Frame {
+    Frame {
+        generation: 0,
+        preview: true,
+        width: 0,
+        height: 0,
+        pixels: Vec::new(),
+        light: Vec::new(),
+        radiance: Vec::new(),
+        hdr: false,
+        colour_error: None,
+        denoised_samples: 0,
+        denoise_ms: 0.0,
+        denoise_error: None,
+        samples: 0,
+        last_ms: 0.0,
+        last_spp: 0,
+        sdr_bytes: Arc::new(Vec::new()),
+        hdr_bytes: Arc::new(Vec::new()),
+    }
+}
+fn preview_current(shared: &Shared, generation: u64) -> bool {
+    let state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+    !state.stopping && state.preview_generation == Some(generation)
+}
+fn fail_preview(session: &mut PreviewSession, shared: &Shared, error: String) {
+    session.fill = false;
+    session.wanted = None;
+    session.job = None;
+    push_event(
+        shared,
+        RenderEvent::PreviewFailed {
+            generation: session.cache.request.generation,
+            error,
+        },
+    );
+}
+fn present_preview(
+    session: &mut PreviewSession,
+    pool: &mut PresentationPool,
+    shared: &Shared,
+) -> bool {
+    let Some(number) = session
+        .wanted
+        .filter(|number| session.cache.contains(*number))
+    else {
+        return false;
+    };
+    let Some(mut frame) = pool.acquire() else {
+        return false;
+    };
+    if session
+        .cache
+        .get_into(number, Arc::get_mut(&mut frame).expect("unique pool frame"))
+        .is_none()
+    {
+        pool.recycle(frame);
+        return false;
+    }
+    session.wanted = None;
+    push_event(
+        shared,
+        RenderEvent::PreviewFrame {
+            generation: session.cache.request.generation,
+            number,
+            frame,
+        },
+    );
+    true
+}
+fn step_preview(
+    gpu: &mut Gpu,
+    session: &mut PreviewSession,
+    pool: &mut PresentationPool,
+    shared: &Shared,
+    interactive: bool,
+) -> bool {
+    let generation = session.cache.request.generation;
+    if !preview_current(shared, generation) {
+        return false;
+    }
+    let mut worked = present_preview(session, pool, shared);
+    if session.job.is_none() && !interactive {
+        let count = session
+            .cache
+            .request
+            .frame_count()
+            .expect("validated range");
+        let number = if session.fill {
+            while session.next_fill < count
+                && session
+                    .cache
+                    .contains(session.cache.request.first + session.next_fill)
+            {
+                session.next_fill += 1;
+            }
+            if session.next_fill == count {
+                session.fill = false;
+                push_event(shared, RenderEvent::PreviewReady { generation });
+                return true;
+            }
+            Some(session.cache.request.first + session.next_fill)
+        } else {
+            session
+                .wanted
+                .filter(|number| !session.cache.contains(*number))
+        };
+        if let Some(number) = number {
+            let request = &session.cache.request;
+            let scene = if let Some(document) = &request.scene.document {
+                document.snapshot(number as f64)
+            } else {
+                Ok(request.scene.as_ref().clone())
+            };
+            let scene = match scene.and_then(|scene| {
+                gpu.prepare_scene(&scene, request.width, request.height)
+                    .map(|()| scene)
+            }) {
+                Ok(scene) => scene,
+                Err(error) => {
+                    fail_preview(session, shared, error);
+                    return true;
+                }
+            };
+            session.job = Some((
+                number,
+                session.cache.manager.current_epoch(),
+                RenderJob {
+                    id: generation,
+                    scene,
+                    target: session
+                        .target
+                        .take()
+                        .unwrap_or_else(|| gpu.target(request.width, request.height)),
+                    spp: request.spp,
+                    reply: None,
+                },
+            ));
+        }
+    }
+    let Some((_, _, job)) = &mut session.job else {
+        return worked;
+    };
+    if !background_batch_allowed(job.target.last_ms, job.target.last_spp, interactive) {
+        return worked;
+    }
+    gpu.prepare_target(&mut job.target, &job.scene, None);
+    let batch = batch_size(&job.target, job.spp.saturating_sub(job.target.samples));
+    let final_pass = job.target.samples.saturating_add(batch) >= job.spp;
+    gpu.step(
+        &mut job.target,
+        &job.scene,
+        batch,
+        session.cache.request.seed,
+        None,
+        final_pass,
+    );
+    worked = true;
+    if !preview_current(shared, generation) {
+        return worked;
+    }
+    if job.target.samples >= job.spp {
+        let (number, epoch, job) = session.job.take().expect("completed preview job");
+        let request = &session.cache.request;
+        let frame = Frame::snapshot(
+            &job.target,
+            generation,
+            true,
+            request.output_hdr,
+            request.white_nits,
+        );
+        session.target = Some(job.target);
+        if let Err(error) = session.cache.store(number, frame, epoch) {
+            fail_preview(session, shared, error);
+            return worked;
+        }
+        if session.fill && number == session.cache.request.first + session.next_fill {
+            session.next_fill += 1;
+        }
+        push_event(
+            shared,
+            RenderEvent::PreviewProgress {
+                generation,
+                completed: session.cache.count(),
+                total: session
+                    .cache
+                    .request
+                    .frame_count()
+                    .expect("validated range"),
+                bytes: session.cache.bytes(),
+            },
+        );
+        worked |= present_preview(session, pool, shared);
+    }
+    worked
+}
+
+pub(crate) fn validate_size(width: usize, height: usize, spp: u32) -> Result<(), String> {
     if width == 0
         || height == 0
         || width > 16384
@@ -561,8 +987,10 @@ fn run_worker(shared: &Shared) {
     let mut viewport: Option<Viewport> = None;
     let mut export: Option<RenderJob> = None;
     let mut thumbnail: Option<RenderJob> = None;
+    let mut preview: Option<PreviewSession> = None;
+    let mut presentations = PresentationPool::default();
     loop {
-        let (request, command, cancel) = {
+        let (request, command, cancel, preview_control, preview_seek, recycled) = {
             let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
             if state.stopping {
                 return;
@@ -590,8 +1018,14 @@ fn run_worker(shared: &Shared) {
                 state.viewport.take(),
                 command,
                 std::mem::take(&mut state.cancel_export),
+                state.preview_control.take(),
+                state.preview_seek.take(),
+                std::mem::take(&mut state.recycled_preview),
             )
         };
+        for frame in recycled.into_iter().flatten() {
+            presentations.recycle(frame);
+        }
         if cancel {
             export = None;
             let mut state = shared.state.lock().unwrap();
@@ -609,8 +1043,98 @@ fn run_worker(shared: &Shared) {
                 viewport = Some(Viewport::new(request));
             }
         }
+        if let Some(control) = preview_control {
+            match control {
+                Command::BeginPreview { request, cache_all } => {
+                    let generation = request.generation;
+                    if let Some(session) = preview
+                        .as_mut()
+                        .filter(|session| session.cache.request.compatible_content(&request))
+                    {
+                        let first = request.first;
+                        if let Err(error) = session.cache.restart(request, cache_all) {
+                            session.cache.request.generation = generation;
+                            fail_preview(session, shared, error);
+                            continue;
+                        }
+                        session.wanted = Some(first);
+                        session.next_fill = 0;
+                        session.fill = cache_all;
+                        if let Some((_, _, job)) = &mut session.job {
+                            job.id = generation;
+                        }
+                        if let Some(v) = &mut viewport {
+                            v.request.active = false;
+                        }
+                        push_event(
+                            shared,
+                            RenderEvent::PreviewProgress {
+                                generation,
+                                completed: session.cache.count(),
+                                total: session
+                                    .cache
+                                    .request
+                                    .frame_count()
+                                    .expect("validated range"),
+                                bytes: session.cache.bytes(),
+                            },
+                        );
+                    } else {
+                        if let Some(old) = preview.take() {
+                            old.cache.invalidate();
+                        }
+                        match crate::preview::PreviewCache::new(request, cache_all) {
+                            Ok(cache) => {
+                                if let Some(v) = &mut viewport {
+                                    v.request.active = false;
+                                }
+                                preview = Some(PreviewSession {
+                                    wanted: Some(cache.request.first),
+                                    next_fill: 0,
+                                    fill: cache_all,
+                                    cache,
+                                    job: None,
+                                    target: None,
+                                });
+                            }
+                            Err(error) => {
+                                push_event(shared, RenderEvent::PreviewFailed { generation, error })
+                            }
+                        }
+                    }
+                }
+                Command::CancelPreview { generation } => {
+                    if let Some(session) = preview
+                        .as_mut()
+                        .filter(|p| p.cache.request.generation == generation)
+                    {
+                        session.fill = false;
+                        session.wanted = None;
+                        session.job = None;
+                        session.cache.manager.increment_generation();
+                    }
+                }
+                _ => {}
+            }
+        }
+        if let Some((generation, number)) = preview_seek {
+            if let Some(session) = preview
+                .as_mut()
+                .filter(|p| p.cache.request.generation == generation)
+            {
+                if session.cache.index(number).is_some() {
+                    session.cache.manager.increment_generation();
+                    session.wanted = Some(number);
+                    // Presentation is served below after a reusable pool slot becomes available.
+                }
+            }
+        }
         if let Some(command) = command {
             match command {
+                Command::BeginPreview { .. }
+                | Command::SeekPreview { .. }
+                | Command::CancelPreview { .. }
+                | Command::RecyclePreviewFrame { .. } => {}
                 Command::CancelExport => export = None,
                 Command::ReloadColour => {
                     gpu.invalidate_colour();
@@ -728,6 +1252,11 @@ fn run_worker(shared: &Shared) {
                 }
             }
         }
+        if export.is_none() {
+            if let Some(session) = &mut preview {
+                worked |= step_preview(&mut gpu, session, &mut presentations, shared, interactive);
+            }
+        }
         if let Some(job) = &mut thumbnail {
             if !interactive && job.target.samples < job.spp {
                 let batch = batch_size(&job.target, job.spp.saturating_sub(job.target.samples));
@@ -748,7 +1277,12 @@ fn run_worker(shared: &Shared) {
             if state.stopping {
                 return;
             }
-            if state.viewport.is_none() && !state.cancel_export {
+            if state.viewport.is_none()
+                && !state.cancel_export
+                && state.preview_control.is_none()
+                && state.preview_seek.is_none()
+                && state.recycled_preview.iter().all(Option::is_none)
+            {
                 let _ = shared.wake.wait_timeout(state, Duration::from_millis(20));
             }
         }
@@ -772,7 +1306,7 @@ fn background_batch_allowed(last_ms: f32, last_spp: u32, interactive: bool) -> b
     // exceeds the interactive budget (or its cost is unknown), defer it until motion ends.
     !interactive || (last_spp > 0 && last_ms > 0.0 && last_ms / last_spp as f32 <= 8.0)
 }
-fn batch_size(target: &Target, remaining: u32) -> u32 {
+pub(crate) fn batch_size(target: &Target, remaining: u32) -> u32 {
     if remaining == 0 {
         return 0;
     }
@@ -859,6 +1393,234 @@ fn step_viewport(gpu: &mut Gpu, active: &mut Viewport, shared: &Shared) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "requires CUDA; verifies Playa cache then play through the real worker"]
+    fn cuda_preview_caches_inclusive_range_then_replays_native_presentation() {
+        let service = RenderService::spawn();
+        let mut scene = Scene::preset(crate::params::FAMILY_BULB);
+        scene.colour.on = false;
+        scene.render.denoise.enabled = false;
+        let request = crate::preview::PreviewRequest {
+            generation: 901,
+            scene: Arc::new(scene),
+            first: 250,
+            last: 252,
+            fps: 24.0,
+            width: 32,
+            height: 18,
+            spp: 2,
+            seed: 7,
+            output_hdr: true,
+            white_nits: 203.0,
+            cache_fraction: 0.01,
+            reserve_gb: 0.0,
+        };
+        service
+            .try_command(Command::BeginPreview {
+                request,
+                cache_all: true,
+            })
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(90);
+        let mut ready = false;
+        let mut replayed = false;
+        while Instant::now() < deadline {
+            for event in service.drain_events() {
+                match event {
+                    RenderEvent::PreviewProgress {
+                        completed, total, ..
+                    } => {
+                        assert_eq!(total, 3);
+                        assert!(completed <= 3);
+                    }
+                    RenderEvent::PreviewReady { generation: 901 } => {
+                        ready = true;
+                        service
+                            .try_command(Command::SeekPreview {
+                                generation: 901,
+                                number: 252,
+                            })
+                            .unwrap();
+                    }
+                    RenderEvent::PreviewFrame { number, frame, .. } => {
+                        assert_eq!(frame.samples, 2);
+                        assert_eq!(frame.light.len(), 32 * 18);
+                        assert_eq!(frame.sdr_bytes.len(), 32 * 18 * 4);
+                        assert_eq!(frame.hdr_bytes.len(), 32 * 18 * 16);
+                        assert!(frame.light.iter().flatten().all(|value| value.is_finite()));
+                        assert!(frame.colour_error.is_none());
+                        if ready && number == 252 {
+                            replayed = true;
+                        }
+                        service
+                            .try_command(Command::RecyclePreviewFrame { frame })
+                            .unwrap();
+                    }
+                    RenderEvent::PreviewFailed { error, .. } | RenderEvent::Error(error) => {
+                        panic!("{error}")
+                    }
+                    _ => {}
+                }
+            }
+            if replayed {
+                break;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            ready && replayed,
+            "inclusive three-frame cache and last frame playback"
+        );
+        service
+            .try_command(Command::CancelPreview { generation: 901 })
+            .unwrap();
+    }
+
+    #[test]
+    fn preview_pool_waits_for_staged_bytes_and_reuses_arc_identity() {
+        let mut pool = PresentationPool::default();
+        let frame = pool.acquire().unwrap();
+        let identity = Arc::as_ptr(&frame);
+        let staged = frame.hdr_bytes.clone();
+        pool.recycle(frame);
+        let second = pool.acquire().unwrap();
+        let third = pool.acquire().unwrap();
+        assert!(
+            pool.acquire().is_none(),
+            "fixed three-slot pool must not grow while staging holds bytes"
+        );
+        drop(staged);
+        let reused = pool.acquire().unwrap();
+        assert_eq!(Arc::as_ptr(&reused), identity);
+        pool.recycle(second);
+        pool.recycle(third);
+        pool.recycle(reused);
+        assert_eq!(pool.created, 3);
+    }
+    #[test]
+    fn preview_mailbox_retains_begin_coalesces_seek_and_recycles_replaced_results() {
+        let shared = Shared {
+            state: Mutex::new(Mailbox::default()),
+            wake: Condvar::new(),
+        };
+        let req = crate::preview::PreviewRequest {
+            generation: 5,
+            scene: Arc::new(request().scene),
+            first: 10,
+            last: 12,
+            fps: 24.0,
+            width: 1,
+            height: 1,
+            spp: 8,
+            seed: 0,
+            output_hdr: false,
+            white_nits: 100.0,
+            cache_fraction: 0.01,
+            reserve_gb: 0.0,
+        };
+        assert!(
+            queue_preview_command(
+                &shared,
+                Command::BeginPreview {
+                    request: req,
+                    cache_all: true
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            queue_preview_command(
+                &shared,
+                Command::SeekPreview {
+                    generation: 5,
+                    number: 12
+                }
+            )
+            .is_ok()
+        );
+        assert!(matches!(
+            shared.state.lock().unwrap().preview_control,
+            Some(Command::BeginPreview { .. })
+        ));
+        let old = completed_frame(5, true);
+        let ptr = Arc::as_ptr(&old);
+        push_event(
+            &shared,
+            RenderEvent::PreviewFrame {
+                generation: 5,
+                number: 10,
+                frame: old,
+            },
+        );
+        push_event(
+            &shared,
+            RenderEvent::PreviewFrame {
+                generation: 5,
+                number: 12,
+                frame: completed_frame(5, true),
+            },
+        );
+        assert!(
+            shared
+                .state
+                .lock()
+                .unwrap()
+                .recycled_preview
+                .iter()
+                .flatten()
+                .any(|frame| Arc::as_ptr(frame) == ptr)
+        );
+        assert!(queue_preview_command(&shared, Command::CancelPreview { generation: 5 }).is_ok());
+        assert!(
+            queue_preview_command(
+                &shared,
+                Command::SeekPreview {
+                    generation: 5,
+                    number: 10
+                }
+            )
+            .is_ok()
+        );
+        assert_eq!(
+            shared.state.lock().unwrap().preview_generation,
+            None,
+            "late seek must not resurrect cancelled work"
+        );
+    }
+    #[test]
+    fn preview_controller_shutdown_drops_pending_transport_without_waiting() {
+        let service = RenderService {
+            shared: Arc::new(Shared {
+                state: Mutex::new(Mailbox {
+                    stopping: true,
+                    ..Mailbox::default()
+                }),
+                wake: Condvar::new(),
+            }),
+        };
+        let req = crate::preview::PreviewRequest {
+            generation: 5,
+            scene: Arc::new(request().scene),
+            first: 10,
+            last: 12,
+            fps: 24.0,
+            width: 1,
+            height: 1,
+            spp: 8,
+            seed: 0,
+            output_hdr: false,
+            white_nits: 100.0,
+            cache_fraction: 0.01,
+            reserve_gb: 0.0,
+        };
+        let mut controller = crate::preview::PreviewController::default();
+        controller.start(req, false).unwrap();
+        assert_eq!(controller.update(0.01, &service), None);
+        assert_eq!(controller.position(), None);
+        assert!(!controller.running());
+        assert_eq!(controller.error(), Some("CUDA worker is unavailable"));
+    }
 
     #[test]
     fn hdr_canvas_direct_bytes_match_original_float_canvas() {

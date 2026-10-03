@@ -1,11 +1,13 @@
-# frac-rs
+# WarpBro
 
 A browser for path-traced 3D fractals. The tracing kernels are **Rust compiled straight to PTX** by
 NVIDIA's [cuda-oxide](https://github.com/NVlabs/cuda-oxide) rustc backend. The tracer uses no CUDA C++
 or shader DSL: host code and tracing kernels live in the same crate and are built in a single
 `cargo oxide build`. The UI is [egui](https://github.com/emilk/egui).
+The project repository is [WarpBro](https://github.com/ssoj13/WarpBro), with SSH remote
+`ssh://git@github.com/ssoj13/WarpBro.git`.
 
-![frac-rs browsing the Menger sponge](docs/ui-menger.jpg)
+![WarpBro browsing the Menger sponge](docs/ui-menger.jpg)
 
 ## What it does
 
@@ -29,9 +31,10 @@ or shader DSL: host code and tracing kernels live in the same crate and are buil
     thin film and anisotropy. The [`standard-surface-bsdf`](https://github.com/ssoj13/render-rs/tree/13c757e45aecc490352bc82ebd5de6ce2e234274) crate
     is called directly from the kernel.
 - **14 palettes** and orbit-trap colouring (origin, plane, point).
-- **Material library:** the 50 curated presets of usd-rs `usd-mat-lib` in 12 categories (metals,
+- **Material Gallery:** actual World material nodes appear as asynchronous GPU-rendered sphere cards.
+  The 50 curated presets of usd-rs `usd-mat-lib` remain available through explicit creation/apply menus in 12 categories (metals,
   brushed metals, plastics, car paint, ceramic, stone, wood, leather, velvet and fabric, rubber,
-  paper, glass, emissive), each shown as a GPU-rendered sphere swatch.
+  paper, glass, emissive).
   - Presets are translated the way usd-rs `usd-hd-pt` maps UsdPreviewSurface to Standard
     Surface. Sheen (velvet) and anisotropy (brushed metal) select the Standard Surface kernels.
   - The `pt-material-ext` facing mix (pearlescent, oil slick) works in both models.
@@ -65,10 +68,10 @@ or shader DSL: host code and tracing kernels live in the same crate and are buil
 
 ## Origin
 
-frac-rs is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX plug-ins
+WarpBro is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX plug-ins
 (WGPU/WGSL):
 
-| ofx-rs / render-rs | frac-rs |
+| ofx-rs / render-rs | WarpBro |
 |---|---|
 | `fractal3d.wgsl`: estimates, march, normals, palette, sky | `src/gpu.rs` |
 | `pathtrace.wgsl` + render-rs `pt-integrator` | `src/gpu.rs`, `trace_path` |
@@ -99,7 +102,7 @@ frac-rs is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX
   `python bootstrap.py d --fix` also installs or migrates the CLI to this revision; regular builds
   check its source without reinstalling it.
 - Git dependencies resolve through GitHub SSH; Cargo.lock records their exact commits.
-  Playa is pinned to `6b1c6c7d53522b696f859af400e0b141aaab2ba5`. OIDN reuses squarebob-rs
+  Playa is pinned to `00d90428d6c931b69b7117fd2a4cdf143d075413`. OIDN reuses squarebob-rs
   `pt-denoise-oidn` and `render-core` at `3dedf872cddb06b4aa5689f5cfe022468cdb6f3b`;
   the shared `oidn-rs` branch source is locked to `a93300d744953865cad3f1ba610107e981d8deee`.
   `cam-controls` and `cam-viewport` use gitnexus-rs commit
@@ -112,7 +115,7 @@ frac-rs is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX
 ## Build and run
 
 On Windows, `python bootstrap.py d --fix` sets up the Rust tools, then `python bootstrap.py b`
-builds the release binary. The bootstrap discovers the MSVC, Windows SDK and CUDA environment
+builds the release binary `target/release/WarpBro.exe`. The bootstrap discovers the MSVC, Windows SDK and CUDA environment
 through `vcv-rs`, so a Developer Command Prompt is unnecessary.
 
 On Linux / WSL2:
@@ -120,8 +123,8 @@ On Linux / WSL2:
 ```sh
 export CUDA_HOME=/usr/local/cuda CUDA_OXIDE_LLC=/usr/bin/llc-22
 cargo oxide run                                         # the browser
-./target/release/frac-rs --gallery out 1920 1080 256    # every preset to out/*.png
-./target/release/frac-rs --bench 960 540 32             # timing table
+./target/release/WarpBro --gallery out 1920 1080 256    # every preset to out/*.png
+./target/release/WarpBro --bench 960 540 32             # timing table
 ```
 
 **Controls:**
@@ -149,15 +152,27 @@ and toolbar position are saved between runs. **Settings → Fonts** (also **Wind
 Fonts…**) selects the built-in font family, body/control, small, heading and monospace text sizes,
 and UI scale.
 
-The **Attribute Editor** follows Playa's original composition: `egui-attr-grid` inside
+One universal **Attribute Editor** edits the selected node of any supported type, including materials.
+It follows Playa's original composition: `egui-attr-grid` inside
 `egui-titlebar::CollapsingSection`, with typed property controls from `egui-widgets-rs`.
 Short labels keep rows compact; tooltips retain full property paths. Shared attribute metrics
 set label/value columns, numeric component widths, square icon buttons and vertical alignment
 across the editor and Timeline. **Settings → Controls** adjusts these compact layout metrics.
 Numeric gestures defer their undo transaction until completion.
 
-One status bar provides resizable sections. The Materials library can be opened for browsing
-and assigns a chosen material to the selected object through the existing World workflow.
+One status bar provides resizable sections. The current Materials revision makes the gallery
+show actual World material nodes. Clicking a card selects its UUID and opens the existing
+Attribute Editor. Assignment uses the object's Material attribute or **Assign to selected objects**
+in the card context menu. The sibling toolbar buttons **+ New material** and **Create from preset**
+create a default node or a preset-based node respectively, without assigning it. The card's **Apply preset to this material** action updates the existing UUID
+and every consumer. **Refresh preview** retries terminal rendering/colour failures; stale
+thumbnail results are rejected. Ordinary clicks only select the material for the shared editor.
+Gallery thumbnails compare evaluated Material values per UUID and become dirty only when those
+parameters change. Renames, unrelated edits and unchanged animated values retain their textures;
+parameter changes invalidate pending preview tickets and reject stale results. Final5 passed
+181 tests, including the preview-error regression, and the production release build passed.
+Native interaction checks remain pending in
+[Plan 5](plans/plan5.md).
 Toolkit changes are published at `e953b2cc6836db2bb47aa44bb7995d9696636034` over GitHub SSH;
 40 toolkit tests and strict Clippy for five crates passed. The grid and Timeline use the same
 label/value/row geometry. Narrow panels now shrink labels to preserve numeric editor space
@@ -239,7 +254,7 @@ Screenshot / Render PNG saves the selected rendering: SDR sRGB/selected monitor 
 `whiteLuminance = 100`; this is display-referred light, not a scene-linear master.
 
 ```sh
-./target/release/frac-rs --gallery out 1920 1080 256 --hdr --display-exr
+./target/release/WarpBro --gallery out 1920 1080 256 --hdr --display-exr
 CUDA_HOME=/usr/local/cuda CUDA_OXIDE_LLC=/usr/bin/llc-22 cargo oxide test -- --release
 ```
 
@@ -265,6 +280,8 @@ and file output even when the GUI stops updating. **Cancel** stops the run; comp
 frames remain, while an unfinished video is discarded. Existing outputs are preserved unless
 **Overwrite existing output** is enabled; finished outputs are published atomically.
 
+For compatibility, the local checkout folder, profile and data locations retain the legacy
+`frac-rs` name during the WarpBro rename.
 Settings are saved in the platform config directory (`~/.config/frac-rs/settings.json` on
 Linux); the colour selection also travels with scene bookmarks. Older bookmarks default
 to the ACES 2.0 SDR view.
@@ -283,10 +300,11 @@ Current follow-up work is tracked in [render optimization](plans/plan2.md),
 File Open/Save/Save As and five 250-frame presets (frames 0–249 at 24 FPS) are implemented.
 Camera orbit speed (degrees/second) and phase are animatable World attributes; old scenes default
 to zero speed. Timeline evaluation supports independent seeking and animated speed.
-The system suite passed 144 tests, including GPU tests; two targeted preset tests and the
-release build passed after the final framing constants. All 1,250 GPU fixture frames rendered,
-and the 15 first/middle/last shots passed visual framing inspection. Native File interactions
-and manual UI latency remain pending.
+The earlier preset suite passed 144 tests; the latest WarpBro suite passed 181 tests.
+The final production release build passed without Rust warnings. All 250 final preset curves
+are covered by CPU tests. The 1,250-frame GPU run at 160×90/4 SPP preceded only the last bounded
+Chrome tune; the final 15-still rerun at 640×360/32 SPP passed and its
+[contact sheet](target/verification/unfolding-v2/contact.png) was inspected, including Chrome's accepted first frame. Native File interactions and manual UI latency remain pending.
 The captured Nsight kernel baseline and CPU preparation measurements do not establish a GPU speedup.
 
 For reproducible preset fixtures, use `--animated-fixtures DIR [W H SPP]`: it writes first,

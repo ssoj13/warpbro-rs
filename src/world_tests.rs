@@ -1,6 +1,489 @@
 use super::*;
 
 #[test]
+fn standalone_material_creation_selects_one_node_without_assigning_and_undo_restores_selection() {
+    let mut e = editor();
+    let fractal = find(&e, WorldKind::Fractal);
+    let before = e.document.clone();
+    let previous_selection = e.selection;
+    let mut surface = crate::scene::Material::default();
+    crate::materials::PRESETS[1].apply(&mut surface);
+    e.execute(WorldCommand::CreateMaterial {
+        material: surface.clone(),
+        name: "Shared copper".into(),
+    })
+    .unwrap();
+    let id = e.selection.unwrap();
+    assert_eq!(e.selected, vec![id]);
+    assert_eq!(e.document.info(id).unwrap().kind, WorldKind::Material);
+    assert_eq!(e.document.info(id).unwrap().name, "Shared copper");
+    assert_eq!(e.document.material(id, 0.0).unwrap(), surface);
+    assert_eq!(e.document.nodes().len(), before.nodes().len() + 1);
+    assert_eq!(
+        e.document.assigned_material(fractal).unwrap(),
+        before.assigned_material(fractal).unwrap()
+    );
+    let created = e.document.clone();
+    assert!(e.undo());
+    assert_eq!(e.document, before);
+    assert_eq!(e.selection, previous_selection);
+    assert!(e.redo());
+    assert_eq!(e.document, created);
+    assert_eq!(e.selection, Some(id));
+    assert_eq!(e.selected, vec![id]);
+    let mut isolated = e.document.clone();
+    isolated.active_camera = Some(NodeId::new());
+    assert!(isolated.snapshot(0.0).is_err());
+    assert_eq!(isolated.material(id, 0.0).unwrap(), surface);
+    assert!(isolated.material(fractal, 0.0).is_err());
+    assert!(isolated.material(id, f64::NAN).is_err());
+}
+
+#[test]
+fn shared_material_assignments_reuse_uuid_and_animated_edits_roundtrip_for_all_consumers() {
+    let mut e = editor();
+    let first = find(&e, WorldKind::Fractal);
+    e.execute(WorldCommand::Duplicate(first)).unwrap();
+    let second = e.selection.unwrap();
+    e.execute(WorldCommand::CreateMaterial {
+        material: crate::scene::Material::default(),
+        name: "Animated shared surface".into(),
+    })
+    .unwrap();
+    let material = e.selection.unwrap();
+    let before_assignment = e.document.clone();
+    e.execute(WorldCommand::Batch(
+        vec![first, second]
+            .into_iter()
+            .map(|id| WorldCommand::AssignMaterial {
+                id,
+                material: Some(material),
+            })
+            .collect(),
+    ))
+    .unwrap();
+    let assigned = e.document.clone();
+    assert!(e.undo());
+    assert_eq!(e.document, before_assignment);
+    assert!(e.redo());
+    assert_eq!(e.document, assigned);
+    let revision = e.revision();
+    let node_count = e.document.nodes().len();
+    e.execute(WorldCommand::AssignMaterial {
+        id: first,
+        material: Some(material),
+    })
+    .unwrap();
+    assert_eq!(e.revision(), revision);
+    assert_eq!(e.document.nodes().len(), node_count);
+    set(
+        &mut e,
+        material,
+        "/material/specular_roughness",
+        json!(0.2),
+        0.0,
+    );
+    e.execute(WorldCommand::Key {
+        id: material,
+        path: "/material/specular_roughness".into(),
+        frame: 0.0,
+    })
+    .unwrap();
+    set(
+        &mut e,
+        material,
+        "/material/specular_roughness",
+        json!(0.8),
+        20.0,
+    );
+    let saved: WorldDocument =
+        serde_json::from_str(&serde_json::to_string(&e.document).unwrap()).unwrap();
+    for frame in [0.0, 5.5, 10.0, 20.0] {
+        let surface = e.document.material(material, frame).unwrap();
+        assert_eq!(saved.material(material, frame).unwrap(), surface);
+        for id in [first, second] {
+            assert_eq!(saved.assigned_material(id).unwrap(), Some(material));
+            assert_eq!(saved.node_scene(id, frame).unwrap().material, surface);
+        }
+        let snapshot = saved.snapshot(frame).unwrap();
+        assert_eq!(snapshot.objects.len(), 2);
+        assert!(
+            snapshot
+                .objects
+                .iter()
+                .all(|object| object.material == surface)
+        );
+    }
+    let surface = e.document.material(material, 10.0).unwrap();
+    assert!((surface.specular_roughness - 0.5).abs() < 1e-6);
+}
+
+#[test]
+fn material_assignment_batch_rejects_locked_or_invalid_targets_without_partial_edits() {
+    let mut e = editor();
+    let first = find(&e, WorldKind::Fractal);
+    e.execute(WorldCommand::Duplicate(first)).unwrap();
+    let second = e.selection.unwrap();
+    e.execute(WorldCommand::CreateMaterial {
+        material: crate::scene::Material::default(),
+        name: "Candidate".into(),
+    })
+    .unwrap();
+    let material = e.selection.unwrap();
+    set(&mut e, second, "/locked", json!(true), 0.0);
+    let before = e.document.clone();
+    let revision = e.revision();
+    assert!(
+        e.execute(WorldCommand::Batch(vec![
+            WorldCommand::AssignMaterial {
+                id: first,
+                material: Some(material)
+            },
+            WorldCommand::AssignMaterial {
+                id: second,
+                material: Some(material)
+            },
+        ]))
+        .is_err()
+    );
+    assert_eq!(e.document, before);
+    assert_eq!(e.revision(), revision);
+    for (receiver, target) in [
+        (first, e.document.active_camera.unwrap()),
+        (material, material),
+        (first, NodeId::new()),
+    ] {
+        assert!(
+            e.execute(WorldCommand::AssignMaterial {
+                id: receiver,
+                material: Some(target)
+            })
+            .is_err()
+        );
+        assert_eq!(e.document, before);
+        assert_eq!(e.revision(), revision);
+    }
+}
+
+#[test]
+fn unchanged_connected_camera_lens_allows_navigation_but_requested_lens_edit_rolls_back() {
+    let mut e = editor();
+    let camera = find(&e, WorldKind::Camera);
+    let source = find(&e, WorldKind::Fractal);
+    let mut source_attrs = e.document.attrs(source).unwrap();
+    source_attrs.set("/custom/fov", to_attr(&json!(32.0)));
+    e.document.store_attrs(source, &source_attrs).unwrap();
+    let mut camera_attrs = e.document.attrs(camera).unwrap();
+    camera_attrs.set_conn(
+        "/camera/fov_y_degrees",
+        Some(playa_engine::entities::attrs::AttrConnection {
+            source_layer: source.0,
+            source_key: "/custom/fov".into(),
+        }),
+    );
+    e.document.store_attrs(camera, &camera_attrs).unwrap();
+    let mut desired = e.document.snapshot(17.0).unwrap();
+    assert_eq!(desired.camera.fov_y_degrees, 32.0);
+    desired.camera.target[0] += 0.7;
+    e.navigate_camera(&desired, 17.0, false, None).unwrap();
+    assert_camera_navigation_pose(&e.document.snapshot(17.0).unwrap(), &desired);
+    assert_eq!(
+        e.document.snapshot(17.0).unwrap().camera.fov_y_degrees,
+        32.0
+    );
+    let before = e.document.clone();
+    let revision = e.revision();
+    desired.camera.target[1] += 0.5;
+    desired.camera.fov_y_degrees = 45.0;
+    assert!(
+        e.navigate_camera(&desired, 17.0, false, None)
+            .unwrap_err()
+            .contains("connected")
+    );
+    assert_eq!(e.document, before);
+    assert_eq!(e.revision(), revision);
+}
+
+fn assert_camera_navigation_pose(actual: &Scene, expected: &Scene) {
+    let actual_pack = actual.pack(640, 360);
+    let expected_pack = expected.pack(640, 360);
+    for start in [
+        crate::params::P_CAM_ORIGIN,
+        crate::params::P_CAM_FORWARD,
+        crate::params::P_CAM_UP,
+    ] {
+        for lane in 0..3 {
+            assert!(
+                (actual_pack[start + lane] - expected_pack[start + lane]).abs() < 0.0004,
+                "camera lane {}: actual {}, expected {}",
+                start + lane,
+                actual_pack[start + lane],
+                expected_pack[start + lane]
+            );
+        }
+    }
+    assert_eq!(actual.camera.free_flight, expected.camera.free_flight);
+}
+
+#[test]
+fn camera_navigation_solves_affine_parent_scale_pivot_and_orbit_into_visible_trs() {
+    let mut e = editor();
+    let camera = find(&e, WorldKind::Camera);
+    e.execute(WorldCommand::Create {
+        kind: WorldKind::Group,
+        name: "Camera parent".into(),
+        parent: None,
+    })
+    .unwrap();
+    let parent = e.selection.unwrap();
+    e.execute(WorldCommand::Reparent {
+        id: camera,
+        parent: Some(parent),
+    })
+    .unwrap();
+    for (id, path, value) in [
+        (parent, "/transform/position", json!([2.0, -1.0, 0.4])),
+        (
+            parent,
+            "/transform/rotation_degrees",
+            json!([14.0, -22.0, 31.0]),
+        ),
+        (parent, "/transform/scale", json!([2.0, 0.7, 1.4])),
+        (camera, "/transform/scale", json!([0.8, 1.3, 1.1])),
+        (camera, "/transform/pivot", json!([0.2, -0.3, 0.1])),
+        (camera, CAMERA_ORBIT_SPEED, json!(12.0)),
+    ] {
+        set(&mut e, id, path, value, 0.0);
+    }
+    let original = e.document.clone();
+    let canonical_camera = e.document.attrs(camera).unwrap();
+    let mut desired = e.document.snapshot(37.5).unwrap();
+    desired.camera.target[0] += 0.6;
+    desired.camera.target[1] -= 0.2;
+    desired.camera.yaw_degrees += 9.0;
+    desired.camera.pitch_degrees -= 6.0;
+    desired.camera.roll_degrees += 4.0;
+    desired.camera.distance *= 0.9;
+    desired.camera.free_flight = true;
+    e.navigate_camera(&desired, 37.5, false, Some(88)).unwrap();
+    assert_camera_navigation_pose(&e.document.snapshot(37.5).unwrap(), &desired);
+    let attrs = e.document.attrs(camera).unwrap();
+    for path in [
+        "/camera/target",
+        "/camera/yaw_degrees",
+        "/camera/pitch_degrees",
+        "/camera/roll_degrees",
+        CAMERA_ORBIT_SPEED,
+    ] {
+        assert_eq!(attrs.get(path), canonical_camera.get(path));
+        assert_eq!(
+            serde_json::to_value(attrs.anim(path)).unwrap(),
+            serde_json::to_value(canonical_camera.anim(path)).unwrap()
+        );
+    }
+    assert_ne!(
+        e.document
+            .attribute_value(camera, "/transform/position", 37.5)
+            .unwrap(),
+        original
+            .attribute_value(camera, "/transform/position", 37.5)
+            .unwrap()
+    );
+    assert_ne!(
+        e.document
+            .attribute_value(camera, "/transform/rotation_degrees", 37.5)
+            .unwrap(),
+        original
+            .attribute_value(camera, "/transform/rotation_degrees", 37.5)
+            .unwrap()
+    );
+    assert_eq!(
+        e.document
+            .attribute_value(camera, "/transform/scale", 37.5)
+            .unwrap(),
+        original
+            .attribute_value(camera, "/transform/scale", 37.5)
+            .unwrap()
+    );
+    assert_eq!(
+        e.document
+            .attribute_value(camera, "/transform/pivot", 37.5)
+            .unwrap(),
+        original
+            .attribute_value(camera, "/transform/pivot", 37.5)
+            .unwrap()
+    );
+    let saved: WorldDocument =
+        serde_json::from_str(&serde_json::to_string(&e.document).unwrap()).unwrap();
+    assert_camera_navigation_pose(&saved.snapshot(37.5).unwrap(), &desired);
+    e.finish_edit();
+    assert!(e.undo());
+    assert_eq!(e.document, original);
+}
+
+#[test]
+fn camera_navigation_without_auto_key_preserves_curve_bytes_and_uses_static_offsets() {
+    let mut e = editor();
+    let camera = find(&e, WorldKind::Camera);
+    for path in [
+        "/transform/position/0",
+        "/transform/rotation_degrees/1",
+        "/camera/distance",
+    ] {
+        e.execute(WorldCommand::Key {
+            id: camera,
+            path: path.into(),
+            frame: 0.0,
+        })
+        .unwrap();
+        e.execute(WorldCommand::Key {
+            id: camera,
+            path: path.into(),
+            frame: 40.0,
+        })
+        .unwrap();
+    }
+    let paths = [
+        "/transform/position",
+        "/transform/rotation_degrees",
+        "/camera/distance",
+    ];
+    let before_attrs = e.document.attrs(camera).unwrap();
+    let before_keys: Vec<_> = paths
+        .iter()
+        .map(|path| serde_json::to_value(before_attrs.anim(path)).unwrap())
+        .collect();
+    let original = e.document.clone();
+    e.undo.clear();
+    for delta in [0.3, 0.6, 0.9] {
+        let mut desired = e.document.snapshot(12.5).unwrap();
+        desired.camera.target[0] += delta;
+        desired.camera.yaw_degrees += 5.0;
+        desired.camera.distance *= 0.95;
+        e.navigate_camera(&desired, 12.5, false, Some(91)).unwrap();
+        assert_camera_navigation_pose(&e.document.snapshot(12.5).unwrap(), &desired);
+        let current = e.document.attrs(camera).unwrap();
+        for (path, keys) in paths.iter().zip(&before_keys) {
+            assert_eq!(&serde_json::to_value(current.anim(path)).unwrap(), keys);
+        }
+        assert_eq!(e.undo.len(), 0);
+    }
+    assert!(
+        e.document
+            .attrs(camera)
+            .unwrap()
+            .contains("/_navigation/transform/position")
+    );
+    assert!(
+        e.document
+            .attributes(camera, 12.5)
+            .unwrap()
+            .iter()
+            .all(|a| !a.path.starts_with("/_navigation/"))
+    );
+    let saved: WorldDocument =
+        serde_json::from_str(&serde_json::to_string(&e.document).unwrap()).unwrap();
+    for frame in [40.0, 12.5, 0.0, 19.75] {
+        assert_eq!(
+            saved.snapshot(frame).unwrap(),
+            e.document.snapshot(frame).unwrap()
+        );
+    }
+    e.finish_edit();
+    assert_eq!(e.undo.len(), 1);
+    assert!(e.undo());
+    assert_eq!(e.document, original);
+}
+
+#[test]
+fn camera_navigation_auto_key_compensates_existing_offsets_and_keys_changed_components_only() {
+    let mut e = editor();
+    let camera = find(&e, WorldKind::Camera);
+    e.execute(WorldCommand::Key {
+        id: camera,
+        path: "/transform/position/0".into(),
+        frame: 0.0,
+    })
+    .unwrap();
+    let mut desired = e.document.snapshot(10.0).unwrap();
+    desired.camera.target[0] += 0.5;
+    e.navigate_camera(&desired, 10.0, false, None).unwrap();
+    let offset = e
+        .document
+        .navigation_offset(camera, "/transform/position")
+        .unwrap();
+    let original = e.document.clone();
+    desired = e.document.snapshot(10.0).unwrap();
+    desired.camera.target[0] += 0.25;
+    e.navigate_camera(&desired, 10.0, true, None).unwrap();
+    assert_camera_navigation_pose(&e.document.snapshot(10.0).unwrap(), &desired);
+    assert_eq!(
+        e.document
+            .navigation_offset(camera, "/transform/position")
+            .unwrap(),
+        offset
+    );
+    let attrs = e.document.attrs(camera).unwrap();
+    let animation = attrs.anim("/transform/position").unwrap();
+    assert_eq!(
+        animation.channels[0]
+            .keys()
+            .iter()
+            .map(|k| k.frame)
+            .collect::<Vec<_>>(),
+        vec![0.0, 10.0]
+    );
+    assert!(animation.channels[1].is_empty());
+    assert!(animation.channels[2].is_empty());
+    e.execute(WorldCommand::RemoveKey {
+        id: camera,
+        path: "/transform/position/0".into(),
+        frame: 10.0,
+    })
+    .unwrap();
+    e.execute(WorldCommand::SetAnimation {
+        id: camera,
+        path: "/transform/position/0".into(),
+        enabled: false,
+        frame: 0.0,
+    })
+    .unwrap();
+    let held = e
+        .document
+        .attribute_value(camera, "/transform/position/0", 0.0)
+        .unwrap();
+    e.execute(WorldCommand::Key {
+        id: camera,
+        path: "/transform/position/0".into(),
+        frame: 15.0,
+    })
+    .unwrap();
+    assert_eq!(
+        e.document
+            .attribute_value(camera, "/transform/position/0", 15.0)
+            .unwrap(),
+        held
+    );
+    assert_ne!(e.document, original);
+}
+
+#[test]
+fn legacy_snapshot_bridge_never_generates_camera_keys_and_navigation_noop_is_clean() {
+    let mut e = editor();
+    let original = e.document.clone();
+    let revision = e.revision();
+    let before = e.document.snapshot(14.0).unwrap();
+    e.navigate_camera(&before, 14.0, false, None).unwrap();
+    assert_eq!(e.document, original);
+    assert_eq!(e.revision(), revision);
+    let mut after = before.clone();
+    after.camera.yaw_degrees += 20.0;
+    e.edit_snapshot(None, &before, &after, 14.0).unwrap();
+    assert_eq!(e.document, original);
+    assert_eq!(e.revision(), revision);
+}
+
+#[test]
 fn camera_orbit_defaults_preserve_old_documents_and_camera_pose() {
     let scene = Scene::preset(0);
     let e = editor();
@@ -78,14 +561,14 @@ fn viewport_yaw_edits_preserve_authored_yaw_under_active_orbit_and_undo() {
     let before = e.document.snapshot(48.0).unwrap();
     let mut after = before.clone();
     after.camera.yaw_degrees += 10.0;
-    e.edit_snapshot(None, &before, &after, 48.0).unwrap();
+    e.navigate_camera(&after, 48.0, false, None).unwrap();
     assert_eq!(
         e.document
             .attribute_value(camera, "/camera/yaw_degrees", 48.0)
             .unwrap(),
-        json!(45.0)
+        json!(35.0)
     );
-    assert_eq!(e.document.snapshot(48.0).unwrap().camera, after.camera);
+    assert_camera_navigation_pose(&e.document.snapshot(48.0).unwrap(), &after);
     assert!(e.undo());
     assert_eq!(e.document, original);
 }
@@ -238,17 +721,17 @@ fn material_library_assignment_is_atomic_and_keeps_object_selection() {
     })
     .unwrap();
     let assigned = e.document.assigned_material(fractal).unwrap().unwrap();
-    assert_ne!(assigned, old_material);
+    assert_eq!(assigned, old_material);
     assert_eq!(e.selection, Some(fractal));
     assert_eq!(
         e.document.node_scene(old_material, 0.0).unwrap().material,
-        old_surface
+        material
     );
     assert_eq!(
         e.document.snapshot(0.0).unwrap().objects[0].material,
         material
     );
-    assert_eq!(e.document.nodes().len(), original.nodes().len() + 1);
+    assert_eq!(e.document.nodes().len(), original.nodes().len());
     assert!(e.undo());
     assert_eq!(e.document, original);
     assert!(e.redo());
