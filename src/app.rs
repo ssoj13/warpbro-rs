@@ -74,6 +74,15 @@ fn material_preview_scene(material: Material) -> Scene {
     s
 }
 
+/// Which objects a material "Assign to …" action addresses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AssignTo {
+    /// The remembered object selection (`remember_material_targets`).
+    Selected,
+    /// Every node with a material reference.
+    AllFractals,
+}
+
 pub(crate) struct App {
     renderer: RenderService,
     io: crate::io_service::IoService,
@@ -1038,12 +1047,22 @@ impl App {
         &self.material_targets
     }
 
-    fn assign_gallery_material(&mut self, material: crate::world::NodeId) -> Result<(), String> {
-        self.remember_material_targets();
+    /// The objects an "Assign to …" action addresses.
+    fn assign_targets(&mut self, to: AssignTo) -> Vec<crate::world::NodeId> {
+        match to {
+            AssignTo::Selected => {
+                self.remember_material_targets();
+                self.material_assignment_targets().to_vec()
+            }
+            AssignTo::AllFractals => self.world.document.material_consumers(),
+        }
+    }
+
+    /// Assign a work-area Material node: one Batch, one undo step.
+    fn assign_gallery_material(&mut self, material: crate::world::NodeId, to: AssignTo) -> Result<(), String> {
         let commands = self
-            .material_assignment_targets()
-            .iter()
-            .copied()
+            .assign_targets(to)
+            .into_iter()
             .map(|id| crate::world::WorldCommand::AssignMaterial {
                 id,
                 material: Some(material),
@@ -1052,8 +1071,48 @@ impl App {
         if commands.is_empty() {
             return Err("Select an object that supports materials".into());
         }
+        self.world.finish_edit();
         self.world
             .execute(crate::world::WorldCommand::Batch(commands))
+    }
+
+    /// Instantiate a library preset as a Material node and assign it, as one undo step.
+    fn assign_library_material(&mut self, index: usize, to: AssignTo) -> Result<(), String> {
+        let preset = &crate::materials::PRESETS[index];
+        let mut material = Material::default();
+        preset.apply(&mut material);
+        let targets = self.assign_targets(to);
+        self.world.finish_edit();
+        self.world.execute(crate::world::WorldCommand::CreateMaterialFor {
+            material,
+            name: preset.name().into(),
+            targets,
+        })?;
+        self.material_gallery.invalidate();
+        Ok(())
+    }
+
+    /// "Assign to selected" / "Assign to all fractals": the shared context-menu items.
+    fn assign_menu(ui: &mut egui::Ui, selected: bool, fractals: bool) -> Option<AssignTo> {
+        let mut picked = None;
+        if ui.add_enabled(selected, egui::Button::new("Assign to selected")).clicked() {
+            picked = Some(AssignTo::Selected);
+        }
+        if ui.add_enabled(fractals, egui::Button::new("Assign to all fractals")).clicked() {
+            picked = Some(AssignTo::AllFractals);
+        }
+        if picked.is_some() {
+            ui.close();
+        }
+        picked
+    }
+
+    fn assign_status(result: Result<(), String>, to: AssignTo) -> String {
+        match (result, to) {
+            (Ok(()), AssignTo::Selected) => "Material assigned to selected objects".into(),
+            (Ok(()), AssignTo::AllFractals) => "Material assigned to all fractals".into(),
+            (Err(error), _) => error,
+        }
     }
 
     fn materials_tab(&mut self, ui: &mut egui::Ui) {
@@ -1096,6 +1155,11 @@ impl App {
                 .weak(),
         );
         let mut select = None;
+        let selected_targets = {
+            self.remember_material_targets();
+            !self.material_assignment_targets().is_empty()
+        };
+        let any_fractal = !self.world.document.material_consumers().is_empty();
         let mut assign = None;
         let mut refresh = None;
         let mut apply_preset = None;
@@ -1148,16 +1212,8 @@ impl App {
                                 response.clone().on_hover_text(error);
                             }
                             response.context_menu(|ui| {
-                                let eligible = !self.material_assignment_targets().is_empty();
-                                if ui
-                                    .add_enabled(
-                                        eligible,
-                                        egui::Button::new("Assign to selected objects"),
-                                    )
-                                    .clicked()
-                                {
-                                    assign = Some(entry.id);
-                                    ui.close();
+                                if let Some(to) = Self::assign_menu(ui, selected_targets, any_fractal) {
+                                    assign = Some((entry.id, to));
                                 }
                                 if ui.button("Select / Edit").clicked() {
                                     select = Some(entry.id);
@@ -1214,11 +1270,9 @@ impl App {
         if let Some(id) = select {
             self.select_material_node(id);
         }
-        if let Some(id) = assign {
-            self.status = match self.assign_gallery_material(id) {
-                Ok(()) => "Material assigned to selected objects".into(),
-                Err(error) => error,
-            };
+        if let Some((id, to)) = assign {
+            let result = self.assign_gallery_material(id, to);
+            self.status = Self::assign_status(result, to);
         }
         if let Some(command) = command
             && let Err(error) = self.world.execute(command)
@@ -1273,7 +1327,13 @@ impl App {
     fn material_library(&mut self, ui: &mut egui::Ui) {
         use crate::materials::{CATEGORIES, PRESETS};
         ui.label("Click a preset to add a Material node to the work area. Assign it separately.");
+        let selected_targets = {
+            self.remember_material_targets();
+            !self.material_assignment_targets().is_empty()
+        };
+        let any_fractal = !self.world.document.material_consumers().is_empty();
         let mut add = None;
+        let mut assign = None;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
@@ -1334,6 +1394,10 @@ impl App {
                                                 add = Some(index);
                                                 ui.close();
                                             }
+                                            ui.separator();
+                                            if let Some(to) = Self::assign_menu(ui, selected_targets, any_fractal) {
+                                                assign = Some((index, to));
+                                            }
                                         });
                                         column += 1;
                                         if column == columns {
@@ -1347,6 +1411,10 @@ impl App {
             });
         if let Some(index) = add {
             self.add_library_material(index);
+        }
+        if let Some((index, to)) = assign {
+            let result = self.assign_library_material(index, to);
+            self.status = Self::assign_status(result, to);
         }
     }
 
@@ -2109,7 +2177,7 @@ impl App {
                     }
                 }).clicked();
             if apply {
-                self.status = match self.assign_gallery_material(material) {
+                self.status = match self.assign_gallery_material(material, AssignTo::Selected) {
                     Ok(()) => "Material assigned".into(),
                     Err(error) => error,
                 };
@@ -2775,6 +2843,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn library_preset_assigns_to_all_fractals_in_one_undo_step() {
+        let mut app = App::new();
+        app.world
+            .execute(crate::world::WorldCommand::Create {
+                kind: crate::world::WorldKind::Fractal,
+                name: "Second".into(),
+                parent: None,
+            })
+            .unwrap();
+        let fractals = app.world.document.material_consumers();
+        assert!(fractals.len() >= 2, "a world holds several fractal nodes");
+        let before: Vec<_> = fractals.iter().map(|id| app.world.document.assigned_material(*id).unwrap()).collect();
+        let materials = app.world.document.nodes().len();
+        app.assign_library_material(0, AssignTo::AllFractals).unwrap();
+        let assigned: Vec<_> = fractals.iter().map(|id| app.world.document.assigned_material(*id).unwrap()).collect();
+        assert!(assigned.iter().all(|m| m.is_some() && *m == assigned[0]), "one new material on every fractal");
+        assert_eq!(app.world.document.nodes().len(), materials + 1);
+        assert!(app.world.undo());
+        let undone: Vec<_> = fractals.iter().map(|id| app.world.document.assigned_material(*id).unwrap()).collect();
+        assert_eq!(undone, before, "one undo removes the material and every assignment");
+        assert_eq!(app.world.document.nodes().len(), materials);
+    }
+
+    #[test]
     fn library_is_read_only_until_explicit_creation_and_never_assigns_objects() {
         let mut app = App::new();
         let before = serde_json::to_string(&app.world.document).unwrap();
@@ -3027,7 +3119,7 @@ mod tests {
         assert_eq!(app.material_assignment_targets(), &[object]);
         assert!(app.world.document.supports_material(object));
         assert!(!app.world.document.supports_material(material));
-        app.assign_gallery_material(material).unwrap();
+        app.assign_gallery_material(material, AssignTo::Selected).unwrap();
         assert_eq!(
             app.world.selection,
             Some(material),
@@ -3054,7 +3146,7 @@ mod tests {
         app.world.selected = vec![camera];
         app.remember_material_targets();
         assert!(app.material_assignment_targets().is_empty());
-        assert!(app.assign_gallery_material(material).is_err());
+        assert!(app.assign_gallery_material(material, AssignTo::Selected).is_err());
     }
 
     #[test]
@@ -3126,7 +3218,7 @@ mod tests {
         app.world.selection = Some(object);
         app.world.selected = vec![object];
         let old = app.world.document.assigned_material(object).unwrap();
-        app.assign_gallery_material(material).unwrap();
+        app.assign_gallery_material(material, AssignTo::Selected).unwrap();
         assert_eq!(
             app.world.document.assigned_material(object).unwrap(),
             Some(material)

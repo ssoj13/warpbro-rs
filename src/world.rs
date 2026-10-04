@@ -130,6 +130,12 @@ pub enum WorldCommand {
         material: crate::scene::Material,
         name: String,
     },
+    /// Create a material and assign it to `targets`: one undo step for "assign a library preset".
+    CreateMaterialFor {
+        material: crate::scene::Material,
+        name: String,
+        targets: Vec<NodeId>,
+    },
     /// Instantiate and assign to a fractal, or edit a selected material node.
     ApplyMaterial {
         id: NodeId,
@@ -554,6 +560,16 @@ impl WorldEditor {
                     .insert(WorldKind::Material, &name, &scene, None)?;
                 self.selection = Some(id);
                 self.selected = vec![id];
+            }
+            WorldCommand::CreateMaterialFor { material, name, targets } => {
+                if targets.is_empty() {
+                    return Err("Select an object that supports materials".into());
+                }
+                self.apply(WorldCommand::CreateMaterial { material, name })?;
+                let created = self.selection.ok_or("The new material was not selected")?;
+                for id in targets {
+                    self.apply(WorldCommand::AssignMaterial { id, material: Some(created) })?;
+                }
             }
             WorldCommand::ApplyMaterial {
                 id,
@@ -1401,6 +1417,14 @@ impl WorldDocument {
     /// Single capability check for the Material reference exposed by the node
     /// schema, shared by the Attribute Editor, gallery and assignment command.
     /// A storage placeholder exists on every node; it is not itself a capability.
+    /// Every node with a material reference (fractals), in document order.
+    pub fn material_consumers(&self) -> Vec<NodeId> {
+        self.nodes()
+            .into_iter()
+            .map(|n| n.id)
+            .filter(|id| self.supports_material(*id))
+            .collect()
+    }
     pub fn supports_material(&self, id: NodeId) -> bool {
         self.node(id)
             .is_ok_and(|data| data["type"].as_str() == Some("Fractal"))
