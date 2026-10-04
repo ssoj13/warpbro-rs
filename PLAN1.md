@@ -107,7 +107,7 @@ encoding too; only its comment changes if it mentions the working space.
   white (D60) via Bradford, and both luminance vectors sum to 1.
 
 ## Steps
-- [ ] 0. Prerequisite: `pt-denoise-oidn` unified in render-rs (with the `acescg` feature); warpbro moved off
+- [x] 0. Prerequisite: `pt-denoise-oidn` unified in render-rs (with the `acescg` feature); warpbro moved off
        the squarebob copy. **Blocks only step 7**; steps 1–6 can proceed in parallel.
 - [x] 1. `color.rs`: `WORKING`, matrices from `vfx_ocio::color_matrix`, AP1 luma, `to_working`,
        `to_display_709`; unit tests (matrix round trip, white maps to white, `luma(white) == 1`, AP1 matrix
@@ -126,7 +126,7 @@ encoding too; only its comment changes if it mentions the working space.
        (a scene JSON with a stale `"input"` loads and renders in ACEScg).
 - [x] 6. EXR export tags AP1 for scene-linear output; read-back test checks the chromaticities attribute
        (update `exr_io.rs:128`). Display-light export tagging unchanged.
-- [ ] 7. Denoise: `pt-denoise-oidn` with `acescg`.
+- [x] 7. Denoise: `pt-denoise-oidn` with `acescg`.
 - [ ] 8. Golden check: render a fixed scene before/after; neutral (grey) materials under a white sky must
        match within noise; saturated scenes differ by design. Record the numbers here.
 - [~] 9. Docs and metadata: module docs (`color.rs`, `exr_io.rs`, `gpu.rs:2953`), comments
@@ -159,13 +159,22 @@ encoding too; only its comment changes if it mentions the working space.
   HEVC tests (`hevc_motion_fixture…`, `cancel_controller…`) fail intermittently with
   `Vulkan Video unavailable: Posix(38)` in full parallel runs — reproduced on clean HEAD (1 of 3 runs), pass
   in isolation on both trees: pre-existing, unrelated.
-- Open: step 0/7 (denoise port), step 8 (golden numbers), step 9 CLAUDE.md note.
+- 2026-10-04: step 7 done. `pt-denoise-oidn` now comes from render-rs `main` (AP1 firefly clamp, oidn-rs
+  `acescg-autoexposure`); squarebob `pt-denoise-oidn` / `render-core` and the direct `oidn-rs` dep are gone.
+  `denoise.rs`: `GpuContext` from `pt_denoise_oidn` (no `gpu_info`). Same API otherwise.
+- 2026-10-04: every own Git dependency tracks `branch = "main"` (latest revisions). Three old pins lived only
+  on unmerged side branches and were brought to `main`: render-rs `cuda-math` (`d46df73`), gitnexus-rs
+  `inertial-look` (`a06c4d0`), egui-file-dialog host-persistence API (fast-forward to `8659643`). `vendor/` removed.
+  `[patch]` stays: it redirects the https tracel-ai / cutile sources requested upstream to SSH (same revisions).
+- Verification: 215 passed, 8 ignored; the 3 OIDN `--ignored` tests pass; `--features ofx-direct` builds.
+  Only warning left: `presets.rs` `AnimatedPreset::description` (hover text lost in 7bc48c2; decision pending).
+- Open: step 8 (golden numbers), step 9 CLAUDE.md note.
 
 ## TODO found on the way (out of scope)
-- [ ] Pre-existing warnings: `P_SHADOW_STRENGTH`, `P_SHADOW_STEPS`, `P_AO_STRENGTH`, `P_AO_STEPS`,
-      `P_AO_RADIUS`, `P_LIGHT_HALF_ANGLE` (`params.rs:79-80`) and `presets.rs:12` `description` never used —
-      investigate whether unfinished features or dead slots.
+- [x] `P_SHADOW_*` / `P_AO_*` / `P_LIGHT_HALF_ANGLE`: OFX Direct ABI slots read only by `ofx-direct` kernels;
+      `slots!` now takes attributes, names exist under the feature, offsets pinned by a const assert.
+- [ ] `presets.rs` `description`: restore as template hover text, or drop (user decision).
 - [ ] HEVC export tests contend for the hardware Vulkan Video session when the suite runs in parallel
       (`Posix(38)`): serialize them (shared test lock) or gate them like `vulkan_hevc_partial_export…`.
-- [ ] `vendor/standard-surface-bsdf/` is not referenced by Cargo (git rev `cd72eb3` is used): dead copy?
+- [x] `vendor/` (dead copies + exr-view licence) removed.
 - [ ] gitnexus index was registered under the old path `cglibs/frac-rs`; re-analyzed as `warpbro-rs`.

@@ -176,8 +176,7 @@ mod tests {
     }
 }
 
-use pt_denoise_oidn::{OidnDenoiser, OidnMode};
-use render_core::gpu::GpuContext;
+use pt_denoise_oidn::{GpuContext, OidnDenoiser, OidnMode};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, mpsc};
 
@@ -365,7 +364,6 @@ impl Processor {
                 adapter: Arc::new(shared.adapter.clone()),
                 device: Arc::new(shared.device.clone()),
                 queue: Arc::new(shared.queue.clone()),
-                gpu_info: None,
             };
             self.inner = Some(Inner::new(ctx, width as u32, height as u32)?);
         }

@@ -1,4 +1,4 @@
-//! Adapted from exr-view/src/ocio.rs (BSD-3-Clause, see vendor/EXR-VIEW-LICENSE).
+//! Adapted from exr-view/src/ocio.rs.
 //! The OCIO display transform of the colour image: the config, the user's choice
 //! (display, view, look), the transform the tile shader and the CPU twin both run, and
 //! the Colour panel. The input is always the tracer's working space

@@ -80,9 +80,9 @@ WarpBro is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX
 | `fractal3d.rs`: presets, `Frames`, `max_distance`, footprint                       | `src/scene.rs`                                                       |
 | `uniform3d.rs`: the uniform layout                                                 | `src/params.rs`                                                      |
 | `ofx-gen/palette.rs`                                                               | `src/palette.rs`                                                     |
-| render-rs `standard-surface-bsdf`                                                  | pinned SSH crate with opt-in `cuda-math` (`libm::*` → `f32` methods) |
+| render-rs `standard-surface-bsdf`                                                  | SSH crate with opt-in `cuda-math` (`libm::*` → `f32` methods)        |
 | usd-rs `usd-mat-lib` presets, `usd-hd-pt` translator, `pt-material-ext` facing mix | `src/materials.rs`, `src/gpu.rs`                                     |
-| gitnexus-rs `cam-controls` / `cam-viewport`                                        | pinned SSH crates; opt-in `inertial-look` for `SpaceFlight::Look`    |
+| gitnexus-rs `cam-controls` / `cam-viewport`                                        | SSH crates; opt-in `inertial-look` for `SpaceFlight::Look`           |
 
 ## Requirements
 
@@ -104,18 +104,12 @@ WarpBro is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX
   `python bootstrap.py d --fix` also installs or migrates the CLI to this revision; regular builds
   check its source without reinstalling it.
 
-- Git dependencies resolve through GitHub SSH; Cargo.lock records their exact commits.
-  Playa is pinned to `00d90428d6c931b69b7117fd2a4cdf143d075413`. OIDN reuses squarebob-rs
-  `pt-denoise-oidn` and `render-core` at `3dedf872cddb06b4aa5689f5cfe022468cdb6f3b`;
-  the shared `oidn-rs` branch source is locked to `a93300d744953865cad3f1ba610107e981d8deee`.
-  `cam-controls` and `cam-viewport` use gitnexus-rs commit
-  `268bcfc8f31d291aefd0e67e2358a6d1e69b39cd`, with `inertial-look` enabled on controls.
-  `standard-surface-bsdf` uses render-rs commit `cd72eb3ac4ad28b7b31c78826f192f383f4b6989`
-  with `cuda-math`. These upstream features preserve their crates' default behaviour.
-  The workspace material catalog lives in `crates/fractal-materials`; external dependencies
-  use pinned or lockfile-resolved SSH Git sources. All widget crates share revision
-  `afad4c31f5066f34eca69994248a33735874fb12`. Historical source-switch verification counts
-  describe their dated checkpoints, not the current release.
+- Git dependencies resolve through GitHub SSH and track the latest `main` of every repository;
+  Cargo.lock records the exact commits (`cargo update` moves them forward). OIDN is render-rs
+  `pt-denoise-oidn` (ACEScg input), `standard-surface-bsdf` comes from the same render-rs with
+  `cuda-math`. Transitive tracel-ai (burn / cubecl / cubek / tracel-llvm) and cutile-rs Git
+  sources are redirected to SSH by `[patch]` at the revisions the upstream crates request.
+  The workspace material catalog lives in `crates/fractal-materials`.
 
 ## Build and run
 
@@ -241,8 +235,8 @@ samples. Changing mode or quality refilters current samples; changing the interv
 accumulation and the last usable result.
 
 CUDA accumulates primary-hit albedo and world-normal sums with their counts. The worker
-passes normalized scene-linear ACEScg HDR to squarebob-rs OIDN (whose autoexposure still weighs
-it with Rec.709 luminance until the render-rs `pt-denoise-oidn` move) before exposure, saturation
+passes normalized scene-linear ACEScg HDR to render-rs `pt-denoise-oidn` (OIDN autoexposure on
+ACEScg luminance) before exposure, saturation
 or OCIO. No firefly clamp changes the HDR input range; NaN protection acts on the denoiser's
 input only. Raw radiance and guide accumulators remain untouched. Until the next pass,
 the viewport can show the last denoised result; its status reports that result's sample count
@@ -421,5 +415,4 @@ and are under PolyForm-Noncommercial-1.0.0. The retained vendor copies are histo
 Cargo uses the pinned SSH dependencies above. The fractal formulas credit their sources in the ofx-rs code they were ported from
 (Knighty's KIFS, Leys' Kleinian, Mandelbulber's pseudo-Kleinian, and others).
 
-The OCIO panel in `src/ocio.rs` is adapted from exr-view; its BSD-3-Clause notice is in
-`vendor/EXR-VIEW-LICENSE`. The ACES 2.0 presets follow the [Academy output transform parameters](https://docs.acescentral.com/system-components/output-transforms/parameters/).
+The OCIO panel in `src/ocio.rs` is adapted from exr-view. The ACES 2.0 presets follow the [Academy output transform parameters](https://docs.acescentral.com/system-components/output-transforms/parameters/).

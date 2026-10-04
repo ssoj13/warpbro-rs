@@ -2,11 +2,14 @@
 //! reads it): the role of ofx-fractal's uniform3d LAYOUT. Integers are stored as exact f32
 //! (all below 2^24). Vectors take 3 consecutive slots, 3x3 matrices 9 (row major).
 
+/// Lays the slots out back to back. A slot's attributes (e.g. `#[cfg(..)]`) apply to its name
+/// only: the slot always occupies its place, so a feature never shifts the offsets after it.
 macro_rules! slots {
-    ($($name:ident = $len:expr),* $(,)?) => {
-        slots!(@acc 0usize; $($name = $len,)*);
+    ($($(#[$meta:meta])* $name:ident = $len:expr),* $(,)?) => {
+        slots!(@acc 0usize; $($(#[$meta])* $name = $len,)*);
     };
-    (@acc $at:expr; $name:ident = $len:expr, $($rest:tt)*) => {
+    (@acc $at:expr; $(#[$meta:meta])* $name:ident = $len:expr, $($rest:tt)*) => {
+        $(#[$meta])*
         pub const $name: usize = $at;
         slots!(@acc $at + $len; $($rest)*);
     };
@@ -75,9 +78,15 @@ slots! {
     // Optional OFX ABI: zeros retain WarpBro's full-frame guide sample counts.
     P_OFX = 1, P_TILE_X = 1, P_TILE_Y = 1, P_TILE_WIDTH = 1, P_TILE_HEIGHT = 1,
     P_OFX_NO_CLIP = 1, P_OFX_THIN_FILM_ENERGY = 1, P_OFX_SEED_HIGH = 1, P_OFX_SKY_ALPHA = 1,
-    // Dedicated deterministic Direct shading; PT defaults remain zero.
-    P_DIRECT = 1, P_DIRECT_GRID = 1, P_SHADOW_STRENGTH = 1, P_SHADOW_STEPS = 1,
-    P_AO_STRENGTH = 1, P_AO_STEPS = 1, P_AO_RADIUS = 1, P_LIGHT_HALF_ANGLE = 1,
+    // Dedicated deterministic Direct shading; PT defaults remain zero. The OFX host writes the
+    // shading controls and only the `ofx-direct` kernels read them, so their names exist there.
+    P_DIRECT = 1, P_DIRECT_GRID = 1,
+    #[cfg(feature = "ofx-direct")] P_SHADOW_STRENGTH = 1,
+    #[cfg(feature = "ofx-direct")] P_SHADOW_STEPS = 1,
+    #[cfg(feature = "ofx-direct")] P_AO_STRENGTH = 1,
+    #[cfg(feature = "ofx-direct")] P_AO_STEPS = 1,
+    #[cfg(feature = "ofx-direct")] P_AO_RADIUS = 1,
+    #[cfg(feature = "ofx-direct")] P_LIGHT_HALF_ANGLE = 1,
     // Append-only extension: pre-existing OFX/global slot offsets stay unchanged.
     P_TRANSMISSION = 1, P_TRANSMISSION_COLOR = 3,
     P_TRANSMISSION_EXTRA_ROUGHNESS = 1, P_TRANSMISSION_DEPTH = 1,
@@ -105,3 +114,7 @@ pub const LIGHT_STRIDE: usize = P_SKY_INTENSITY - P_LIGHT_DIR;
 
 /// Palette LUT entries (ofx-gen PALETTE_SAMPLES) plus the interior colour.
 pub const PALETTE_SAMPLES: usize = 1024;
+
+// The six Direct shading slots are named only with `ofx-direct`, but always reserved:
+// the OFX host relies on the offsets after them.
+const _: () = assert!(P_TRANSMISSION == P_DIRECT_GRID + 7);
