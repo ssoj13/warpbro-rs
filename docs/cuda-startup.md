@@ -22,6 +22,24 @@ This warms the CUDA driver's existing disk JIT cache. It does not add a separate
 
 The interactive worker still owns CUDA. Bounded queues, cancellation, and nonblocking UI polling are unchanged. Parameter upload failures now become target errors instead of panicking the shared worker, and startup validates the block before reporting Ready.
 
+## Exclude unused OFX Direct kernels
+
+Default WarpBro builds leave `ofx-direct` disabled and exclude the eight `direct_*` CUDA entry points, which WarpBro never dispatches. The original executable embedded 28 PTX entries, including these eight Direct entries. The Direct entries accounted for 2,472,318 of 8,850,192 entry-text bytes (about 28%). A fresh baseline cold CUDA load took 215.7338802 s under the current system load, which differs from the earlier 173-second run. The rebuilt default executable loaded in 76.6563534 s with an isolated cold cache, about 2.8× faster in this run. Concurrent builds and system load differed between runs, so this is not a controlled idle benchmark. Cold startup remains well above 5–10 seconds.
+
+Both build variants succeeded. Binary scans asserted 20 PTX entries with zero Direct entries in the default build and 28 entries with eight Direct entries when `ofx-direct` was enabled.
+
+The final default executable was restored and bootstrap passed, including a 63.405 s module prewarm in the default cache. The 32×32, 1-SPP render checks passed all 18 legacy scenes (Fast/Standard Surface, including OIDN) and all eight World cases (Full/Fast); cached module loads were 70.405 ms and 68.1236 ms, respectively. The full test suite was not rerun for this gate.
+
+Enable the compatibility entries explicitly when needed:
+
+```powershell
+cargo oxide build --features ofx-direct
+```
+
+The Direct implementation lives in `src/gpu/kernels/direct.rs`. Its feature-gated kernel declarations remain inline in `src/gpu.rs` because `cuda_module` generates launchers from those declarations. The OFX plugin has separate kernel sources and artifacts under `ofx-rs/fx/ofx-fractal/kernels/source`; this WarpBro gate does not change them.
+
+Prewarming remains a cache workaround: it moves cold JIT work into the build step. It does not reduce compilation work when the driver's cache is empty or disabled. The feature gate removes unused module entries, but no cold-start speedup is established by the earlier warm-cache timings below.
+
 ## Verified release result
 
 The accepted production build completed in 1m 12s of Cargo time. Its CUDA warmup initialized successfully in 187.3112 ms (304 ms for the complete process). The following native GUI launch created the context in 106.3973 ms and loaded/validated kernels in **87.5814 ms**. The viewport, material preview, and Gallery cards all rendered; OIDN also completed. These are warm-cache startup measurements on this machine, not an idle cold-cache benchmark or a tracing-throughput speedup.

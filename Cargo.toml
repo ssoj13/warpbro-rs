@@ -7,6 +7,12 @@ edition = "2024"
 name = "WarpBro"
 path = "src/main.rs"
 
+[features]
+default = []
+# Export the deterministic Direct kernels for OFX artifact builds only.
+# WarpBro uses Fast/Full path tracing; this avoids JIT-compiling unused entry points.
+ofx-direct = []
+
 [workspace]
 members = ["crates/fractal-materials"]
 

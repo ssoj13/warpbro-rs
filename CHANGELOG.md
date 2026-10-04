@@ -26,6 +26,8 @@
 
 ### Render startup
 
+- Exclude the eight unused OFX Direct CUDA entry points from default WarpBro builds with the opt-in `ofx-direct` feature; enable them with `cargo oxide build --features ofx-direct`. Preserve the separate OFX plugin sources and artifacts. See [CUDA startup](docs/cuda-startup.md#exclude-unused-ofx-direct-kernels) for scope and validation limits.
+- Verify both Direct feature variants: default PTX has 20 entries and no Direct entries; opt-in PTX has 28 entries with eight Direct entries. Isolated cold-cache loading fell from 215.7338802 s to 76.6563534 s in this run (about 2.8×); concurrent load differed, and cold startup remains above 5–10 seconds.
 - Warm the CUDA driver's JIT cache for the exact executable during bootstrap builds, before reporting success; add `--warmup-cuda` and a packaging opt-out.
 - Validate the constant-memory parameter block before reporting the CUDA worker ready. Initialization failures now fail the default bootstrap build.
 - Keep the tested PTX path: cubin materialization was rejected after a missing-parameter-symbol failure and an excessively slow compiler workaround.
