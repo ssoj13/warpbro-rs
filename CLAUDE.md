@@ -1,7 +1,7 @@
 <!-- gitnexus-rs:start -->
 # GitNexus-rs — Code Intelligence
 
-This project is indexed by gitnexus-rs as **frac-rs** (3151 symbols, 8752 relationships, 279 execution flows). Use the gitnexus-rs MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by gitnexus-rs as **warpbro-rs** (3181 symbols, 8795 relationships, 281 execution flows). Use the gitnexus-rs MCP tools to understand code, assess impact, and navigate safely.
 
 > Call `graph_status` when freshness matters. Use `reanalyze` (incremental) or `gitnexus-rs analyze` (full). `detect_changes` does **not** re-index.
 
@@ -27,10 +27,10 @@ This project is indexed by gitnexus-rs as **frac-rs** (3151 symbols, 8752 relati
 
 | Resource | Use for |
 |----------|---------|
-| `gitnexus://repo/frac-rs/context` | Codebase overview |
-| `gitnexus://repo/frac-rs/clusters` | All functional areas |
-| `gitnexus://repo/frac-rs/processes` | All execution flows |
-| `gitnexus://repo/frac-rs/process/{name}` | Step-by-step execution trace |
+| `gitnexus://repo/warpbro-rs/context` | Codebase overview |
+| `gitnexus://repo/warpbro-rs/clusters` | All functional areas |
+| `gitnexus://repo/warpbro-rs/processes` | All execution flows |
+| `gitnexus://repo/warpbro-rs/process/{name}` | Step-by-step execution trace |
 
 ## Skills
 
