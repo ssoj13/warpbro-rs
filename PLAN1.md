@@ -34,11 +34,11 @@ OCIO (ACES 2.0 views) stays the only display path.
   hue shifts and clipped/negative channels on saturated bounces. AP1 is the production rendering space.
 - The display side is already ACES 2.0 via OCIO; today OCIO converts `Linear Rec.709 (sRGB)` → ACES at the
   end, i.e. the gamut is lost before rendering, not after.
-- The shared OIDN glue (`pt-denoise-oidn`, being unified into render-rs) has an `acescg` feature that
-  switches both OIDN autoexposure and the firefly clamp to AP1 luminance.
+- The shared OIDN glue (`pt-denoise-oidn` in render-rs) is AP1-only: its firefly clamp and oidn-rs
+  autoexposure (`acescg-autoexposure`) weigh luminance in ACEScg.
 
-## Current state (verified in code, 2026-10-04)
-| Where | What | Today |
+## State before the change (verified in code, 2026-10-04; historical, line numbers as of `1b0b440`)
+| Where | What | Before |
 |---|---|---|
 | `src/color.rs:9` | `INPUT` (OCIO input colour space) | `"Linear Rec.709 (sRGB)"`; module doc: "The tracer's RGB is linear Rec.709, NOT ACEScg" |
 | `src/color.rs:32` `default_selection` | default `ocio::Sel` with `input: INPUT` | Rec.709 |
@@ -69,9 +69,10 @@ encoding too; only its comment changes if it mentions the working space.
 1. **One colour-space module** (`src/color.rs`): `WORKING = "ACEScg"`, the Rec.709→AP1 and AP1→Rec.709
    3x3 matrices (Bradford D65→D60, built from `vfx_ocio::color_matrix`, which `color.rs`/`ocio.rs`
    already import — not hand-typed), AP1 luminance weights (the Y row of AP1→XYZ:
-   `0.2722287, 0.6740818, 0.0536895`), `to_working([f32;3])`, `to_display_709([f32;3])` and `luma([f32;3])`.
-   No other file contains a colour matrix or luminance weights. The GPU kernel (`gpu.rs luminance`) takes
-   its weights from these constants (the kernel is Rust, so it references the const directly).
+   `0.2722287, 0.6740818, 0.0536895`), `to_working([f32;3])`, `to_709([f32;3])` and `luma([f32;3])`.
+   No other file contains a colour matrix or luminance weights. The CUDA kernel cannot link `color.rs`
+   (it pulls vfx-ocio), so it reads the same weights from `standard_surface_bsdf::consts::SS_LUMA`, which
+   `color::LUMA` re-exports; a test pins both to the AP1 Y row.
 2. **Authoring stays Rec.709/sRGB; conversion happens at upload.** UI colour pickers, presets, palettes and
    saved scenes keep their current (Rec.709) values — they are user-facing. `scene.rs` parameter packing
    (`put3` for colours) and `palette::build_lut` convert to AP1 when filling GPU buffers. This keeps every
@@ -92,11 +93,11 @@ encoding too; only its comment changes if it mentions the working space.
    saturation), `environment.rs` CDF + `mean_luminance`, and the CPU saturation in `render.rs` call the one
    AP1 `color::luma`. The CPU saturation and the GPU saturation must stay one formula (currently
    duplicated; keep them sharing the weights at minimum).
-6. **Display**: OCIO source = `color::WORKING`. Every non-OCIO path (`ColorPipeline::apply` OCIO-off /
-   Reinhard, `ocio.rs:413` built-in path, `render_service` / `preview` direct previews, `export.rs`
-   8-bit/video) applies AP1→Rec.709 through `color::to_display_709` before `oetf` — one helper, no per-site
-   matrices. Grep gate: every `oetf(` call site receives display-709 values.
-7. **Denoise**: depend on the unified `pt-denoise-oidn` (render-rs) with `features = ["acescg"]`.
+6. **Display**: OCIO source = `color::WORKING`. The only place raw tracer RGB meets `oetf` is the OCIO-off /
+   Reinhard branch of `ColorPipeline::apply`: it converts with `color::to_709`, then Reinhard, then `oetf`.
+   Every other `oetf` site (`render_service`, `preview`, `export` HEVC) consumes `target.light`, which is
+   already display light — converting there would double-convert.
+7. **Denoise**: `pt-denoise-oidn` from render-rs `main` (AP1-only; no feature flag exists).
 
 ## Expected behaviour changes (by design, record in step 9)
 - Saturation ≠ 1 changes slightly (AP1 luma pivots on different weights).
@@ -126,7 +127,7 @@ encoding too; only its comment changes if it mentions the working space.
        (a scene JSON with a stale `"input"` loads and renders in ACEScg).
 - [x] 6. EXR export tags AP1 for scene-linear output; read-back test checks the chromaticities attribute
        (update `exr_io.rs:128`). Display-light export tagging unchanged.
-- [x] 7. Denoise: `pt-denoise-oidn` with `acescg`.
+- [x] 7. Denoise: `pt-denoise-oidn` from render-rs (AP1-only).
 - [ ] 8. Golden check: render a fixed scene before/after; neutral (grey) materials under a white sky must
        match within noise; saturated scenes differ by design. Record the numbers here.
 - [~] 9. Docs and metadata: module docs (`color.rs`, `exr_io.rs`, `gpu.rs:2953`), comments
@@ -139,8 +140,7 @@ encoding too; only its comment changes if it mentions the working space.
   no — author in Rec.709/sRGB, render in AP1.
 - Palettes: keep their Rec.709 definitions (converted at upload) or re-author in AP1 for wider colours?
   Default plan: convert at upload; re-authoring is a separate creative change.
-- Is `ocio::Sel` used for anything besides the tracer image (e.g. viewing loaded EXRs)? If yes, `input`
-  stays there and only the tracer path pins it to `WORKING`; if no, the field is deleted outright.
+- ~~Is `ocio::Sel` used for anything besides the tracer image?~~ No: `input` deleted outright.
 
 ## Progress log
 - 2026-10-04: steps 1-6 implemented. `color.rs`: `WORKING`, `WORKING_PRIMS`/`DISPLAY_PRIMS`, `LUMA`
@@ -165,16 +165,17 @@ encoding too; only its comment changes if it mentions the working space.
 - 2026-10-04: every own Git dependency tracks `branch = "main"` (latest revisions). Three old pins lived only
   on unmerged side branches and were brought to `main`: render-rs `cuda-math` (`d46df73`), gitnexus-rs
   `inertial-look` (`a06c4d0`), egui-file-dialog host-persistence API (fast-forward to `8659643`). `vendor/` removed.
-  `[patch]` stays: it redirects the https tracel-ai / cutile sources requested upstream to SSH (same revisions).
+  (Later the same day: `[patch]` removed — own repos are SSH, third-party git sources stay HTTPS.)
 - Verification: 215 passed, 8 ignored; the 3 OIDN `--ignored` tests pass; `--features ofx-direct` builds.
   Only warning left: `presets.rs` `AnimatedPreset::description` (hover text lost in 7bc48c2; decision pending).
-- Open: step 8 (golden numbers), step 9 CLAUDE.md note.
+- Open: step 8 (golden numbers), step 9 CLAUDE.md note + CHANGELOG entry for the later features
+  (PNG export, `~/.warpbro` profile, built-in templates, camera slots, material assign menus).
 
 ## TODO found on the way (out of scope)
 - [x] `P_SHADOW_*` / `P_AO_*` / `P_LIGHT_HALF_ANGLE`: OFX Direct ABI slots read only by `ofx-direct` kernels;
       `slots!` now takes attributes, names exist under the feature, offsets pinned by a const assert.
-- [ ] `presets.rs` `description`: restore as template hover text, or drop (user decision).
-- [ ] HEVC export tests contend for the hardware Vulkan Video session when the suite runs in parallel
-      (`Posix(38)`): serialize them (shared test lock) or gate them like `vulkan_hevc_partial_export…`.
+- [x] `presets.rs` `description`: restored as the Templates menu hover text (built-in template catalog).
+- [~] HEVC export tests contend for the hardware Vulkan Video session in parallel runs (`Posix(38)`):
+      the tests that may open a session now share `vulkan_video()` lock; not yet confirmed in a full run.
 - [x] `vendor/` (dead copies + exr-view licence) removed.
-- [ ] gitnexus index was registered under the old path `cglibs/frac-rs`; re-analyzed as `warpbro-rs`.
+- [ ] gitnexus index (re-analyzed as `warpbro-rs`) is stale after the later commits: `reanalyze`.
