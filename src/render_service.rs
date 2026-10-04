@@ -126,6 +126,8 @@ pub struct Frame {
     pub denoise_ms: f32,
     pub denoise_error: Option<String>,
     pub samples: u32,
+    /// Adaptive sampling found every tile converged before `samples` reached the target.
+    pub converged: bool,
     pub last_ms: f32,
     pub last_spp: u32,
     pub sdr_bytes: Arc<Vec<u8>>,
@@ -185,11 +187,16 @@ impl Frame {
             denoise_ms: target.denoise.last_ms,
             denoise_error: target.denoise.error.clone(),
             samples: target.samples,
+            converged: target.converged,
             last_ms: target.last_ms,
             last_spp: target.last_spp,
             sdr_bytes,
             hdr_bytes,
         }
+    }
+    /// Finished for a target of `spp`: all samples taken, or adaptive sampling converged.
+    pub fn complete(&self, spp: u32) -> bool {
+        self.samples >= spp || self.converged
     }
     pub fn msamples_per_s(&self) -> f64 {
         if self.last_ms <= 0.0 {
@@ -822,6 +829,7 @@ fn empty_presentation() -> Frame {
         denoise_ms: 0.0,
         denoise_error: None,
         samples: 0,
+        converged: false,
         last_ms: 0.0,
         last_spp: 0,
         sdr_bytes: Arc::new(Vec::new()),
@@ -968,7 +976,7 @@ fn step_preview(
     if !preview_current(shared, generation) {
         return worked;
     }
-    if job.target.samples >= job.spp {
+    if job.target.complete(job.spp) {
         let (number, epoch, job) = session.job.take().expect("completed preview job");
         let request = &session.cache.request;
         let frame = Frame::snapshot(
@@ -1381,7 +1389,7 @@ fn run_worker(shared: &Shared) {
             worked = true;
             let cancelled = shared.state.lock().unwrap().cancel_export;
             if !cancelled {
-                if job.target.samples >= job.spp {
+                if job.target.complete(job.spp) {
                     let mut frame = Frame::snapshot(&job.target, job.id, false, false, 100.0);
                     frame.radiance = gpu.scene_linear(&job.target);
                     dispatch_export(
@@ -1415,13 +1423,13 @@ fn run_worker(shared: &Shared) {
             }
         }
         if let Some(job) = &mut thumbnail {
-            if !interactive && job.target.samples < job.spp {
+            if !interactive && !job.target.complete(job.spp) {
                 let batch = batch_size(&job.target, job.spp.saturating_sub(job.target.samples));
                 let final_pass = job.target.samples.saturating_add(batch) >= job.spp;
                 gpu.step(&mut job.target, &job.scene, batch, 7, None, final_pass);
                 worked = true;
             }
-            if job.target.samples >= job.spp
+            if job.target.complete(job.spp)
                 && shared.state.lock().unwrap().events.len() < QUEUE_LIMIT
             {
                 let frame = Arc::new(Frame::snapshot(&job.target, job.id, false, false, 100.0));
@@ -1530,7 +1538,7 @@ fn step_viewport(gpu: &mut Gpu, active: &mut Viewport, shared: &Shared) -> bool 
     if active.dirty
         || fresh
         || active.last_preview != preview
-        || target.samples >= goal
+        || target.complete(goal)
         || active.last_publish.elapsed() >= Duration::from_millis(16)
     {
         let frame = Arc::new(Frame::snapshot(
@@ -1885,6 +1893,7 @@ mod tests {
             denoise_ms: 0.0,
             denoise_error: None,
             samples: 1,
+            converged: false,
             last_ms: 1.0,
             last_spp: 1,
             sdr_bytes: Arc::new(vec![0; 4]),

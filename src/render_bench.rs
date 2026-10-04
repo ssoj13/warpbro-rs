@@ -57,6 +57,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let mut case = None;
     let mut seed = 0u32;
     let mut batch = 4u32;
+    // `--adaptive THRESHOLD`: measure adaptive sampling (stops converged tiles; `samples` is the
+    // budget). Off by default so estimator comparisons get exactly `samples` per pixel.
+    let mut adaptive_threshold: Option<f32> = None;
     while position < args.len() {
         let flag = &args[position];
         let value = args
@@ -66,6 +69,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             "--case" => case = Some(value.as_str()),
             "--seed" => seed = value.parse().context("Invalid benchmark seed")?,
             "--batch" => batch = value.parse().context("Invalid benchmark batch")?,
+            "--adaptive" => {
+                adaptive_threshold = Some(value.parse().context("Invalid adaptive threshold")?)
+            }
             _ => anyhow::bail!("Unknown world benchmark option: {flag}"),
         }
         position += 2;
@@ -116,6 +122,12 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             "Benchmark must use evaluated world objects"
         );
         scene.render.denoise.enabled = false;
+        // Estimator comparisons need exactly `samples` per pixel; adaptive sampling would stop
+        // converged tiles early and change both the error and the time of every run.
+        scene.render.adaptive.enabled = adaptive_threshold.is_some();
+        if let Some(threshold) = adaptive_threshold {
+            scene.render.adaptive.noise_threshold = threshold;
+        }
         scene.render.exposure_stops = 0.0;
         scene.render.saturation = 1.0;
         if diffuse {
@@ -165,7 +177,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         gpu.prepare_target(&mut target, &scene, None);
         let mut batches = Vec::with_capacity(samples.div_ceil(batch) as usize);
         let start = Instant::now();
-        while target.samples < samples {
+        while !target.complete(samples) {
             let count = batch.min(samples - target.samples);
             let final_pass = target.samples + count == samples;
             gpu.step(&mut target, &scene, count, seed, None, final_pass);
@@ -202,6 +214,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             "case": name, "preset": crate::presets::ANIMATED[preset].name, "frame": frame,
             "gpu": &gpu.name, "width": width, "height": height, "samples": samples,
             "seed": seed, "batch": batch, "world_render": true,
+            "adaptive_threshold": adaptive_threshold, "samples_taken": target.samples,
+            "active_tiles": [target.active_tiles.0, target.active_tiles.1],
             "denoise_enabled": false, "exposure_multiplier": 1.0, "saturation": 1.0,
             "elapsed_seconds": elapsed, "raw_readback_seconds": readback_seconds,
             "ms_per_sample": elapsed * 1000.0 / f64::from(samples),

@@ -19,6 +19,9 @@ const BLOCK: u32 = 128;
 const TONEMAP_ONLY: [usize; 3] = [P_EXPOSURE, P_SATURATION, P_TONEMAP];
 /// Slots that change every launch.
 const PER_LAUNCH: [usize; 3] = [P_SAMPLE_BEGIN, P_SPP, P_SEED];
+/// Adaptive-sampling slots: they choose which tiles keep sampling, never the accumulated values,
+/// so changing them must not restart the render (the `adapt` kernel re-decides every step).
+const SCHEDULE_ONLY: [usize; 2] = [P_ADAPT_THRESHOLD, P_ADAPT_MIN];
 
 /// Worker-local counters; uploads count only completed host-to-device copies.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -422,6 +425,15 @@ pub struct Target {
     accum: DeviceBuffer<[f32; 4]>,
     albedo: DeviceBuffer<[f32; 4]>,
     normal: DeviceBuffer<[f32; 4]>,
+    /// Per pixel: sum of squared sample luminance (adaptive sampling variance).
+    moment: DeviceBuffer<f32>,
+    /// Per 8x4 tile: 1 = keep sampling, 0 = converged (written by the `adapt` kernel).
+    active: DeviceBuffer<u32>,
+    active_host: Vec<u32>,
+    /// Tiles still sampling / all tiles, after the last adaptive decision.
+    pub active_tiles: (usize, usize),
+    /// Every tile is under the adaptive noise threshold: further samples change nothing.
+    pub converged: bool,
     pub denoise: crate::denoise::State,
     denoise_selected: bool,
     out: DeviceBuffer<[f32; 4]>,
@@ -442,7 +454,53 @@ pub struct Target {
     pub last_spp: u32,
 }
 
+impl Target {
+    /// Finished for a target of `spp`: all samples taken, or adaptive sampling converged.
+    pub fn complete(&self, spp: u32) -> bool {
+        self.samples >= spp || self.converged
+    }
+}
+
 impl Gpu {
+    /// Every tile samples again (new accumulation, or adaptive sampling switched off).
+    fn activate_all(&self, target: &mut Target) {
+        target.active_host.fill(1);
+        target
+            .active
+            .copy_from_host(&self.stream, &target.active_host)
+            .expect("activate tiles");
+        target.active_tiles = (target.active_host.len(), target.active_host.len());
+        target.converged = false;
+    }
+
+    /// Adaptive sampling after a traced batch: the `adapt` kernel decides per tile, the host reads
+    /// the flags back for the scheduler (`converged`) and the status line (`active_tiles`).
+    fn adapt(&self, target: &mut Target, scene: &Scene) {
+        let adaptive = scene.render.adaptive;
+        if !adaptive.enabled {
+            if target.active_tiles.0 != target.active_tiles.1 {
+                self.activate_all(target);
+            }
+            return;
+        }
+        if target.samples < adaptive.min_samples {
+            return;
+        }
+        let tiles = target.active_host.len() as u32;
+        let cfg = LaunchConfig1D::new(tiles.div_ceil(BLOCK), BLOCK, 0);
+        let prepared = self.module.prepare_adapt(cfg).expect("prepare adapt");
+        self.module
+            .adapt(&self.stream, &prepared, &target.accum, &target.moment, &mut target.active)
+            .expect("adapt");
+        target
+            .active
+            .copy_to_host(&self.stream, &mut target.active_host)
+            .expect("tile flags readback");
+        let active = target.active_host.iter().filter(|&&a| a != 0).count();
+        target.active_tiles = (active, target.active_host.len());
+        target.converged = active == 0;
+    }
+
     pub fn invalidate_colour(&mut self) {
         self.colour = crate::color::ColorPipeline::new();
         self.colour_revision = self.colour_revision.wrapping_add(1);
@@ -502,6 +560,15 @@ impl Gpu {
             accum: DeviceBuffer::zeroed(&self.stream, padded).expect("accumulator"),
             albedo: DeviceBuffer::zeroed(&self.stream, padded).expect("albedo guides"),
             normal: DeviceBuffer::zeroed(&self.stream, padded).expect("normal guides"),
+            moment: DeviceBuffer::zeroed(&self.stream, padded).expect("sample moments"),
+            active: {
+                let mut active = DeviceBuffer::zeroed(&self.stream, padded / 32).expect("tile flags");
+                active.copy_from_host(&self.stream, &vec![1u32; padded / 32]).expect("activate tiles");
+                active
+            },
+            active_host: vec![1; padded / 32],
+            active_tiles: (padded / 32, padded / 32),
+            converged: false,
             denoise: Default::default(),
             denoise_selected: false,
             out: DeviceBuffer::zeroed(&self.stream, width * height).expect("output"),
@@ -576,7 +643,7 @@ impl Gpu {
         params: &[f32; P_COUNT],
     ) -> bool {
         let mut key = *params;
-        for i in TONEMAP_ONLY.iter().chain(PER_LAUNCH.iter()) {
+        for i in TONEMAP_ONLY.iter().chain(PER_LAUNCH.iter()).chain(SCHEDULE_ONLY.iter()) {
             key[*i] = 0.0;
         }
         if target.key.len() == P_COUNT + prepared.trace.len()
@@ -599,6 +666,11 @@ impl Gpu {
             .normal
             .zero_async(&self.stream)
             .expect("clear normal guides");
+        target
+            .moment
+            .zero_async(&self.stream)
+            .expect("clear sample moments");
+        self.activate_all(target);
         target.denoise.reset();
         target.denoise_selected = false;
         target.samples = 0;
@@ -790,6 +862,8 @@ impl Gpu {
                         acc,
                         &mut target.albedo,
                         &mut target.normal,
+                        &target.active,
+                        &mut target.moment,
                     )
                     .expect(stringify!($run));
                 }};
@@ -835,7 +909,10 @@ impl Gpu {
                 }
             }
             target.samples += spp;
+            self.adapt(target, scene);
         }
+        // Converging early ends the render: run the final-pass work (OIDN at completion) now.
+        let final_pass = final_pass || target.converged;
         let denoise_changed = self.process_denoise(target, scene, final_pass);
         let display_changed = !target
             .display_key
@@ -1945,6 +2022,36 @@ mod tests {
         object.material.specular = 0.0;
         object
     }
+    #[test]
+    fn cuda_adaptive_sampling_stops_converged_tiles_and_keeps_sky_exact() {
+        let mut gpu = Gpu::new().unwrap();
+        let mut scene = Scene::preset(FAMILY_BULB);
+        scene.camera.distance *= 4.0; // mostly sky: those tiles converge at the minimum
+        scene.render.denoise.enabled = false;
+        scene.render.adaptive = crate::scene::Adaptive { enabled: true, noise_threshold: 0.05, min_samples: 16 };
+        let budget = 4096;
+        let mut target = gpu.target(64, 48);
+        while !target.complete(budget) {
+            gpu.step(&mut target, &scene, 16, 0, None, false);
+        }
+        assert!(target.converged && target.samples < budget, "{} samples", target.samples);
+        assert_eq!(target.active_tiles.0, 0);
+        let counts: Vec<f32> = gpu.guide_sums(&target, &target.accum).iter().map(|p| p[3]).collect();
+        let (low, high) = counts.iter().fold((f32::MAX, 0.0f32), |(l, h), &c| (l.min(c), h.max(c)));
+        assert_eq!(low, 16.0, "sky tiles stop at the minimum");
+        assert!(high > low, "noisy fractal tiles keep sampling");
+        // Sky radiance is deterministic: per-pixel normalisation must reproduce the uniform render.
+        let adaptive = gpu.raw_scene_linear(&target);
+        scene.render.adaptive.enabled = false;
+        let mut uniform = gpu.target(64, 48);
+        gpu.step(&mut uniform, &scene, 16, 0, None, false);
+        let reference = gpu.raw_scene_linear(&uniform);
+        let sky = counts.iter().position(|&c| c == 16.0).unwrap();
+        for k in 0..3 {
+            assert!((adaptive[sky][k] - reference[sky][k]).abs() < 1e-5, "{:?} vs {:?}", adaptive[sky], reference[sky]);
+        }
+    }
+
     /// Working-space pixels in Rec.709, the primaries test colours are authored in.
     fn rec709(pixels: &[[f32; 4]]) -> Vec<[f32; 3]> {
         pixels.iter().map(|p| crate::color::to_709([p[0], p[1], p[2]])).collect()

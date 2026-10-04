@@ -1043,6 +1043,8 @@ fn attribute_range(path: &str) -> Option<(f64, f64)> {
     match path {
         "/camera/fov_y_degrees" => Some((1.0, 179.0)),
         "/render/denoise/interval" => Some((0.0, u32::MAX as f64)),
+        "/render/adaptive/noise_threshold" => Some((0.0005, 1.0)),
+        "/render/adaptive/min_samples" => Some((1.0, 65536.0)),
         "/material/transmission" => Some((0.0, 1.0)),
         "/material/transmission_depth" => Some((0.0, f32::MAX as f64)),
         p if p.ends_with("roughness") || p.ends_with("metallic") || p == "/material/opacity" => {

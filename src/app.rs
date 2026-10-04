@@ -743,7 +743,7 @@ impl App {
         let wait_thumbs = !std::env::var("FRAC_SNAP_WAIT_THUMBS").is_ok_and(|value| value == "0");
         let ready = (!wait_thumbs || !thumbs_pending)
             && !self.showing_preview
-            && self.frame.as_ref().is_some_and(|t| t.samples >= spp);
+            && self.frame.as_ref().is_some_and(|t| t.complete(spp));
         if ready && !requested {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
             self.snap = self.snap.take().map(|(path, spp, _)| (path, spp, true));
@@ -2514,7 +2514,7 @@ impl App {
             return;
         };
         if frame.preview
-            || frame.samples < viewport.target_spp
+            || !frame.complete(viewport.target_spp)
             || frame.width != viewport.width
             || frame.height != viewport.height
             || self.viewport_stamp
@@ -3218,6 +3218,7 @@ mod tests {
                 denoise_ms: 0.0,
                 denoise_error: None,
                 samples,
+                converged: false,
                 last_ms: 0.0,
                 last_spp: 1,
                 sdr_bytes: Arc::new(vec![]),

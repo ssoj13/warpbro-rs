@@ -384,6 +384,7 @@ impl PreviewController {
 struct FrameMetadata {
     hdr: bool,
     samples: u32,
+    converged: bool,
     last_ms: f32,
     last_spp: u32,
     denoised_samples: u32,
@@ -477,13 +478,14 @@ impl PreviewCache {
             || frame.height != self.request.height
             || frame.pixels.len() != frame.width * frame.height
             || frame.light.len() != frame.width * frame.height
-            || frame.samples < self.request.spp
+            || !frame.complete(self.request.spp)
         {
             return Err("Viewport frame does not match preview quality or dimensions".into());
         }
         let meta = FrameMetadata {
             hdr: frame.hdr,
             samples: frame.samples,
+            converged: frame.converged,
             last_ms: frame.last_ms,
             last_spp: frame.last_spp,
             denoised_samples: frame.denoised_samples,
@@ -587,6 +589,7 @@ impl PreviewCache {
         frame.denoise_ms = meta.denoise_ms;
         frame.denoise_error.clone_from(&meta.denoise_error);
         frame.samples = meta.samples;
+        frame.converged = meta.converged;
         frame.last_ms = meta.last_ms;
         frame.last_spp = meta.last_spp;
         Some(())
@@ -634,6 +637,7 @@ mod tests {
             denoise_ms: 0.5,
             denoise_error: None,
             samples: 8,
+            converged: false,
             last_ms: 3.0,
             last_spp: 2,
             sdr_bytes: Arc::new(vec![]),

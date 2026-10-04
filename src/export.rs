@@ -864,7 +864,7 @@ impl ExportWriter {
                                 return Ok(());
                             }
                         };
-                        if frame.samples < settings.samples {
+                        if !frame.complete(settings.samples) {
                             return Err(format!(
                                 "Incomplete frame: {} < {} samples",
                                 frame.samples, settings.samples
@@ -1290,6 +1290,7 @@ mod tests {
             denoise_ms: 0.0,
             denoise_error: None,
             samples: 4,
+            converged: false,
             last_ms: 1.,
             last_spp: 4,
             sdr_bytes: Arc::new(Vec::new()),

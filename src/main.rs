@@ -119,7 +119,7 @@ fn headless(out: Option<&str>, w: usize, h: usize, spp: u32, hdr: bool, display_
         gpu.step(&mut t, &scene, 1, 0, None, spp <= 1); // warm-up
         let batch = 8u32;
         let t0 = Instant::now();
-        while t.samples < spp {
+        while !t.complete(spp) {
             let n = batch.min(spp - t.samples);
             let final_pass = t.samples + n >= spp;
             gpu.step(&mut t, &scene, n, 0, None, final_pass);

@@ -90,6 +90,8 @@ slots! {
     // Append-only extension: pre-existing OFX/global slot offsets stay unchanged.
     P_TRANSMISSION = 1, P_TRANSMISSION_COLOR = 3,
     P_TRANSMISSION_EXTRA_ROUGHNESS = 1, P_TRANSMISSION_DEPTH = 1,
+    // Adaptive sampling (`adapt` kernel): relative error threshold and minimum samples per pixel.
+    P_ADAPT_THRESHOLD = 1, P_ADAPT_MIN = 1,
 }
 
 /// Formula families (ofx-fractal Formula3d codes).

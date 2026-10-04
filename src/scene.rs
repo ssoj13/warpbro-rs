@@ -419,6 +419,25 @@ pub struct Render {
     /// OIDN works on neutral scene-linear samples before display transforms.
     #[serde(default)]
     pub denoise: crate::denoise::Settings,
+    #[serde(default)]
+    pub adaptive: Adaptive,
+}
+
+/// Adaptive sampling (V-Ray noise threshold / Redshift adaptive error): 8x4 pixel tiles stop
+/// receiving samples once their noise is below the threshold; the sample target stays the maximum.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Adaptive {
+    pub enabled: bool,
+    /// Relative standard error of a pixel's mean luminance, `se / sqrt(mean)`.
+    pub noise_threshold: f32,
+    /// Samples every pixel receives before its tile may stop.
+    pub min_samples: u32,
+}
+impl Default for Adaptive {
+    fn default() -> Self {
+        Self { enabled: true, noise_threshold: 0.01, min_samples: 16 }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -667,6 +686,7 @@ impl Scene {
                 saturation: 1.0,
                 reinhard: false,
                 denoise: crate::denoise::Settings::default(),
+                adaptive: Adaptive::default(),
             },
         }
     }
@@ -1079,6 +1099,8 @@ impl Scene {
         p[P_EXPOSURE] = 2f32.powf(r.exposure_stops);
         p[P_SATURATION] = r.saturation;
         p[P_TONEMAP] = r.reinhard as u32 as f32;
+        p[P_ADAPT_THRESHOLD] = r.adaptive.noise_threshold;
+        p[P_ADAPT_MIN] = r.adaptive.min_samples as f32;
         p
     }
 }
