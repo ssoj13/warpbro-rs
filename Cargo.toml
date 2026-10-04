@@ -8,8 +8,10 @@ name = "WarpBro"
 path = "src/main.rs"
 
 [workspace]
+members = ["crates/fractal-materials"]
 
 [dependencies]
+fractal-materials = { path = "crates/fractal-materials" }
 playa-player = { git = "ssh://git@github.com/ssoj13/playa.git", rev = "00d90428d6c931b69b7117fd2a4cdf143d075413", default-features = false }
 pt-denoise-oidn = { git = "ssh://git@github.com/ssoj13/squarebob-rs.git", rev = "3dedf872cddb06b4aa5689f5cfe022468cdb6f3b" }
 render-core = { git = "ssh://git@github.com/ssoj13/squarebob-rs.git", rev = "3dedf872cddb06b4aa5689f5cfe022468cdb6f3b" }
