@@ -254,9 +254,9 @@ HDR preservation, unchanged raw samples and final denoising below the interval.
 The final release test logs are [the regular suite](target/verification/ssh-final-tests.out)
 and [the explicitly enabled GPU suite](target/verification/ssh-final-gpu-tests.out).
 
-Screenshot / Render PNG saves the selected rendering: SDR sRGB/selected monitor codes as
-8-bit PNG, or HDR10 BT.2020/PQ as 16-bit PNG with `cICP`, `mDCV`, and measured `cLLI` metadata.
-**Display EXR** saves unquantized linear Rec.709 display light with chromaticities and
+All output goes to `~/.warpbro/out/<local date_time>/`, one new folder per export or screenshot.
+**File → Save image** writes the viewport as shown: 8-bit sRGB PNG, or HDR10 BT.2020/PQ 16-bit PNG
+with `cICP`, `mDCV` and measured `cLLI` for an HDR view. **Display EXR** saves unquantized linear Rec.709 display light with chromaticities and
 `whiteLuminance = 100`; this is display-referred light, not a scene-linear master.
 
 ```sh
@@ -267,12 +267,15 @@ CUDA_HOME=/usr/local/cuda CUDA_OXIDE_LLC=/usr/bin/llc-22 cargo oxide test -- --r
 ### Render / Encode
 
 Open **Render → Render / Encode…** or **Window → Render / Encode**. This dockable panel
-uses Playa's shared encoder schema. Set output path, resolution, **Samples / frame**, and the
-inclusive frame range, then select an output:
+uses Playa's shared encoder schema. Pick the format tab, a file **Name**, resolution,
+**Samples / frame** and the inclusive frame range (**Current frame** renders the frame under the
+playhead). A one-frame range writes `name.ext`; a longer range writes `name.000001.ext`, ...
 
+- **PNG:** the monitor rendering baked in, as **SDR · 8-bit sRGB / BT.709**, **HDR10 · 16-bit PQ /
+  BT.2020** (`cICP`, `mDCV`, `cLLI`) or **HLG · 16-bit BT.2020** (`cICP`, `mDCV`), with the HDR
+  mastering peak in nits. HDR keeps SDR white at 100 nits; choose an HDR view for HDR highlights.
 - **EXR sequence:** float RGB scene-linear ACEScg tagged with AP1 chromaticities; exposure and the
-  display transform are excluded. `renders/frame.exr`, range 1–3, produces
-  `renders/frame.000001.exr` through `renders/frame.000003.exr`.
+  display transform are excluded.
 - **HEVC / ffmpeg-rs:** hardware **GPU · Vulkan Video** encoding to MP4 or MOV by default, with rational FPS and QP 0–51. **CPU · Kvazaar (I-frames)** is an explicit software alternative using independent frames to avoid reproduced corruption in the pinned inter-prediction path; hardware initialization failures are reported instead of silently switching encoders. Output is SDR 8-bit YUV 4:2:0 with Rec.709 primaries and sRGB transfer;
   the display transform is baked in. Width and height must be even. HDR video is unavailable.
 
@@ -281,8 +284,16 @@ each frame evaluates its Playa animation at that frame's time, including transfo
 visibility and discrete keys. When OIDN is enabled, the scene-linear EXR output contains the
 final denoised radiance; exposure and OCIO remain excluded.
 An autonomous coordinator advances rendering and a bounded writer queue handles encoding
-and file output even when the GUI stops updating. **Cancel** stops sampling new frames, drains completed frames and flushes delayed codec packets to publish a playable partial movie. Completed EXR frames remain; cancellation before the first complete video frame creates no movie. Existing outputs are preserved unless
-**Overwrite existing output** is enabled; finished outputs are published atomically.
+and file output even when the GUI stops updating. **Cancel** stops sampling new frames, drains completed frames and flushes delayed codec packets to publish a playable partial movie. Completed frames remain; cancellation before the first complete video frame creates no movie. Every export
+writes into its own new folder, and finished outputs are published atomically.
+
+**Templates** (File → Templates) are built into the binary; a `*.frac.json` in
+`~/.warpbro/templates` with the same name overrides a built-in, any other file is added. The
+binary needs no external files.
+
+**Camera slots:** the five buttons at the right of the viewport toolbar store the viewport
+camera on left click and restore it on right click (like copy / paste); the slots are kept with
+the application settings, and a restore is authored like any viewport navigation (Auto Key, undo).
 
 For compatibility, the local checkout folder, profile and data locations retain the legacy
 `frac-rs` name during the WarpBro rename.

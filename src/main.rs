@@ -10,6 +10,7 @@
 mod animation;
 mod app;
 mod camera_orbit;
+mod camera_slots;
 mod color;
 mod denoise;
 mod environment;
@@ -48,6 +49,34 @@ use std::time::Instant;
 
 fn arg<T: std::str::FromStr>(args: &[String], i: usize, default: T) -> T {
     args.get(i).and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// `~/.warpbro`: the user's templates and every render / screenshot output live under it.
+pub fn warpbro_dir() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".warpbro")
+}
+
+/// `~/.warpbro/out`: every export and screenshot gets its own timestamped folder here.
+pub fn out_root() -> std::path::PathBuf {
+    warpbro_dir().join("out")
+}
+
+/// A new, unique `<root>/<local timestamp>` folder for one export or screenshot.
+pub fn new_out_dir(root: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    std::fs::create_dir_all(root).map_err(|e| format!("{}: {e}", root.display()))?;
+    let stamp = jiff::Zoned::now().strftime("%Y-%m-%d_%H-%M-%S").to_string();
+    // Two outputs within one second get -2, -3, ...: `create_dir` is the atomic claim.
+    for n in 1..1000 {
+        let dir = root.join(if n == 1 { stamp.clone() } else { format!("{stamp}-{n}") });
+        match std::fs::create_dir(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("{}: {e}", dir.display())),
+        }
+    }
+    Err(format!("{}: no free folder name for {stamp}", root.display()))
 }
 
 pub fn slug(name: &str) -> String {
@@ -101,7 +130,7 @@ fn headless(out: Option<&str>, w: usize, h: usize, spp: u32, hdr: bool, display_
         );
         if let Some(dir) = out {
             let path = std::path::Path::new(dir).join(format!("{}.png", slug(&scene.name)));
-            t.save_png(&path).expect("save png");
+            t.save_png(&path, crate::render_service::PngEncoding::displayed(t.hdr), 1000.0, true).expect("save png");
             if display_exr {
                 t.save_display_exr(&path.with_extension("display.exr"))
                     .expect("save display EXR");
@@ -178,7 +207,7 @@ fn animated_fixtures(
                 "Fixture accumulation did not complete"
             );
             target
-                .save_png(&output.join(format!("frame.{frame:06}.png")))
+                .save_png(&output.join(format!("frame.{frame:06}.png")), crate::render_service::PngEncoding::displayed(target.hdr), 1000.0, true)
                 .map_err(anyhow::Error::msg)?;
             println!(
                 "{} frame {}: {:.3}s",

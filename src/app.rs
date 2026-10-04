@@ -1,5 +1,6 @@
 //! The browser UI (egui): gallery + bookmarks with GPU thumbnails, the progressive viewport,
-//! the scene inspector, screenshots and final PNG renders.
+//! the scene inspector and viewport screenshots. Renders (PNG / EXR / video) go through the
+//! Render / Encode panel (`export.rs`); all output lands in `~/.warpbro/out/<timestamp>`.
 
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -19,14 +20,6 @@ const THUMB_H: usize = 126;
 const THUMB_SPP: u32 = 24;
 /// After the last camera / parameter change, keep the low-resolution preview this long.
 const PREVIEW_HOLD_S: f32 = 0.18;
-
-const FINAL_SIZES: [(u32, u32, &str); 5] = [
-    (1280, 720, "720p"),
-    (1920, 1080, "1080p"),
-    (2560, 1440, "1440p"),
-    (3840, 2160, "4K"),
-    (2048, 2048, "2048²"),
-];
 
 pub fn run() -> anyhow::Result<()> {
     crate::window::run()
@@ -81,14 +74,6 @@ fn material_preview_scene(material: Material) -> Scene {
     s
 }
 
-struct Job {
-    width: usize,
-    height: usize,
-    samples: u32,
-    spp: u32,
-    path: PathBuf,
-}
-
 pub(crate) struct App {
     renderer: RenderService,
     io: crate::io_service::IoService,
@@ -127,6 +112,7 @@ pub(crate) struct App {
     dock: egui_dock::DockState<dock::Panel>,
     panels_to_open: Vec<dock::Panel>,
     toolbar: egui_viewport_toolbar::ToolbarState,
+    camera_slots: crate::camera_slots::CameraSlots,
     fonts: dock::Fonts,
     applied_fonts: Option<dock::Fonts>,
     viewport_visible: bool,
@@ -136,7 +122,7 @@ pub(crate) struct App {
     scene_file_path: Option<PathBuf>,
     scene_file_sequence: u64,
     scene_file_pending: Option<(u64, u64, crate::templates::FileAction)>,
-    templates: Vec<PathBuf>,
+    templates: Vec<crate::templates::Entry>,
     templates_requested: bool,
     templates_pending: bool,
     persisted_settings: Option<Settings>,
@@ -162,9 +148,6 @@ pub(crate) struct App {
     resolution: f32,
     paused: bool,
     show_ui: bool,
-    job: Option<Job>,
-    final_size: usize,
-    final_spp: u32,
     status: String,
     frame_ms: f32,
     seed: u32,
@@ -198,13 +181,6 @@ fn data_dir() -> PathBuf {
         return PathBuf::from(root).join("data");
     }
     dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("frac-rs")
-}
-
-fn pictures_dir() -> PathBuf {
-    dirs::picture_dir()
-        .or_else(dirs::home_dir)
         .unwrap_or_else(|| PathBuf::from("."))
         .join("frac-rs")
 }
@@ -289,6 +265,7 @@ struct Settings {
     fonts: dock::Fonts,
     layout: Option<String>,
     toolbar: egui_viewport_toolbar::ToolbarState,
+    camera_slots: crate::camera_slots::CameraSlots,
     layouts: egui_layout_manager::LayoutStore,
     export: crate::export::ExportSettings,
     gui_fps: u32,
@@ -313,6 +290,7 @@ impl Default for Settings {
             fonts: Default::default(),
             layout: None,
             toolbar: Default::default(),
+            camera_slots: Default::default(),
             layouts: Default::default(),
             export: Default::default(),
             gui_fps: 60,
@@ -394,6 +372,7 @@ impl App {
             dock: dock::default_layout(),
             panels_to_open: Vec::new(),
             toolbar: Default::default(),
+            camera_slots: Default::default(),
             fonts: Default::default(),
             applied_fonts: None,
             viewport_visible: false,
@@ -428,9 +407,6 @@ impl App {
             resolution: 1.0,
             paused: false,
             show_ui: true,
-            job: None,
-            final_size: 1,
-            final_spp: 512,
             status: String::new(),
             frame_ms: 16.0,
             seed: 0,
@@ -456,6 +432,7 @@ impl App {
             self.prefs = settings.panel;
             self.controls = settings.controls;
             self.toolbar = settings.toolbar;
+            self.camera_slots = settings.camera_slots;
             self.layouts.store = settings.layouts;
             self.export.restore(settings.export);
             self.gui_fps = settings.gui_fps.clamp(15, 240);
@@ -661,6 +638,7 @@ impl App {
             && saved.controls.look_sensitivity == self.controls.look_sensitivity
             && saved.controls.fly_speed == self.controls.fly_speed
             && saved.toolbar == self.toolbar
+            && saved.camera_slots == self.camera_slots
             && saved.fonts == self.fonts
             && saved.layouts == self.layouts.store
             && saved.gui_fps == self.gui_fps
@@ -710,6 +688,7 @@ impl App {
             },
             layout,
             toolbar: self.toolbar,
+            camera_slots: self.camera_slots,
             fonts: self.fonts.clone(),
             layouts: self.layouts.store.clone(),
             export: self.export.settings().clone(),
@@ -1423,10 +1402,16 @@ impl App {
             self.status = "Nothing rendered yet".into();
             return;
         };
-        let path = pictures_dir().join(format!(
-            "{}-{}.{}",
+        let dir = match crate::new_out_dir(&crate::out_root()) {
+            Ok(dir) => dir,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
+        let path = dir.join(format!(
+            "{}.{}",
             crate::slug(&self.scene.name),
-            now_stamp(),
             if exr { "display.exr" } else { "png" }
         ));
         self.status = match self
@@ -1436,48 +1421,6 @@ impl App {
             Ok(()) => "Saving image…".into(),
             Err(e) => e,
         };
-    }
-    fn start_job(&mut self) {
-        let (w, h, _) = FINAL_SIZES[self.final_size];
-        let path = pictures_dir().join(format!(
-            "{}-{}x{}-{}spp-{}.png",
-            crate::slug(&self.scene.name),
-            w,
-            h,
-            self.final_spp,
-            now_stamp()
-        ));
-        let mut scene = match self
-            .world
-            .document
-            .snapshot(f64::from(self.world_ui.playhead))
-        {
-            Ok(scene) => scene,
-            Err(error) => {
-                self.status = error;
-                return;
-            }
-        };
-        self.export.settings().apply_denoise_policy(&mut scene);
-        match self.renderer.try_command(Command::RenderExport {
-            reply: None,
-            id: 1,
-            scene,
-            width: w as usize,
-            height: h as usize,
-            spp: self.final_spp,
-        }) {
-            Ok(()) => {
-                self.job = Some(Job {
-                    width: w as usize,
-                    height: h as usize,
-                    samples: 0,
-                    spp: self.final_spp,
-                    path,
-                })
-            }
-            Err(e) => self.status = e,
-        }
     }
     fn step_viewport(&mut self, w: usize, h: usize, output_hdr: bool, white_nits: f32) {
         let mut snapshot = self.scene.clone();
@@ -1530,7 +1473,7 @@ impl App {
         while let Some(result) = self.io.poll_templates() {
             self.templates_pending = false;
             match result {
-                Ok(paths) => self.templates = paths,
+                Ok(entries) => self.templates = entries,
                 Err(error) => self.status = format!("Templates: {error}"),
             }
             ctx.request_repaint();
@@ -1564,16 +1507,11 @@ impl App {
             self.export.handle(&event, &self.renderer);
             match event {
                 RenderEvent::Ready { name } => self.gpu_name = name,
-                RenderEvent::ExportFailed { id: 1, error } => {
-                    self.job = None;
-                    self.status = format!("Render failed: {error}");
-                }
                 RenderEvent::Error(error) => {
                     if let Some((id, _)) = self.thumb_pending.take() {
                         self.material_gallery.fail_thumbnail(id, error.clone());
                     }
                     self.status = error;
-                    self.job = None;
                 }
                 RenderEvent::Thumbnail { id, frame } => {
                     let pending = if self
@@ -1629,22 +1567,6 @@ impl App {
                         }
                     }
                 }
-                RenderEvent::ExportProgress { id: 1, samples, .. } => {
-                    if let Some(job) = &mut self.job {
-                        job.samples = samples;
-                    }
-                }
-                RenderEvent::ExportFrame { id: 1, frame } => {
-                    if let Some(job) = self.job.take()
-                        && let Err(error) = self.io.send(crate::io_service::Command::SaveFrame {
-                            frame,
-                            path: job.path,
-                            exr: false,
-                        })
-                    {
-                        self.status = error;
-                    }
-                }
                 _ => {}
             }
         }
@@ -1662,59 +1584,18 @@ impl App {
         freeze_world_scene(&self.scene, &self.world.document)
     }
     fn export_ui(&mut self, ui: &mut egui::Ui) {
-        egui::CollapsingHeader::new("Still image · PNG")
-            .default_open(true)
-            .show(ui, |ui| self.still_image_ui(ui));
-        ui.separator();
         let timeline = (
             self.world.document.first,
             self.world.document.last,
             self.world.document.fps,
+            self.world_ui.playhead,
         );
         let scene = &self.scene;
         let world = &mut self.world;
-        ui.add_enabled_ui(self.job.is_none(), |ui| {
-            self.export.ui(
-                ui,
-                timeline,
-                &self.renderer,
-                &mut self.world_ui.file_dialogs,
-                || {
-                    world.finish_edit();
-                    freeze_world_scene(scene, &world.document)
-                },
-            );
+        self.export.ui(ui, timeline, &self.renderer, || {
+            world.finish_edit();
+            freeze_world_scene(scene, &world.document)
         });
-    }
-
-    fn still_image_ui(&mut self, ui: &mut egui::Ui) {
-        egui::ComboBox::from_id_salt("final_size")
-            .selected_text(FINAL_SIZES[self.final_size].2)
-            .show_ui(ui, |ui| {
-                for (i, size) in FINAL_SIZES.iter().enumerate() {
-                    ui.selectable_value(&mut self.final_size, i, size.2);
-                }
-            });
-        ui.add(
-            egui::DragValue::new(&mut self.final_spp)
-                .range(1..=65536)
-                .suffix(" spp"),
-        );
-        ui.add_enabled_ui(self.job.is_none() && !self.export.is_running(), |ui| {
-            self.export.denoise_option(ui)
-        });
-        if let Some(job) = &self.job {
-            ui.add(egui::ProgressBar::new(job.samples as f32 / job.spp as f32).show_percentage());
-            if ui.button("Cancel image render").clicked() {
-                let _ = self.renderer.try_command(Command::CancelExport);
-                self.job = None;
-            }
-        } else if ui
-            .add_enabled(!self.export.is_running(), egui::Button::new("Render PNG"))
-            .clicked()
-        {
-            self.start_job();
-        }
     }
 
     /// Unreal-style flight: hold RMB in the viewport, mouse looks, WASD moves, R/C up/down, Q/E rolls,
@@ -1985,22 +1866,37 @@ impl App {
                         ui.ctx().request_repaint();
                     }
                     let mut picked = None;
-                    for path in &self.templates {
-                        let name = path
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .unwrap_or("Scene");
-                        let name = name
-                            .strip_suffix(".frac.json")
-                            .or_else(|| name.strip_suffix(".json"))
-                            .unwrap_or(name);
-                        if ui.button(name).clicked() {
-                            picked = Some(path.clone());
+                    for entry in &self.templates {
+                        let origin = match &entry.source {
+                            crate::templates::Source::Builtin(_) => "Built-in".to_owned(),
+                            crate::templates::Source::File(path) if entry.overrides => {
+                                format!("{} (overrides the built-in)", path.display())
+                            }
+                            crate::templates::Source::File(path) => path.display().to_string(),
+                        };
+                        let hint = match entry.description {
+                            Some(description) => format!("{description}
+
+{origin}"),
+                            None => origin,
+                        };
+                        if ui.button(&entry.name).on_hover_text(hint).clicked() {
+                            picked = Some(entry.source.clone());
                             ui.close();
                         }
                     }
-                    if let Some(path) = picked {
-                        self.submit_scene_action(path, crate::templates::FileAction::OpenTemplate);
+                    match picked {
+                        Some(crate::templates::Source::Builtin(index)) => match crate::presets::scene(index) {
+                            Ok(scene) => {
+                                self.status = format!("Opened template {}", scene.name);
+                                self.load(scene);
+                            }
+                            Err(error) => self.status = error,
+                        },
+                        Some(crate::templates::Source::File(path)) => {
+                            self.submit_scene_action(path, crate::templates::FileAction::OpenTemplate);
+                        }
+                        None => {}
                     }
                 });
                 ui.separator();
@@ -2476,11 +2372,8 @@ impl App {
                 },
             ));
         }
-        if let Some(job) = &self.job {
-            let text = format!(
-                "Rendering {}×{} · {}/{} spp",
-                job.width, job.height, job.samples, job.spp
-            );
+        if self.export.is_running() {
+            let text = format!("Rendering · {}", self.export.status);
             ui.painter().text(
                 rect.left_top() + Vec2::new(12.0, 12.0),
                 egui::Align2::LEFT_TOP,
@@ -3354,9 +3247,8 @@ mod tests {
                 egui::CentralPanel::default().show(root, |ui| {
                     app.export.ui(
                         ui,
-                        (frame, frame + 250, 24.0),
+                        (frame, frame + 250, 24.0, frame),
                         &app.renderer,
-                        &mut app.world_ui.file_dialogs,
                         || panic!("An idle export panel must not clone the authoring document"),
                     );
                 });
@@ -3390,7 +3282,7 @@ mod tests {
         app.status_layout.widths = vec![210.0, 100.0];
         app.gui_fps = 144;
         let mut export = app.export.settings().clone();
-        export.output = "renders/new.exr".into();
+        export.name = "new".into();
         export.qp = 19;
         app.export.restore(export);
         let json = app.changed_settings_json(&ctx).unwrap().unwrap();
@@ -3399,7 +3291,7 @@ mod tests {
         assert_eq!(saved.fonts.face, "Custom face");
         assert_eq!(saved.status_layout.widths, [210.0, 100.0]);
         assert_eq!(saved.gui_fps, 144);
-        assert_eq!(saved.export.output, "renders/new.exr");
+        assert_eq!(saved.export.name, "new");
         assert_eq!(saved.export.qp, 19);
         assert!(app.changed_settings_json(&ctx).unwrap().is_none());
         app.layouts.store.save(

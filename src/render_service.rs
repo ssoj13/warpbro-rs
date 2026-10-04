@@ -28,6 +28,88 @@ pub struct ViewportRequest {
     pub white_nits: f32,
 }
 
+/// How a PNG encodes a frame's display light.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum PngEncoding {
+    /// 8-bit sRGB / BT.709 SDR: the SDR view's codes (an HDR view is rendered for SDR too).
+    #[default]
+    Sdr8,
+    /// 16-bit BT.2100 PQ, BT.2020 primaries; `cICP`, `mDCV`, `cLLI`.
+    Hdr10,
+    /// 16-bit BT.2100 HLG, BT.2020 primaries, for a display of the given peak; `cICP`, `mDCV`.
+    Hlg,
+}
+impl PngEncoding {
+    pub const ALL: [Self; 3] = [Self::Sdr8, Self::Hdr10, Self::Hlg];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Sdr8 => "SDR · 8-bit sRGB / BT.709",
+            Self::Hdr10 => "HDR10 · 16-bit PQ / BT.2020",
+            Self::Hlg => "HLG · 16-bit BT.2020",
+        }
+    }
+    pub fn hdr(self) -> bool {
+        self != Self::Sdr8
+    }
+    /// What the selected monitor rendering shows: HDR10 for an HDR view, else SDR.
+    pub fn displayed(hdr: bool) -> Self {
+        if hdr { Self::Hdr10 } else { Self::Sdr8 }
+    }
+}
+
+/// Write display light as a PNG: the one encoder behind the viewport, export and CLI writers.
+/// `light` is linear Rec.709 display light (1.0 = SDR white = 100 nits); `sdr` yields the 8-bit
+/// sRGB codes, read only for SDR. `peak_nits` is the mastering display (`mDCV`, HLG gamma).
+#[allow(clippy::too_many_arguments)]
+pub fn write_png(
+    path: &Path,
+    width: usize,
+    height: usize,
+    light: &[[f32; 4]],
+    sdr: impl FnOnce() -> Vec<u8>,
+    encoding: PngEncoding,
+    peak_nits: f32,
+    overwrite: bool,
+) -> Result<(), String> {
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    av_util_core::outfile::check_overwrite(path, overwrite).map_err(|e| e.to_string())?;
+    let u16s = |codes: [f32; 3]| codes.map(|c| (c.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16);
+    let nits = |p: &[f32; 4]| egui_display::rec2020_nits([p[0], p[1], p[2]], 100.0);
+    let hdr = |code: &dyn Fn([f32; 3]) -> [f32; 3]| {
+        egui_display::screenshot::Pixels::Rgba16(
+            light
+                .iter()
+                .flat_map(|p| {
+                    let [r, g, b] = u16s(code(nits(p)));
+                    [r, g, b, 65535]
+                })
+                .collect(),
+        )
+    };
+    let (output, pixels) = match encoding {
+        PngEncoding::Sdr8 => (egui_display::Output::Sdr8, egui_display::screenshot::Pixels::Rgba8(sdr())),
+        PngEncoding::Hdr10 => (
+            egui_display::Output::Hdr10,
+            hdr(&|n| n.map(|v| egui_display::pq(v.clamp(0.0, 10000.0)))),
+        ),
+        PngEncoding::Hlg => (
+            egui_display::Output::Hlg,
+            hdr(&|n| egui_display::hlg(n.map(|v| v.max(0.0)), peak_nits)),
+        ),
+    };
+    let capture = egui_display::screenshot::Capture {
+        output,
+        width: width as u32,
+        height: height as u32,
+        white_nits: 100.0,
+        peak_nits: if encoding.hdr() { peak_nits } else { 100.0 },
+        pixels,
+    };
+    capture.save(path).map(|_| ()).map_err(|e| e.to_string())
+}
+
 /// CPU data only. The GPU context, buffers and progressive targets never leave the worker.
 pub struct Frame {
     pub generation: u64,
@@ -117,41 +199,11 @@ impl Frame {
             / (self.last_ms as f64 / 1000.0)
             / 1.0e6
     }
-    pub fn save_png(&self, path: &Path) -> Result<(), String> {
+    pub fn save_png(&self, path: &Path, encoding: PngEncoding, peak_nits: f32, overwrite: bool) -> Result<(), String> {
         if let Some(e) = &self.colour_error {
             return Err(format!("Colour transform failed: {e}"));
         }
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        }
-        let pixels = if self.hdr {
-            let codes = self
-                .light
-                .iter()
-                .flat_map(|p| {
-                    let nits = egui_display::rec2020_nits([p[0], p[1], p[2]], 100.0);
-                    let pq =
-                        |n: f32| (egui_display::pq(n.clamp(0.0, 10000.0)) * 65535.0 + 0.5) as u16;
-                    [pq(nits[0]), pq(nits[1]), pq(nits[2]), 65535]
-                })
-                .collect();
-            egui_display::screenshot::Pixels::Rgba16(codes)
-        } else {
-            egui_display::screenshot::Pixels::Rgba8(self.sdr_bytes.as_ref().clone())
-        };
-        let capture = egui_display::screenshot::Capture {
-            output: if self.hdr {
-                egui_display::Output::Hdr10
-            } else {
-                egui_display::Output::Sdr8
-            },
-            width: self.width as u32,
-            height: self.height as u32,
-            white_nits: 100.0,
-            peak_nits: if self.hdr { 1000.0 } else { 100.0 },
-            pixels,
-        };
-        capture.save(path).map(|_| ()).map_err(|e| e.to_string())
+        write_png(path, self.width, self.height, &self.light, || self.sdr_bytes.as_ref().clone(), encoding, peak_nits, overwrite)
     }
     pub fn save_display_exr(&self, path: &Path) -> Result<(), String> {
         if let Some(e) = &self.colour_error {

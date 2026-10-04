@@ -89,6 +89,8 @@ curves = { git = "ssh://git@github.com/ssoj13/curves-rs.git", branch = "main", f
 box-rs = { git = "ssh://git@github.com/ssoj13/box-rs.git", branch = "main" }
 # Radiance .hdr only: EXR environments are read by `exr_io` (exr-core); the `exr` feature would pull crates.io exrs.
 image = { version = "0.25", default-features = false, features = ["hdr"] }
+# Local time for the output folder names.
+jiff = "0.2"
 
 [dev-dependencies]
 av-format-mov = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }

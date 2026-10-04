@@ -1,6 +1,6 @@
 //! Event-driven export coordinator and bounded CPU writer. CUDA never runs on the UI thread.
 use crate::{
-    render_service::{Command, Frame, RenderEvent, RenderPort, RenderService},
+    render_service::{Command, Frame, PngEncoding, RenderEvent, RenderPort, RenderService},
     scene::Scene,
 };
 use egui_encode_dialog::{Codec, EncodeOption, EncodeSchema, Format};
@@ -23,6 +23,27 @@ const HIGH_QUALITY_PRESET: usize = 3;
 pub enum ExportFormat {
     Exr,
     Hevc,
+    Png,
+}
+impl ExportFormat {
+    /// Schema order: the format tabs of the panel.
+    pub const ALL: [Self; 3] = [Self::Exr, Self::Png, Self::Hevc];
+    pub fn extension(self) -> &'static str {
+        match self {
+            Self::Exr => "exr",
+            Self::Png => "png",
+            Self::Hevc => "mp4",
+        }
+    }
+    /// The schema entry of this format (labels and hints come from there).
+    fn schema(self) -> &'static Format {
+        let id = match self {
+            Self::Exr => "exr",
+            Self::Png => "png",
+            Self::Hevc => "mp4",
+        };
+        schema().formats.iter().find(|f| f.id == id).expect("every export format is in the schema")
+    }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VideoEncoder {
@@ -44,6 +65,10 @@ impl VideoEncoder {
 pub struct ExportSettings {
     pub format: ExportFormat,
     pub encoder: VideoEncoder,
+    /// File name stem; every export writes into a new `~/.warpbro/out/<timestamp>` folder.
+    pub name: String,
+    /// The resolved target file (`resolve`); a sequence numbers it per frame (`frame_path`).
+    #[serde(skip)]
     pub output: String,
     pub width: usize,
     pub height: usize,
@@ -58,13 +83,17 @@ pub struct ExportSettings {
     pub overwrite: bool,
     /// Override world cadence for offline renders: OIDN runs once at the final sample.
     pub denoise_at_completion: bool,
+    pub png: PngEncoding,
+    /// Mastering display peak of HDR PNGs (`mDCV`, HLG system gamma).
+    pub png_peak_nits: f32,
 }
 impl Default for ExportSettings {
     fn default() -> Self {
         Self {
             format: ExportFormat::Exr,
             encoder: VideoEncoder::Vulkan,
-            output: "renders/frame.exr".into(),
+            name: "frame".into(),
+            output: String::new(),
             width: 1920,
             height: 1080,
             samples: 256,
@@ -76,6 +105,8 @@ impl Default for ExportSettings {
             preset: HIGH_QUALITY_PRESET,
             overwrite: false,
             denoise_at_completion: false,
+            png: PngEncoding::Sdr8,
+            png_peak_nits: 1000.0,
         }
     }
 }
@@ -114,7 +145,18 @@ impl ExportSettings {
             scene.render.denoise.interval = 0;
         }
     }
+    /// Target `dir/<name>.<ext>` for the current format.
+    pub fn resolve(&mut self, dir: &Path) {
+        self.output = dir.join(format!("{}.{}", self.name.trim(), self.format.extension())).display().to_string();
+    }
     pub fn validate(&self) -> Result<(), String> {
+        let name = self.name.trim();
+        if name.is_empty() || name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) {
+            return Err("The name must be a plain file name".into());
+        }
+        if !(100.0..=10000.0).contains(&self.png_peak_nits) {
+            return Err("HDR peak must be 100–10000 nits".into());
+        }
         if self.width == 0 || self.height == 0 || self.width > 16384 || self.height > 16384 {
             return Err("Resolution must be 1–16384 pixels per axis".into());
         }
@@ -132,7 +174,7 @@ impl ExportSettings {
             return Err("Frame range must be ordered and contain at most 100001 frames".into());
         }
         if self.output.trim().is_empty() {
-            return Err("Choose an output path".into());
+            return Err("Output is not resolved".into());
         }
         if self.fps_num == 0 || self.fps_den == 0 {
             return Err("FPS numerator and denominator must be positive".into());
@@ -149,6 +191,9 @@ impl ExportSettings {
             ExportFormat::Exr if extension != "exr" => {
                 return Err("EXR output must have an .exr extension".into());
             }
+            ExportFormat::Png if extension != "png" => {
+                return Err("PNG output must have a .png extension".into());
+            }
             ExportFormat::Hevc if !["mp4", "mov"].contains(&extension.as_str()) => {
                 return Err("HEVC output must have an .mp4 or .mov extension".into());
             }
@@ -164,10 +209,15 @@ impl ExportSettings {
     pub fn frame_count(&self) -> u32 {
         self.last.saturating_sub(self.first).saturating_add(1)
     }
+    /// The file of frame `number`: the output itself for a single frame, else `stem.NNNNNN.ext`.
     pub fn frame_path(&self, number: u32) -> PathBuf {
         let p = Path::new(&self.output);
+        if self.first == self.last {
+            return p.to_path_buf();
+        }
         let stem = p.file_stem().unwrap_or_default().to_string_lossy();
-        p.with_file_name(format!("{stem}.{number:06}.exr"))
+        let ext = p.extension().unwrap_or_default().to_string_lossy();
+        p.with_file_name(format!("{stem}.{number:06}.{ext}"))
     }
 }
 
@@ -194,6 +244,17 @@ pub fn schema() -> &'static EncodeSchema {
                 .hint("Scene-linear ACEScg (AP1-tagged); no display transform or exposure baked in.")],
             ),
             Format::new(
+                "png",
+                "PNG",
+                "png",
+                [Codec::new(
+                    "png",
+                    "Display-referred PNG",
+                    [EncodeOption::int("samples", "Samples / frame", 256, 1, 1_000_000)],
+                )
+                .hint("The monitor rendering baked in: SDR 8-bit sRGB / BT.709, or HDR10 / HLG 16-bit BT.2020 with cICP. HDR keeps SDR white at 100 nits; pick an HDR view for HDR highlights.")],
+            ),
+            Format::new(
                 "mp4",
                 "Video",
                 "mp4",
@@ -218,7 +279,10 @@ pub struct ExportController {
     pub sample_progress: (u32, u32),
     run: Option<Run>,
     next_id: u64,
-    browse: Option<egui_file_dialog::FileDialog>,
+    /// Root of the per-export folders (`~/.warpbro/out`).
+    pub out_root: PathBuf,
+    /// The resolved settings of the last started export: where its files went.
+    pub last: Option<ExportSettings>,
 }
 #[derive(Clone, Default)]
 struct Progress {
@@ -246,19 +310,14 @@ impl Default for ExportController {
             sample_progress: (0, 0),
             run: None,
             next_id: 100,
-            browse: None,
+            out_root: crate::out_root(),
+            last: None,
         }
     }
 }
 impl ExportController {
     pub fn settings(&self) -> &ExportSettings {
         &self.settings
-    }
-    pub fn denoise_option(&mut self, ui: &mut egui::Ui) {
-        ui.checkbox(
-            &mut self.settings.denoise_at_completion,
-            "Denoise once at completion",
-        );
     }
     pub fn restore(&mut self, settings: ExportSettings) {
         self.settings = settings;
@@ -286,8 +345,11 @@ impl ExportController {
         if self.run.is_some() {
             return Err("An export is already running".into());
         }
-        self.settings.validate()?;
-        let settings = self.settings.clone();
+        let mut settings = self.settings.clone();
+        // Validate against the output root first so a rejected export leaves no empty folder.
+        settings.resolve(&self.out_root);
+        settings.validate()?;
+        settings.resolve(&crate::new_out_dir(&self.out_root)?);
         let scene = scene.clone();
         let port = service.port();
         let id = self.next_id;
@@ -308,7 +370,7 @@ impl ExportController {
                     coordinate_export(&config, &scene, &port, id, &shared, &stop)
                 }));
                 let status = match result {
-                    Ok(Ok(true)) => "Export complete".to_string(),
+                    Ok(Ok(true)) => format!("Export complete: {}", config.frame_path(config.first).parent().unwrap_or(Path::new("")).display()),
                     Ok(Ok(false)) => {
                         let completed = shared.lock().unwrap_or_else(|e| e.into_inner()).completed;
                         if config.format == ExportFormat::Hevc && completed > 0 {
@@ -319,7 +381,7 @@ impl ExportController {
                         } else if config.format == ExportFormat::Hevc {
                             "Export cancelled before any complete frames".into()
                         } else {
-                            format!("Export cancelled; {completed} EXR frames retained")
+                            format!("Export cancelled; {completed} frames retained")
                         }
                     }
                     Ok(Err(error)) => format!("Export failed: {error}"),
@@ -333,6 +395,7 @@ impl ExportController {
         self.completed = 0;
         self.sample_progress = (0, settings.samples);
         self.status = "Starting export".into();
+        self.last = Some(settings.clone());
         self.run = Some(Run {
             settings,
             progress,
@@ -346,41 +409,54 @@ impl ExportController {
             self.status = "Cancelling export…".into();
         }
     }
+    /// `timeline` is (first, last, fps, playhead) of the world document.
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
-        timeline: (u32, u32, f64),
+        timeline: (u32, u32, f64, u32),
         service: &RenderService,
-        file_dialogs: &mut crate::file_dialogs::History,
         freeze: impl FnOnce() -> Scene,
     ) {
-        if let Some(picker) = &mut self.browse {
-            picker.update(ui.ctx());
-            file_dialogs.observe(crate::file_dialogs::EXPORT, picker);
-            if let Some(path) = picker.take_picked() {
-                self.settings.output = path.display().to_string();
-            }
-        }
         ui.heading("Render / Encode");
         let running = self.is_running();
         ui.add_enabled_ui(!running, |ui| {
             ui.horizontal(|ui| {
-                ui.label("Output"); ui.text_edit_singleline(&mut self.settings.output);
-                if ui.button("Browse…").clicked() { let mut picker = file_dialogs.prepare(egui_file_dialog::FileDialog::new(), crate::file_dialogs::EXPORT, Path::new(&self.settings.output).parent(), ""); picker.save_file(); self.browse = Some(picker); }
+                for format in ExportFormat::ALL {
+                    ui.selectable_value(&mut self.settings.format, format, &format.schema().label);
+                }
             });
-            let old = self.settings.format;
-            let schema = schema();
-            ui.horizontal(|ui| { for format in &schema.formats {
-                let value = if format.id == "exr" { ExportFormat::Exr } else { ExportFormat::Hevc };
-                ui.selectable_value(&mut self.settings.format, value, &format.label);
-            }});
-            if old != self.settings.format { self.settings.output = Path::new(&self.settings.output).with_extension(if self.settings.format == ExportFormat::Exr {"exr"} else {"mp4"}).display().to_string(); }
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                ui.text_edit_singleline(&mut self.settings.name);
+                ui.label(format!(".{}", self.settings.format.extension()));
+            });
+            ui.weak(format!("Written to {}", self.out_root.join("<date_time>").display()));
             ui.separator();
             egui::Grid::new("render_encode_options").num_columns(2).show(ui, |ui| {
                 ui.label("Resolution"); ui.horizontal(|ui| { ui.add(egui::DragValue::new(&mut self.settings.width).range(1..=16384)); ui.label("×"); ui.add(egui::DragValue::new(&mut self.settings.height).range(1..=16384)); }); ui.end_row();
                 ui.label("Samples / frame"); ui.add(egui::DragValue::new(&mut self.settings.samples).range(1..=1_000_000)); ui.end_row();
                 ui.label("Denoise"); ui.checkbox(&mut self.settings.denoise_at_completion, "Once at completion").on_hover_text("Run OIDN once after all samples of each exported frame; override World Settings cadence."); ui.end_row();
-                ui.label("Frame range"); ui.horizontal(|ui| { ui.add(egui::DragValue::new(&mut self.settings.first).range(0..=u32::MAX)); ui.label("…"); ui.add(egui::DragValue::new(&mut self.settings.last).range(0..=u32::MAX)); }); ui.end_row();
+                ui.label("Frame range"); ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut self.settings.first).range(0..=u32::MAX)); ui.label("…"); ui.add(egui::DragValue::new(&mut self.settings.last).range(0..=u32::MAX));
+                    if ui.button("Current frame").on_hover_text("Render only the frame under the playhead.").clicked() {
+                        self.settings.first = timeline.3;
+                        self.settings.last = timeline.3;
+                    }
+                }); ui.end_row();
+                if self.settings.format == ExportFormat::Png {
+                    ui.label("Encoding");
+                    egui::ComboBox::from_id_salt("png_encoding").selected_text(self.settings.png.label()).show_ui(ui, |ui| {
+                        for encoding in PngEncoding::ALL {
+                            ui.selectable_value(&mut self.settings.png, encoding, encoding.label());
+                        }
+                    }); ui.end_row();
+                    if self.settings.png.hdr() {
+                        ui.label("HDR peak");
+                        ui.add(egui::DragValue::new(&mut self.settings.png_peak_nits).range(100.0..=10000.0).suffix(" nits"))
+                            .on_hover_text("Mastering display peak recorded in mDCV; HLG also derives its system gamma from it.");
+                        ui.end_row();
+                    }
+                }
                 if self.settings.format == ExportFormat::Hevc {
                     ui.label("Encoder");
                     egui::ComboBox::from_id_salt("video_encoder").selected_text(self.settings.encoder.label()).show_ui(ui, |ui| {
@@ -414,16 +490,18 @@ impl ExportController {
                     }
                 }
             });
-            ui.checkbox(&mut self.settings.overwrite,"Overwrite existing output");
             if ui.button("Use timeline range and FPS").clicked() {
                 self.settings.first = timeline.0;
                 self.settings.last = timeline.1;
                 self.settings.set_fps(timeline.2);
             }
             ui.label("Animation is sampled at each frame. The scene and keys are frozen when export starts.");
-            let hint = schema.formats[if self.settings.format == ExportFormat::Exr {0} else {1}].codecs[0].hint.as_deref().unwrap_or("");
-            ui.small(hint);
-            let validation = self.settings.validate();
+            ui.small(self.settings.format.schema().codecs[0].hint.as_deref().unwrap_or(""));
+            let validation = {
+                let mut preview = self.settings.clone();
+                preview.resolve(&self.out_root);
+                preview.validate()
+            };
             if let Err(error) = &validation { ui.colored_label(egui::Color32::LIGHT_RED,error); }
             if ui.add_enabled(validation.is_ok(),egui::Button::new("Start render")).clicked() {
                 let scene = freeze();
@@ -675,10 +753,11 @@ impl ExportWriter {
                         if frame.width != settings.width || frame.height != settings.height {
                             return Err("Export frame resolution changed".into());
                         }
-                        if let Some(sink) = &mut hevc {
-                            sink.write(&frame)?;
-                        } else {
-                            write_exr(&settings.frame_path(number), &frame, settings.overwrite)?;
+                        let path = settings.frame_path(number);
+                        match settings.format {
+                            ExportFormat::Hevc => hevc.as_mut().ok_or("HEVC sink missing")?.write(&frame)?,
+                            ExportFormat::Exr => write_exr(&path, &frame, settings.overwrite)?,
+                            ExportFormat::Png => frame.save_png(&path, settings.png, settings.png_peak_nits, settings.overwrite)?,
                         }
                         let _ = tx.send(WriteEvent::Written(number));
                         if number == settings.last {
@@ -1097,6 +1176,12 @@ mod tests {
             hdr_bytes: Arc::new(Vec::new()),
         }
     }
+    /// Vulkan Video sessions are a per-device hardware resource: two tests opening one at once
+    /// fail with `Vulkan Video unavailable`. Tests that may use the GPU encoder hold this.
+    fn vulkan_video() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
     fn temp_dir(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(
             "frac-export-{name}-{}-{}",
@@ -1144,6 +1229,7 @@ mod tests {
     }
     #[test]
     fn hevc_mux_finishes_and_abort_never_publishes() {
+        let _video = vulkan_video();
         let dir = temp_dir("hevc");
         let mut settings = ExportSettings::default();
         settings.format = ExportFormat::Hevc;
@@ -1230,6 +1316,7 @@ mod tests {
     #[test]
     #[ignore = "requires Vulkan Video HEVC hardware encode"]
     fn vulkan_hevc_partial_export_flushes_and_has_exact_timing() {
+        let _video = vulkan_video();
         let dir = temp_dir("vulkan-partial");
         let settings = ExportSettings {
             format: ExportFormat::Hevc,
@@ -1291,6 +1378,7 @@ mod tests {
     /// and movies for an independent decoder comparison.
     #[test]
     fn hevc_motion_fixture_encodes_every_source_frame() {
+        let _video = vulkan_video();
         use std::io::Write;
         let retained = std::env::var_os("WARP_BRO_VIDEO_FIXTURE");
         let dir = retained
@@ -1390,7 +1478,7 @@ mod tests {
         let dir = temp_dir("cuda");
         let service = RenderService::spawn();
         let mut controller = ExportController::default();
-        controller.settings.output = dir.join("frame.exr").display().to_string();
+        controller.out_root = dir.clone();
         controller.settings.width = 16;
         controller.settings.height = 16;
         controller.settings.samples = 2;
@@ -1425,27 +1513,31 @@ mod tests {
         controller.update(&service);
         assert!(!controller.is_running());
         assert_eq!(controller.completed, 2, "{}", controller.status);
-        assert_eq!(controller.status, "Export complete");
-        assert!(controller.settings.frame_path(3).exists());
-        assert!(controller.settings.frame_path(4).exists());
-        let pixel = |number| crate::exr_io::read_rgb(&controller.settings.frame_path(number)).unwrap().2[0];
+        assert!(controller.status.starts_with("Export complete"), "{}", controller.status);
+        let written = controller.last.clone().unwrap();
+        assert!(written.frame_path(3).starts_with(&dir), "exports land in a folder under the output root");
+        assert!(written.frame_path(3).exists());
+        assert!(written.frame_path(4).exists());
+        let pixel = |number| crate::exr_io::read_rgb(&written.frame_path(number)).unwrap().2[0];
         assert_eq!(pixel(3)[0], 0.0);
         assert!(
             pixel(4)[0] > 0.0,
             "Each exported frame must evaluate its animation"
         );
-        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        assert_eq!(std::fs::read_dir(written.frame_path(3).parent().unwrap()).unwrap().count(), 2);
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn cancel_controller_publishes_completed_movie_without_gui_waiting() {
+        let _video = vulkan_video();
         let dir = temp_dir("controller-cancel");
         let service = RenderService::spawn();
         let mut controller = ExportController::default();
+        controller.out_root = dir.clone();
         controller.settings = ExportSettings {
             format: ExportFormat::Hevc,
             encoder: VideoEncoder::Vulkan,
-            output: dir.join("partial.mp4").display().to_string(),
+            name: "partial".into(),
             width: 256,
             height: 256,
             samples: 1,
@@ -1475,7 +1567,7 @@ mod tests {
             "{}",
             controller.status
         );
-        let demux = av_format_mov::Demuxer::open(Path::new(&controller.settings.output)).unwrap();
+        let demux = av_format_mov::Demuxer::open(Path::new(&controller.last.clone().unwrap().output)).unwrap();
         assert_eq!(
             demux.presented_frame_count().unwrap(),
             controller.completed as usize
@@ -1496,6 +1588,22 @@ mod tests {
             PathBuf::from("some folder/image.000008.exr")
         );
         assert!(s.validate().is_ok());
+        // A one-frame range is a still: the resolved file itself, no frame number.
+        s.format = ExportFormat::Png;
+        s.name = "still".into();
+        s.resolve(Path::new("out"));
+        s.first = 5;
+        s.last = 5;
+        assert_eq!(s.frame_path(5), Path::new("out").join("still.png"));
+        assert!(s.validate().is_ok());
+        s.png_peak_nits = 50.0;
+        assert!(s.validate().unwrap_err().contains("peak"));
+        s.png_peak_nits = 1000.0;
+        s.name = "a/b".into();
+        assert!(s.validate().unwrap_err().contains("plain file name"));
+        s.name = "frame".into();
+        s.first = 7;
+        s.last = 9;
         s.format = ExportFormat::Hevc;
         s.output = "clip.mp4".into();
         s.width = 17;

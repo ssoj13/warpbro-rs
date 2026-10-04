@@ -1190,42 +1190,18 @@ impl Target {
             / 1.0e6
     }
 
-    pub fn save_png(&self, path: &std::path::Path) -> Result<(), String> {
+    pub fn save_png(
+        &self,
+        path: &std::path::Path,
+        encoding: crate::render_service::PngEncoding,
+        peak_nits: f32,
+        overwrite: bool,
+    ) -> Result<(), String> {
         if let Some(e) = &self.colour_error {
             return Err(format!("Colour transform failed: {e}"));
         }
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        }
-        let pixels = if self.hdr {
-            // OCIO display light is absolute, 1 = 100 nits. HDR10 is BT.2020 + PQ.
-            let codes = self
-                .light
-                .iter()
-                .flat_map(|p| {
-                    let nits = egui_display::rec2020_nits([p[0], p[1], p[2]], 100.0);
-                    [pq16(nits[0]), pq16(nits[1]), pq16(nits[2]), 65535]
-                })
-                .collect();
-            egui_display::screenshot::Pixels::Rgba16(codes)
-        } else {
-            egui_display::screenshot::Pixels::Rgba8(
-                self.pixels.iter().flat_map(|p| p.to_le_bytes()).collect(),
-            )
-        };
-        let capture = egui_display::screenshot::Capture {
-            output: if self.hdr {
-                egui_display::Output::Hdr10
-            } else {
-                egui_display::Output::Sdr8
-            },
-            width: self.width as u32,
-            height: self.height as u32,
-            white_nits: 100.0,
-            peak_nits: if self.hdr { 1000.0 } else { 100.0 },
-            pixels,
-        };
-        capture.save(path).map(|_| ()).map_err(|e| e.to_string())
+        let sdr = || self.pixels.iter().flat_map(|p| p.to_le_bytes()).collect();
+        crate::render_service::write_png(path, self.width, self.height, &self.light, sdr, encoding, peak_nits, overwrite)
     }
 
     /// Display light, linear Rec.709, normalized to 100 nits (matching exr-view).
@@ -1235,10 +1211,6 @@ impl Target {
         }
         crate::exr_io::write_rgb(path, self.width, self.height, &self.light, &crate::color::DISPLAY_PRIMS, Some(100.0), true)
     }
-}
-
-fn pq16(nits: f32) -> u16 {
-    (egui_display::pq(nits.clamp(0.0, 10000.0)) * 65535.0 + 0.5) as u16
 }
 
 #[cfg(test)]
@@ -1300,7 +1272,7 @@ mod tests {
                 }
                 assert!(target.colour_error.is_none(), "{:?}", target.colour_error);
                 let path = output.join(format!("{shape}-{preset}.png"));
-                target.save_png(&path).unwrap();
+                target.save_png(&path, crate::render_service::PngEncoding::displayed(target.hdr), 1000.0, true).unwrap();
                 eprintln!("glass_visual {} samples={}", path.display(), target.samples);
             }
         }
@@ -2512,16 +2484,26 @@ mod tests {
         );
         let dir = std::env::temp_dir().join(format!("frac-hdr-test-{}", std::process::id()));
         let png = dir.join("hdr.png");
-        target.save_png(&png).unwrap();
-        let bytes = std::fs::read(&png).unwrap();
-        for chunk in [b"cICP", b"mDCV", b"cLLI"] {
-            assert!(bytes.windows(4).any(|b| b == chunk));
+        // Every encoding from one HDR frame: HDR10 / HLG are 16-bit BT.2020 with their cICP
+        // transfer (16 = PQ, 18 = HLG), SDR is the 8-bit sRGB rendering.
+        use crate::render_service::PngEncoding;
+        for (encoding, depth, cicp) in [
+            (PngEncoding::Hdr10, png::BitDepth::Sixteen, Some(16u8)),
+            (PngEncoding::Hlg, png::BitDepth::Sixteen, Some(18)),
+            (PngEncoding::Sdr8, png::BitDepth::Eight, None),
+        ] {
+            target.save_png(&png, encoding, 1000.0, true).unwrap();
+            let bytes = std::fs::read(&png).unwrap();
+            let at = bytes.windows(4).position(|b| b == b"cICP");
+            assert_eq!(at.map(|i| bytes[i + 5]), cicp, "{encoding:?} transfer");
+            assert_eq!(bytes.windows(4).any(|b| b == b"cLLI"), encoding == PngEncoding::Hdr10);
+            let mut decoder = png::Decoder::new(std::io::Cursor::new(&bytes));
+            decoder.set_transformations(png::Transformations::IDENTITY);
+            let reader = decoder.read_info().unwrap();
+            assert_eq!(reader.info().bit_depth, depth, "{encoding:?}");
+            assert_eq!(reader.info().width, 17);
         }
-        let mut decoder = png::Decoder::new(std::io::Cursor::new(&bytes));
-        decoder.set_transformations(png::Transformations::IDENTITY);
-        let reader = decoder.read_info().unwrap();
-        assert_eq!(reader.info().bit_depth, png::BitDepth::Sixteen);
-        assert_eq!(reader.info().width, 17);
+        assert!(target.save_png(&png, PngEncoding::Sdr8, 1000.0, false).is_err(), "existing file without overwrite");
         let exr_path = dir.join("display.exr");
         target.save_display_exr(&exr_path).unwrap();
         assert_eq!(
@@ -2532,7 +2514,7 @@ mod tests {
         scene.colour.view = "missing view".into();
         gpu.step(&mut target, &scene, 0, 0, None, false);
         assert!(target.colour_error.is_some());
-        assert!(target.save_png(&png).is_err());
+        assert!(target.save_png(&png, crate::render_service::PngEncoding::Sdr8, 1000.0, true).is_err());
         let display_before_reset = target.light.clone();
         scene.camera.yaw_degrees += 5.0;
         assert!(gpu.prepare_target(&mut target, &scene, None));

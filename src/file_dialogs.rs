@@ -11,7 +11,6 @@ pub const SCENE_OPEN: &str = "scene.open";
 pub const SCENE_SAVE: &str = "scene.save";
 pub const ENVIRONMENT: &str = "environment.path";
 pub const OCIO: &str = "colour.config";
-pub const EXPORT: &str = "render.output";
 
 #[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]

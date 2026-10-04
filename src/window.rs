@@ -86,6 +86,9 @@ impl Native {
         let mut fonts = egui::FontDefinitions::default();
         egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
         ctx.set_fonts(fonts);
+        // Solid scroll bars reserve their width: egui's default floating bars paint over the
+        // right edge of every scroll area (e.g. the Attribute Editor's per-row expand buttons).
+        ctx.all_styles_mut(|style| style.spacing.scroll = egui::style::ScrollStyle::solid());
         egui_attr_table::set_label_width(&ctx, 130.0);
         let input = egui_winit::State::new(
             ctx.clone(),

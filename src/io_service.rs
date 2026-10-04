@@ -60,7 +60,7 @@ pub struct IoService {
     settings: Arc<Mutex<Option<(PathBuf, String)>>>,
     events: mpsc::Receiver<Result<String, String>>,
     scene_events: mpsc::Receiver<SceneEvent>,
-    template_events: mpsc::Receiver<Result<Vec<PathBuf>, String>>,
+    template_events: mpsc::Receiver<Result<Vec<crate::templates::Entry>, String>>,
 }
 impl IoService {
     pub fn spawn() -> Self {
@@ -88,7 +88,8 @@ impl IoService {
                             let result = if exr {
                                 frame.save_display_exr(&path)
                             } else {
-                                frame.save_png(&path)
+                                // Screenshots record what the selected monitor rendering shows.
+                                frame.save_png(&path, crate::render_service::PngEncoding::displayed(frame.hdr), 1000.0, true)
                             };
                             let _ = done.send(result.map(|_| format!("Saved {}", path.display())));
                         }
@@ -116,7 +117,7 @@ impl IoService {
                             let _ = scene_done.send(SceneEvent { id, path, result });
                         }
                         Ok(Command::RefreshTemplates { directory }) => {
-                            let _ = template_done.send(crate::templates::scan(&directory));
+                            let _ = template_done.send(crate::templates::catalog(&directory));
                         }
                         Ok(Command::Delete(path)) => {
                             if let Err(e) = std::fs::remove_file(path) {
@@ -156,7 +157,7 @@ impl IoService {
     pub fn settings(&self, path: PathBuf, json: String) {
         *self.settings.lock().unwrap() = Some((path, json));
     }
-    pub fn poll_templates(&self) -> Option<Result<Vec<PathBuf>, String>> {
+    pub fn poll_templates(&self) -> Option<Result<Vec<crate::templates::Entry>, String>> {
         self.template_events.try_recv().ok()
     }
     pub fn poll_scene(&self) -> Option<SceneEvent> {
