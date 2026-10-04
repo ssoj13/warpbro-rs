@@ -56,6 +56,8 @@ pub struct ExportSettings {
     /// Retained for reading older settings. Unsafe inter presets are disabled.
     pub preset: usize,
     pub overwrite: bool,
+    /// Override world cadence for offline renders: OIDN runs once at the final sample.
+    pub denoise_at_completion: bool,
 }
 impl Default for ExportSettings {
     fn default() -> Self {
@@ -73,10 +75,45 @@ impl Default for ExportSettings {
             qp: HIGH_QUALITY_QP,
             preset: HIGH_QUALITY_PRESET,
             overwrite: false,
+            denoise_at_completion: false,
         }
     }
 }
 impl ExportSettings {
+    pub fn fps(&self) -> f64 {
+        self.fps_num as f64 / self.fps_den.max(1) as f64
+    }
+    /// UI values use ordinary frames/second. Recognize broadcast rates before
+    /// reducing the custom millisecond fraction, preserving exact encoder timing.
+    pub fn set_fps(&mut self, fps: f64) {
+        let fps = if fps.is_finite() {
+            fps.clamp(1.0, 240.0)
+        } else {
+            24.0
+        };
+        for (num, den) in [(24000, 1001), (30000, 1001), (60000, 1001), (120000, 1001)] {
+            if (fps - num as f64 / den as f64).abs() < 0.0005 {
+                self.fps_num = num;
+                self.fps_den = den;
+                return;
+            }
+        }
+        let num = (fps * 1000.0).round() as u32;
+        let (mut a, mut b) = (num, 1000);
+        while b != 0 {
+            (a, b) = (b, a % b);
+        }
+        self.fps_num = num / a;
+        self.fps_den = 1000 / a;
+    }
+
+    /// Apply after animation evaluation so authored denoise keys cannot restore periodic passes.
+    pub fn apply_denoise_policy(&self, scene: &mut Scene) {
+        if self.denoise_at_completion {
+            scene.render.denoise.enabled = true;
+            scene.render.denoise.interval = 0;
+        }
+    }
     pub fn validate(&self) -> Result<(), String> {
         if self.width == 0 || self.height == 0 || self.width > 16384 || self.height > 16384 {
             return Err("Resolution must be 1–16384 pixels per axis".into());
@@ -217,6 +254,12 @@ impl ExportController {
     pub fn settings(&self) -> &ExportSettings {
         &self.settings
     }
+    pub fn denoise_option(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(
+            &mut self.settings.denoise_at_completion,
+            "Denoise once at completion",
+        );
+    }
     pub fn restore(&mut self, settings: ExportSettings) {
         self.settings = settings;
     }
@@ -308,10 +351,12 @@ impl ExportController {
         ui: &mut egui::Ui,
         timeline: (u32, u32, f64),
         service: &RenderService,
+        file_dialogs: &mut crate::file_dialogs::History,
         freeze: impl FnOnce() -> Scene,
     ) {
         if let Some(picker) = &mut self.browse {
             picker.update(ui.ctx());
+            file_dialogs.observe(crate::file_dialogs::EXPORT, picker);
             if let Some(path) = picker.take_picked() {
                 self.settings.output = path.display().to_string();
             }
@@ -321,7 +366,7 @@ impl ExportController {
         ui.add_enabled_ui(!running, |ui| {
             ui.horizontal(|ui| {
                 ui.label("Output"); ui.text_edit_singleline(&mut self.settings.output);
-                if ui.button("Browse…").clicked() { let mut picker = egui_file_dialog::FileDialog::new(); picker.save_file(); self.browse = Some(picker); }
+                if ui.button("Browse…").clicked() { let mut picker = file_dialogs.prepare(egui_file_dialog::FileDialog::new(), crate::file_dialogs::EXPORT, Path::new(&self.settings.output).parent(), ""); picker.save_file(); self.browse = Some(picker); }
             });
             let old = self.settings.format;
             let schema = schema();
@@ -334,6 +379,7 @@ impl ExportController {
             egui::Grid::new("render_encode_options").num_columns(2).show(ui, |ui| {
                 ui.label("Resolution"); ui.horizontal(|ui| { ui.add(egui::DragValue::new(&mut self.settings.width).range(1..=16384)); ui.label("×"); ui.add(egui::DragValue::new(&mut self.settings.height).range(1..=16384)); }); ui.end_row();
                 ui.label("Samples / frame"); ui.add(egui::DragValue::new(&mut self.settings.samples).range(1..=1_000_000)); ui.end_row();
+                ui.label("Denoise"); ui.checkbox(&mut self.settings.denoise_at_completion, "Once at completion").on_hover_text("Run OIDN once after all samples of each exported frame; override World Settings cadence."); ui.end_row();
                 ui.label("Frame range"); ui.horizontal(|ui| { ui.add(egui::DragValue::new(&mut self.settings.first).range(0..=u32::MAX)); ui.label("…"); ui.add(egui::DragValue::new(&mut self.settings.last).range(0..=u32::MAX)); }); ui.end_row();
                 if self.settings.format == ExportFormat::Hevc {
                     ui.label("Encoder");
@@ -342,7 +388,19 @@ impl ExportController {
                             ui.selectable_value(&mut self.settings.encoder, encoder, encoder.label());
                         }
                     }); ui.end_row();
-                    ui.label("FPS"); ui.horizontal(|ui| { ui.add(egui::DragValue::new(&mut self.settings.fps_num).range(1..=120000)); ui.label("/"); ui.add(egui::DragValue::new(&mut self.settings.fps_den).range(1..=10000)); }); ui.end_row();
+                    ui.label("FPS"); ui.horizontal(|ui| {
+                        let mut fps = self.settings.fps();
+                        if ui.add(egui::DragValue::new(&mut fps).speed(0.1).range(1.0..=240.0).max_decimals(3)).changed() {
+                            self.settings.set_fps(fps);
+                        }
+                        egui::ComboBox::from_id_salt("export_fps_presets").selected_text("Presets").show_ui(ui, |ui| {
+                            for rate in [23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0, 120.0] {
+                                if ui.selectable_label((self.settings.fps() - rate).abs() < 0.001, rate.to_string()).clicked() {
+                                    self.settings.set_fps(rate); ui.close();
+                                }
+                            }
+                        });
+                    }); ui.end_row();
                     ui.label("Quality"); ui.horizontal(|ui| {
                         ui.add(egui::Slider::new(&mut self.settings.qp,0..=51).text("QP"))
                             .on_hover_text("Lower QP preserves more detail and produces larger files.");
@@ -360,8 +418,7 @@ impl ExportController {
             if ui.button("Use timeline range and FPS").clicked() {
                 self.settings.first = timeline.0;
                 self.settings.last = timeline.1;
-                self.settings.fps_num = (timeline.2 * 1000.0).round().clamp(1.0,120000.0) as u32;
-                self.settings.fps_den = 1000;
+                self.settings.set_fps(timeline.2);
             }
             ui.label("Animation is sampled at each frame. The scene and keys are frozen when export starts.");
             let hint = schema.formats[if self.settings.format == ExportFormat::Exr {0} else {1}].codecs[0].hint.as_deref().unwrap_or("");
@@ -404,7 +461,8 @@ fn coordinate_export(
     let (reply, events) = mpsc::sync_channel(16);
     let result = (|| -> Result<bool, String> {
         for number in settings.first..=settings.last {
-            let frame_scene = scene.evaluated(f64::from(number))?;
+            let mut frame_scene = scene.evaluated(f64::from(number))?;
+            settings.apply_denoise_policy(&mut frame_scene);
             let id = first_id + u64::from(number - settings.first);
             loop {
                 if cancel.load(Ordering::Acquire) {
@@ -993,6 +1051,50 @@ impl HevcSink {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fps_ui_values_preserve_broadcast_timing_and_reduce_integer_rates() {
+        let mut settings = super::ExportSettings::default();
+        for (fps, exact) in [
+            (24.0, (24, 1)),
+            (25.0, (25, 1)),
+            (23.976, (24000, 1001)),
+            (29.97, (30000, 1001)),
+            (59.94, (60000, 1001)),
+            (27.5, (55, 2)),
+        ] {
+            settings.set_fps(fps);
+            assert_eq!((settings.fps_num, settings.fps_den), exact);
+            assert!((settings.fps() - fps).abs() < 0.0005);
+        }
+        settings.set_fps(f64::NAN);
+        assert_eq!((settings.fps_num, settings.fps_den), (24, 1));
+    }
+    #[test]
+    fn final_denoise_override_runs_once_and_preserves_world_settings() {
+        let mut world = crate::scene::Scene::preset(crate::params::FAMILY_BULB);
+        world.render.denoise.interval = 8;
+        world.render.denoise.enabled = false;
+        let mut frame = world.clone();
+        let settings = super::ExportSettings {
+            denoise_at_completion: true,
+            ..Default::default()
+        };
+        settings.apply_denoise_policy(&mut frame);
+        let mut cadence = crate::denoise::State::default();
+        let mut attempts = Vec::new();
+        for samples in (4..=64).step_by(4) {
+            if cadence.due(&frame.render.denoise, samples, samples == 64) {
+                attempts.push(samples);
+            }
+        }
+        assert_eq!(attempts, vec![64]);
+        assert!(!cadence.due(&frame.render.denoise, 64, true));
+        assert!(!world.render.denoise.enabled);
+        assert_eq!(world.render.denoise.interval, 8);
+        super::ExportSettings::default().apply_denoise_policy(&mut world);
+        assert_eq!(world.render.denoise.interval, 8);
+        assert!(!world.render.denoise.enabled);
+    }
     use super::*;
 
     fn frame(width: usize, height: usize) -> Frame {

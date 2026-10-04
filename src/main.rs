@@ -18,7 +18,9 @@ mod inspector;
 mod timeline;
 // Keep the copied viewer API intact, including its CPU oracle used by tests.
 mod export;
+mod file_dialogs;
 mod gpu;
+mod hotkeys;
 mod io_service;
 mod material_gallery;
 mod materials;
@@ -34,6 +36,7 @@ mod render_bench;
 mod render_service;
 mod scene;
 mod transfer;
+mod templates;
 mod ui_style;
 mod window;
 mod world;

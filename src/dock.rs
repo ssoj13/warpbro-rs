@@ -142,6 +142,20 @@ impl TabViewer for Viewer<'_> {
         tab.title().into()
     }
     fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Panel) {
+        use crate::hotkeys::Scope;
+        let scope = match tab {
+            Panel::Viewport => Scope::Viewport,
+            Panel::Timeline => Scope::Timeline,
+            Panel::Gallery => Scope::Gallery,
+            Panel::Bookmarks => Scope::Bookmarks,
+            Panel::Materials => Scope::Materials,
+            Panel::Inspector => Scope::AttributeEditor,
+            Panel::Settings => Scope::Settings,
+            Panel::Export => Scope::Export,
+            Panel::Outliner => Scope::Outliner,
+            Panel::MaterialLibrary => Scope::MaterialLibrary,
+        };
+        crate::hotkeys::register(ui, scope, ui.max_rect());
         ui.push_id(*tab, |ui| match tab {
             Panel::Viewport => self.app.viewport(ui),
             Panel::Inspector => self.app.inspector(ui),

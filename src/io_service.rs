@@ -17,6 +17,9 @@ pub enum Command {
         text: String,
     },
     Delete(PathBuf),
+    RefreshTemplates {
+        directory: PathBuf,
+    },
     OpenScene {
         id: u64,
         path: PathBuf,
@@ -57,12 +60,14 @@ pub struct IoService {
     settings: Arc<Mutex<Option<(PathBuf, String)>>>,
     events: mpsc::Receiver<Result<String, String>>,
     scene_events: mpsc::Receiver<SceneEvent>,
+    template_events: mpsc::Receiver<Result<Vec<PathBuf>, String>>,
 }
 impl IoService {
     pub fn spawn() -> Self {
         let (tx, rx) = mpsc::sync_channel(8);
         let (done, events) = mpsc::channel();
         let (scene_done, scene_events) = mpsc::channel();
+        let (template_done, template_events) = mpsc::channel();
         let settings = Arc::new(Mutex::new(None::<(PathBuf, String)>));
         let pending = settings.clone();
         thread::Builder::new()
@@ -110,6 +115,9 @@ impl IoService {
                                 .map(|_| None);
                             let _ = scene_done.send(SceneEvent { id, path, result });
                         }
+                        Ok(Command::RefreshTemplates { directory }) => {
+                            let _ = template_done.send(crate::templates::scan(&directory));
+                        }
                         Ok(Command::Delete(path)) => {
                             if let Err(e) = std::fs::remove_file(path) {
                                 let _ = done.send(Err(e.to_string()));
@@ -137,6 +145,7 @@ impl IoService {
             settings,
             events,
             scene_events,
+            template_events,
         }
     }
     pub fn send(&self, cmd: Command) -> Result<(), String> {
@@ -146,6 +155,9 @@ impl IoService {
     }
     pub fn settings(&self, path: PathBuf, json: String) {
         *self.settings.lock().unwrap() = Some((path, json));
+    }
+    pub fn poll_templates(&self) -> Option<Result<Vec<PathBuf>, String>> {
+        self.template_events.try_recv().ok()
     }
     pub fn poll_scene(&self) -> Option<SceneEvent> {
         self.scene_events.try_recv().ok()

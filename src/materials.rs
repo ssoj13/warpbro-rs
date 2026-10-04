@@ -1,5 +1,5 @@
-//! The material library: the curated presets of usd-rs `usd-mat-lib` (data copied verbatim,
-//! USD authoring dropped; `path` is now just the preset name) and their translation onto this
+//! The material library: the curated presets of usd-rs `usd-mat-lib` plus WarpBro metal looks,
+//! USD authoring is omitted; `path` is the preset name. Presets translate onto this
 //! renderer's Standard Surface inputs, following usd-rs `usd-hd-pt` material.rs
 //! (UsdPreviewSurface -> StandardSurfaceParams) and `pt-material-ext` (sheen, anisotropy,
 //! facing mix).
@@ -54,6 +54,10 @@ pub struct MaterialPreset {
 }
 
 impl MaterialPreset {
+    /// RGB metallic-workflow look, without claiming measured spectral optical constants.
+    const fn metal(path: &'static str, tint: [f32; 3], roughness: f32) -> Self {
+        Self::plain(path, "Metal", tint, roughness, 1.0, 1.0, 1.5, [0.0; 3])
+    }
     /// Construct a plain (no-extension) preset. Keeps the [`PRESETS`] table terse
     /// by defaulting `sheen` / `anisotropy` to `None`. `category` is the explicit
     /// UI tag bucket (2nd arg, right after `path`).
@@ -227,6 +231,23 @@ pub const PRESETS: &[MaterialPreset] = &[
         emissive: [0.0, 0.0, 0.0], sheen: None, anisotropy: None,
         facing: Some(([0.05, 0.75, 0.55], 0.16, 0.0, 4.0)),
     },
+    // Append-only WarpBro conductor looks. Neutral metals differ in tint and
+    // surface finish; these are curated RGB looks, not spectral measurements.
+    MaterialPreset::metal("MetalLead",      [0.36, 0.38, 0.43], 0.48),
+    MaterialPreset::metal("MetalUranium",   [0.55, 0.57, 0.53], 0.32),
+    MaterialPreset::metal("MetalCobalt",    [0.58, 0.62, 0.69], 0.20),
+    MaterialPreset::metal("MetalCadmium",   [0.74, 0.76, 0.79], 0.26),
+    MaterialPreset::metal("MetalNickel",    [0.66, 0.63, 0.57], 0.18),
+    MaterialPreset::metal("MetalTin",       [0.82, 0.84, 0.86], 0.24),
+    MaterialPreset::metal("MetalBronze",    [0.72, 0.43, 0.22], 0.30),
+    MaterialPreset::metal("MetalLithium",   [0.86, 0.87, 0.90], 0.13),
+    MaterialPreset::metal("MetalSodium",    [0.91, 0.90, 0.85], 0.09),
+    MaterialPreset::metal("MetalSilver",    [0.97, 0.96, 0.92], 0.06),
+    MaterialPreset::metal("MetalPlatinum",  [0.72, 0.70, 0.67], 0.11),
+    MaterialPreset::metal("MetalZinc",      [0.66, 0.71, 0.77], 0.38),
+    MaterialPreset::metal("MetalTungsten",  [0.47, 0.46, 0.43], 0.22),
+    MaterialPreset::metal("MetalPalladium", [0.78, 0.77, 0.74], 0.16),
+    MaterialPreset::metal("MetalMagnesium", [0.84, 0.85, 0.83], 0.34),
 ];
 
 /// Category order of the library tab (usd-mat-lib's grouping).
@@ -250,9 +271,9 @@ impl MaterialPreset {
     /// emissiveColor -> emission_color (weight 1 when non-zero). The fractal colour source
     /// switches to the material colour.
     ///
-    /// opacity < 1 (glass) has no transmissive equivalent on a distance-estimated fractal (no
-    /// interior to refract through), so it becomes a clear-coated, dark, smooth dielectric whose
-    /// base weight is the opacity: the reflective look of glass without the refraction.
+    /// Legacy glass approximation: this host currently maps opacity to a coated
+    /// dielectric and does not upload transmission. This is an integration limitation,
+    /// not a claim that distance-estimated surfaces cannot support refraction.
     pub fn apply(&self, m: &mut Material) {
         let defaults = Material::default();
         let model = m.model;

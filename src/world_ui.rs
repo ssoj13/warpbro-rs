@@ -212,6 +212,7 @@ pub struct WorldUi {
     custom_value: f64,
     picker: Option<(NodeId, egui_file_dialog::FileDialog)>,
     environment_file: egui_file_field::FileFieldState,
+    pub file_dialogs: crate::file_dialogs::History,
     cache: AttributeCache,
     drag_order: Option<std::sync::Arc<Vec<NodeId>>>,
     timeline_cache: TimelineCache,
@@ -252,6 +253,7 @@ impl Default for WorldUi {
             custom_value: 0.0,
             picker: None,
             environment_file: egui_file_field::FileFieldState::default(),
+            file_dialogs: Default::default(),
             cache: AttributeCache::default(),
             drag_order: None,
             timeline_cache: TimelineCache::default(),
@@ -361,6 +363,7 @@ impl WorldUi {
                     || input.modifiers.ctrl
                     || input.modifiers.command
             })
+            && crate::hotkeys::active(ctx) == Some(crate::hotkeys::Scope::Timeline)
             && (self
                 .timeline_rect
                 .is_some_and(|rect| ctx.pointer_hover_pos().is_some_and(|p| rect.contains(p)))
@@ -369,6 +372,8 @@ impl WorldUi {
                     .is_some_and(|id| ctx.memory(|memory| memory.focused()) == Some(id)))
     }
     fn timeline_shortcuts(&mut self, ui: &egui::Ui, e: &WorldEditor, nodes: &[WorldNodeInfo]) {
+        use crate::hotkeys::{self, Command as Hotkey, Scope};
+        hotkeys::register(ui, Scope::Timeline, ui.max_rect());
         let focus = ui.id().with("world-timeline-keyboard");
         // Registration can surrender focus on a release outside the row. A press inside
         // owns panel focus until another press or a child editor explicitly takes it.
@@ -396,19 +401,17 @@ impl WorldUi {
             return;
         }
         let modifiers = ui.input(|input| input.modifiers);
-        let pressed = |key| {
-            ui.input(|input| input.events.iter().any(|event| matches!(event,
-                egui::Event::Key { key: event_key, pressed: true, repeat: false, .. } if *event_key == key)))
-                && ui.input_mut(|input| input.consume_key(modifiers, key))
-        };
-        for (key, bit) in [
-            (egui::Key::P, PropertyFilter::POSITION),
-            (egui::Key::T, PropertyFilter::POSITION),
-            (egui::Key::R, PropertyFilter::ROTATION),
-            (egui::Key::S, PropertyFilter::SCALE),
-            (egui::Key::U, PropertyFilter::KEYED),
+        let pressed = |command| hotkeys::consume(ui.ctx(), Scope::Timeline, command);
+        if pressed(Hotkey::Fit) {
+            self.fit_timeline(ui.available_width(), nodes, e);
+        }
+        for (command, bit) in [
+            (Hotkey::Translate, PropertyFilter::POSITION),
+            (Hotkey::Rotate, PropertyFilter::ROTATION),
+            (Hotkey::Scale, PropertyFilter::SCALE),
+            (Hotkey::Keyed, PropertyFilter::KEYED),
         ] {
-            if pressed(key) {
+            if pressed(command) {
                 for id in e
                     .selected
                     .iter()
@@ -423,9 +426,10 @@ impl WorldUi {
                 }
             }
         }
-        let jump_in = pressed(egui::Key::I);
-        let jump_out = pressed(egui::Key::O);
-        let preview = pressed(egui::Key::Insert);
+        let jump_in = pressed(Hotkey::In);
+        let jump_out = pressed(Hotkey::Out);
+        let cache_preview = pressed(Hotkey::CachePreview);
+        let preview = cache_preview || pressed(Hotkey::Preview);
         if jump_in || jump_out || preview {
             let bounds = selection_bounds(nodes, e);
             if jump_in {
@@ -437,7 +441,7 @@ impl WorldUi {
             if preview {
                 self.seek(bounds.0);
                 self.playing = false;
-                self.preview_action = Some(if modifiers.shift {
+                self.preview_action = Some(if cache_preview {
                     PreviewAction::CacheThenPlay {
                         first: bounds.0,
                         last: bounds.1,
@@ -450,9 +454,32 @@ impl WorldUi {
                 });
             }
         }
-        if pressed(egui::Key::Space) {
+        if pressed(Hotkey::Play) {
             self.playing = !self.playing;
         }
+    }
+    /// Fit authored layer bounds into the actual canvas beside the outline.
+    /// This changes only presentation state; animation and the work area stay intact.
+    fn fit_timeline(&mut self, width: f32, nodes: &[WorldNodeInfo], e: &WorldEditor) {
+        let max_outline = (width - 140.0).max(width * 0.5).max(1.0);
+        let outline = self
+            .timeline_outline_width
+            .clamp(140.0_f32.min(max_outline), max_outline);
+        let canvas = (width - outline).max(1.0);
+        let (first, last) = nodes
+            .iter()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), n| {
+                (a.min(n.start), b.max(n.end))
+            });
+        let (first, last) = if first.is_finite() && last.is_finite() {
+            (first, last + 1.0)
+        } else {
+            (e.document.first as f64, e.document.last as f64 + 1.0)
+        };
+        let margin = 8.0_f32.min(canvas * 0.1);
+        let ppf = ((canvas - 2.0 * margin) / (last - first).max(1.0) as f32).max(0.00001);
+        self.view.zoom = ppf / TimelineConfig::default().pixels_per_frame;
+        self.view.pan_offset = first as f32 - margin / ppf;
     }
     pub fn seek(&mut self, frame: u32) {
         self.playhead = frame;
@@ -463,7 +490,9 @@ impl WorldUi {
         let attribute_label_width = self.attribute_label_width;
         let timeline_outline_width = self.timeline_outline_width;
         let auto_key = self.auto_key;
+        let file_dialogs = std::mem::take(&mut self.file_dialogs);
         *self = Self::default();
+        self.file_dialogs = file_dialogs;
         self.attribute_metrics = attribute_metrics;
         self.attribute_label_width = attribute_label_width;
         self.timeline_outline_width = timeline_outline_width;
@@ -1892,16 +1921,16 @@ impl WorldUi {
             ui.checkbox(&mut self.auto_key, "Auto Key")
                 .on_hover_text("Key camera navigation only when Auto Key is enabled; otherwise preserve existing animation keys.");
             ui.checkbox(&mut self.snap, "Snap");
-            if ui.small_button("Fit").clicked() {
-                self.view.pan_offset = e.document.first as f32;
-                self.view.zoom = ((ui.available_width().max(500.0) * 0.55)
-                    / (e.document.last - e.document.first + 1) as f32
-                    / 2.0)
-                    .clamp(0.02, 50.0);
+            if ui.small_button("Fit").on_hover_text("Fit all layer bars · F").clicked() {
+                let width = ui.max_rect().width();
+                let cache = self.take_cache(e);
+                self.fit_timeline(width, &cache.nodes, e);
+                self.cache = cache;
             }
             ui.add(
                 egui::Slider::new(&mut self.view.zoom, 0.05..=20.0)
                     .logarithmic(true)
+                    .clamping(egui::SliderClamping::Edits)
                     .text("Zoom"),
             );
             ui.menu_button("Interpolation", |ui| {
@@ -2006,7 +2035,7 @@ impl WorldUi {
                 .tooltip("Browse HDR / EXR environment")
                 .show(ui);
             if response.browse_clicked() {
-                let start = self.environment_file.start_dir(path);
+                let start = std::path::Path::new(path).parent();
                 let mut picker = egui_file_dialog::FileDialog::new().add_file_filter(
                     "HDR / EXR",
                     egui_file_dialog::Filter::new(|p: &std::path::Path| {
@@ -2017,9 +2046,12 @@ impl WorldUi {
                             })
                     }),
                 );
-                if !start.is_empty() {
-                    picker = picker.initial_directory(start.into());
-                }
+                picker = self.file_dialogs.prepare(
+                    picker,
+                    crate::file_dialogs::ENVIRONMENT,
+                    start,
+                    "HDR / EXR",
+                );
                 picker.pick_file();
                 self.picker = Some((id, picker));
             }
@@ -2041,9 +2073,10 @@ impl WorldUi {
         self.attribute_metrics.apply(ui);
         if let Some((id, picker)) = &mut self.picker {
             picker.update(ui.ctx());
+            self.file_dialogs
+                .observe(crate::file_dialogs::ENVIRONMENT, picker);
             if let Some(path) = picker.take_picked() {
                 let id = *id;
-                self.environment_file.remember(&path.to_string_lossy());
                 self.command(
                     e,
                     WorldCommand::Batch(vec![
@@ -2992,6 +3025,24 @@ mod tests {
     }
 
     #[test]
+    fn timeline_fit_uses_bar_bounds_and_actual_splitter_width() {
+        let e = editor();
+        let mut nodes = e.document.nodes();
+        for node in &mut nodes {
+            node.start = 100.0;
+            node.end = 399.0;
+        }
+        let mut state = WorldUi::default();
+        state.timeline_outline_width = 400.0;
+        let before = serde_json::to_string(&e.document).unwrap();
+        state.fit_timeline(1000.0, &nodes, &e);
+        let ppf = state.view.zoom * TimelineConfig::default().pixels_per_frame;
+        assert!(((100.0 - state.view.pan_offset as f64) * ppf as f64 - 8.0).abs() < 0.001);
+        assert!(((400.0 - state.view.pan_offset as f64) * ppf as f64 - 592.0).abs() < 0.001);
+        assert_eq!(serde_json::to_string(&e.document).unwrap(), before);
+    }
+
+    #[test]
     fn timeline_keyboard_focus_survives_pointer_exit_and_clears_on_outside_click() {
         let e = editor();
         let object = e.selection.unwrap();
@@ -3418,7 +3469,17 @@ mod tests {
             playing: true,
             ..Default::default()
         };
+        state
+            .file_dialogs
+            .directories
+            .insert(crate::file_dialogs::ENVIRONMENT.into(), "C:/HDR".into());
+        state
+            .file_dialogs
+            .filters
+            .insert(crate::file_dialogs::ENVIRONMENT.into(), None);
+        let history = state.file_dialogs.clone();
         state.reset();
+        assert!(state.file_dialogs == history);
         assert_eq!(state.attribute_metrics, metrics);
         assert_eq!(state.attribute_label_width, 237.0);
         assert!(state.auto_key);
