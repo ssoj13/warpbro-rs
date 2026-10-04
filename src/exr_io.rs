@@ -3,17 +3,17 @@
 //! "Save view" EXR and lat-long environment maps all go through here, so the colour tags, the
 //! compression and the overwrite rules exist once.
 //!
-//! The tracer's RGB is linear Rec.709 (`color::INPUT`), so every file is tagged with BT.709/D65
-//! `chromaticities`: readers that colour-manage (OCIO, ffmpeg-rs, Nuke) then know the primaries
-//! instead of guessing.
+//! Every file is tagged with its `chromaticities`: ACES AP1 for scene-linear (working-space)
+//! output, BT.709/D65 for display light. Readers that colour-manage (OCIO, ffmpeg-rs, Nuke) then
+//! know the primaries instead of guessing; `read_rgb` honours the tag the same way.
 
 use std::path::Path;
 
-#[cfg(test)]
 use exr_core::attr::Attribute;
 use exr_core::attr::{Chromaticities, ChromaticitiesAttribute, Compression, FloatAttribute};
 use exr_core::{ChannelData, Image};
 use imath_rs::{Box2i, V2i};
+use vfx_ocio::color_matrix::Primaries;
 
 /// OpenEXR's own default compression (`Header` default = ZIP): lossless, and the usual choice for
 /// float renders.
@@ -23,7 +23,7 @@ const COMPRESSION: Compression = Compression::Zip;
 const MAX_ENV_PIXELS: u64 = 16_777_216;
 const MAX_ENV_AXIS: i64 = 16_384;
 
-/// Write the RGB of `pixels` (alpha ignored) as a float32 EXR tagged linear Rec.709.
+/// Write the RGB of `pixels` (alpha ignored) as a float32 EXR tagged with `prims`.
 ///
 /// `white_nits` adds OpenEXR's `whiteLuminance` (the display-light export: 1.0 == that many nits).
 /// The file is published atomically by `exr-core` (sibling temp + rename); an existing file is
@@ -33,6 +33,7 @@ pub fn write_rgb(
     width: usize,
     height: usize,
     pixels: &[[f32; 4]],
+    prims: &Primaries,
     white_nits: Option<f32>,
     overwrite: bool,
 ) -> Result<(), String> {
@@ -54,9 +55,8 @@ pub fn write_rgb(
         .with_channel("G", channel(1))
         .with_channel("B", channel(2));
     let attrs = image.attributes_mut();
-    // `Chromaticities::default()` is OpenEXR's Rec. ITU-R BT.709-3 / D65 default.
     attrs
-        .insert("chromaticities", Box::new(ChromaticitiesAttribute::new(Chromaticities::default())))
+        .insert("chromaticities", Box::new(ChromaticitiesAttribute::new(chroma(prims))))
         .map_err(|e| e.to_string())?;
     if let Some(nits) = white_nits {
         attrs
@@ -74,8 +74,9 @@ pub fn write_rgb(
 
 /// Read the R, G, B channels of a single-part flat EXR as linear float RGB, raster order over the
 /// data window. Any channel type is widened to f32; a file without all three is an error, never a
-/// guessed fill. The size is checked from the header before the pixels are read.
-pub fn read_rgb(path: &Path) -> Result<(u32, u32, Vec<[f32; 3]>), String> {
+/// guessed fill. The size is checked from the header before the pixels are read. Also returns the
+/// file's primaries: its `chromaticities`, or OpenEXR's BT.709/D65 default when untagged.
+pub fn read_rgb(path: &Path) -> Result<(u32, u32, Vec<[f32; 3]>, Primaries), String> {
     let err = |e: exr_core::ExrError| format!("EXR {}: {e}", path.display());
     let header = Image::read_header_only(path).map_err(err)?;
     let (w, h) = (header.width(), header.height());
@@ -86,6 +87,12 @@ pub fn read_rgb(path: &Path) -> Result<(u32, u32, Vec<[f32; 3]>), String> {
         ));
     }
     let image = Image::read(path).map_err(err)?;
+    // Untagged is BT.709 by the OpenEXR spec; a "chromaticities" of another type is a broken file.
+    let tag = match image.attributes().get("chromaticities") {
+        None => Chromaticities::default(),
+        Some(_) => attr::<Chromaticities>(&image, "chromaticities")
+            .ok_or_else(|| format!("EXR {}: \"chromaticities\" has the wrong attribute type", path.display()))?,
+    };
     let plane = |name: &str| -> Result<Vec<f32>, String> {
         if image.sampling(name).is_some_and(|s| s != (1, 1)) {
             return Err(format!("EXR {}: channel {name} is subsampled", path.display()));
@@ -98,13 +105,28 @@ pub fn read_rgb(path: &Path) -> Result<(u32, u32, Vec<[f32; 3]>), String> {
     let (r, g, b) = (plane("R")?, plane("G")?, plane("B")?);
     let pixels = r.iter().zip(&g).zip(&b).map(|((r, g), b)| [*r, *g, *b]).collect();
     // Bounded by the checks above, so the casts cannot truncate.
-    Ok((w as u32, h as u32, pixels))
+    Ok((w as u32, h as u32, pixels, primaries(&tag)))
+}
+
+/// The EXR attribute for `p` (narrowed to the attribute's f32).
+fn chroma(p: &Primaries) -> Chromaticities {
+    let xy = |v: [f64; 2]| v.map(|c| c as f32);
+    Chromaticities { red: xy(p.red), green: xy(p.grn), blue: xy(p.blu), white: xy(p.wht) }
+}
+/// The primaries an EXR attribute declares; validity is checked by the matrix builder.
+fn primaries(c: &Chromaticities) -> Primaries {
+    let xy = |v: [f32; 2]| v.map(f64::from);
+    Primaries { red: xy(c.red), grn: xy(c.green), blu: xy(c.blue), wht: xy(c.white) }
 }
 
 /// One typed header attribute of `path` (tests: the tags the writer must stamp).
 #[cfg(test)]
 pub(crate) fn read_attr<T: exr_core::attr::AttrValue + Clone + 'static>(path: &Path, name: &str) -> Option<T> {
-    let image = Image::read_header_only(path).ok()?;
+    attr(&Image::read_header_only(path).ok()?, name)
+}
+
+/// One typed header attribute of `image`; None when absent or of another type.
+fn attr<T: exr_core::attr::AttrValue + Clone + 'static>(image: &Image, name: &str) -> Option<T> {
     let attr: &dyn Attribute = image.attributes().get(name)?;
     attr.as_any()
         .downcast_ref::<exr_core::attr::TypedAttribute<T>>()
@@ -116,19 +138,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn float_rgb_round_trips_with_rec709_tags_and_refuses_overwrite() {
+    fn float_rgb_round_trips_with_primaries_tags_and_refuses_overwrite() {
         let dir = std::env::temp_dir().join(format!("frac-exr-io-{}", std::process::id()));
         let path = dir.join("rt.exr");
         // Values above 1, negative and tiny: scene-linear data must survive bit-exactly.
         let pixels = vec![[19.43, -0.25, 1e-6, 1.0], [0.5, 2.0, 0.125, 1.0]];
-        write_rgb(&path, 2, 1, &pixels, Some(100.0), true).unwrap();
-        let (w, h, back) = read_rgb(&path).unwrap();
+        let display = &crate::color::DISPLAY_PRIMS;
+        write_rgb(&path, 2, 1, &pixels, display, Some(100.0), true).unwrap();
+        let (w, h, back, prims) = read_rgb(&path).unwrap();
         assert_eq!((w, h), (2, 1));
         assert_eq!(back, vec![[19.43, -0.25, 1e-6], [0.5, 2.0, 0.125]]);
+        // BT.709 is OpenEXR's default attribute value; the f32 tag reads back within f32.
         assert_eq!(read_attr::<Chromaticities>(&path, "chromaticities"), Some(Chromaticities::default()));
+        assert_eq!(chroma(&prims), chroma(display));
         assert_eq!(read_attr::<f32>(&path, "whiteLuminance"), Some(100.0));
-        assert!(write_rgb(&path, 2, 1, &pixels, None, false).is_err(), "existing file without overwrite");
-        assert!(write_rgb(&path, 3, 1, &pixels, None, true).is_err(), "size mismatch");
+        write_rgb(&path, 2, 1, &pixels, &crate::color::WORKING_PRIMS, None, true).unwrap();
+        assert_eq!(read_attr::<Chromaticities>(&path, "chromaticities"), Some(chroma(&crate::color::WORKING_PRIMS)));
+        assert_eq!(read_rgb(&path).unwrap().3.wht, chroma(&crate::color::WORKING_PRIMS).white.map(f64::from));
+        assert!(write_rgb(&path, 2, 1, &pixels, display, None, false).is_err(), "existing file without overwrite");
+        assert!(write_rgb(&path, 3, 1, &pixels, display, None, true).is_err(), "size mismatch");
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

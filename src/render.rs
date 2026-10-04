@@ -856,7 +856,7 @@ impl Gpu {
                     pixel[1] * p[P_EXPOSURE],
                     pixel[2] * p[P_EXPOSURE],
                 ];
-                let l = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+                let l = crate::color::luma(c);
                 *raw = [
                     l + (c[0] - l) * p[P_SATURATION],
                     l + (c[1] - l) * p[P_SATURATION],
@@ -1233,7 +1233,7 @@ impl Target {
         if let Some(e) = &self.colour_error {
             return Err(format!("Colour transform failed: {e}"));
         }
-        crate::exr_io::write_rgb(path, self.width, self.height, &self.light, Some(100.0), true)
+        crate::exr_io::write_rgb(path, self.width, self.height, &self.light, &crate::color::DISPLAY_PRIMS, Some(100.0), true)
     }
 }
 
@@ -1266,7 +1266,7 @@ mod tests {
                 }
             })
             .collect();
-        crate::exr_io::write_rgb(&environment, 512, 256, &checker, None, true).unwrap();
+        crate::exr_io::write_rgb(&environment, 512, 256, &checker, &crate::color::DISPLAY_PRIMS, None, true).unwrap();
         let mut gpu = Gpu::new().unwrap();
         for (family, shape) in [(FAMILY_KIFS, "sphere"), (FAMILY_BULB, "bulb")] {
             for preset in ["GlassClear", "GlassBottleGreen", "GlassWaterGreen"] {
@@ -1327,7 +1327,7 @@ mod tests {
         assert_eq!(p[P_TRANSMISSION_DEPTH], 0.5);
         assert_eq!(
             &p[P_TRANSMISSION_COLOR..P_TRANSMISSION_COLOR + 3],
-            &[0.12, 0.82, 0.25]
+            &crate::color::to_working([0.12, 0.82, 0.25])
         );
         assert_eq!(cache.builds, 3);
     }
@@ -1397,11 +1397,13 @@ mod tests {
                     material.transmission_depth = 2.0;
                     gpu.step(&mut target, &scene, 256, 19, None, false);
                     let green = gpu.raw_scene_linear(&target)[center];
+                    // Hue in the authored (Rec.709) primaries, magnitude in the working space.
+                    let hue = crate::color::to_709([green[0], green[1], green[2]]);
                     assert!(
-                        green[1] > green[0] * 5.0 && green[1] > green[2] * 2.0,
-                        "{green:?}"
+                        hue[1] > hue[0] * 5.0 && hue[1] > hue[2] * 2.0,
+                        "{green:?} = Rec.709 {hue:?}"
                     );
-                    for (value, expected) in green[..3].iter().zip([0.12, 0.82, 0.25]) {
+                    for (value, expected) in green[..3].iter().zip(crate::color::to_working([0.12, 0.82, 0.25])) {
                         assert!(
                             (*value - expected).abs() < expected * 0.15 + 0.01,
                             "depth family={family} world={world}: {green:?}"
@@ -1971,6 +1973,10 @@ mod tests {
         object.material.specular = 0.0;
         object
     }
+    /// Working-space pixels in Rec.709, the primaries test colours are authored in.
+    fn rec709(pixels: &[[f32; 4]]) -> Vec<[f32; 3]> {
+        pixels.iter().map(|p| crate::color::to_709([p[0], p[1], p[2]])).collect()
+    }
     fn dark_world() -> Scene {
         let mut scene = Scene::preset(FAMILY_BULB);
         scene.world_render = true;
@@ -2032,7 +2038,11 @@ mod tests {
                         .any(|(a, n)| a[..3] == [0.0; 3] && n[..3] == [0.0; 3])
                 );
                 let center = 12 * 33 + 16;
-                for (actual, expected) in albedo[center][..3].iter().zip([0.19, 0.26, 0.3]) {
+                // The kernel's primary albedo, base * tint * (1 - metal) + emission, over working-space inputs.
+                let w = crate::color::to_working;
+                let (c, t, e) = (w([0.2, 0.4, 0.6]), w([1.0, 0.5, 0.25]), w([0.1, 0.2, 0.3]));
+                let want: [f32; 3] = std::array::from_fn(|k| c[k] * 0.8 * t[k] * 0.75 + e[k] * 0.7);
+                for (actual, expected) in albedo[center][..3].iter().zip(want) {
                     assert!(
                         (actual / 4.0 - expected).abs() < 1e-5,
                         "{:?}",
@@ -2123,11 +2133,13 @@ mod tests {
             denoised,
             "Export ignores display adjustments"
         );
+        // OCIO is off: exposure and saturation in the working space, then Rec.709 display light.
         for (display, p) in target.light.iter().zip(&denoised) {
             let c = [p[0] * 4.0, p[1] * 4.0, p[2] * 4.0];
-            let l = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+            let l = crate::color::luma(c);
+            let want = crate::color::to_709(c.map(|v| l + (v - l) * 0.5));
             for k in 0..3 {
-                assert!((display[k] - (l + (c[k] - l) * 0.5)).abs() < 1e-5);
+                assert!((display[k] - want[k]).abs() < 1e-5);
             }
         }
         scene.render.denoise.enabled = false;
@@ -2240,7 +2252,8 @@ mod tests {
         scene.objects[1].material.model = MaterialModel::StandardSurface;
         gpu.step(&mut target, &scene, 4, 0, None, false);
         assert!(target.colour_error.is_none(), "{:?}", target.colour_error);
-        let both = gpu.scene_linear(&target);
+        // Pure Rec.709 red / blue materials are pure only in Rec.709.
+        let both = rec709(&gpu.scene_linear(&target));
         assert!(both.iter().any(|p| p[0] > 0.5 && p[2] < 0.01));
         assert!(both.iter().any(|p| p[2] > 0.5 && p[0] < 0.01));
         scene.objects[0] = world_object(FAMILY_BULB, [0.0, 0.0, 0.7], [1.0; 3], [1.0, 0.0, 0.0]);
@@ -2279,13 +2292,13 @@ mod tests {
         light.sun_color = [1.0, 0.0, 0.0];
         scene.lights.push(light);
         gpu.step(&mut target, &scene, 32, 0, None, false);
-        let first = gpu.scene_linear(&target);
+        let first = rec709(&gpu.scene_linear(&target));
         let red: f32 = first.iter().map(|p| p[0]).sum();
         assert!(red > 0.1);
         light.sun_color = [0.0, 0.0, 1.0];
         scene.lights.push(light);
         gpu.step(&mut target, &scene, 32, 0, None, false);
-        let both = gpu.scene_linear(&target);
+        let both = rec709(&gpu.scene_linear(&target));
         let blue: f32 = both.iter().map(|p| p[2]).sum();
         let red: f32 = both.iter().map(|p| p[0]).sum();
         assert!(blue > 0.1 && red > 0.1);
@@ -2373,7 +2386,7 @@ mod tests {
         let texels: Vec<[f32; 4]> = (0..4)
             .map(|i| [8.0 * (i % 2) as f32, 4.0 * (i / 2) as f32, 2.0, 1.0])
             .collect();
-        crate::exr_io::write_rgb(&path, 2, 2, &texels, None, true).unwrap();
+        crate::exr_io::write_rgb(&path, 2, 2, &texels, &crate::color::WORKING_PRIMS, None, true).unwrap();
         let mut gpu = Gpu::new().unwrap();
         let mut target = gpu.target(64, 32);
         let mut scene = Scene::preset(FAMILY_QUAT);
@@ -2401,7 +2414,7 @@ mod tests {
     #[test]
     fn hdr_environment_lights_surfaces_and_preserves_background_radiance() {
         let path = std::env::temp_dir().join(format!("frac-env-gpu-{}.exr", std::process::id()));
-        crate::exr_io::write_rgb(&path, 8, 4, &[[4.0, 2.0, 1.0, 1.0]; 32], None, true).unwrap();
+        crate::exr_io::write_rgb(&path, 8, 4, &[[4.0, 2.0, 1.0, 1.0]; 32], &crate::color::WORKING_PRIMS, None, true).unwrap();
         let mut gpu = Gpu::new().unwrap();
         let mut target = gpu.target(16, 8);
         let mut scene = Scene::preset(FAMILY_QUAT);
@@ -2538,11 +2551,16 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
-    fn old_bookmarks_default_to_linear_rec709_aces2() {
+    fn old_bookmarks_default_to_aces2_and_ignore_a_stored_input() {
         let scene = Scene::preset(FAMILY_BULB);
         let mut json = serde_json::to_value(&scene).unwrap();
         json.as_object_mut().unwrap().remove("colour");
         let restored: Scene = serde_json::from_value(json).unwrap();
         assert_eq!(restored.colour, crate::color::default_selection());
+        // Scenes saved while the input was a choice still load; the working space wins.
+        let mut json = serde_json::to_value(&scene).unwrap();
+        json["colour"]["input"] = "Linear Rec.709 (sRGB)".into();
+        let restored: Scene = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.colour, scene.colour);
     }
 }

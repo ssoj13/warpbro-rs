@@ -100,7 +100,9 @@ impl MaterialTarget for Material {
         m.specular_ior = preset.ior;
         if preset.emissive.iter().any(|&c| c > 0.0) {
             m.emission = 1.0;
-            m.emission_color = preset.emissive;
+            // The library's emissive is ACEScg while editable colours are Rec.709; upload
+            // converts back, so the kernel receives the preset's exact AP1 radiance.
+            m.emission_color = crate::color::to_709(preset.emissive);
         }
         if preset.opacity < 1.0 {
             m.transmission = 1.0 - preset.opacity;

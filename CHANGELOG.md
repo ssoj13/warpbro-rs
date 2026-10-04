@@ -2,12 +2,28 @@
 
 ## Unreleased — 2026-10-04
 
+### Rendering in ACEScg
+
+- The tracer works in linear ACEScg (AP1, ACES white) instead of linear Rec.709. Authored colours
+  (materials, palettes, sky, sun, lights) stay Rec.709 and are converted once at upload
+  (`Scene::pack`, `palette::build_lut`); the Rec.709->AP1 matrix is built by vfx-ocio (Bradford) and
+  matches the OCIO studio config. The library's emissive preset (authored in ACEScg) is stored as
+  its Rec.709 equivalent, so it reaches the kernel unchanged.
+- Environment EXRs are converted from their `chromaticities` (BT.709 when untagged); `.hdr` is Rec.709.
+- Luminance (light selection, specular probability, saturation, environment importance sampling)
+  uses the AP1 weights (`SS_LUMA`, the same as the Standard Surface lobe selection).
+- OCIO input is always `ACEScg`; the Colour panel's Input choice and the persisted `input` field are
+  gone (old scenes still load). OCIO-off / Reinhard paths convert AP1->Rec.709 before the sRGB OETF.
+- Scene-linear EXR sequences are tagged with AP1 chromaticities; the display-light EXR stays BT.709.
+- Expected differences: saturated colours under GI, saturation != 1, and the noise pattern (light /
+  lobe probabilities) change; neutral scenes under a white sky render the same within noise.
+
 ### OpenEXR through exr-core
 
 - Every EXR read/write goes through `src/exr_io.rs` over our `exr-core` (exr-rs, 1:1 OpenEXR port)
   instead of crates.io `exr`: sequence frames, the display-light "Save view" EXR (now one writer
   shared by `render.rs` and `render_service.rs`), lat-long environment maps and the CUDA glass probe's
-  checker environment. Files are float32 R,G,B, ZIP, tagged BT.709/D65 `chromaticities`
+  checker environment. Files are float32 R,G,B, ZIP, tagged with `chromaticities`
   (+ `whiteLuminance` = 100 nits on the display export); environment maps are size-checked from the
   header before any pixel is read; an existing file is refused unless overwrite is granted.
 - egui-widgets-rs pinned to `6afc5cb` (egui-display writes EXR through exr-core). `cargo tree -i exr` is

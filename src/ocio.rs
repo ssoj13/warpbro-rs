@@ -1,7 +1,8 @@
 //! Adapted from exr-view/src/ocio.rs (BSD-3-Clause, see vendor/EXR-VIEW-LICENSE).
 //! The OCIO display transform of the colour image: the config, the user's choice
-//! (input colour space, display, view, look), the transform the tile shader and the
-//! CPU twin both run, and the Colour panel.
+//! (display, view, look), the transform the tile shader and the CPU twin both run, and
+//! the Colour panel. The input is always the tracer's working space
+//! (`color::WORKING`): a renderer fact, not a choice, so it is never persisted.
 //!
 //! Everything comes from `vfx-ocio` (the OpenColorIO 2.5 port Playa and vfx-view use):
 //! ONE `Processor` gives the WGSL spliced into the tile shader (`wgsl_prelude`, bound
@@ -13,9 +14,8 @@
 //! display-encoded result (where OCIO's own `ociodisplay` applies its display gamma:
 //! an `ExponentTransform` after the display/view transform). No sRGB OETF: the
 //! display colour space already encodes. Isolated channels are data and keep the
-//! built-in path. The exposure is a gain on the INPUT values, which is exposure for
-//! every linear input (all scene-linear EXR spaces); vfx-ocio has no OCIO
-//! `LegacyViewingPipeline` to put it in `scene_linear` for a log input.
+//! built-in path. The exposure is a gain on the input (linear ACEScg) values, which is
+//! scene-linear exposure.
 //!
 //! What the transform ends with follows the window's output (`present::Output`):
 //!
@@ -54,8 +54,6 @@ pub struct Sel {
     pub on: bool,
     /// A config file or an `ocio://` URI; empty = `$OCIO`, else `ocio://default`.
     pub config: String,
-    /// Input colour space; empty = the `scene_linear` role.
-    pub input: String,
     /// Display; empty = the first one offered.
     pub display: String,
     /// View; empty = the display's first one offered.
@@ -113,11 +111,6 @@ impl Ocio {
         })
     }
 
-    /// Every colour space, config order.
-    pub fn inputs(&self) -> Vec<&str> {
-        self.cfg.colorspace_names().collect()
-    }
-
     /// The active displays offered: with `hdr` every one with a picture (non-data)
     /// view; without, those with a non-data SDR view. A data view (`Raw`) does not
     /// count: every display has one.
@@ -163,16 +156,10 @@ impl Ocio {
     /// `sel`'s names in this config, empty ones replaced by the defaults. A name the
     /// config lacks is an error, not a silent substitute: the panel says which.
     pub fn resolve(&self, sel: &Sel, hdr: bool) -> Result<Names> {
-        let input = if sel.input.is_empty() {
-            if !self.cfg.has_role("scene_linear") {
-                bail!("the config has no scene_linear role: pick an input colour space");
-            }
-            "scene_linear".to_owned()
-        } else if self.cfg.colorspace(&sel.input).is_some() {
-            sel.input.clone()
-        } else {
-            bail!("the config has no colour space \"{}\"", sel.input);
-        };
+        let input = crate::color::WORKING;
+        if self.cfg.colorspace(input).is_none() {
+            bail!("the config has no \"{input}\" colour space (the tracer's working space)");
+        }
         // What a name is missing as: an HDR display on an SDR output is "no SDR display".
         let kind = if hdr { "" } else { "SDR " };
         let displays = self.displays(hdr);
@@ -201,7 +188,7 @@ impl Ocio {
             bail!("the config has no look \"{}\"", sel.look);
         }
         Ok(Names {
-            input,
+            input: input.to_owned(),
             display: display.to_owned(),
             view: view.to_owned(),
             look: sel.look.clone(),
@@ -736,7 +723,7 @@ impl State {
             let displays = owned(ocio.displays(hdr));
             let resolved = ocio.resolve(&self.sel, hdr).ok();
             let views = resolved.as_ref().map(|n| owned(ocio.views(&n.display, hdr))).unwrap_or_default();
-            let (inputs, looks) = (owned(ocio.inputs()), owned(ocio.looks()));
+            let looks = owned(ocio.looks());
             let presets: Vec<_> = PRESETS
                 .iter()
                 .filter(|p| hdr || !p.hdr)
@@ -766,9 +753,6 @@ impl State {
                     }
                 }
             });
-            ui.end_row();
-            ui.label("Input").on_hover_text("The colour space of the image's values.");
-            combo(ui, "ocio.input", &mut self.sel.input, &inputs, "scene_linear (role)");
             ui.end_row();
             ui.label("Display").on_hover_text(
                 "The target display for rendering and export. HDR targets remain selectable on SDR screens; WarpBro presents an SDR preview there. Settings > Display selects the actual window output.",
@@ -912,7 +896,7 @@ mod tests {
     fn default_transform_renders_mid_grey() {
         let o = cg();
         let n = o.resolve(&Sel::default(), false).unwrap();
-        assert_eq!(n.input, "scene_linear");
+        assert_eq!(n.input, crate::color::WORKING);
         assert_eq!(
             (n.display.as_str(), n.view.as_str()),
             ("sRGB - Display", "ACES 2.0 - SDR 100 nits (Rec.709)")
@@ -959,14 +943,14 @@ mod tests {
         };
         assert!(o.resolve(&hdr, false).is_err());
         let bad = Sel {
-            input: "no such space".into(),
+            display: "no such display".into(),
             ..Sel::default()
         };
         assert!(
             o.resolve(&bad, false)
                 .unwrap_err()
                 .to_string()
-                .contains("no such space")
+                .contains("no such display")
         );
         // An HDR output offers the PQ display and its HDR views.
         assert!(o.displays(true).contains(&"Rec.2100-PQ - Display"));

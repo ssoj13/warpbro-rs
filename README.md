@@ -207,9 +207,13 @@ the rotation convention; layer order is separate from hierarchy and physical occ
 **Settings → Display / Color** uses the same `egui-prefs2` layout as exr-view. Display uses
 `egui-display::settings_ui` directly: output, SDR reference white and HLG display peak, with
 OS values used automatically unless overridden. Color is the copied exr-view OCIO panel:
-config (built-in, `$OCIO`, `.ocio`/`.ocioz` file), Input, Display, View, Look, Reload and monitor
-presets. The default input is **Linear Rec.709 (sRGB)**, matching this tracer's material,
-palette and lighting values; it must not be interpreted as ACEScg.
+config (built-in, `$OCIO`, `.ocio`/`.ocioz` file), Display, View, Look, Reload and monitor
+presets. The tracer renders in **linear ACEScg** (AP1, ACES white), which is always the OCIO
+input (a config without an `ACEScg` colour space is reported, not substituted). Material,
+palette, sky and light colours are authored in linear Rec.709 / sRGB primaries and converted to
+ACEScg once at GPU upload; environment EXRs are converted from their `chromaticities` (BT.709
+when untagged), `.hdr` maps are read as Rec.709. With OCIO off or Reinhard, the image is
+converted to Rec.709 before the sRGB encoding.
 
 For HDR on screen, enable HDR in the OS, choose an available HDR output in Display, then
 select **HDR · 1000 nits** in Color. The ACES rendering peak and UI reference white are
@@ -237,7 +241,8 @@ samples. Changing mode or quality refilters current samples; changing the interv
 accumulation and the last usable result.
 
 CUDA accumulates primary-hit albedo and world-normal sums with their counts. The worker
-passes normalized scene-linear Rec.709 HDR to squarebob-rs OIDN before exposure, saturation
+passes normalized scene-linear ACEScg HDR to squarebob-rs OIDN (whose autoexposure still weighs
+it with Rec.709 luminance until the render-rs `pt-denoise-oidn` move) before exposure, saturation
 or OCIO. No firefly clamp changes the HDR input range; NaN protection acts on the denoiser's
 input only. Raw radiance and guide accumulators remain untouched. Until the next pass,
 the viewport can show the last denoised result; its status reports that result's sample count
@@ -271,7 +276,7 @@ Open **Render → Render / Encode…** or **Window → Render / Encode**. This d
 uses Playa's shared encoder schema. Set output path, resolution, **Samples / frame**, and the
 inclusive frame range, then select an output:
 
-- **EXR sequence:** float RGB scene-linear Rec.709 with chromaticities; exposure and the
+- **EXR sequence:** float RGB scene-linear ACEScg tagged with AP1 chromaticities; exposure and the
   display transform are excluded. `renders/frame.exr`, range 1–3, produces
   `renders/frame.000001.exr` through `renders/frame.000003.exr`.
 - **HEVC / ffmpeg-rs:** hardware **GPU · Vulkan Video** encoding to MP4 or MOV by default, with rational FPS and QP 0–51. **CPU · Kvazaar (I-frames)** is an explicit software alternative using independent frames to avoid reproduced corruption in the pinned inter-prediction path; hardware initialization failures are reported instead of silently switching encoders. Output is SDR 8-bit YUV 4:2:0 with Rec.709 primaries and sRGB transfer;
@@ -364,7 +369,7 @@ the full table is in [docs/bench-1280x720.txt](docs/bench-1280x720.txt)):
 - **Step factor 0.85** (ofx-fractal uses 0.5). On the presets it measured unbiased (mean
   luminance unchanged) and is 1.5× faster. A slider brings back 0.5.
 - **8×4 pixel tiles per warp,** so neighbouring rays share their march paths.
-- **Float colour pipeline.** Normalized scene-linear Rec.709 RGBA32F passes through optional
+- **Float colour pipeline.** Normalized scene-linear ACEScg RGBA32F passes through optional
   OIDN, then exposure and saturation. The shared `vfx-ocio` GPU runtime applies the complete
   ACES 2.0 output transform from oiio-rs; no Narkowicz approximation. Display and denoise
   setting changes preserve accumulated samples.
@@ -396,7 +401,7 @@ src/io_service.rs       asynchronous full-scene open/save, settings, bookmarks a
 src/export.rs     autonomous render coordinator, EXR sink and ffmpeg-rs HEVC writer
 src/inspector.rs  scene controls from egui-widgets-rs attribute editors
 src/denoise.rs    worker OIDN settings, target cadence and shared-device processor
-src/color.rs      cached vfx-ocio GPU colour processing (linear Rec.709 input)
+src/color.rs      working space (ACEScg) matrices and luma, cached vfx-ocio GPU colour processing
 src/ocio.rs       OCIO controls and background config loader, adapted from exr-view (BSD-3-Clause)
 src/window.rs     winit/wgpu shell + egui-display float canvas and SDR/HDR swapchain
 src/palette.rs    the 14 palettes

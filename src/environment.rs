@@ -42,8 +42,10 @@ impl Map {
             return Err("Environment must be a lat-long .hdr or .exr image".into());
         }
         if extension.eq_ignore_ascii_case("exr") {
-            let (w, h, pixels) = crate::exr_io::read_rgb(path)?;
-            return Self::from_pixels(w, h, pixels);
+            let (w, h, pixels, prims) = crate::exr_io::read_rgb(path)?;
+            let m = crate::color::working_from(&prims)
+                .map_err(|e| format!("Environment {}: chromaticities: {e}", path.display()))?;
+            return Self::from_pixels(w, h, pixels.into_iter().map(|p| crate::color::mul(&m, p)).collect());
         }
         let reader = image::ImageReader::open(path)
             .map_err(|e| format!("Environment {}: {e}", path.display()))?
@@ -57,9 +59,11 @@ impl Map {
         if w == 0 || h == 0 || w > 16384 || h > 16384 || u64::from(w) * u64::from(h) > 16_777_216 {
             return Err("Environment is limited to 16 megapixels / 16384 per axis".into());
         }
-        let pixels = img.pixels().map(|p| p.0).collect();
+        // Radiance .hdr has no primaries tag in practice: it is read as Rec.709.
+        let pixels = img.pixels().map(|p| crate::color::to_working(p.0)).collect();
         Self::from_pixels(w, h, pixels)
     }
+    /// `pixels` are working-space (ACEScg) radiance; `load` converts files into it.
     pub fn from_pixels(width: u32, height: u32, pixels: Vec<[f32; 3]>) -> Result<Self, String> {
         if width == 0 || height == 0 || pixels.len() != width as usize * height as usize {
             return Err("Invalid environment dimensions".into());
@@ -76,7 +80,7 @@ impl Map {
             let solid_angle = 2.0 * std::f64::consts::PI / f64::from(width)
                 * ((std::f64::consts::PI * row as f64 / f64::from(height)).cos()
                     - (std::f64::consts::PI * (row + 1) as f64 / f64::from(height)).cos());
-            let l = f64::from(0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]);
+            let l = f64::from(crate::color::luma(p));
             let weight = l * solid_angle;
             weights.push((weight, solid_angle));
             total += weight;
@@ -109,24 +113,30 @@ impl Map {
 mod tests {
     use super::*;
     #[test]
-    fn hdr_and_exr_load_preserve_linear_values_above_one() {
+    fn hdr_and_exr_load_into_the_working_space_by_their_primaries() {
         let dir = std::env::temp_dir().join(format!("frac-env-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let hdr = dir.join("light.hdr");
-        let exr = dir.join("light.exr");
-        let pixels = vec![image::Rgb([4.0, 2.0, 1.0]); 8];
+        let exr709 = dir.join("light709.exr");
+        let exr_ap1 = dir.join("light_ap1.exr");
+        let rec709 = [4.0, 2.0, 1.0];
+        let ap1 = crate::color::to_working(rec709);
+        let pixels = vec![image::Rgb(rec709); 8];
         image::codecs::hdr::HdrEncoder::new(std::fs::File::create(&hdr).unwrap())
             .encode(&pixels, 4, 2)
             .unwrap();
-        crate::exr_io::write_rgb(&exr, 4, 2, &[[4.0, 2.0, 1.0, 1.0]; 8], None, true).unwrap();
-        for path in [&hdr, &exr] {
+        let rgba = |c: [f32; 3]| [[c[0], c[1], c[2], 1.0]; 8];
+        crate::exr_io::write_rgb(&exr709, 4, 2, &rgba(rec709), &crate::color::DISPLAY_PRIMS, None, true).unwrap();
+        crate::exr_io::write_rgb(&exr_ap1, 4, 2, &rgba(ap1), &crate::color::WORKING_PRIMS, None, true).unwrap();
+        // The same light, tagged either way, loads as the same working-space radiance (above one).
+        for path in [&hdr, &exr709, &exr_ap1] {
             let map = Map::load(path).unwrap();
             assert_eq!((map.width, map.height), (4, 2));
-            assert_eq!(&map.texels[0][..3], &[4.0, 2.0, 1.0]);
+            for k in 0..3 {
+                assert!((map.texels[0][k] - ap1[k]).abs() < 1e-5, "{}: {:?} vs {ap1:?}", path.display(), map.texels[0]);
+            }
         }
-        std::fs::remove_file(hdr).unwrap();
-        std::fs::remove_file(exr).unwrap();
-        std::fs::remove_dir(dir).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn constant_map_is_uniform_on_the_sphere() {

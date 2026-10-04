@@ -1024,15 +1024,15 @@ impl Scene {
             P_LIGHT_DIR,
             [el.cos() * az.sin(), el.sin(), el.cos() * az.cos()],
         );
-        put3(&mut p, P_LIGHT_COLOR, l.sun_color);
+        put_rgb(&mut p, P_LIGHT_COLOR, l.sun_color);
         p[P_LIGHT_INTENSITY] = l.sun_intensity;
         let half_angle = (l.sun_angle * 0.5).to_radians().max(1.0e-4);
         let omc = 1.0 - half_angle.cos();
         p[P_SUN_ONE_MINUS_COS] = omc;
         p[P_SUN_CONE_PDF] = 1.0 / (2.0 * std::f32::consts::PI * omc);
         p[P_SKY_INTENSITY] = l.sky_intensity;
-        put3(&mut p, P_SKY_HORIZON, l.sky_horizon);
-        put3(&mut p, P_SKY_ZENITH, l.sky_zenith);
+        put_rgb(&mut p, P_SKY_HORIZON, l.sky_horizon);
+        put_rgb(&mut p, P_SKY_ZENITH, l.sky_zenith);
         p[P_BACKGROUND] = l.background as u32 as f32;
         p[P_ENV_INTENSITY] = self.environment.intensity.max(0.0);
         p[P_ENV_ROTATION] = self.environment.rotation_degrees.to_radians();
@@ -1040,24 +1040,24 @@ impl Scene {
         // --- material
         let m = &self.material;
         p[P_BASE] = m.base;
-        put3(&mut p, P_BASE_TINT, m.base_tint);
+        put_rgb(&mut p, P_BASE_TINT, m.base_tint);
         p[P_DIFFUSE_ROUGHNESS] = m.diffuse_roughness;
         p[P_METALNESS] = m.metalness;
         p[P_SPECULAR] = m.specular;
-        put3(&mut p, P_SPECULAR_COLOR, m.specular_color);
+        put_rgb(&mut p, P_SPECULAR_COLOR, m.specular_color);
         p[P_SPECULAR_ROUGHNESS] = m.specular_roughness;
         p[P_SPECULAR_IOR] = m.specular_ior;
         p[P_SPECULAR_ANISOTROPY] = m.specular_anisotropy;
         p[P_SPECULAR_ROTATION] = m.specular_rotation;
         p[P_TRANSMISSION] = m.transmission.clamp(0.0, 1.0);
-        put3(&mut p, P_TRANSMISSION_COLOR, m.transmission_color);
+        put_rgb(&mut p, P_TRANSMISSION_COLOR, m.transmission_color);
         p[P_TRANSMISSION_EXTRA_ROUGHNESS] = m.transmission_extra_roughness;
         p[P_TRANSMISSION_DEPTH] = m.transmission_depth;
         p[P_SHEEN] = m.sheen;
-        put3(&mut p, P_SHEEN_COLOR, m.sheen_color);
+        put_rgb(&mut p, P_SHEEN_COLOR, m.sheen_color);
         p[P_SHEEN_ROUGHNESS] = m.sheen_roughness;
         p[P_COAT] = m.coat;
-        put3(&mut p, P_COAT_COLOR, m.coat_color);
+        put_rgb(&mut p, P_COAT_COLOR, m.coat_color);
         p[P_COAT_ROUGHNESS] = m.coat_roughness;
         p[P_COAT_IOR] = m.coat_ior;
         p[P_COAT_AFFECT_COLOR] = m.coat_affect_color;
@@ -1065,12 +1065,12 @@ impl Scene {
         p[P_THIN_FILM_THICKNESS] = m.thin_film_thickness;
         p[P_THIN_FILM_IOR] = m.thin_film_ior;
         p[P_EMISSION] = m.emission;
-        put3(&mut p, P_EMISSION_COLOR, m.emission_color);
+        put_rgb(&mut p, P_EMISSION_COLOR, m.emission_color);
         p[P_COLOR_SOURCE] = (m.color_source == ColorSource::Material) as u32 as f32;
-        put3(&mut p, P_BASE_COLOR, m.base_color);
+        put_rgb(&mut p, P_BASE_COLOR, m.base_color);
         if let Some(f) = m.facing {
             p[P_FACING_EXPONENT] = f.exponent;
-            put3(&mut p, P_FACING_COLOR, f.color);
+            put_rgb(&mut p, P_FACING_COLOR, f.color);
             p[P_FACING_ROUGHNESS] = f.roughness;
             p[P_FACING_METALLIC] = f.metallic;
         }
@@ -1096,6 +1096,10 @@ pub fn length(a: [f32; 3]) -> f32 {
 }
 fn put3(p: &mut [f32], i: usize, v: [f32; 3]) {
     p[i..i + 3].copy_from_slice(&v);
+}
+/// Authored colours are Rec.709; the kernels work in [`crate::color::WORKING`].
+fn put_rgb(p: &mut [f32], i: usize, v: [f32; 3]) {
+    put3(p, i, crate::color::to_working(v));
 }
 fn put9(p: &mut [f32], i: usize, m: [[f32; 3]; 3]) {
     for r in 0..3 {

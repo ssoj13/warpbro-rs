@@ -191,7 +191,7 @@ pub fn schema() -> &'static EncodeSchema {
                         1_000_000,
                     )],
                 )
-                .hint("Scene-linear Rec.709; no display transform or exposure baked in.")],
+                .hint("Scene-linear ACEScg (AP1-tagged); no display transform or exposure baked in.")],
             ),
             Format::new(
                 "mp4",
@@ -716,7 +716,7 @@ fn write_exr(path: &Path, frame: &Frame, overwrite: bool) -> Result<(), String> 
     if frame.radiance.len() != frame.width * frame.height {
         return Err("Scene-linear radiance is missing".into());
     }
-    crate::exr_io::write_rgb(path, frame.width, frame.height, &frame.radiance, None, overwrite)
+    crate::exr_io::write_rgb(path, frame.width, frame.height, &frame.radiance, &crate::color::WORKING_PRIMS, None, overwrite)
 }
 
 struct HevcSink {
@@ -1137,7 +1137,7 @@ mod tests {
             writer.events.recv_timeout(Duration::from_secs(30)).unwrap(),
             WriteEvent::Finished
         ));
-        let (_, _, pixels) = crate::exr_io::read_rgb(&settings.frame_path(7)).unwrap();
+        let (_, _, pixels, _) = crate::exr_io::read_rgb(&settings.frame_path(7)).unwrap();
         assert_eq!(pixels[0], [2., 0.5, 0.125]);
         assert!(settings.frame_path(8).exists());
         std::fs::remove_dir_all(dir).unwrap();

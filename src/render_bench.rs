@@ -199,7 +199,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             "million_samples_per_second": (width * height) as f64 * f64::from(samples) / elapsed / 1e6,
             "timing_scope": "Gpu::step including per-batch display/readback; excludes warmup, target allocation, artifact writes and final raw readback",
             "raw": {"file": raw_path.file_name().unwrap().to_string_lossy(),
-                "format": "little-endian f32 RGB, row-major top-to-bottom, scene-linear Rec.709, no header"},
+                "format": "little-endian f32 RGB, row-major top-to-bottom, scene-linear ACEScg, no header"},
             "batches": batches.iter().map(|(count, ms)| json!({"samples": count, "step_ms": ms})).collect::<Vec<_>>(),
             "authoring_world": document,
             "evaluated_scene": &scene,

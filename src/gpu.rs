@@ -74,9 +74,11 @@ pub mod kernels {
     fn neg(a: V3) -> V3 {
         [-a[0], -a[1], -a[2]]
     }
+    /// Working-space (ACEScg) luminance: the BSDF crate's device-safe constant, which is also
+    /// `crate::color::LUMA` on the host (the kernel cannot reach `color.rs`, it links vfx-ocio).
     #[inline(always)]
     fn luminance(a: V3) -> f32 {
-        0.2126 * a[0] + 0.7152 * a[1] + 0.0722 * a[2]
+        dot(a, standard_surface_bsdf::consts::SS_LUMA)
     }
     /// The per-launch parameter block (`params.rs` slots), set by the host before each launch.
     /// Every thread reads the same slot, so the constant cache broadcasts it to the warp.
@@ -2950,7 +2952,7 @@ pub mod kernels {
         }
     }
 
-    /// Untile the running mean and apply exposure/saturation in scene-linear Rec.709.
+    /// Untile the running mean and apply exposure/saturation in scene-linear ACEScg.
     /// Full ACES 2.0 runs through vfx-ocio on the shared wgpu device afterwards.
     #[kernel]
     #[launch_bounds(128)]

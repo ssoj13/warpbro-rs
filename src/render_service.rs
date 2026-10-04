@@ -36,7 +36,7 @@ pub struct Frame {
     pub height: usize,
     pub pixels: Vec<u32>,
     pub light: Vec<[f32; 4]>,
-    /// Unexposed linear Rec.709 radiance, populated for final export frames only.
+    /// Unexposed linear ACEScg radiance, populated for final export frames only.
     pub radiance: Vec<[f32; 4]>,
     pub hdr: bool,
     pub colour_error: Option<String>,
@@ -157,7 +157,7 @@ impl Frame {
         if let Some(e) = &self.colour_error {
             return Err(format!("Colour transform failed: {e}"));
         }
-        crate::exr_io::write_rgb(path, self.width, self.height, &self.light, Some(100.0), true)
+        crate::exr_io::write_rgb(path, self.width, self.height, &self.light, &crate::color::DISPLAY_PRIMS, Some(100.0), true)
     }
 }
 
@@ -1884,9 +1884,11 @@ mod tests {
                     assert_eq!(frame.radiance.len(), 33 * 25);
                     assert!(frame.radiance.iter().flatten().all(|v| v.is_finite()));
                     assert!(frame.radiance.iter().any(|p| p[0] > 1.0));
+                    // OCIO is off: display light is the exposed working-space radiance in Rec.709.
                     for (light, radiance) in frame.light.iter().zip(&frame.radiance) {
+                        let want = crate::color::to_709([radiance[0], radiance[1], radiance[2]].map(|v| 4.0 * v));
                         for k in 0..3 {
-                            assert!((light[k] - 4.0 * radiance[k]).abs() < 1e-4);
+                            assert!((light[k] - want[k]).abs() < 1e-4);
                         }
                     }
                     break;
