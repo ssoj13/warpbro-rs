@@ -1,7 +1,7 @@
 <!-- gitnexus-rs:start -->
 # GitNexus-rs — Code Intelligence
 
-This project is indexed by gitnexus-rs as **frac-rs** (2775 symbols, 6537 relationships, 82 execution flows). Use the gitnexus-rs MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by gitnexus-rs as **frac-rs** (3151 symbols, 8752 relationships, 279 execution flows). Use the gitnexus-rs MCP tools to understand code, assess impact, and navigate safely.
 
 > Call `graph_status` when freshness matters. Use `reanalyze` (incremental) or `gitnexus-rs analyze` (full). `detect_changes` does **not** re-index.
 
