@@ -51,8 +51,12 @@ fn arg<T: std::str::FromStr>(args: &[String], i: usize, default: T) -> T {
     args.get(i).and_then(|v| v.parse().ok()).unwrap_or(default)
 }
 
-/// `~/.warpbro`: the user's templates and every render / screenshot output live under it.
+/// The WarpBro profile, `~/.warpbro` (or `$WARPBRO_HOME`): `settings.json`, `bookmarks/`,
+/// `templates/` and every render / screenshot under `out/`.
 pub fn warpbro_dir() -> std::path::PathBuf {
+    if let Some(root) = std::env::var_os("WARPBRO_HOME") {
+        return std::path::PathBuf::from(root);
+    }
     dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".warpbro")

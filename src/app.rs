@@ -176,17 +176,9 @@ fn now_stamp() -> u64 {
         .unwrap_or(0)
 }
 
-fn data_dir() -> PathBuf {
-    if let Some(root) = std::env::var_os("FRAC_PROFILE_DIR") {
-        return PathBuf::from(root).join("data");
-    }
-    dirs::data_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("frac-rs")
-}
 
 fn load_bookmarks() -> Vec<Entry> {
-    let dir = data_dir().join("bookmarks");
+    let dir = crate::warpbro_dir().join("bookmarks");
     let mut v: Vec<(PathBuf, Scene)> = std::fs::read_dir(&dir)
         .into_iter()
         .flatten()
@@ -306,12 +298,7 @@ impl Default for Settings {
     }
 }
 fn settings_path() -> PathBuf {
-    if let Some(root) = std::env::var_os("FRAC_PROFILE_DIR") {
-        return PathBuf::from(root).join("settings.json");
-    }
-    dirs::config_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("frac-rs/settings.json")
+    crate::warpbro_dir().join("settings.json")
 }
 
 fn freeze_world_scene(scene: &Scene, document: &WorldDocument) -> Scene {
@@ -1364,7 +1351,7 @@ impl App {
     }
 
     fn save_bookmark(&mut self) {
-        let dir = data_dir().join("bookmarks");
+        let dir = crate::warpbro_dir().join("bookmarks");
         let path = dir.join(format!(
             "{}-{}.json",
             now_stamp(),
