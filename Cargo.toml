@@ -30,8 +30,8 @@ egui-outliner = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branc
 # Our Windows fork includes the Rust 1.99 backend fixes.
 cuda-device = { git = "ssh://git@github.com/ssoj13/cuda-oxide-windows.git", branch = "main" }
 cuda-host = { git = "ssh://git@github.com/ssoj13/cuda-oxide-windows.git", branch = "main" }
-# Match cuda-host's Windows-compatible runtime to keep shared types identical.
-cuda-core = { git = "ssh://git@github.com/ansidium/cutile-rs.git", branch = "main" }
+# Third-party: the exact source cuda-oxide-windows declares, so cuda-host and we share one cuda-core.
+cuda-core = { git = "https://github.com/ansidium/cutile-rs", rev = "b4eae9b2a783eba8e18587aa2b760f985a07f866" }
 egui = "0.36"
 egui_dock = { version = "0.21", features = ["serde"] }
 egui-dock-layout = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
@@ -92,76 +92,3 @@ image = { version = "0.25", default-features = false, features = ["hdr"] }
 
 [dev-dependencies]
 av-format-mov = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
-
-# Keep transitive Git dependencies on the same pinned SSH sources.
-
-[patch."https://github.com/tracel-ai/burn"]
-burn = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-burn-autodiff = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-burn-backend = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-burn-backend-extension = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-burn-core = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-burn-cpu = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-burn-cubecl = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-burn-cubecl-fusion = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-burn-cuda = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-burn-derive = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-burn-dispatch = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-burn-flex = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-burn-fusion = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-burn-ir = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-burn-ndarray = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-burn-nn = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-burn-optim = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-burn-pack = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-burn-rocm = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-burn-std = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-burn-store = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-burn-tch = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-burn-tensor = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-burn-vision = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-burn-wgpu = { git = "ssh://git@github.com/tracel-ai/burn.git", rev = "93e63e8e9cf215ffb870ed62132961588a774096" }
-
-[patch."https://github.com/tracel-ai/cubecl"]
-cubecl = { git = "ssh://git@github.com/tracel-ai/cubecl.git", rev = "31c5506cfc1dd9d350124910fb51cee8b54a31e1" }
-cubecl-common = { git = "ssh://git@github.com/tracel-ai/cubecl.git", rev = "31c5506cfc1dd9d350124910fb51cee8b54a31e1" }
-cubecl-core = { git = "ssh://git@github.com/tracel-ai/cubecl.git", rev = "31c5506cfc1dd9d350124910fb51cee8b54a31e1" }
-cubecl-cpp = { git = "ssh://git@github.com/tracel-ai/cubecl.git", rev = "31c5506cfc1dd9d350124910fb51cee8b54a31e1" }
-cubecl-cpu = { git = "ssh://git@github.com/tracel-ai/cubecl.git", rev = "31c5506cfc1dd9d350124910fb51cee8b54a31e1" }
-cubecl-cuda = { git = "ssh://git@github.com/tracel-ai/cubecl.git", rev = "31c5506cfc1dd9d350124910fb51cee8b54a31e1" }
-cubecl-hip = { git = "ssh://git@github.com/tracel-ai/cubecl.git", rev = "31c5506cfc1dd9d350124910fb51cee8b54a31e1" }
-cubecl-ir = { git = "ssh://git@github.com/tracel-ai/cubecl.git", rev = "31c5506cfc1dd9d350124910fb51cee8b54a31e1" }
-cubecl-macros = { git = "ssh://git@github.com/tracel-ai/cubecl.git", rev = "31c5506cfc1dd9d350124910fb51cee8b54a31e1" }
-cubecl-macros-internal = { git = "ssh://git@github.com/tracel-ai/cubecl.git", rev = "31c5506cfc1dd9d350124910fb51cee8b54a31e1" }
-cubecl-opt = { git = "ssh://git@github.com/tracel-ai/cubecl.git", rev = "31c5506cfc1dd9d350124910fb51cee8b54a31e1" }
-cubecl-runtime = { git = "ssh://git@github.com/tracel-ai/cubecl.git", rev = "31c5506cfc1dd9d350124910fb51cee8b54a31e1" }
-cubecl-std = { git = "ssh://git@github.com/tracel-ai/cubecl.git", rev = "31c5506cfc1dd9d350124910fb51cee8b54a31e1" }
-cubecl-wgpu = { git = "ssh://git@github.com/tracel-ai/cubecl.git", rev = "31c5506cfc1dd9d350124910fb51cee8b54a31e1" }
-cubecl-zspace = { git = "ssh://git@github.com/tracel-ai/cubecl.git", rev = "31c5506cfc1dd9d350124910fb51cee8b54a31e1" }
-
-[patch."https://github.com/tracel-ai/cubek"]
-cubek = { git = "ssh://git@github.com/tracel-ai/cubek.git", rev = "55567e4ff2708499b0a329e57655208c2a77f71a" }
-cubek-attention = { git = "ssh://git@github.com/tracel-ai/cubek.git", rev = "55567e4ff2708499b0a329e57655208c2a77f71a" }
-cubek-convolution = { git = "ssh://git@github.com/tracel-ai/cubek.git", rev = "55567e4ff2708499b0a329e57655208c2a77f71a" }
-cubek-fft = { git = "ssh://git@github.com/tracel-ai/cubek.git", rev = "55567e4ff2708499b0a329e57655208c2a77f71a" }
-cubek-interpolate = { git = "ssh://git@github.com/tracel-ai/cubek.git", rev = "55567e4ff2708499b0a329e57655208c2a77f71a" }
-cubek-matmul = { git = "ssh://git@github.com/tracel-ai/cubek.git", rev = "55567e4ff2708499b0a329e57655208c2a77f71a" }
-cubek-pool = { git = "ssh://git@github.com/tracel-ai/cubek.git", rev = "55567e4ff2708499b0a329e57655208c2a77f71a" }
-cubek-quant = { git = "ssh://git@github.com/tracel-ai/cubek.git", rev = "55567e4ff2708499b0a329e57655208c2a77f71a" }
-cubek-random = { git = "ssh://git@github.com/tracel-ai/cubek.git", rev = "55567e4ff2708499b0a329e57655208c2a77f71a" }
-cubek-reduce = { git = "ssh://git@github.com/tracel-ai/cubek.git", rev = "55567e4ff2708499b0a329e57655208c2a77f71a" }
-cubek-std = { git = "ssh://git@github.com/tracel-ai/cubek.git", rev = "55567e4ff2708499b0a329e57655208c2a77f71a" }
-cubek-tile = { git = "ssh://git@github.com/tracel-ai/cubek.git", rev = "55567e4ff2708499b0a329e57655208c2a77f71a" }
-
-[patch."https://github.com/tracel-ai/tracel-llvm"]
-tracel-llvm = { git = "ssh://git@github.com/tracel-ai/tracel-llvm.git", rev = "82401e3c00a35a3fb7d5e2b415e79692e09e1079" }
-tracel-llvm-bundler = { git = "ssh://git@github.com/tracel-ai/tracel-llvm.git", rev = "82401e3c00a35a3fb7d5e2b415e79692e09e1079" }
-tracel-mlir-rs = { git = "ssh://git@github.com/tracel-ai/tracel-llvm.git", rev = "82401e3c00a35a3fb7d5e2b415e79692e09e1079" }
-tracel-mlir-rs-macros = { git = "ssh://git@github.com/tracel-ai/tracel-llvm.git", rev = "82401e3c00a35a3fb7d5e2b415e79692e09e1079" }
-tracel-mlir-sys = { git = "ssh://git@github.com/tracel-ai/tracel-llvm.git", rev = "82401e3c00a35a3fb7d5e2b415e79692e09e1079" }
-tracel-tblgen-rs = { git = "ssh://git@github.com/tracel-ai/tracel-llvm.git", rev = "82401e3c00a35a3fb7d5e2b415e79692e09e1079" }
-
-[patch."https://github.com/ansidium/cutile-rs"]
-cuda-core = { git = "ssh://git@github.com/ansidium/cutile-rs.git", branch = "main" }
-cuda-core-derive = { git = "ssh://git@github.com/ansidium/cutile-rs.git", branch = "main" }
-cuda-bindings = { git = "ssh://git@github.com/ansidium/cutile-rs.git", branch = "main" }

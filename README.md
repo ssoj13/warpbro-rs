@@ -107,8 +107,8 @@ WarpBro is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX
 - Git dependencies resolve through GitHub SSH and track the latest `main` of every repository;
   Cargo.lock records the exact commits (`cargo update` moves them forward). OIDN is render-rs
   `pt-denoise-oidn` (ACEScg input), `standard-surface-bsdf` comes from the same render-rs with
-  `cuda-math`. Transitive tracel-ai (burn / cubecl / cubek / tracel-llvm) and cutile-rs Git
-  sources are redirected to SSH by `[patch]` at the revisions the upstream crates request.
+  `cuda-math`. Our own repositories are SSH Git dependencies; third-party Git sources
+  (burn, cubecl, cutile-rs, ...) stay on the HTTPS URLs their crates declare.
   The workspace material catalog lives in `crates/fractal-materials`.
 
 ## Build and run
