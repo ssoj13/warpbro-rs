@@ -60,6 +60,10 @@ pub struct Sel {
     pub view: String,
     /// Look applied instead of the view's own looks; empty = the view's looks.
     pub look: String,
+    /// This config's name for the tracer's working space (linear AP1 / ACEScg); empty = found
+    /// automatically ([`Ocio::working_space`]). Not `input`: scenes saved while the input was a
+    /// free choice stored "Linear Rec.709", which would now shift every colour.
+    pub working_input: String,
 }
 
 /// The config `sel_config` stands for: itself, else `$OCIO` (the standard OCIO
@@ -91,6 +95,8 @@ pub struct Ocio {
     /// reload of the same source rebuilds the tile pipeline.
     serial: u64,
     cfg: vfx_ocio::Config,
+    /// [`Ocio::working_space`], found once per load.
+    working: std::sync::OnceLock<Option<String>>,
 }
 
 /// The load counter behind [`Ocio::serial`].
@@ -108,7 +114,58 @@ impl Ocio {
             src: src.to_owned(),
             serial: LOADS.fetch_add(1, Ordering::Relaxed),
             cfg,
+            working: std::sync::OnceLock::new(),
         })
+    }
+
+    /// Every colour space, config order.
+    pub fn inputs(&self) -> Vec<&str> {
+        self.cfg.colorspace_names().collect()
+    }
+
+    /// Whether colour space `name` is linear AP1 (ACEScg): its transform to the config's
+    /// `aces_interchange` role (ACES2065-1) must be the AP1 -> AP0 matrix. None when the config
+    /// has no such role (OCIO v1 / non-ACES configs), so the transform cannot be checked.
+    pub fn is_working(&self, name: &str) -> Option<bool> {
+        if !self.cfg.has_role("aces_interchange") {
+            return None;
+        }
+        let Ok(processor) = self.cfg.processor(name, "aces_interchange") else {
+            return Some(false);
+        };
+        let mut probe = [[1.0f32, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.18, 0.5, 2.0]];
+        let want = probe.map(crate::color::to_ap0);
+        processor.apply_rgb(&mut probe);
+        Some(probe.iter().zip(want).all(|(got, want)| {
+            got.iter().zip(want).all(|(g, w)| (g - w).abs() <= 1e-4 * w.abs().max(1.0))
+        }))
+    }
+
+    /// This config's name for the tracer's working space: the space whose transform is linear
+    /// AP1 ([`Self::is_working`]), else (configs without `aces_interchange`) the first of the
+    /// ACES names ([`crate::color::WORKING_NAMES`]) the config knows. Found once per load.
+    pub fn working_space(&self) -> Option<&str> {
+        self.working
+            .get_or_init(|| {
+                let by_transform = self.cfg.has_role("aces_interchange").then(|| {
+                    // ACES names first: the transform check then usually succeeds on the first try.
+                    crate::color::WORKING_NAMES
+                        .iter()
+                        .copied()
+                        .filter(|n| self.cfg.colorspace(n).is_some())
+                        .chain(self.cfg.colorspace_names())
+                        .find(|n| self.is_working(n) == Some(true))
+                        .map(str::to_owned)
+                });
+                match by_transform {
+                    Some(found) => found,
+                    None => crate::color::WORKING_NAMES
+                        .iter()
+                        .find(|n| self.cfg.colorspace(n).is_some())
+                        .map(|n| (*n).to_owned()),
+                }
+            })
+            .as_deref()
     }
 
     /// The active displays offered: with `hdr` every one with a picture (non-data)
@@ -156,10 +213,15 @@ impl Ocio {
     /// `sel`'s names in this config, empty ones replaced by the defaults. A name the
     /// config lacks is an error, not a silent substitute: the panel says which.
     pub fn resolve(&self, sel: &Sel, hdr: bool) -> Result<Names> {
-        let input = crate::color::WORKING;
-        if self.cfg.colorspace(input).is_none() {
-            bail!("the config has no \"{input}\" colour space (the tracer's working space)");
-        }
+        let input = if sel.working_input.is_empty() {
+            self.working_space()
+                .ok_or_else(|| anyhow!("the config has no linear AP1 (ACEScg) colour space: pick it in Input"))?
+                .to_owned()
+        } else if self.cfg.colorspace(&sel.working_input).is_some() {
+            sel.working_input.clone()
+        } else {
+            bail!("the config has no colour space \"{}\"", sel.working_input);
+        };
         // What a name is missing as: an HDR display on an SDR output is "no SDR display".
         let kind = if hdr { "" } else { "SDR " };
         let displays = self.displays(hdr);
@@ -188,7 +250,7 @@ impl Ocio {
             bail!("the config has no look \"{}\"", sel.look);
         }
         Ok(Names {
-            input: input.to_owned(),
+            input,
             display: display.to_owned(),
             view: view.to_owned(),
             look: sel.look.clone(),
@@ -723,7 +785,11 @@ impl State {
             let displays = owned(ocio.displays(hdr));
             let resolved = ocio.resolve(&self.sel, hdr).ok();
             let views = resolved.as_ref().map(|n| owned(ocio.views(&n.display, hdr))).unwrap_or_default();
-            let looks = owned(ocio.looks());
+            let (inputs, looks) = (owned(ocio.inputs()), owned(ocio.looks()));
+            let auto_input = ocio.working_space().map_or_else(|| "none found".to_owned(), |n| format!("auto: {n}"));
+            let input_warning = resolved
+                .as_ref()
+                .and_then(|n| (ocio.is_working(&n.input) == Some(false)).then(|| n.input.clone()));
             let presets: Vec<_> = PRESETS
                 .iter()
                 .filter(|p| hdr || !p.hdr)
@@ -751,6 +817,17 @@ impl State {
                         self.sel.display = p.display.to_owned();
                         self.sel.view = p.view.to_owned();
                     }
+                }
+            });
+            ui.end_row();
+            ui.label("Input").on_hover_text(
+                "This config's linear AP1 (ACEScg) colour space: the tracer renders in ACEScg. Default: found by its transform to the aces_interchange role (else by the ACES names).",
+            );
+            ui.horizontal(|ui| {
+                combo(ui, "ocio.working_input", &mut self.sel.working_input, &inputs, &auto_input);
+                if let Some(name) = &input_warning {
+                    ui.colored_label(egui::Color32::LIGHT_RED, egui_phosphor::regular::WARNING)
+                        .on_hover_text(format!("\"{name}\" is not linear AP1: colours will be wrong."));
                 }
             });
             ui.end_row();
@@ -897,6 +974,13 @@ mod tests {
         let o = cg();
         let n = o.resolve(&Sel::default(), false).unwrap();
         assert_eq!(n.input, crate::color::WORKING);
+        // The working space is identified by its transform, not only by its name.
+        assert_eq!(o.is_working(crate::color::WORKING), Some(true));
+        assert_eq!(o.is_working("Linear Rec.709 (sRGB)"), Some(false));
+        let studio = Ocio::load("ocio://studio-config-latest").unwrap();
+        assert_eq!(studio.working_space(), Some(crate::color::WORKING));
+        let picked = Sel { working_input: "lin_ap1".into(), ..Sel::default() };
+        assert_eq!(studio.is_working(&studio.resolve(&picked, false).unwrap().input), Some(true));
         assert_eq!(
             (n.display.as_str(), n.view.as_str()),
             ("sRGB - Display", "ACES 2.0 - SDR 100 nits (Rec.709)")

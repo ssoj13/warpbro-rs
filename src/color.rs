@@ -7,7 +7,7 @@ use vfx_ocio::{Config, DisplayViewTransform, GroupTransform, MatrixTransform, Pr
 #[cfg(test)]
 use vfx_ocio::color_matrix::conversion_matrix_from_xyz_d65;
 use std::sync::LazyLock;
-use vfx_ocio::color_matrix::{ACES_AP1, Adaptation, Primaries, REC709, conversion_matrix};
+use vfx_ocio::color_matrix::{ACES_AP0, ACES_AP1, Adaptation, Primaries, REC709, conversion_matrix};
 
 /// The tracer's working space (linear AP1, ACES white), as named in the OCIO studio config.
 pub const WORKING: &str = "ACEScg";
@@ -26,6 +26,19 @@ pub type M3 = [[f32; 3]; 3];
 
 /// Rec.709 (D65) -> working: authored colours (pickers, presets, palettes) enter the tracer here.
 static TO_WORKING: LazyLock<M3> = LazyLock::new(|| working_from(&REC709).expect("builtin Rec.709 primaries"));
+/// Working -> ACES2065-1 (AP0, same white): what an OCIO config's `aces_interchange` role
+/// receives from its linear AP1 space. `ocio::Ocio` identifies that space with it.
+static TO_AP0: LazyLock<M3> = LazyLock::new(|| {
+    m3(conversion_matrix(&ACES_AP1, &ACES_AP0, Adaptation::None).expect("builtin AP1 / AP0 primaries"))
+});
+/// Working -> AP0 (ACES2065-1).
+pub fn to_ap0(c: [f32; 3]) -> [f32; 3] {
+    mul(&TO_AP0, c)
+}
+/// The names ACES configs give the working space (ACES 2.0 name / OCIO v2 alias / ACES 1.x name),
+/// for configs without an `aces_interchange` role to identify it by its transform.
+pub const WORKING_NAMES: [&str; 3] = [WORKING, "lin_ap1", "ACES - ACEScg"];
+
 /// Working -> Rec.709 (D65): the non-OCIO display paths, in front of `oetf`.
 static TO_709: LazyLock<M3> = LazyLock::new(|| {
     m3(conversion_matrix(&ACES_AP1, &REC709, Adaptation::Bradford).expect("builtin AP1 primaries"))

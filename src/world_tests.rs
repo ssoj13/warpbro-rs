@@ -4,7 +4,7 @@ use super::*;
 fn glass_node_transmission_is_keyable_shared_and_roundtrips() {
     let mut e = editor();
     let first = find(&e, WorldKind::Fractal);
-    e.execute(WorldCommand::Duplicate(first)).unwrap();
+    e.execute(WorldCommand::Duplicate(vec![first])).unwrap();
     let second = e.selection.unwrap();
     let material = find(&e, WorldKind::Material);
     e.execute(WorldCommand::AssignMaterial {
@@ -177,7 +177,7 @@ fn standalone_material_creation_selects_one_node_without_assigning_and_undo_rest
 fn shared_material_assignments_reuse_uuid_and_animated_edits_roundtrip_for_all_consumers() {
     let mut e = editor();
     let first = find(&e, WorldKind::Fractal);
-    e.execute(WorldCommand::Duplicate(first)).unwrap();
+    e.execute(WorldCommand::Duplicate(vec![first])).unwrap();
     let second = e.selection.unwrap();
     e.execute(WorldCommand::CreateMaterial {
         material: crate::scene::Material::default(),
@@ -256,7 +256,7 @@ fn shared_material_assignments_reuse_uuid_and_animated_edits_roundtrip_for_all_c
 fn material_assignment_batch_rejects_locked_or_invalid_targets_without_partial_edits() {
     let mut e = editor();
     let first = find(&e, WorldKind::Fractal);
-    e.execute(WorldCommand::Duplicate(first)).unwrap();
+    e.execute(WorldCommand::Duplicate(vec![first])).unwrap();
     let second = e.selection.unwrap();
     e.execute(WorldCommand::CreateMaterial {
         material: crate::scene::Material::default(),
@@ -1325,7 +1325,7 @@ fn duplicate_retains_independent_keys_and_all_visible_objects() {
         json!([2.0, 3.0, 4.0]),
         10.0,
     );
-    e.execute(WorldCommand::Duplicate(original)).unwrap();
+    e.execute(WorldCommand::Duplicate(vec![original])).unwrap();
     let duplicate = e.selection.unwrap();
     assert_ne!(original, duplicate);
     assert_eq!(e.document.snapshot(5.0).unwrap().objects.len(), 2);
@@ -1697,4 +1697,40 @@ fn render_schema_filters_fractal_controls_without_dropping_stored_tracks() {
             scene.evaluated(frame).unwrap().render.exposure_stops
         );
     }
+}
+
+#[test]
+fn clipboard_copy_paste_and_duplicate_remap_ids_in_one_undo_step() {
+    let mut e = editor();
+    let fractal = find(&e, WorldKind::Fractal);
+    let material = find(&e, WorldKind::Material);
+    e.execute(WorldCommand::AssignMaterial { id: fractal, material: Some(material) }).unwrap();
+    let count = e.document.nodes().len();
+
+    // Ctrl+D on two nodes: both copied, one undo step, copies selected.
+    e.execute(WorldCommand::Duplicate(vec![fractal, material])).unwrap();
+    assert_eq!(e.document.nodes().len(), count + 2);
+    assert_eq!(e.selected.len(), 2);
+    let copy = *e.selected.iter().find(|id| e.document.supports_material(**id)).unwrap();
+    let copied_material = e.document.assigned_material(copy).unwrap().unwrap();
+    assert_ne!(copied_material, material, "a reference inside the fragment follows the remap");
+    assert!(e.selected.contains(&copied_material));
+    assert!(e.undo());
+    assert_eq!(e.document.nodes().len(), count);
+
+    // Ctrl+C / Ctrl+V: fresh UUIDs; an outside reference that exists is kept.
+    let text = e.document.copy_fragment(&[fractal]).unwrap();
+    e.execute(WorldCommand::Delete(fractal)).unwrap();
+    e.execute(WorldCommand::Paste(text.clone())).unwrap();
+    let pasted = e.selection.unwrap();
+    assert_ne!(pasted, fractal, "paste never reuses the source UUID");
+    assert_eq!(e.document.assigned_material(pasted).unwrap(), Some(material));
+    e.execute(WorldCommand::Paste(text)).unwrap();
+    assert_ne!(e.selection.unwrap(), pasted, "every paste is a new node");
+
+    // Foreign clipboard text is not WarpBro nodes and changes nothing.
+    assert!(parse_clipboard("hello").is_none());
+    let before = e.document.nodes().len();
+    assert!(e.execute(WorldCommand::Paste("{\"nodes\":{}}".into())).is_err());
+    assert_eq!(e.document.nodes().len(), before);
 }

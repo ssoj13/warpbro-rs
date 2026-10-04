@@ -1242,7 +1242,7 @@ impl App {
                                     }
                                 });
                                 if ui.button("Duplicate").clicked() {
-                                    command = Some(WorldCommand::Duplicate(entry.id));
+                                    command = Some(WorldCommand::Duplicate(vec![entry.id]));
                                     ui.close();
                                 }
                                 if ui.button("Delete").clicked() {
@@ -1638,6 +1638,41 @@ impl App {
     fn frozen_world_scene(&self) -> Scene {
         freeze_world_scene(&self.scene, &self.world.document)
     }
+    /// Ctrl+D duplicates, Ctrl+C copies the selected nodes (with descendants) to the system
+    /// clipboard, Ctrl+V pastes WarpBro nodes from it. Each edit is one world command / undo step.
+    fn node_clipboard(&mut self, ctx: &egui::Context) {
+        use crate::hotkeys::{self, Command as Hotkey, Scope};
+        let selected = if self.world.selected.is_empty() {
+            self.world.selection.into_iter().collect()
+        } else {
+            self.world.selected.clone()
+        };
+        if hotkeys::consume(ctx, Scope::Global, Hotkey::Duplicate) && !selected.is_empty() {
+            self.world.finish_edit();
+            let count = selected.len();
+            self.status = match self.world.execute(crate::world::WorldCommand::Duplicate(selected.clone())) {
+                Ok(()) => format!("Duplicated {count} node(s)"),
+                Err(error) => error,
+            };
+        }
+        if hotkeys::take_copy(ctx, !selected.is_empty()) {
+            self.status = match self.world.document.copy_fragment(&selected) {
+                Ok(text) => {
+                    ctx.copy_text(text);
+                    format!("Copied {} node(s)", selected.len())
+                }
+                Err(error) => error,
+            };
+        }
+        if let Some(text) = hotkeys::take_paste(ctx, |text| crate::world::parse_clipboard(text).is_some()) {
+            self.world.finish_edit();
+            self.status = match self.world.execute(crate::world::WorldCommand::Paste(text)) {
+                Ok(()) => format!("Pasted {} node(s)", self.world.selected.len()),
+                Err(error) => error,
+            };
+        }
+    }
+
     fn export_ui(&mut self, ui: &mut egui::Ui) {
         let timeline = (
             self.world.document.first,
@@ -2735,6 +2770,7 @@ impl App {
         } else if hotkeys::consume(&ctx, Scope::Global, Hotkey::Undo) {
             self.world.undo();
         }
+        self.node_clipboard(&ctx);
 
         if let Err(error) = self.refresh_scene() {
             self.status = error;

@@ -625,7 +625,7 @@ impl WorldUi {
                 .clicked()
             {
                 if let Some(id) = e.selection {
-                    self.command(e, WorldCommand::Duplicate(id));
+                    self.command(e, WorldCommand::Duplicate(vec![id]));
                 }
             }
             if ui
@@ -706,7 +706,7 @@ impl WorldUi {
                 OutlinerAction::Context { id, action } => {
                     if let Some(id) = map.get(&id).copied() {
                         match action.as_str() {
-                            "duplicate" => self.command(e, WorldCommand::Duplicate(id)),
+                            "duplicate" => self.command(e, WorldCommand::Duplicate(vec![id])),
                             "delete" => self.command(e, WorldCommand::Delete(id)),
                             "unparent" => {
                                 self.command(e, WorldCommand::Reparent { id, parent: None })
@@ -1463,7 +1463,7 @@ impl WorldUi {
                     .add_enabled(!n.locked, egui::Button::new("Duplicate"))
                     .clicked()
                 {
-                    self.command(e, WorldCommand::Duplicate(n.id));
+                    self.command(e, WorldCommand::Duplicate(vec![n.id]));
                     ui.close();
                 }
                 let unlocked = e

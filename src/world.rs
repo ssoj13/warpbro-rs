@@ -14,6 +14,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 
+/// Marker of WarpBro nodes on the system clipboard, so foreign text is never pasted as nodes.
+const CLIPBOARD_KEY: &str = "warpbro_nodes";
+const CLIPBOARD_VERSION: u32 = 1;
+
+/// The node data of a `WorldDocument::copy_fragment` clipboard text; None for any other text.
+pub fn parse_clipboard(text: &str) -> Option<HashMap<String, Value>> {
+    let value: Value = serde_json::from_str(text.trim()).ok()?;
+    if value[CLIPBOARD_KEY].as_u64() != Some(u64::from(CLIPBOARD_VERSION)) {
+        return None;
+    }
+    serde_json::from_value(value["nodes"].clone()).ok()
+}
+
 pub(crate) const CAMERA_ORBIT_SPEED: &str = "/camera/orbit_speed_degrees";
 pub(crate) const CAMERA_ORBIT_PHASE: &str = "/camera/orbit_phase_degrees";
 
@@ -71,7 +84,10 @@ pub enum WorldCommand {
         parent: Option<NodeId>,
     },
     Delete(NodeId),
-    Duplicate(NodeId),
+    /// Copy the nodes (with descendants) in place; the copies are selected (Ctrl+D).
+    Duplicate(Vec<NodeId>),
+    /// Insert a clipboard fragment from `WorldDocument::copy_fragment` (Ctrl+V).
+    Paste(String),
     Rename {
         id: NodeId,
         name: String,
@@ -331,6 +347,52 @@ impl WorldEditor {
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
+    /// Insert `nodes` (UUID -> node data) with fresh UUIDs and select the pasted roots. References
+    /// inside the fragment follow the remap; a parent or material that is neither in the fragment
+    /// nor in this document is cleared. A fragment that still cannot be evaluated (e.g. an
+    /// attribute connection to an absent node) is an error, so the edit rolls back.
+    fn insert_fragment(&mut self, nodes: HashMap<String, Value>) -> Result<Vec<NodeId>, String> {
+        if nodes.is_empty() {
+            return Err("Nothing to paste".into());
+        }
+        let mut fragment = SubnetFile { nodes, ..self.document.graph.clone() };
+        let map = playa_graph::remap_node_ids(&mut fragment);
+        let fresh: HashSet<NodeId> = map.values().copied().collect();
+        let exists = |id: NodeId| fresh.contains(&id) || self.document.graph.nodes.contains_key(&id.to_string());
+        for data in fragment.nodes.values_mut() {
+            // Host UUID references are ordinary data, remapped alongside Playa graph references.
+            if let Some(old) = data["material"].as_str().and_then(NodeId::parse) {
+                data["material"] = match map.get(&old) {
+                    Some(new) => json!(new),
+                    None if exists(old) => json!(old),
+                    None => Value::Null,
+                };
+            }
+            if data["parent"].as_str().and_then(NodeId::parse).is_some_and(|p| !exists(p)) {
+                data["parent"] = Value::Null;
+            }
+        }
+        let roots: Vec<NodeId> = fragment
+            .nodes
+            .iter()
+            .filter_map(|(id, data)| {
+                let id = NodeId::parse(id)?;
+                let parent = data["parent"].as_str().and_then(NodeId::parse);
+                (!parent.is_some_and(|p| fresh.contains(&p))).then_some(id)
+            })
+            .collect();
+        self.document.graph.nodes.extend(fragment.nodes);
+        self.document.rebuild_children();
+        self.document
+            .snapshot(f64::from(self.document.first))
+            .map_err(|e| format!("Pasted nodes do not fit this scene: {e}"))?;
+        let order = self.document.nodes();
+        let mut roots = roots;
+        roots.sort_by_key(|id| order.iter().position(|n| n.id == *id));
+        self.selection = roots.last().copied();
+        self.selected = roots.clone();
+        Ok(roots)
+    }
     fn apply(&mut self, command: WorldCommand) -> Result<(), String> {
         match command {
             #[cfg(test)]
@@ -473,43 +535,20 @@ impl WorldEditor {
                     self.document.active_environment = None;
                 }
             }
-            WorldCommand::Duplicate(id) => {
-                self.document.assert_unlocked(id)?;
-                let mut fragment = self.document.graph.clone();
-                let mut ids = HashSet::from([id]);
-                loop {
-                    let n = ids.len();
-                    for node in self.document.nodes() {
-                        if node.parent.is_some_and(|p| ids.contains(&p)) {
-                            ids.insert(node.id);
-                        }
-                    }
-                    if n == ids.len() {
-                        break;
-                    }
+            WorldCommand::Duplicate(ids) => {
+                for &id in &ids {
+                    self.document.assert_unlocked(id)?;
                 }
-                fragment
-                    .nodes
-                    .retain(|k, _| NodeId::parse(k).is_some_and(|id| ids.contains(&id)));
-                let map = playa_graph::remap_node_ids(&mut fragment);
-                // Host UUID references are ordinary data, remapped alongside Playa graph references.
-                for data in fragment.nodes.values_mut() {
-                    if let Some(s) = data.get_mut("material") {
-                        if let Some(new) = s
-                            .as_str()
-                            .and_then(NodeId::parse)
-                            .and_then(|id| map.get(&id))
-                        {
-                            *s = json!(new);
-                        }
-                    }
+                let nodes = self.document.fragment(&ids)?;
+                let roots = self.insert_fragment(nodes)?;
+                for &id in &roots {
+                    let name = format!("{} copy", self.document.info(id)?.name);
+                    self.document.node_mut(id)?["name"] = json!(name);
                 }
-                let new = map[&id];
-                self.document.graph.nodes.extend(fragment.nodes);
-                self.selection = Some(new);
-                self.selected = vec![new];
-                let name = format!("{} copy", self.document.info(new)?.name);
-                self.document.node_mut(new)?["name"] = json!(name);
+            }
+            WorldCommand::Paste(text) => {
+                let nodes = parse_clipboard(&text).ok_or("The clipboard holds no WarpBro nodes")?;
+                self.insert_fragment(nodes)?;
             }
             WorldCommand::Rename { id, name } => {
                 self.document.assert_unlocked(id)?;
@@ -1417,6 +1456,35 @@ impl WorldDocument {
     /// Single capability check for the Material reference exposed by the node
     /// schema, shared by the Attribute Editor, gallery and assignment command.
     /// A storage placeholder exists on every node; it is not itself a capability.
+    /// `ids` and all their descendants, as stored node data (UUID -> data).
+    pub fn fragment(&self, ids: &[NodeId]) -> Result<HashMap<String, Value>, String> {
+        let mut set: HashSet<NodeId> = ids.iter().copied().collect();
+        let nodes = self.nodes();
+        loop {
+            let n = set.len();
+            for node in &nodes {
+                if node.parent.is_some_and(|p| set.contains(&p)) {
+                    set.insert(node.id);
+                }
+            }
+            if n == set.len() {
+                break;
+            }
+        }
+        let mut out = HashMap::new();
+        for id in set {
+            out.insert(id.to_string(), self.node(id)?.clone());
+        }
+        Ok(out)
+    }
+    /// The system-clipboard text of `ids` (with descendants): see `parse_clipboard`.
+    pub fn copy_fragment(&self, ids: &[NodeId]) -> Result<String, String> {
+        if ids.is_empty() {
+            return Err("Nothing selected to copy".into());
+        }
+        serde_json::to_string(&json!({ CLIPBOARD_KEY: CLIPBOARD_VERSION, "nodes": self.fragment(ids)? }))
+            .map_err(|e| e.to_string())
+    }
     /// Every node with a material reference (fractals), in document order.
     pub fn material_consumers(&self) -> Vec<NodeId> {
         self.nodes()

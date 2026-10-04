@@ -23,6 +23,7 @@ pub enum Command {
     ToggleUi,
     Undo,
     Redo,
+    Duplicate,
     Fit,
     Home,
     Flight,
@@ -69,6 +70,7 @@ pub const GLOBAL: &[Binding] = &[
         Key::Z,
         Modifiers::COMMAND.plus(Modifiers::SHIFT),
     ),
+    binding(Command::Duplicate, Key::D, Modifiers::COMMAND),
 ];
 pub const VIEWPORT: &[Binding] = &[
     binding(Command::Fit, Key::F, Modifiers::NONE),
@@ -159,6 +161,36 @@ pub fn consume(ctx: &Context, scope: Scope, command: Command) -> bool {
             _ => None,
         });
         chord.is_some_and(|(key, modifiers)| input.consume_key(modifiers, key))
+    })
+}
+/// The platform Copy request (Ctrl+C / Cmd+C, Ctrl+Insert). egui-winit turns it into
+/// `Event::Copy`, not a key event. Consumed only when `wanted` and no text editor has focus,
+/// so text fields and selectable labels keep their own copy.
+pub fn take_copy(ctx: &Context, wanted: bool) -> bool {
+    if !wanted || ctx.text_edit_focused() {
+        return false;
+    }
+    ctx.input_mut(|input| {
+        let before = input.events.len();
+        input.events.retain(|event| !matches!(event, egui::Event::Copy));
+        input.events.len() != before
+    })
+}
+/// The platform Paste (`Event::Paste`, clipboard text) when `accept` claims it and no text
+/// editor has focus; other text stays for the widgets.
+pub fn take_paste(ctx: &Context, accept: impl Fn(&str) -> bool) -> Option<String> {
+    if ctx.text_edit_focused() {
+        return None;
+    }
+    ctx.input_mut(|input| {
+        let index = input
+            .events
+            .iter()
+            .position(|event| matches!(event, egui::Event::Paste(text) if accept(text)))?;
+        match input.events.remove(index) {
+            egui::Event::Paste(text) => Some(text),
+            _ => None,
+        }
     })
 }
 #[cfg(test)]
