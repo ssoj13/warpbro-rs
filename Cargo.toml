@@ -66,7 +66,9 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 png = "0.18.1"
 dirs = "7.0.0"
-cam-controls = { git = "ssh://git@github.com/ssoj13/gitnexus-rs.git", branch = "main", features = ["inertial-look"] }
+cam-controls = { git = "ssh://git@github.com/ssoj13/gitnexus-rs.git", branch = "main" }
+# Shared egui -> camera intent bindings (fly keys, speed modifiers); the tree viewport part is off.
+cam-controls-egui = { git = "ssh://git@github.com/ssoj13/gitnexus-rs.git", branch = "main", default-features = false }
 glam = "0.33.6"
 cam-viewport = { git = "ssh://git@github.com/ssoj13/gitnexus-rs.git", branch = "main" }
 

@@ -44,10 +44,15 @@ Current usage and verification: [documentation index](docs/README.md), [workspac
   - Path-traced glass uses Fresnel reflection, refraction, and depth-dependent absorption.
     Bottle-green glass and green water are available as presets. See [glass controls and geometry limits](docs/glass.md).
 - **Unreal-style flight:** hold the right mouse button in the viewport to fly.
-  - The mouse looks around; WASD moves; R/C moves up/down; Q/E rolls and enables free flight;
-    Shift boosts; the wheel sets the speed.
+  - The mouse looks around; WASD moves; R/C moves up/down; Q/E rolls; Alt flies x4, Shift x0.1;
+    the wheel sets the speed. Translation, look and roll all carry inertia and ease out
+    (Settings > Camera controls: translate / rotate decay, inertial look, flip angle, multipliers).
+  - The toolbar airplane switches free 6-DoF flight and horizon lock. Locked, the horizon stays
+    level to a world plane: a short Q/E press tilts and springs back, holding past the flip angle
+    turns the camera onto the next world plane, where it levels again.
   - It uses `cam-controls` `SpaceFlight` with FPS damping and a level horizon.
-    The shared crate's opt-in `inertial-look` feature provides damped mouse-look.
+    The flight rig, its horizon lock and the key bindings come from the shared gitnexus-rs
+    `cam-controls` / `cam-controls-egui` crates.
   - When you release the button, the orbit pivot sits in front of the camera, so orbiting
     continues from where you flew.
   - Backtick / tilde switches between a level horizon and free flight. In free flight,
@@ -82,7 +87,7 @@ WarpBro is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX
 | `ofx-gen/palette.rs`                                                               | `src/palette.rs`                                                     |
 | render-rs `standard-surface-bsdf`                                                  | SSH crate with opt-in `cuda-math` (`libm::*` → `f32` methods)        |
 | usd-rs `usd-mat-lib` presets, `usd-hd-pt` translator, `pt-material-ext` facing mix | `src/materials.rs`, `src/gpu.rs`                                     |
-| gitnexus-rs `cam-controls` / `cam-viewport`                                        | SSH crates; opt-in `inertial-look` for `SpaceFlight::Look`           |
+| gitnexus-rs `cam-controls` / `cam-viewport` / `cam-controls-egui`                  | SSH crates (flight rig, horizon lock, shared fly bindings)           |
 
 ## Requirements
 

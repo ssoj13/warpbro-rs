@@ -166,6 +166,8 @@ pub(crate) struct App {
     /// Flight via cam-controls' inertial `SpaceFlight`, alive while RMB is held and
     /// while its momentum coasts after release.
     fly: Option<cam_controls::SpaceFlight>,
+    /// Last speed scale sent to the flight rig (Alt / Shift latch, 1.0 = normal).
+    fly_speed_scale: f32,
     /// Persistent mouse sensitivity and flight speed (also adjusted by the wheel).
     controls: Controls,
 }
@@ -241,17 +243,58 @@ fn to_image(t: &Frame) -> ColorImage {
     )
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+/// Viewport flight preferences (Settings > Camera controls). `inertia` turns them into the
+/// shared `cam_controls` flight settings: the one place WarpBro configures the flight rig.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct Controls {
     look_sensitivity: f32,
     fly_speed: f32,
+    /// Seconds for the translation speed to fall to 1/e once thrust stops.
+    translate_decay: f32,
+    /// Seconds for the rotation rate (look, roll) to fall to 1/e; also the horizon-lock
+    /// levelling speed.
+    rotate_decay: f32,
+    /// Mouse look coasts and eases out instead of turning 1:1.
+    inertial_look: bool,
+    /// Horizon lock: roll angle (degrees) past which the lock flips to the next plane.
+    flip_degrees: f32,
+    /// Thrust multipliers while Alt (fast) / Shift (slow) are held.
+    fast_multiplier: f32,
+    slow_multiplier: f32,
 }
 impl Default for Controls {
     fn default() -> Self {
         Self {
             look_sensitivity: 1.0,
             fly_speed: 1.0,
+            translate_decay: 0.6,
+            rotate_decay: 0.25,
+            inertial_look: true,
+            flip_degrees: 60.0,
+            fast_multiplier: 4.0,
+            slow_multiplier: 0.1,
+        }
+    }
+}
+impl Controls {
+    /// The flight rig settings for a scene of framing radius `radius` (thrust scales with it).
+    fn inertia(&self, radius: f32) -> cam_controls::InertiaSettings {
+        let defaults = cam_controls::InertiaSettings::default();
+        cam_controls::InertiaSettings {
+            // Relative mouse look (pointer motion), not cursor-deflection steering.
+            mouse_steer: cam_controls::MouseSteer::Relative,
+            look_sensitivity: 0.001 * self.look_sensitivity,
+            thrust_sensitivity: 6.0 * radius * self.fly_speed,
+            linear_damping: 1.0 / self.translate_decay.max(0.02),
+            angular_damping: 1.0 / self.rotate_decay.max(0.02),
+            inertial_look: self.inertial_look,
+            // Keep the hold angle 15 degrees past the flip angle: a held key always flips.
+            lock_flip: self.flip_degrees.to_radians(),
+            lock_hold: (self.flip_degrees + 15.0).to_radians(),
+            fast_multiplier: self.fast_multiplier,
+            slow_multiplier: self.slow_multiplier,
+            ..defaults
         }
     }
 }
@@ -407,6 +450,7 @@ impl App {
             frame_ms: 16.0,
             seed: 0,
             fly: None,
+            fly_speed_scale: 1.0,
             controls: Default::default(),
             snap: std::env::var("FRAC_SNAP").ok().map(|p| {
                 let spp = std::env::var("FRAC_SNAP_SPP")
@@ -534,6 +578,12 @@ impl App {
                         egui_attr_table::attr_table(ui, |t| {
                             t.row("Mouse sensitivity").default(1.0).slider(&mut self.controls.look_sensitivity, 0.1..=5.0);
                             t.row("Flight speed ×").default(1.0).slider(&mut self.controls.fly_speed, 0.02..=50.0);
+                            t.row("Translate decay, s").default(0.6).slider(&mut self.controls.translate_decay, 0.02..=5.0);
+                            t.row("Rotate decay, s").default(0.25).slider(&mut self.controls.rotate_decay, 0.02..=5.0);
+                            t.row("Inertial look").default(true).checkbox(&mut self.controls.inertial_look);
+                            t.row("Horizon flip, °").default(60.0).slider(&mut self.controls.flip_degrees, 20.0..=85.0);
+                            t.row("Alt fast ×").default(4.0).slider(&mut self.controls.fast_multiplier, 1.0..=20.0);
+                            t.row("Shift slow ×").default(0.1).slider(&mut self.controls.slow_multiplier, 0.01..=1.0);
                         });
                         egui_prefs2::section_header(ui, "Attribute controls");
                         let defaults = crate::ui_style::AttributeMetrics::default();
@@ -631,8 +681,7 @@ impl App {
         saved.display == self.display
             && saved.colour == self.scene.colour
             && saved.panel == self.prefs
-            && saved.controls.look_sensitivity == self.controls.look_sensitivity
-            && saved.controls.fly_speed == self.controls.fly_speed
+            && saved.controls == self.controls
             && saved.toolbar == self.toolbar
             && saved.camera_slots == self.camera_slots
             && saved.fonts == self.fonts
@@ -678,10 +727,7 @@ impl App {
             display: self.display,
             colour: self.scene.colour.clone(),
             panel: self.prefs.clone(),
-            controls: Controls {
-                look_sensitivity: self.controls.look_sensitivity,
-                fly_speed: self.controls.fly_speed,
-            },
+            controls: self.controls,
             layout,
             toolbar: self.toolbar,
             camera_slots: self.camera_slots,
@@ -1706,8 +1752,8 @@ impl App {
     /// current orbit distance, so orbiting continues from where you flew.
     fn fly_camera(&mut self, ui: &egui::Ui, resp: &egui::Response) {
         use crate::hotkeys::{self, Command as Hotkey, Scope};
-        use cam_controls::{CameraIntent, CameraPose, InertiaSettings, SpaceFlight};
-        use glam::{Quat, Vec3};
+        use cam_controls::{CameraIntent, CameraPose, SpaceFlight};
+        use glam::Vec3;
         hotkeys::register(ui, Scope::Viewport, resp.rect);
         if hotkeys::consume(ui.ctx(), Scope::Viewport, Hotkey::Flight) {
             self.toggle_flight_mode();
@@ -1737,11 +1783,8 @@ impl App {
             .camera_reference
             .unwrap_or(self.scene.formula.framing_radius());
         let cam = &mut self.scene.camera;
-        // Roll releases the horizon lock rather than being silently discarded.
-        if held && ui.input(|i| i.key_down(egui::Key::Q) || i.key_down(egui::Key::E)) {
-            cam.free_flight = true;
-        }
         let dist = cam.distance * radius;
+        let lock = (!cam.free_flight).then_some(Vec3::Y);
         if held && self.fly.is_none() {
             let orientation = cam.orientation();
             let eye = Vec3::from_array(cam.target) - (orientation * -Vec3::Z) * dist;
@@ -1751,10 +1794,18 @@ impl App {
                 ..CameraPose::default()
             };
             let mut fly = SpaceFlight::from_pose(pose);
-            fly.inertia = InertiaSettings::fps();
+            fly.inertia = self.controls.inertia(radius);
+            // The lock takes the plane nearest to the current roll (a camera left on its side
+            // by an earlier flip keeps that plane).
+            fly.set_horizon_lock(lock);
             self.fly = Some(fly);
         }
         let Some(fly) = &mut self.fly else { return };
+        // Settings act live; the toolbar mode switch engages or releases the lock mid-flight.
+        fly.inertia = self.controls.inertia(radius);
+        if fly.horizon_lock().is_some() != lock.is_some() && !fly.set_horizon_lock(lock) {
+            self.status = "Horizon lock needs a view that is not straight up or down".into();
+        }
         let viewport = cam_viewport::ViewportSize::new(
             resp.rect.width().max(1.0) as u32,
             resp.rect.height().max(1.0) as u32,
@@ -1764,81 +1815,46 @@ impl App {
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::Locked));
-            let (delta, scroll, keys) = ui.input(|i| {
-                let k = |key| if i.key_down(key) { 1.0f32 } else { 0.0 };
-                (
-                    i.pointer.motion().unwrap_or_else(|| i.pointer.delta()),
-                    i.smooth_scroll_delta.y,
-                    [
-                        k(egui::Key::W) - k(egui::Key::S),
-                        k(egui::Key::D) - k(egui::Key::A),
-                        k(egui::Key::R) - k(egui::Key::C),
-                        if i.modifiers.shift { 1.0 } else { 0.0 },
-                        k(egui::Key::E) - k(egui::Key::Q),
-                    ],
-                )
-            });
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll != 0.0 {
                 self.controls.fly_speed =
                     (self.controls.fly_speed * (scroll * 0.003).exp()).clamp(0.02, 50.0);
                 self.status = format!("Flight speed ×{:.2}", self.controls.fly_speed);
             }
-            let sens = 0.001 * self.controls.look_sensitivity;
-            fly.apply_intent(
-                CameraIntent::Look {
-                    dyaw: -delta.x * sens,
-                    dpitch: -delta.y * sens,
-                },
-                viewport,
+            // WASD / R-C thrust, Q/E roll, Alt / Shift speed, mouse look: the shared bindings.
+            let intents = cam_controls_egui::gather_fly_intents(
+                ui,
+                &fly.inertia,
+                &mut self.fly_speed_scale,
+                true,
+                resp.rect,
+                resp.rect.center(),
             );
-            fly.apply_intent(
-                CameraIntent::Thrust {
-                    forward: keys[0],
-                    right: keys[1],
-                    up: keys[2],
-                },
-                viewport,
-            );
-            fly.apply_intent(CameraIntent::Boost(keys[3] > 0.0), viewport);
-            fly.apply_intent(CameraIntent::Roll { d: keys[4] }, viewport);
+            for intent in intents {
+                fly.apply_intent(intent, viewport);
+            }
         } else {
+            // Released: drop held axes and modifiers; the momentum coasts and damps out.
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
-            fly.apply_intent(
-                CameraIntent::Thrust {
-                    forward: 0.0,
-                    right: 0.0,
-                    up: 0.0,
-                },
-                viewport,
-            );
-            fly.apply_intent(CameraIntent::Boost(false), viewport);
-            fly.apply_intent(CameraIntent::Roll { d: 0.0 }, viewport);
+            for intent in [
+                CameraIntent::Thrust { forward: 0.0, right: 0.0, up: 0.0 },
+                CameraIntent::Roll { d: 0.0 },
+                CameraIntent::SpeedScale(1.0),
+            ] {
+                fly.apply_intent(intent, viewport);
+            }
+            self.fly_speed_scale = 1.0;
         }
-        // Acceleration scales with the formula's size and the speed multiplier.
-        fly.inertia.thrust_sensitivity = 6.0 * radius * self.controls.fly_speed;
-        let moving = fly.update_dynamics(dt);
+        let moving = fly.update_dynamics(dt) || fly.has_motion();
 
+        // The authored camera follows the flight pose (Euler YXZ keeps any roll).
         let pose = fly.pose();
-        if cam.free_flight {
-            let (yaw, pitch, roll) = pose.orientation.to_euler(glam::EulerRot::YXZ);
-            cam.yaw_degrees = yaw.to_degrees();
-            cam.pitch_degrees = -pitch.to_degrees();
-            cam.roll_degrees = roll.to_degrees();
-        } else {
-            let f = pose.forward();
-            cam.pitch_degrees = (-f.y)
-                .clamp(-1.0, 1.0)
-                .asin()
-                .to_degrees()
-                .clamp(-89.0, 89.0);
-            cam.yaw_degrees = (-f.x).atan2(-f.z).to_degrees();
-            cam.roll_degrees = 0.0;
-            fly.orientation = Quat::from_axis_angle(Vec3::Y, cam.yaw_degrees.to_radians())
-                * Quat::from_axis_angle(Vec3::X, -cam.pitch_degrees.to_radians());
-        }
-        let f = fly.pose().forward();
-        let target = pose.eye + f * dist;
+        let (yaw, pitch, roll) = pose.orientation.to_euler(glam::EulerRot::YXZ);
+        cam.yaw_degrees = yaw.to_degrees();
+        cam.pitch_degrees = -pitch.to_degrees();
+        cam.roll_degrees = roll.to_degrees();
+        let target = pose.eye + pose.forward() * dist;
         cam.target = [target.x, target.y, target.z];
         if !held && !moving {
             self.fly = None;
@@ -1873,43 +1889,15 @@ impl App {
         self.status = "Camera framed to bounds".into();
     }
 
+    /// Free 6-DoF flight or horizon lock. A live flight follows the flag in `fly_camera`, where
+    /// the lock levels the view smoothly through its spring instead of snapping.
     fn toggle_flight_mode(&mut self) {
-        use glam::{Quat, Vec3};
         let cam = &mut self.scene.camera;
-        let dist = cam.distance
-            * self
-                .scene
-                .camera_reference
-                .unwrap_or(self.scene.formula.framing_radius());
-        let eye = self.fly.as_ref().map_or_else(
-            || Vec3::from_array(cam.target) - (cam.orientation() * -Vec3::Z) * dist,
-            |fly| fly.eye,
-        );
         cam.free_flight = !cam.free_flight;
-        if !cam.free_flight {
-            let f = cam.orientation() * -Vec3::Z;
-            cam.yaw_degrees = (-f.x).atan2(-f.z).to_degrees();
-            cam.pitch_degrees = (-f.y)
-                .clamp(-1.0, 1.0)
-                .asin()
-                .to_degrees()
-                .clamp(-89.0, 89.0);
-            cam.roll_degrees = 0.0;
-            let orientation: Quat = cam.orientation();
-            cam.target = (eye + (orientation * -Vec3::Z) * dist).to_array();
-            if let Some(fly) = &mut self.fly {
-                fly.orientation = orientation;
-                fly.momentum.angular.z = 0.0;
-                fly.apply_intent(
-                    cam_controls::CameraIntent::Roll { d: 0.0 },
-                    cam_viewport::ViewportSize::new(1, 1),
-                );
-            }
-        }
         self.status = if cam.free_flight {
-            "Flight: free · Q/E roll · R/C up/down"
+            "Flight: free 6-DoF · Q/E roll · R/C up/down · Alt fast · Shift slow"
         } else {
-            "Flight: horizon · R/C up/down · Q/E enables roll"
+            "Flight: horizon lock · Q/E tilt, hold to flip the plane · R/C up/down · Alt fast · Shift slow"
         }
         .into();
     }
@@ -3938,7 +3926,7 @@ mod tests {
 
     #[test]
     fn shared_flight_inertia_coasts_and_stops_on_all_six_axes() {
-        use cam_controls::{CameraIntent, InertiaSettings, SpaceFlight};
+        use cam_controls::{CameraIntent, SpaceFlight};
         let cases = [
             (
                 "forward",
@@ -3983,7 +3971,8 @@ mod tests {
         let viewport = cam_viewport::ViewportSize::new(800, 600);
         for (name, intent) in cases {
             let mut fly = SpaceFlight::default();
-            fly.inertia = InertiaSettings::fps();
+            // The rig exactly as the viewport configures it.
+            fly.inertia = Controls::default().inertia(1.0);
             for _ in 0..30 {
                 fly.apply_intent(intent, viewport);
                 fly.update_dynamics(1.0 / 60.0);

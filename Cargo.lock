@@ -1575,7 +1575,7 @@ dependencies = [
 [[package]]
 name = "cam-controls"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/gitnexus-rs.git?branch=main#a06c4d0169cede946b84d632b843f68639e7248b"
+source = "git+ssh://git@github.com/ssoj13/gitnexus-rs.git?branch=main#6ba51eef0af3e531672ee17d10557af83c74ad98"
 dependencies = [
  "cam-viewport",
  "glam",
@@ -1583,9 +1583,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "cam-controls-egui"
+version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/gitnexus-rs.git?branch=main#6ba51eef0af3e531672ee17d10557af83c74ad98"
+dependencies = [
+ "cam-controls",
+ "cam-viewport",
+ "egui",
+]
+
+[[package]]
 name = "cam-viewport"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/gitnexus-rs.git?branch=main#a06c4d0169cede946b84d632b843f68639e7248b"
+source = "git+ssh://git@github.com/ssoj13/gitnexus-rs.git?branch=main#6ba51eef0af3e531672ee17d10557af83c74ad98"
 dependencies = [
  "glam",
 ]
@@ -9437,6 +9447,7 @@ dependencies = [
  "box-rs",
  "bytemuck",
  "cam-controls",
+ "cam-controls-egui",
  "cam-viewport",
  "cuda-core",
  "cuda-device",
