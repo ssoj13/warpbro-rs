@@ -869,20 +869,24 @@ pub mod kernels {
         let slope = slope * eps_scale;
         // Clip to the bounding sphere: outside it every estimate is exact "outside" (escape
         // radius / ball bound), so marching there only burns steps.
-        let oc = sub(origin, pv3(ctx, P_CLIP_CENTER));
-        let radius = pr(ctx, P_CLIP_RADIUS);
-        let b = dot(oc, dir);
-        let disc = b * b - (dot(oc, oc) - radius * radius);
-        if disc <= 0.0 {
-            return miss;
+        let mut t_enter = 0.0;
+        let mut max_distance = pr(ctx, P_MAX_DISTANCE);
+        if !(global(P_OFX) != 0.0 && global(P_OFX_NO_CLIP) != 0.0) {
+            let oc = sub(origin, pv3(ctx, P_CLIP_CENTER));
+            let radius = pr(ctx, P_CLIP_RADIUS);
+            let b = dot(oc, dir);
+            let disc = b * b - (dot(oc, oc) - radius * radius);
+            if disc <= 0.0 {
+                return miss;
+            }
+            let root = disc.sqrt();
+            let t_exit = -b + root;
+            if t_exit <= 0.0 {
+                return miss;
+            }
+            t_enter = (-b - root).max(0.0);
+            max_distance = t_exit.min(pr(ctx, P_MAX_DISTANCE));
         }
-        let root = disc.sqrt();
-        let t_exit = -b + root;
-        if t_exit <= 0.0 {
-            return miss;
-        }
-        let t_enter = (-b - root).max(0.0);
-        let max_distance = t_exit.min(pr(ctx, P_MAX_DISTANCE));
         let trap_mode = if kind == RAY_VISIBILITY {
             0
         } else if F == FAMILY_WORLD {
@@ -1529,7 +1533,11 @@ pub mod kernels {
             thin_film_ior: pr(ctx, P_THIN_FILM_IOR),
             emission: pr(ctx, P_EMISSION),
             emission_color: pv3(ctx, P_EMISSION_COLOR),
-            thin_film_energy: ThinFilmEnergy::MaterialX,
+            thin_film_energy: if global(P_OFX) != 0.0 && global(P_OFX_THIN_FILM_ENERGY) != 0.0 {
+                ThinFilmEnergy::Conserving
+            } else {
+                ThinFilmEnergy::MaterialX
+            },
             ..SurfaceInputs::MATERIALX_DEFAULT
         }
     }
@@ -1776,13 +1784,33 @@ pub mod kernels {
     ) {
         let width = pr(ctx, P_WIDTH) as u32;
         let height = pr(ctx, P_HEIGHT) as u32;
-        let (x, y) = tile_pixel(i, width);
+        let ofx = global(P_OFX) != 0.0;
+        let tile_width = if ofx {
+            global(P_TILE_WIDTH) as u32
+        } else {
+            width
+        };
+        let tile_height = if ofx {
+            global(P_TILE_HEIGHT) as u32
+        } else {
+            height
+        };
+        let (local_x, local_y) = tile_pixel(i, tile_width);
+        if local_x >= tile_width || local_y >= tile_height {
+            return;
+        }
+        let x = local_x + if ofx { global(P_TILE_X) as u32 } else { 0 };
+        let y = local_y + if ofx { global(P_TILE_Y) as u32 } else { 0 };
         if x >= width || y >= height {
             return;
         }
         let begin = pr(ctx, P_SAMPLE_BEGIN) as u32;
         let spp = pr(ctx, P_SPP) as u32;
-        let seed = pr(ctx, P_SEED) as u32;
+        let seed = if ofx {
+            (global(P_OFX_SEED_HIGH) as u32) << 16 | (pr(ctx, P_SEED) as u32)
+        } else {
+            pr(ctx, P_SEED) as u32
+        };
         let origin = pv3(ctx, P_CAM_ORIGIN);
         let fwd = pv3(ctx, P_CAM_FORWARD);
         let right = pv3(ctx, P_CAM_RIGHT);
@@ -1792,6 +1820,7 @@ pub mod kernels {
         let mut sum = [acc[0], acc[1], acc[2]];
         let mut albedo_sum = [albedo[0], albedo[1], albedo[2]];
         let mut normal_sum = [normal[0], normal[1], normal[2]];
+        let mut primary_hits = 0.0;
         let mut s = 0u32;
         while s < spp {
             let mut r = Rng {
@@ -1821,9 +1850,24 @@ pub mod kernels {
                 dir = normalize(sub(focus, ro));
             }
             let (l, hit, a, n) = trace_path::<FULL, F, MIXED>(ctx, lut, ro, dir, &mut r);
+            primary_hits += if hit {
+                1.0
+            } else {
+                if ofx { global(P_OFX_SKY_ALPHA) } else { 0.0 }
+            };
             albedo_sum = add(albedo_sum, a);
             normal_sum = add(normal_sum, n);
-            let l = if hit || background { l } else { [0.0; 3] };
+            let l = if ofx {
+                if hit {
+                    l
+                } else {
+                    mul(l, global(P_OFX_SKY_ALPHA))
+                }
+            } else if hit || background {
+                l
+            } else {
+                [0.0; 3]
+            };
             sum = add(sum, l);
             s += 1;
         }
@@ -1838,7 +1882,7 @@ pub mod kernels {
             normal_sum[0],
             normal_sum[1],
             normal_sum[2],
-            normal[3] + spp as f32,
+            normal[3] + if ofx { primary_hits } else { spp as f32 },
         ];
     }
 

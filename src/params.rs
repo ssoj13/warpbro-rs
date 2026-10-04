@@ -72,6 +72,9 @@ slots! {
     P_FACING_EXPONENT = 1, P_FACING_COLOR = 3, P_FACING_ROUGHNESS = 1, P_FACING_METALLIC = 1,
     // tonemap
     P_EXPOSURE = 1, P_SATURATION = 1, P_TONEMAP = 1,
+    // Optional OFX ABI: zeros retain WarpBro's full-frame guide sample counts.
+    P_OFX = 1, P_TILE_X = 1, P_TILE_Y = 1, P_TILE_WIDTH = 1, P_TILE_HEIGHT = 1,
+    P_OFX_NO_CLIP = 1, P_OFX_THIN_FILM_ENERGY = 1, P_OFX_SEED_HIGH = 1, P_OFX_SKY_ALPHA = 1,
 }
 
 /// Formula families (ofx-fractal Formula3d codes).

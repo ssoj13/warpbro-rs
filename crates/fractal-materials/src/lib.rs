@@ -41,18 +41,18 @@ pub struct MaterialPreset {
     /// Emissive radiance (ACEScg energy units; `[0, 0, 0]` for non-emissive).
     pub emissive: [f32; 3],
     /// OPTIONAL Charlie **sheen** (velvet): `(color_rec709, roughness)`. When
-    /// `Some`, [`author_preset`] calls [`pt_material_ext::author_sheen`] on the
+    /// `Some`, `author_preset` calls `pt_material_ext::author_sheen` on the
     /// `/Surface` shader so the PT renders the retroreflective sheen lobe.
     pub sheen: Option<([f32; 3], f32)>,
     /// OPTIONAL **anisotropy** (brushed metal): `(amount, brush_dir_object_space)`.
-    /// `amount` in `[-1, 1]`; when `Some`, [`author_preset`] calls
-    /// [`pt_material_ext::author_anisotropy`] so the PT renders the UV-free
+    /// `amount` in `[-1, 1]`; when `Some`, `author_preset` calls
+    /// `pt_material_ext::author_anisotropy` so the PT renders the UV-free
     /// brushed-GGX lobe oriented along `brush_dir`.
     pub anisotropy: Option<(f32, [f32; 3])>,
     /// OPTIONAL **facing-mix** (pearlescent / falloff): the material B (the
     /// grazing look) + grazing exponent, as `(B diffuse Rec.709, B roughness,
-    /// B metallic, exponent)`. When `Some`, [`author_preset`] calls
-    /// [`pt_material_ext::author_facing`] to author a SECOND `/SurfaceB`
+    /// B metallic, exponent)`. When `Some`, `author_preset` calls
+    /// `pt_material_ext::author_facing` to author a SECOND `/SurfaceB`
     /// `UsdPreviewSurface` + `inputs:facingExponent` on `/Surface`, so the PT
     /// blends A→B by facing ratio (`pow(1 - |N·V|, exponent)`). Storm ignores it.
     pub facing: Option<([f32; 3], f32, f32, f32)>,
