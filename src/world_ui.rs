@@ -37,9 +37,10 @@ fn value_gesture_eligible(attr: &WorldAttribute, value: &Value) -> bool {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PreviewAction {
-    Play { first: u32, last: u32 },
-    CacheThenPlay { first: u32, last: u32 },
+pub struct PreviewAction {
+    pub first: u32,
+    pub last: u32,
+    pub mode: crate::preview::PreviewMode,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 struct PropertyFilter(u8);
@@ -190,6 +191,8 @@ pub struct WorldUi {
     pub material_library_requested: bool,
     pub preview_action: Option<PreviewAction>,
     pub playback_range: Option<(u32, u32)>,
+    pub cached_frames: std::sync::Arc<[u32]>,
+    pub cache_draft: bool,
     property_filters: HashMap<NodeId, PropertyFilter>,
     timeline_focus: Option<egui::Id>,
     timeline_rect: Option<Rect>,
@@ -231,6 +234,8 @@ impl Default for WorldUi {
             material_library_requested: false,
             preview_action: None,
             playback_range: None,
+            cached_frames: Default::default(),
+            cache_draft: false,
             property_filters: HashMap::new(),
             timeline_focus: None,
             timeline_rect: None,
@@ -357,12 +362,9 @@ impl WorldUi {
     }
     pub fn shortcuts_active(&self, ctx: &egui::Context) -> bool {
         !ctx.text_edit_focused()
-            && !ctx.input(|input| {
-                input.pointer.secondary_down()
-                    || input.modifiers.alt
-                    || input.modifiers.ctrl
-                    || input.modifiers.command
-            })
+            // Modifier matching belongs to the shared command registry. Panel
+            // activation must allow registered Ctrl/Shift chords as well.
+            && !ctx.input(|input| input.pointer.secondary_down())
             && crate::hotkeys::active(ctx) == Some(crate::hotkeys::Scope::Timeline)
             && (self
                 .timeline_rect
@@ -428,8 +430,16 @@ impl WorldUi {
         }
         let jump_in = pressed(Hotkey::In);
         let jump_out = pressed(Hotkey::Out);
-        let cache_preview = pressed(Hotkey::CachePreview);
-        let preview = cache_preview || pressed(Hotkey::Preview);
+        let mode = if pressed(Hotkey::DraftCachePreview) {
+            Some(crate::preview::PreviewMode::DraftCacheThenPlay)
+        } else if pressed(Hotkey::CachePreview) {
+            Some(crate::preview::PreviewMode::CacheThenPlay)
+        } else if pressed(Hotkey::Preview) {
+            Some(crate::preview::PreviewMode::Play)
+        } else {
+            None
+        };
+        let preview = mode.is_some();
         if jump_in || jump_out || preview {
             let bounds = selection_bounds(nodes, e);
             if jump_in {
@@ -441,16 +451,10 @@ impl WorldUi {
             if preview {
                 self.seek(bounds.0);
                 self.playing = false;
-                self.preview_action = Some(if cache_preview {
-                    PreviewAction::CacheThenPlay {
-                        first: bounds.0,
-                        last: bounds.1,
-                    }
-                } else {
-                    PreviewAction::Play {
-                        first: bounds.0,
-                        last: bounds.1,
-                    }
+                self.preview_action = mode.map(|mode| PreviewAction {
+                    first: bounds.0,
+                    last: bounds.1,
+                    mode,
                 });
             }
         }
@@ -1225,6 +1229,15 @@ impl WorldUi {
                 );
                 canvas.set_clip_rect(canvas.clip_rect().intersect(right_rect));
                 let resp = TrackTimeline::new(cfg).show(&mut canvas, &mut self.view, &model);
+                let painter = canvas.painter().with_clip_rect(resp.ruler_rect.intersect(canvas.clip_rect()));
+                let color = if self.cache_draft { Color32::from_rgb(75, 155, 235) } else { Color32::from_rgb(75, 205, 110) };
+                for &frame in self.cached_frames.iter() {
+                    let x = self.view.frame_to_x(frame as f32, resp.ruler_rect.left(), &cfg);
+                    let width = self.view.ppf(&cfg).max(1.0);
+                    if x + width >= resp.ruler_rect.left() && x <= resp.ruler_rect.right() {
+                        painter.rect_filled(Rect::from_min_size(Pos2::new(x, resp.ruler_rect.bottom() - 3.0), Vec2::new(width, 3.0)), 0.0, color);
+                    }
+                }
                 let header =
                     Rect::from_min_size(origin, Vec2::new(left_w, resp.ruler_rect.height()));
                 ui.painter()
@@ -1237,7 +1250,7 @@ impl WorldUi {
                     ui.visuals().weak_text_color(),
                 );
                 ui.interact(header, ui.id().with("timeline-shortcuts-help"), Sense::hover())
-                    .on_hover_text("P / T: Translate · R: Rotate · S: Scale · U: Keyed properties\nShift + property shortcut: add / remove filter\nI / O: selection In / Out · Space: Play / pause\nInsert: Play selection · Shift + Insert: Cache selection, then play");
+                    .on_hover_text("P / T: Translate · R: Rotate · S: Scale · U: Keyed properties\nShift + property shortcut: add / remove filter\nI / O: selection In / Out · Space: Play / pause\nInsert: Play selection · Shift + Insert: Cache selection, then play\nCtrl + Shift + Insert: Cache selection at 1 spp, then play\nGreen: final cache · Blue: draft cache");
                 for (ti, n) in nodes.iter().enumerate() {
                     let y = resp.track_tops[ti];
                     let row = Rect::from_min_size(
@@ -3258,7 +3271,8 @@ mod tests {
         );
         assert_eq!(
             state.take_preview_action(),
-            Some(PreviewAction::Play {
+            Some(PreviewAction {
+                mode: crate::preview::PreviewMode::Play,
                 first: 10,
                 last: 70
             })
@@ -3277,13 +3291,32 @@ mod tests {
         );
         assert_eq!(
             state.take_preview_action(),
-            Some(PreviewAction::CacheThenPlay {
+            Some(PreviewAction {
+                mode: crate::preview::PreviewMode::CacheThenPlay,
                 first: 10,
                 last: 70
             })
         );
         assert!(!state.playing);
         assert_eq!(state.playhead, 10);
+        let mut release = shortcut_key(egui::Key::Insert, true);
+        if let egui::Event::Key { pressed, .. } = &mut release {
+            *pressed = false;
+        }
+        shortcut_frame(&ctx, &mut state, &e, vec![release]);
+        let mut draft = shortcut_key(egui::Key::Insert, true);
+        if let egui::Event::Key { modifiers, .. } = &mut draft {
+            *modifiers = egui::Modifiers::CTRL.plus(egui::Modifiers::SHIFT);
+        }
+        shortcut_frame(&ctx, &mut state, &e, vec![draft]);
+        assert_eq!(
+            state.take_preview_action(),
+            Some(PreviewAction {
+                first: 10,
+                last: 70,
+                mode: crate::preview::PreviewMode::DraftCacheThenPlay,
+            })
+        );
         e.selected.clear();
         e.selection = None;
         assert_eq!(selection_bounds(&e.document.nodes(), &e), (10, 70));
@@ -3445,7 +3478,8 @@ mod tests {
         assert_eq!(state.playhead, 12);
         assert!(!state.playing);
         assert_eq!(e.revision(), revision);
-        state.preview_action = Some(PreviewAction::Play {
+        state.preview_action = Some(PreviewAction {
+            mode: crate::preview::PreviewMode::Play,
             first: 10,
             last: 12,
         });

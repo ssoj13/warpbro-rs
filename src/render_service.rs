@@ -202,6 +202,12 @@ pub enum Command {
         request: crate::preview::PreviewRequest,
         cache_all: bool,
     },
+    /// Replaceable completed viewport frame; pixel copying stays on the worker.
+    CacheViewport {
+        request: crate::preview::PreviewRequest,
+        number: u32,
+        frame: Arc<Frame>,
+    },
     SeekPreview {
         generation: u64,
         number: u32,
@@ -246,6 +252,7 @@ pub enum RenderEvent {
         completed: u32,
         total: u32,
         bytes: usize,
+        resident: Arc<[u32]>,
     },
     PreviewReady {
         generation: u64,
@@ -275,6 +282,7 @@ struct Mailbox {
     preview_generation: Option<u64>,
     preview_control: Option<Command>,
     preview_seek: Option<(u64, u32)>,
+    preview_store: Option<Command>,
     pending_preview_frame: Option<RenderEvent>,
     pending_preview_status: Option<RenderEvent>,
     recycled_preview: [Option<Arc<Frame>>; 3],
@@ -395,6 +403,19 @@ fn queue_preview_command(shared: &Shared, command: Command) -> Result<(), Comman
             }
             state.preview_control = Some(command);
             state.preview_seek = None;
+            state.preview_store = None;
+        }
+        command @ Command::CacheViewport { .. } => {
+            if let Command::CacheViewport { request, .. } = &command {
+                if state
+                    .preview_generation
+                    .is_some_and(|id| id != request.generation)
+                {
+                    return Ok(());
+                }
+                state.preview_generation = Some(request.generation);
+            }
+            state.preview_store = Some(command);
         }
         Command::SeekPreview { generation, number } => {
             if state.preview_generation == Some(generation) {
@@ -406,6 +427,7 @@ fn queue_preview_command(shared: &Shared, command: Command) -> Result<(), Comman
                 state.preview_generation = None;
                 state.preview_control = Some(command);
                 state.preview_seek = None;
+                state.preview_store = None;
             }
         }
         Command::RecyclePreviewFrame { frame } => {
@@ -457,12 +479,15 @@ impl RenderPort {
             | Command::RenderExport {
                 width, height, spp, ..
             } => validate_size(*width, *height, *spp)?,
-            Command::BeginPreview { request, .. } => request.validate()?,
+            Command::BeginPreview { request, .. } | Command::CacheViewport { request, .. } => {
+                request.validate()?
+            }
             _ => {}
         }
         if matches!(
             &command,
             Command::BeginPreview { .. }
+                | Command::CacheViewport { .. }
                 | Command::SeekPreview { .. }
                 | Command::CancelPreview { .. }
                 | Command::RecyclePreviewFrame { .. }
@@ -920,7 +945,7 @@ fn step_preview(
             request.white_nits,
         );
         session.target = Some(job.target);
-        if let Err(error) = session.cache.store(number, frame, epoch) {
+        if let Err(error) = session.cache.store(number, &frame, epoch) {
             fail_preview(session, shared, error);
             return worked;
         }
@@ -938,6 +963,7 @@ fn step_preview(
                     .frame_count()
                     .expect("validated range"),
                 bytes: session.cache.bytes(),
+                resident: session.cache.resident(),
             },
         );
         worked |= present_preview(session, pool, shared);
@@ -961,6 +987,26 @@ pub(crate) fn validate_size(width: usize, height: usize, spp: u32) -> Result<(),
     }
     Ok(())
 }
+/// Move cache ownership between quality profiles without cloning pixels. Scene
+/// edits fail compatibility and cannot reuse an old profile's rendered content.
+fn switch_preview_cache(
+    active: &mut Option<PreviewSession>,
+    parked: &mut Option<crate::preview::PreviewCache>,
+    request: crate::preview::PreviewRequest,
+    cache_all: bool,
+) -> Result<crate::preview::PreviewCache, String> {
+    let reusable = parked
+        .take()
+        .filter(|cache| cache.request.compatible_content(&request));
+    *parked = active.take().map(|session| session.cache);
+    if let Some(mut cache) = reusable {
+        cache.restart(request, cache_all)?;
+        Ok(cache)
+    } else {
+        crate::preview::PreviewCache::new(request, cache_all)
+    }
+}
+
 fn run_worker(shared: &Shared) {
     if shared
         .state
@@ -988,9 +1034,12 @@ fn run_worker(shared: &Shared) {
     let mut export: Option<RenderJob> = None;
     let mut thumbnail: Option<RenderJob> = None;
     let mut preview: Option<PreviewSession> = None;
+    // Keep the other quality profile resident when switching draft/final transport.
+    // Both caches retain Playa's byte budget and eviction policy.
+    let mut parked_preview: Option<crate::preview::PreviewCache> = None;
     let mut presentations = PresentationPool::default();
     loop {
-        let (request, command, cancel, preview_control, preview_seek, recycled) = {
+        let (request, command, cancel, preview_control, preview_seek, preview_store, recycled) = {
             let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
             if state.stopping {
                 return;
@@ -1020,6 +1069,7 @@ fn run_worker(shared: &Shared) {
                 std::mem::take(&mut state.cancel_export),
                 state.preview_control.take(),
                 state.preview_seek.take(),
+                state.preview_store.take(),
                 std::mem::take(&mut state.recycled_preview),
             )
         };
@@ -1077,17 +1127,33 @@ fn run_worker(shared: &Shared) {
                                     .frame_count()
                                     .expect("validated range"),
                                 bytes: session.cache.bytes(),
+                                resident: session.cache.resident(),
                             },
                         );
                     } else {
-                        if let Some(old) = preview.take() {
-                            old.cache.invalidate();
-                        }
-                        match crate::preview::PreviewCache::new(request, cache_all) {
+                        match switch_preview_cache(
+                            &mut preview,
+                            &mut parked_preview,
+                            request,
+                            cache_all,
+                        ) {
                             Ok(cache) => {
                                 if let Some(v) = &mut viewport {
                                     v.request.active = false;
                                 }
+                                push_event(
+                                    shared,
+                                    RenderEvent::PreviewProgress {
+                                        generation,
+                                        completed: cache.count(),
+                                        total: cache
+                                            .request
+                                            .frame_count()
+                                            .expect("validated range"),
+                                        bytes: cache.bytes(),
+                                        resident: cache.resident(),
+                                    },
+                                );
                                 preview = Some(PreviewSession {
                                     wanted: Some(cache.request.first),
                                     next_fill: 0,
@@ -1117,6 +1183,62 @@ fn run_worker(shared: &Shared) {
                 _ => {}
             }
         }
+        if let Some(Command::CacheViewport {
+            request,
+            number,
+            frame,
+        }) = preview_store
+        {
+            let generation = request.generation;
+            if preview_current(shared, generation) {
+                if preview
+                    .as_ref()
+                    .is_none_or(|s| !s.cache.request.compatible_content(&request))
+                {
+                    match switch_preview_cache(&mut preview, &mut parked_preview, request, false) {
+                        Ok(cache) => {
+                            preview = Some(PreviewSession {
+                                cache,
+                                wanted: None,
+                                next_fill: 0,
+                                fill: false,
+                                job: None,
+                                target: None,
+                            })
+                        }
+                        Err(error) => {
+                            push_event(shared, RenderEvent::PreviewFailed { generation, error });
+                            continue;
+                        }
+                    }
+                }
+                if let Some(session) = preview
+                    .as_mut()
+                    .filter(|s| s.cache.request.generation == generation)
+                {
+                    let epoch = session.cache.manager.current_epoch();
+                    match session.cache.store(number, &frame, epoch) {
+                        Ok(()) => push_event(
+                            shared,
+                            RenderEvent::PreviewProgress {
+                                generation,
+                                completed: session.cache.count(),
+                                total: session
+                                    .cache
+                                    .request
+                                    .frame_count()
+                                    .expect("validated range"),
+                                bytes: session.cache.bytes(),
+                                resident: session.cache.resident(),
+                            },
+                        ),
+                        Err(error) => {
+                            push_event(shared, RenderEvent::PreviewFailed { generation, error })
+                        }
+                    }
+                }
+            }
+        }
         if let Some((generation, number)) = preview_seek {
             if let Some(session) = preview
                 .as_mut()
@@ -1132,6 +1254,7 @@ fn run_worker(shared: &Shared) {
         if let Some(command) = command {
             match command {
                 Command::BeginPreview { .. }
+                | Command::CacheViewport { .. }
                 | Command::SeekPreview { .. }
                 | Command::CancelPreview { .. }
                 | Command::RecyclePreviewFrame { .. } => {}
@@ -1281,6 +1404,7 @@ fn run_worker(shared: &Shared) {
                 && !state.cancel_export
                 && state.preview_control.is_none()
                 && state.preview_seek.is_none()
+                && state.preview_store.is_none()
                 && state.recycled_preview.iter().all(Option::is_none)
             {
                 let _ = shared.wake.wait_timeout(state, Duration::from_millis(20));
@@ -1475,6 +1599,60 @@ mod tests {
         service
             .try_command(Command::CancelPreview { generation: 901 })
             .unwrap();
+    }
+
+    #[test]
+    fn switching_draft_and_final_profiles_preserves_final_pixels() {
+        let full = crate::preview::PreviewRequest {
+            generation: 41,
+            scene: Arc::new(request().scene),
+            first: 0,
+            last: 0,
+            fps: 24.0,
+            width: 1,
+            height: 1,
+            spp: 8,
+            seed: 0,
+            output_hdr: false,
+            white_nits: 100.0,
+            cache_fraction: 0.01,
+            reserve_gb: 0.0,
+        };
+        let mut cache = crate::preview::PreviewCache::new(full.clone(), false).unwrap();
+        let mut frame = completed_frame(41, false);
+        Arc::get_mut(&mut frame).unwrap().samples = 8;
+        cache
+            .store(0, &frame, cache.manager.current_epoch())
+            .unwrap();
+        let session = |cache| PreviewSession {
+            cache,
+            wanted: None,
+            next_fill: 0,
+            fill: false,
+            job: None,
+            target: None,
+        };
+        let mut active = Some(session(cache));
+        let mut parked = None;
+        let mut draft = full.clone();
+        draft.generation += 1;
+        draft.spp = 1;
+        let cache = switch_preview_cache(&mut active, &mut parked, draft, true).unwrap();
+        assert!(!cache.contains(0));
+        assert!(parked.as_ref().unwrap().contains(0));
+        active = Some(session(cache));
+        let mut restored = full;
+        restored.generation += 2;
+        let cache = switch_preview_cache(&mut active, &mut parked, restored, false).unwrap();
+        assert!(
+            cache.contains(0),
+            "returning to final quality must reuse its completed pixels"
+        );
+        let mut output = empty_presentation();
+        cache.get_into(0, &mut output).unwrap();
+        assert_eq!(output.samples, 8);
+        assert_eq!(output.generation, 43);
+        assert_eq!(parked.as_ref().unwrap().request.spp, 1);
     }
 
     #[test]

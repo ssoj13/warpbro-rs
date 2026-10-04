@@ -15,6 +15,27 @@ use playa_engine::{
 use playa_player::clock::Clock;
 use std::sync::Arc;
 
+/// All transport entry points use this policy; draft frames are completed at their
+/// own one-sample target and never masquerade as final-quality cache entries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreviewMode {
+    Play,
+    CacheThenPlay,
+    DraftCacheThenPlay,
+}
+impl PreviewMode {
+    pub fn cache_all(self) -> bool {
+        self != Self::Play
+    }
+    pub fn samples(self, final_samples: u32) -> u32 {
+        if self == Self::DraftCacheThenPlay {
+            1
+        } else {
+            final_samples
+        }
+    }
+}
+
 /// Frozen animation and presentation settings for one preview cache generation.
 #[derive(Clone)]
 pub struct PreviewRequest {
@@ -42,8 +63,7 @@ impl PreviewRequest {
                 _ => false,
             };
         scene_matches
-            && self.first == other.first
-            && self.last == other.last
+            && self.cache_bounds() == other.cache_bounds()
             && self.width == other.width
             && self.height == other.height
             && self.spp == other.spp
@@ -52,6 +72,16 @@ impl PreviewRequest {
             && self.white_nits == other.white_nits
             && self.cache_fraction == other.cache_fraction
             && self.reserve_gb == other.reserve_gb
+    }
+    /// Transport range does not define pixel identity. Cache covers the authoring
+    /// work area so selection-only preview changes reuse the same frames.
+    pub fn cache_bounds(&self) -> (u32, u32) {
+        self.scene
+            .document
+            .as_ref()
+            .map_or((self.first, self.last), |doc| {
+                (doc.first.min(self.first), doc.last.max(self.last))
+            })
     }
     pub fn frame_count(&self) -> Result<u32, String> {
         self.last
@@ -62,6 +92,14 @@ impl PreviewRequest {
     }
     pub fn validate(&self) -> Result<(), String> {
         self.frame_count()?;
+        let (first, last) = self.cache_bounds();
+        if last
+            .checked_sub(first)
+            .and_then(|n| n.checked_add(1))
+            .is_none_or(|n| n > 100001)
+        {
+            return Err("Preview cache range must contain 1..=100001 frames".into());
+        }
         if !self.fps.is_finite()
             || self.fps <= 0.0
             || !self.white_nits.is_finite()
@@ -94,10 +132,62 @@ pub struct PreviewController {
     bytes: usize,
     error: Option<String>,
     awaiting_frame: bool,
+    pub resident: Arc<[u32]>,
 }
 impl PreviewController {
+    /// Adopt a completed ordinary viewport frame without changing transport or
+    /// copying any pixel buffer on the UI thread.
+    pub fn cache_viewport(
+        &mut self,
+        mut request: PreviewRequest,
+        number: u32,
+        frame: Arc<Frame>,
+    ) -> Result<(), String> {
+        request.validate()?;
+        if self
+            .request
+            .as_ref()
+            .is_none_or(|old| !old.compatible_content(&request))
+        {
+            let mut clock = Clock::new(request.fps, request.frame_count()? as i32);
+            clock.set_loop(true);
+            clock.set_position((number.saturating_sub(request.first)) as i32);
+            self.clock = Some(clock);
+            self.request = Some(request.clone());
+            self.resident = Arc::default();
+            self.caching = false;
+            self.awaiting_frame = false;
+            self.error = None;
+            self.begin = None;
+        }
+        if let Some(active) = &self.request {
+            request.generation = active.generation;
+        }
+        self.pending = Some(Command::CacheViewport {
+            request,
+            number,
+            frame,
+        });
+        Ok(())
+    }
+    pub fn cached_request(&self) -> Option<PreviewRequest> {
+        self.request.clone()
+    }
+    pub fn cached_spp(&self) -> Option<u32> {
+        self.request.as_ref().map(|r| r.spp)
+    }
+    pub fn displaying_preview(&self) -> bool {
+        self.caching || self.playing() || self.awaiting_frame
+    }
     pub fn start(&mut self, request: PreviewRequest, cache_then_play: bool) -> Result<(), String> {
         request.validate()?;
+        if self
+            .request
+            .as_ref()
+            .is_none_or(|old| !old.compatible_content(&request))
+        {
+            self.resident = Arc::default();
+        }
         let mut clock = Clock::new(request.fps, request.frame_count()? as i32);
         clock.set_loop(true);
         if !cache_then_play {
@@ -177,9 +267,11 @@ impl PreviewController {
                 completed,
                 total,
                 bytes,
+                resident,
             } if *id == generation => {
                 self.completed = (*completed).min(*total);
                 self.bytes = *bytes;
+                self.resident = resident.clone();
                 None
             }
             RenderEvent::PreviewReady { generation: id } if *id == generation => {
@@ -243,6 +335,7 @@ impl PreviewController {
         }
         self.caching = false;
         self.request = None;
+        self.resident = Arc::default();
         self.clock = None;
         self.awaiting_frame = false;
     }
@@ -309,7 +402,8 @@ pub(crate) struct PreviewCache {
 impl PreviewCache {
     pub fn new(request: PreviewRequest, cache_all: bool) -> Result<Self, String> {
         request.validate()?;
-        let count = request.frame_count()? as usize;
+        let (cache_first, cache_last) = request.cache_bounds();
+        let count = (cache_last - cache_first + 1) as usize;
         let manager = Arc::new(CacheManager::new(
             request.cache_fraction,
             request.reserve_gb,
@@ -318,7 +412,7 @@ impl PreviewCache {
             .width
             .checked_mul(request.height)
             .and_then(|n| n.checked_mul(20))
-            .and_then(|n| n.checked_mul(count))
+            .and_then(|n| n.checked_mul(request.frame_count().ok()? as usize))
             .ok_or("Preview cache size overflow")?;
         if cache_all && required > manager.mem().1 {
             return Err(format!(
@@ -354,21 +448,38 @@ impl PreviewCache {
         Ok(())
     }
     pub fn index(&self, number: u32) -> Option<i32> {
-        (number >= self.request.first && number <= self.request.last)
-            .then(|| (number - self.request.first) as i32)
+        let (first, last) = self.request.cache_bounds();
+        (number >= first && number <= last).then(|| (number - first) as i32)
     }
     pub fn bytes(&self) -> usize {
         self.manager.mem().0
     }
     pub fn count(&self) -> u32 {
-        (self.cache.len() / 2) as u32
+        (self.request.first..=self.request.last)
+            .filter(|n| self.contains(*n))
+            .count() as u32
     }
-    pub fn store(&mut self, number: u32, frame: Frame, epoch: u64) -> Result<(), String> {
+    pub fn resident(&self) -> Arc<[u32]> {
+        let (first, last) = self.request.cache_bounds();
+        (first..=last)
+            .filter(|n| self.contains(*n))
+            .collect::<Vec<_>>()
+            .into()
+    }
+    pub fn store(&mut self, number: u32, frame: &Frame, epoch: u64) -> Result<(), String> {
         let index = self
             .index(number)
             .ok_or("Preview frame is outside its range")?;
-        if let Some(error) = frame.colour_error {
-            return Err(error);
+        if let Some(error) = &frame.colour_error {
+            return Err(error.clone());
+        }
+        if frame.width != self.request.width
+            || frame.height != self.request.height
+            || frame.pixels.len() != frame.width * frame.height
+            || frame.light.len() != frame.width * frame.height
+            || frame.samples < self.request.spp
+        {
+            return Err("Viewport frame does not match preview quality or dimensions".into());
         }
         let meta = FrameMetadata {
             hdr: frame.hdr,
@@ -377,14 +488,15 @@ impl PreviewCache {
             last_spp: frame.last_spp,
             denoised_samples: frame.denoised_samples,
             denoise_ms: frame.denoise_ms,
-            denoise_error: frame.denoise_error,
+            denoise_error: frame.denoise_error.clone(),
         };
         let codes = frame
             .pixels
-            .into_iter()
+            .iter()
+            .copied()
             .flat_map(u32::to_le_bytes)
             .collect();
-        let linear = frame.light.into_iter().flatten().collect();
+        let linear = frame.light.iter().flatten().copied().collect();
         let codes = PlayaFrame::from_cpu_buffer(
             PixelBuffer::U8(codes),
             PixelFormat::Rgba8,
@@ -529,11 +641,63 @@ mod tests {
         }
     }
     #[test]
+    fn incomplete_frames_are_rejected_but_one_sample_draft_is_complete() {
+        let mut final_cache = PreviewCache::new(request(), false).unwrap();
+        let mut partial = frame();
+        partial.samples = 7;
+        let epoch = final_cache.manager.current_epoch();
+        assert!(final_cache.store(10, &partial, epoch).is_err());
+        assert!(final_cache.resident().is_empty());
+        let mut draft_request = request();
+        draft_request.spp = PreviewMode::DraftCacheThenPlay.samples(8);
+        assert!(!draft_request.compatible_content(&request()));
+        let mut draft = PreviewCache::new(draft_request, true).unwrap();
+        partial.samples = 1;
+        draft
+            .store(10, &partial, draft.manager.current_epoch())
+            .unwrap();
+        assert_eq!(draft.resident().as_ref(), &[10]);
+        assert!(final_cache.resident().is_empty());
+        final_cache.store(10, &frame(), epoch).unwrap();
+        assert_eq!(final_cache.resident().as_ref(), &[10]);
+        assert!(final_cache.store(10, &partial, epoch).is_err());
+        let mut output = frame();
+        final_cache.get_into(10, &mut output).unwrap();
+        assert_eq!(output.samples, 8);
+    }
+
+    #[test]
+    fn selected_transport_range_reuses_work_area_frame_identity() {
+        let mut full = request();
+        Arc::make_mut(&mut full.scene).document = Some(Box::new(
+            crate::world::WorldDocument::from_scene(&full.scene),
+        ));
+        let mut cache = PreviewCache::new(full.clone(), false).unwrap();
+        cache
+            .store(10, &frame(), cache.manager.current_epoch())
+            .unwrap();
+        let index = cache.index(10);
+        let mut selection = full.clone();
+        selection.first = 11;
+        selection.last = 12;
+        selection.generation += 1;
+        assert!(full.compatible_content(&selection));
+        cache.restart(selection, false).unwrap();
+        assert_eq!(cache.index(10), index);
+        assert_eq!(cache.count(), 0, "progress counts only the selected range");
+        assert_eq!(
+            cache.resident().as_ref(),
+            &[10],
+            "coverage includes the whole work area"
+        );
+    }
+
+    #[test]
     fn transport_restart_retains_native_cache_and_content_changes_do_not_match() {
         let original = request();
         let mut cache = PreviewCache::new(original.clone(), true).unwrap();
         let epoch = cache.manager.current_epoch();
-        cache.store(10, frame(), epoch).unwrap();
+        cache.store(10, &frame(), epoch).unwrap();
         let mut restart = original.clone();
         restart.generation += 1;
         assert!(original.compatible_content(&restart));
@@ -639,7 +803,7 @@ mod tests {
     fn native_hdr_cache_preserves_values_and_reuses_presentation_allocations() {
         let mut cache = PreviewCache::new(request(), true).unwrap();
         let epoch = cache.manager.current_epoch();
-        cache.store(10, frame(), epoch).unwrap();
+        cache.store(10, &frame(), epoch).unwrap();
         assert_eq!(cache.count(), 1);
         assert_eq!(cache.bytes(), 20);
         let mut out = frame();

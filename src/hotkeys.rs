@@ -35,6 +35,7 @@ pub enum Command {
     Play,
     Preview,
     CachePreview,
+    DraftCachePreview,
 }
 
 #[derive(Clone, Copy)]
@@ -87,6 +88,11 @@ pub const TIMELINE: &[Binding] = &[
     binding(Command::Play, Key::Space, Modifiers::NONE),
     binding(Command::Preview, Key::Insert, Modifiers::NONE),
     binding(Command::CachePreview, Key::Insert, Modifiers::SHIFT),
+    binding(
+        Command::DraftCachePreview,
+        Key::Insert,
+        Modifiers::CTRL.plus(Modifiers::SHIFT),
+    ),
 ];
 pub fn bindings(scope: Scope) -> &'static [Binding] {
     match scope {

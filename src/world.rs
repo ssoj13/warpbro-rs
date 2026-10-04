@@ -604,8 +604,8 @@ impl WorldEditor {
             }
             WorldCommand::AssignMaterial { id, material } => {
                 self.document.assert_unlocked(id)?;
-                if self.document.info(id)?.kind != WorldKind::Fractal {
-                    return Err("Only fractals receive materials".into());
+                if !self.document.supports_material(id) {
+                    return Err("Selected node has no material reference field".into());
                 }
                 if let Some(material) = material {
                     if self.document.info(material)?.kind != WorldKind::Material {
@@ -1353,6 +1353,14 @@ impl WorldDocument {
             end: f64::from(a.get_float_or("/end", self.last as f32 + 1.0)),
         })
     }
+    /// Single capability check for the Material reference exposed by the node
+    /// schema, shared by the Attribute Editor, gallery and assignment command.
+    /// A storage placeholder exists on every node; it is not itself a capability.
+    pub fn supports_material(&self, id: NodeId) -> bool {
+        self.node(id)
+            .is_ok_and(|data| data["type"].as_str() == Some("Fractal"))
+    }
+
     /// Resolve a fractal's material UUID without building a scene snapshot.
     pub fn assigned_material(&self, id: NodeId) -> Result<Option<NodeId>, String> {
         let data = self.node(id)?;
@@ -1430,7 +1438,7 @@ impl WorldDocument {
                 range: attribute_range(path),
             });
         }
-        if self.info(id)?.kind == WorldKind::Fractal {
+        if self.supports_material(id) {
             out.push(WorldAttribute {
                 path: "/material_id".into(),
                 label: "Material".into(),
