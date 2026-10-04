@@ -2,6 +2,7 @@
 
 The guides below describe the current implementation. Dated plans preserve the decisions and verification history of earlier revisions.
 
+- [Colour](color.md): BT.709 / BT.2020 / ACES gamuts, sRGB / PQ / HLG curves, and the ACEScg render pipeline.
 - [Workspace, materials, and cached playback](workspace.md): node selection, assignment, gesture Undo, panel shortcuts, and final/draft preview caches.
 - [Transparent and absorbing glass](glass.md): transmission, green glass/water, depth controls, legacy scenes, and geometry limits.
 - [CUDA startup investigation](cuda-startup.md): measured context/module timings, system-load caveats, reproduction, and pending work.
