@@ -50,14 +50,14 @@ Current usage and verification: [documentation index](docs/README.md), [workspac
   - The toolbar airplane switches free 6-DoF flight and horizon lock. Locked, the horizon stays
     level to a world plane: a short Q/E press tilts and springs back, holding past the flip angle
     turns the camera onto the next world plane, where it levels again.
-  - It uses `cam-controls` `SpaceFlight` with FPS damping and a level horizon.
-    The flight rig, its horizon lock and the key bindings come from the shared gitnexus-rs
-    `cam-controls` / `cam-controls-egui` crates.
+  - The flight rig, its horizon lock and the key bindings come from the shared gitnexus-rs
+    `cam-controls` / `cam-controls-egui` crates, like the Houdini orbit (left drag tumbles,
+    middle drag pans, the wheel zooms; released drags coast and ease out with the rotate decay).
   - When you release the button, the orbit pivot sits in front of the camera, so orbiting
     continues from where you flew.
-  - Backtick / tilde switches between a level horizon and free flight. In free flight,
-    Q/E rolls and R/C moves up/down; all six flight axes have damped inertia. Roll and mode
-    are saved with the camera and survive releasing RMB.
+  - Backtick / tilde switches between horizon lock and free flight; switching to the lock
+    levels a resting camera smoothly too. Roll and mode are saved with the camera and survive
+    releasing RMB; the orbit keeps the roll.
   - H restores the loaded preset/bookmark's camera; F frames the fractal's declared bounds
     (or a 10×10×10 box), including object scale/offset/rotation.
   - Settings → Controls adjusts mouse sensitivity and flight speed, saved between runs.
@@ -139,14 +139,14 @@ python bootstrap.py r                                  # build, warm the CUDA ca
 
 | input             | action                                                                                                     |
 | ----------------- | ---------------------------------------------------------------------------------------------------------- |
-| left drag         | orbit                                                                                                      |
-| middle drag       | pan                                                                                                        |
+| left drag         | orbit (coasts on release)                                                                                  |
+| middle drag       | pan (coasts on release)                                                                                    |
 | wheel             | zoom                                                                                                       |
-| hold right button | fly: mouse looks, WASD moves, R/C up/down, Q/E rolls (enables free flight), Shift boosts, wheel sets speed |
+| hold right button | fly: mouse looks, WASD moves, R/C up/down, Q/E rolls (tilts under the lock), Alt x4, Shift x0.1, wheel speed |
 | double-click      | recentre                                                                                                   |
 | `Tab`             | hide the panels                                                                                            |
 | `Space`           | pause                                                                                                      |
-| backtick / tilde  | switch horizon / free flight (Q/E roll, R/C up/down in free mode)                                          |
+| backtick / tilde  | switch horizon lock / free flight                                                                          |
 
 The interface uses `egui-dock`: drag tabs to rearrange, split or float panels, including Settings.
 The top bar uses **File**, **Edit**, **View**, **Render** and **Window** menus, following Playa.

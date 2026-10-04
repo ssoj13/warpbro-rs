@@ -486,6 +486,13 @@ impl Camera {
             self.roll_degrees.to_radians(),
         )
     }
+    /// Aim along `forward` (yaw / pitch), keeping the roll.
+    pub fn set_forward(&mut self, forward: glam::Vec3) {
+        let f = forward.normalize_or_zero();
+        // forward = Ry(yaw) Rx(-pitch) (-Z) = (-cos p sin y, -sin p, -cos p cos y).
+        self.yaw_degrees = (-f.x).atan2(-f.z).to_degrees();
+        self.pitch_degrees = -f.y.clamp(-1.0, 1.0).asin().to_degrees();
+    }
     /// ofx-fractal default_camera: eye on +Z, level, CAMERA_DEFAULT_DISTANCE framing radii.
     pub const fn default_fov(fov: f32) -> Self {
         Self {

@@ -168,6 +168,12 @@ pub(crate) struct App {
     fly: Option<cam_controls::SpaceFlight>,
     /// Last speed scale sent to the flight rig (Alt / Shift latch, 1.0 = normal).
     fly_speed_scale: f32,
+    /// Houdini orbit rig (LMB tumble, MMB pan, wheel zoom). The scene camera stays the
+    /// source of truth: the rig is re-seeded from it every frame and only carries the coast.
+    orbit: cam_controls::HoudiniOrbit,
+    orbit_drag: cam_controls_egui::OrbitDragState,
+    /// The camera as the orbit coast last wrote it; any other edit stops the coast.
+    orbit_written: Option<crate::scene::Camera>,
     /// Persistent mouse sensitivity and flight speed (also adjusted by the wheel).
     controls: Controls,
 }
@@ -295,6 +301,23 @@ impl Controls {
             fast_multiplier: self.fast_multiplier,
             slow_multiplier: self.slow_multiplier,
             ..defaults
+        }
+    }
+
+    /// The orbit navigation settings for a view of vertical FOV `fov_y` (radians) that is
+    /// `height` points tall: pan moves the target exactly with the cursor, the wheel zooms
+    /// exponentially, and a released drag coasts at its own speed, decaying like the flight
+    /// rotation (`rotate_decay`).
+    fn navigation(&self, fov_y: f32, height: f32) -> cam_controls::CameraNavigationSettings {
+        cam_controls::CameraNavigationSettings {
+            zoom_mode: cam_controls::ZoomMode::Exponential,
+            zoom_to_cursor: false,
+            orbit_sensitivity: 0.1_f32.to_radians() * self.look_sensitivity,
+            zoom_scroll_exponential: 0.0015,
+            pan_sensitivity: 2.0 * (fov_y * 0.5).tan() / height.max(1.0),
+            orbit_release_inertia_scale: 1.0,
+            inertia_friction: 1.0 / self.rotate_decay.max(0.02),
+            ..cam_controls::CameraNavigationSettings::default()
         }
     }
 }
@@ -451,6 +474,9 @@ impl App {
             seed: 0,
             fly: None,
             fly_speed_scale: 1.0,
+            orbit: cam_controls::HoudiniOrbit::default(),
+            orbit_drag: cam_controls_egui::OrbitDragState::default(),
+            orbit_written: None,
             controls: Default::default(),
             snap: std::env::var("FRAC_SNAP").ok().map(|p| {
                 let spp = std::env::var("FRAC_SNAP_SPP")
@@ -1752,7 +1778,7 @@ impl App {
     /// current orbit distance, so orbiting continues from where you flew.
     fn fly_camera(&mut self, ui: &egui::Ui, resp: &egui::Response) {
         use crate::hotkeys::{self, Command as Hotkey, Scope};
-        use cam_controls::{CameraIntent, CameraPose, SpaceFlight};
+        use cam_controls::CameraIntent;
         use glam::Vec3;
         hotkeys::register(ui, Scope::Viewport, resp.rect);
         if hotkeys::consume(ui.ctx(), Scope::Viewport, Hotkey::Flight) {
@@ -1782,24 +1808,12 @@ impl App {
             .scene
             .camera_reference
             .unwrap_or(self.scene.formula.framing_radius());
+        if held && self.fly.is_none() {
+            self.start_flight();
+        }
         let cam = &mut self.scene.camera;
         let dist = cam.distance * radius;
         let lock = (!cam.free_flight).then_some(Vec3::Y);
-        if held && self.fly.is_none() {
-            let orientation = cam.orientation();
-            let eye = Vec3::from_array(cam.target) - (orientation * -Vec3::Z) * dist;
-            let pose = CameraPose {
-                eye,
-                orientation,
-                ..CameraPose::default()
-            };
-            let mut fly = SpaceFlight::from_pose(pose);
-            fly.inertia = self.controls.inertia(radius);
-            // The lock takes the plane nearest to the current roll (a camera left on its side
-            // by an earlier flip keeps that plane).
-            fly.set_horizon_lock(lock);
-            self.fly = Some(fly);
-        }
         let Some(fly) = &mut self.fly else { return };
         // Settings act live; the toolbar mode switch engages or releases the lock mid-flight.
         fly.inertia = self.controls.inertia(radius);
@@ -1862,6 +1876,83 @@ impl App {
         ui.ctx().request_repaint();
     }
 
+    /// Houdini orbit through the shared rig: LMB tumbles about world up, MMB pans, the wheel
+    /// zooms toward the target, and released drags coast. The camera roll is an overlay the
+    /// turntable leaves alone (as do pan and zoom); pan turns the cursor motion by it so the
+    /// view follows the cursor.
+    fn orbit_camera(&mut self, ui: &egui::Ui, resp: &egui::Response, over_toolbar: bool) {
+        use cam_controls::{CameraIntent, OrbitPose};
+        use glam::Vec3;
+        let radius = self
+            .scene
+            .camera_reference
+            .unwrap_or(self.scene.formula.framing_radius());
+        let cam = &mut self.scene.camera;
+        let rig = &mut self.orbit.rig;
+        if rig.has_inertia() && self.orbit_written != Some(*cam) {
+            rig.stop_inertia();
+        }
+        let nav = self
+            .controls
+            .navigation(cam.fov_y_degrees.to_radians(), resp.rect.height());
+        rig.apply_navigation(nav);
+        rig.pitch_limit = 89.0_f32.to_radians();
+        rig.projection.distance_min = 0.05 * radius;
+        rig.projection.distance_max = f32::MAX;
+        let seed = OrbitPose::looking(
+            Vec3::from_array(cam.target),
+            cam.orientation() * -Vec3::Z,
+            cam.distance * radius,
+        );
+        rig.pose = seed;
+
+        let buttons = cam_controls_egui::OrbitButtons {
+            // RMB belongs to flight.
+            dolly: None,
+            wheel: !over_toolbar,
+            ..cam_controls_egui::OrbitButtons::HOUDINI
+        };
+        let frame =
+            cam_controls_egui::gather_orbit_intents(ui, resp, &nav, &mut self.orbit_drag, buttons);
+        let viewport = cam_viewport::ViewportSize::new(
+            resp.rect.width().max(1.0) as u32,
+            resp.rect.height().max(1.0) as u32,
+        );
+        // The rig pans in the unrolled view plane: turn screen motion back by the roll.
+        let (sin, cos) = cam.roll_degrees.to_radians().sin_cos();
+        let unroll = |x: f32, y: f32| (x * cos + y * sin, y * cos - x * sin);
+        for intent in frame.intents {
+            let intent = match intent {
+                CameraIntent::Pan { dx_px, dy_px } => {
+                    let (dx_px, dy_px) = unroll(dx_px, dy_px);
+                    CameraIntent::Pan { dx_px, dy_px }
+                }
+                CameraIntent::PanInertia { dx_rate, dy_rate } => {
+                    let (dx_rate, dy_rate) = unroll(dx_rate, dy_rate);
+                    CameraIntent::PanInertia { dx_rate, dy_rate }
+                }
+                other => other,
+            };
+            self.orbit.apply_intent(intent, viewport);
+        }
+        let rig = &mut self.orbit.rig;
+        let coasting = rig.has_inertia();
+        if coasting {
+            rig.update_dynamics(ui.input(|i| i.stable_dt).clamp(1.0e-4, 0.1));
+        }
+        // Write back only real changes: a still drag must not restart the progressive render.
+        let pose = rig.pose;
+        if pose != seed {
+            cam.set_forward(pose.target - pose.eye());
+            cam.target = pose.target.to_array();
+            cam.distance = pose.distance / radius;
+        }
+        self.orbit_written = rig.has_inertia().then_some(*cam);
+        if coasting || frame.request_repaint {
+            ui.ctx().request_repaint();
+        }
+    }
+
     fn frame_camera(&mut self, width: u32, height: u32) {
         use cam_controls::{CameraController, CameraPose, SpaceFlight};
         let (min, max) = self.scene.framing_bounds();
@@ -1889,11 +1980,38 @@ impl App {
         self.status = "Camera framed to bounds".into();
     }
 
-    /// Free 6-DoF flight or horizon lock. A live flight follows the flag in `fly_camera`, where
-    /// the lock levels the view smoothly through its spring instead of snapping.
+    /// Seed the flight rig from the scene camera. `fly_camera` then drives it while RMB is
+    /// held and lets its momentum and lock spring settle after release.
+    fn start_flight(&mut self) {
+        use cam_controls::{CameraPose, SpaceFlight};
+        use glam::Vec3;
+        let radius = self
+            .scene
+            .camera_reference
+            .unwrap_or(self.scene.formula.framing_radius());
+        let cam = &self.scene.camera;
+        let orientation = cam.orientation();
+        let eye = Vec3::from_array(cam.target) - (orientation * -Vec3::Z) * (cam.distance * radius);
+        let mut fly = SpaceFlight::from_pose(CameraPose {
+            eye,
+            orientation,
+            ..CameraPose::default()
+        });
+        fly.inertia = self.controls.inertia(radius);
+        // The lock takes the world plane nearest to the current roll (a camera left on its
+        // side by an earlier flip keeps that plane).
+        fly.set_horizon_lock((!cam.free_flight).then_some(Vec3::Y));
+        self.fly = Some(fly);
+    }
+
+    /// Free 6-DoF flight or horizon lock. A live flight follows the flag in `fly_camera`; a
+    /// camera at rest gets a coasting rig, so the lock spring levels it smoothly either way.
     fn toggle_flight_mode(&mut self) {
-        let cam = &mut self.scene.camera;
-        cam.free_flight = !cam.free_flight;
+        self.scene.camera.free_flight = !self.scene.camera.free_flight;
+        if !self.scene.camera.free_flight && self.fly.is_none() {
+            self.start_flight();
+        }
+        let cam = &self.scene.camera;
         self.status = if cam.free_flight {
             "Flight: free 6-DoF · Q/E roll · R/C up/down · Alt fast · Shift slow"
         } else {
@@ -2378,37 +2496,11 @@ impl App {
         if !toolbar.contains_pointer || self.fly.is_some() {
             self.fly_camera(ui, &resp);
         }
-        let cam = &mut self.scene.camera;
-        if resp.dragged_by(egui::PointerButton::Primary) {
-            let d = resp.drag_delta();
-            let sensitivity = 0.1 * self.controls.look_sensitivity;
-            cam.yaw_degrees = (cam.yaw_degrees - d.x * sensitivity) % 360.0;
-            cam.pitch_degrees = (cam.pitch_degrees + d.y * sensitivity).clamp(-89.0, 89.0);
-        }
-        if resp.dragged_by(egui::PointerButton::Middle) {
-            // Pan the orbit target in the camera plane.
-            let d = resp.drag_delta();
-            let radius = self
-                .scene
-                .camera_reference
-                .unwrap_or(self.scene.formula.framing_radius());
-            let orientation = cam.orientation();
-            let right = (orientation * glam::Vec3::X).to_array();
-            let up = (orientation * glam::Vec3::Y).to_array();
-            let k = cam.distance * radius * 2.0 * (cam.fov_y_degrees.to_radians() * 0.5).tan()
-                / avail.y.max(1.0);
-            for i in 0..3 {
-                cam.target[i] += (-d.x * right[i] + d.y * up[i]) * k;
-            }
-        }
-        if resp.hovered() && !toolbar.contains_pointer && self.fly.is_none() {
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0 {
-                cam.distance = (cam.distance * (-scroll * 0.0015).exp()).max(0.05);
-            }
+        if self.fly.is_none() {
+            self.orbit_camera(ui, &resp, toolbar.contains_pointer);
         }
         if resp.double_clicked() {
-            cam.target = [0.0; 3];
+            self.scene.camera.target = [0.0; 3];
         }
 
         let ppp = ui.ctx().pixels_per_point() * self.resolution;
@@ -3512,6 +3604,80 @@ mod tests {
     }
 
     #[test]
+    fn orbit_tumbles_coasts_to_rest_and_pans_with_the_cursor_under_roll() {
+        let mut app = App::new();
+        let ctx = egui::Context::default();
+        let mut time = 0.0;
+        let mut frame = |app: &mut App, events| {
+            time += 1.0 / 60.0;
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(640.0, 400.0),
+                    )),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| app.viewport(ui));
+                },
+            )
+        };
+        let button = |button, pressed, pos| egui::Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let mut pos = egui::pos2(300.0, 200.0);
+        frame(&mut app, vec![egui::Event::PointerMoved(pos)]);
+        frame(&mut app, vec![button(egui::PointerButton::Primary, true, pos)]);
+        let yaw = app.scene.camera.yaw_degrees;
+        for _ in 0..6 {
+            pos.x += 10.0;
+            frame(&mut app, vec![egui::Event::PointerMoved(pos)]);
+        }
+        let dragged = app.scene.camera.yaw_degrees;
+        assert!(dragged < yaw - 1.0, "dragging right turns the view: {yaw} -> {dragged}");
+        frame(&mut app, vec![button(egui::PointerButton::Primary, false, pos)]);
+        let released = app.scene.camera.yaw_degrees;
+        frame(&mut app, Vec::new());
+        assert!(
+            app.scene.camera.yaw_degrees < released,
+            "a released drag coasts on"
+        );
+        for _ in 0..600 {
+            frame(&mut app, Vec::new());
+        }
+        assert!(!app.orbit.rig.has_inertia(), "the coast decays to rest");
+        let rest = app.scene.camera;
+        frame(&mut app, Vec::new());
+        assert_eq!(app.scene.camera, rest, "a resting orbit leaves the camera alone");
+
+        // MMB pan with the camera rolled 90 degrees: the target moves against the
+        // cursor along the rolled screen axis, the roll itself stays.
+        app.scene.camera.roll_degrees = 90.0;
+        let orientation = app.scene.camera.orientation();
+        let (right, up) = (orientation * glam::Vec3::X, orientation * glam::Vec3::Y);
+        let target = glam::Vec3::from_array(app.scene.camera.target);
+        frame(&mut app, vec![button(egui::PointerButton::Middle, true, pos)]);
+        for _ in 0..6 {
+            pos.x += 10.0;
+            frame(&mut app, vec![egui::Event::PointerMoved(pos)]);
+        }
+        frame(&mut app, vec![button(egui::PointerButton::Middle, false, pos)]);
+        let moved = glam::Vec3::from_array(app.scene.camera.target) - target;
+        assert!(moved.dot(right) < 0.0, "pan follows the rolled cursor axis: {moved}");
+        assert!(
+            moved.dot(up).abs() < 1e-3 * moved.length(),
+            "no drift across the rolled axis: {moved}"
+        );
+        assert_eq!(app.scene.camera.roll_degrees, 90.0);
+    }
+
+    #[test]
     fn viewport_toolbar_preserves_rmb_flight_and_continuous_camera_updates() {
         let mut app = App::new();
         let ctx = egui::Context::default();
@@ -3760,7 +3926,18 @@ mod tests {
             !app.scene.camera.free_flight,
             "Shift+backtick (tilde) must restore horizon mode"
         );
-        assert_eq!(app.scene.camera.roll_degrees, 0.0);
+        for _ in 0..240 {
+            frame(&mut app, vec![]);
+        }
+        // Horizon mode levels the resting camera smoothly onto the nearest world plane.
+        assert!(app.fly.is_none(), "the levelling rig settles and lets go");
+        let right = app.scene.camera.orientation() * glam::Vec3::X;
+        assert!(
+            [glam::Vec3::X, glam::Vec3::Y, glam::Vec3::Z]
+                .iter()
+                .any(|axis| right.dot(*axis).abs() < 2e-3),
+            "level to a world plane: right {right}"
+        );
         frame(&mut app, vec![toggle(false, true)]);
         let shortcut = |key| egui::Event::Key {
             key,
@@ -3833,16 +4010,24 @@ mod tests {
             frame(&mut app, vec![]);
         }
         assert!(
-            app.scene.camera.free_flight,
-            "Q/E must release the horizon lock"
+            !app.scene.camera.free_flight,
+            "Q/E tilt against the horizon lock instead of releasing it"
         );
         assert!(
             app.scene.camera.roll_degrees.abs() > 1.0,
-            "Q must roll the camera"
+            "Q must tilt the camera"
         );
         frame(
             &mut app,
             vec![flight_key(egui::Key::Q, false), button(false)],
+        );
+        for _ in 0..240 {
+            frame(&mut app, vec![]);
+        }
+        assert!(
+            app.scene.camera.roll_degrees.abs() < 0.1,
+            "a short tilt springs back level: {}",
+            app.scene.camera.roll_degrees
         );
         frame(&mut app, vec![shortcut(egui::Key::H)]);
         ctx.memory_mut(|m| m.request_focus(egui::Id::new("flight-test-text")));
