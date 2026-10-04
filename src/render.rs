@@ -1253,17 +1253,20 @@ mod tests {
         let output = std::env::current_dir().unwrap().join("target/glass-probe");
         std::fs::create_dir_all(&output).unwrap();
         let environment = output.join("studio-checker.exr");
-        exr::prelude::write_rgb_file(&environment, 512, 256, |x, y| {
-            let band = (x / 32 + y / 32) % 2;
-            if y < 48 {
-                (2.0f32, 2.0f32, 2.0f32)
-            } else if band == 0 {
-                (0.16f32, 0.32f32, 0.70f32)
-            } else {
-                (0.85f32, 0.60f32, 0.28f32)
-            }
-        })
-        .unwrap();
+        let checker: Vec<[f32; 4]> = (0..256u32)
+            .flat_map(|y| (0..512u32).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                let band = (x / 32 + y / 32) % 2;
+                if y < 48 {
+                    [2.0, 2.0, 2.0, 1.0]
+                } else if band == 0 {
+                    [0.16, 0.32, 0.70, 1.0]
+                } else {
+                    [0.85, 0.60, 0.28, 1.0]
+                }
+            })
+            .collect();
+        crate::exr_io::write_rgb(&environment, 512, 256, &checker, None, true).unwrap();
         let mut gpu = Gpu::new().unwrap();
         for (family, shape) in [(FAMILY_KIFS, "sphere"), (FAMILY_BULB, "bulb")] {
             for preset in ["GlassClear", "GlassBottleGreen", "GlassWaterGreen"] {

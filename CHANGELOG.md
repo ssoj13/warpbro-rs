@@ -2,6 +2,17 @@
 
 ## Unreleased — 2026-10-04
 
+### OpenEXR through exr-core
+
+- Every EXR read/write goes through `src/exr_io.rs` over our `exr-core` (exr-rs, 1:1 OpenEXR port)
+  instead of crates.io `exr`: sequence frames, the display-light "Save view" EXR (now one writer
+  shared by `render.rs` and `render_service.rs`), lat-long environment maps and the CUDA glass probe's
+  checker environment. Files are float32 R,G,B, ZIP, tagged BT.709/D65 `chromaticities`
+  (+ `whiteLuminance` = 100 nits on the display export); environment maps are size-checked from the
+  header before any pixel is read; an existing file is refused unless overwrite is granted.
+- egui-widgets-rs pinned to `6afc5cb` (egui-display writes EXR through exr-core). `cargo tree -i exr` is
+  empty.
+
 ### Glass and absorption
 
 - Add keyable Material-node transmission, transmission color, extra roughness, and world-space absorption depth.
