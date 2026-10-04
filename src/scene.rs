@@ -370,6 +370,17 @@ pub struct Material {
     pub specular_ior: f32,
     pub specular_anisotropy: f32,
     pub specular_rotation: f32,
+    /// Fraction of dielectric base energy that refracts rather than diffuses.
+    #[serde(default)]
+    pub transmission: f32,
+    /// Interface tint when depth is zero; Beer-Lambert transmittance at depth otherwise.
+    #[serde(default = "default_transmission_color")]
+    pub transmission_color: [f32; 3],
+    #[serde(default)]
+    pub transmission_extra_roughness: f32,
+    /// World-space reference distance for absorption. Zero disables volume absorption.
+    #[serde(default)]
+    pub transmission_depth: f32,
     pub sheen: f32,
     pub sheen_color: [f32; 3],
     pub sheen_roughness: f32,
@@ -490,6 +501,10 @@ impl Default for Lighting {
     }
 }
 
+fn default_transmission_color() -> [f32; 3] {
+    [1.0; 3]
+}
+
 fn default_base_color() -> [f32; 3] {
     [0.8, 0.8, 0.8]
 }
@@ -513,6 +528,10 @@ impl Default for Material {
             specular_ior: 1.5,
             specular_anisotropy: 0.0,
             specular_rotation: 0.0,
+            transmission: 0.0,
+            transmission_color: [1.0; 3],
+            transmission_extra_roughness: 0.0,
+            transmission_depth: 0.0,
             sheen: 0.0,
             sheen_color: [1.0; 3],
             sheen_roughness: 0.3,
@@ -835,7 +854,8 @@ impl Scene {
         p[P_SECONDARY_STEPS] = r.max_steps as f32;
         p[P_SECONDARY_EPS] = 1.0;
         p[P_STEP_FACTOR] = r.step_factor;
-        p[P_MATERIAL_MODEL] = (self.material.model == MaterialModel::StandardSurface) as u32 as f32;
+        p[P_MATERIAL_MODEL] = (self.material.model == MaterialModel::StandardSurface
+            || self.material.transmission > 0.0) as u32 as f32;
 
         // --- formula: common
         p[P_FAMILY] = self.formula.code() as f32;
@@ -1029,6 +1049,10 @@ impl Scene {
         p[P_SPECULAR_IOR] = m.specular_ior;
         p[P_SPECULAR_ANISOTROPY] = m.specular_anisotropy;
         p[P_SPECULAR_ROTATION] = m.specular_rotation;
+        p[P_TRANSMISSION] = m.transmission.clamp(0.0, 1.0);
+        put3(&mut p, P_TRANSMISSION_COLOR, m.transmission_color);
+        p[P_TRANSMISSION_EXTRA_ROUGHNESS] = m.transmission_extra_roughness;
+        p[P_TRANSMISSION_DEPTH] = m.transmission_depth;
         p[P_SHEEN] = m.sheen;
         put3(&mut p, P_SHEEN_COLOR, m.sheen_color);
         p[P_SHEEN_ROUGHNESS] = m.sheen_roughness;

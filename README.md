@@ -30,19 +30,19 @@ Current usage and verification: [documentation index](docs/README.md), [workspac
 - **Two material models**, supported by both the world tracer and legacy specialized kernels:
   - _Fast_: Lambert plus GGX.
   - _Standard Surface_: the full Autodesk Standard Surface (MaterialX port) with coat, sheen,
-    thin film and anisotropy. The [`standard-surface-bsdf`](https://github.com/ssoj13/render-rs/tree/cd72eb3ac4ad28b7b31c78826f192f383f4b6989) crate
+    thin film, anisotropy, and dielectric transmission. The [`standard-surface-bsdf`](https://github.com/ssoj13/render-rs/tree/cd72eb3ac4ad28b7b31c78826f192f383f4b6989) crate
     is called directly from the kernel.
 - **14 palettes** and orbit-trap colouring (origin, plane, point).
 - **Material Gallery:** actual World material nodes appear as asynchronous GPU-rendered sphere cards.
-  The separate **Material Library** window shows the 67 curated presets from `fractal-materials` (derived from usd-rs `usd-mat-lib`) in adaptive grids across 12 categories (metals,
+  The separate **Material Library** window shows the 69 curated presets from `fractal-materials` (derived from usd-rs `usd-mat-lib`) in adaptive grids across 12 categories (metals,
   brushed metals, plastics, car paint, ceramic, stone, wood, leather, velvet and fabric, rubber,
   paper, glass, emissive).
   - Presets are translated the way usd-rs `usd-hd-pt` maps UsdPreviewSurface to Standard
     Surface. Sheen (velvet) and anisotropy (brushed metal) select the Standard Surface kernels.
   - The `pt-material-ext` facing mix (pearlescent, oil slick) works in both models.
   - The fractal colour comes from either the palette or the material.
-  - Glass currently renders as a clear-coated smooth dielectric. True transmission and
-    refraction are not implemented; this is a renderer limitation.
+  - Path-traced glass uses Fresnel reflection, refraction, and depth-dependent absorption.
+    Bottle-green glass and green water are available as presets. See [glass controls and geometry limits](docs/glass.md).
 - **Unreal-style flight:** hold the right mouse button in the viewport to fly.
   - The mouse looks around; WASD moves; R/C moves up/down; Q/E rolls and enables free flight;
     Shift boosts; the wheel sets the speed.
@@ -121,13 +121,17 @@ WarpBro is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX
 
 On Windows, `python bootstrap.py d --fix` sets up the Rust tools, then `python bootstrap.py b`
 builds the release binary `target/release/WarpBro.exe`. The bootstrap discovers the MSVC, Windows SDK and CUDA environment
-through `vcv-rs`, so a Developer Command Prompt is unnecessary.
+through `vcv-rs`, so a Developer Command Prompt is unnecessary. After linking, it initializes
+the exact executable's CUDA module and parameter block to warm the driver's JIT cache.
+A module/ABI initialization failure now fails the build instead of appearing only in the UI.
+Use `--skip-cuda-warmup` for packaging/cross-builds without a GPU. For a direct
+`cargo oxide build`, run `target/release/WarpBro --warmup-cuda` afterward.
 
 On Linux / WSL2:
 
 ```sh
 export CUDA_HOME=/usr/local/cuda CUDA_OXIDE_LLC=/usr/bin/llc-22
-cargo oxide run                                         # the browser
+python bootstrap.py r                                  # build, warm the CUDA cache, then open
 ./target/release/WarpBro --gallery out 1920 1080 256    # every preset to out/*.png
 ./target/release/WarpBro --bench 960 540 32             # timing table
 ```
@@ -301,7 +305,7 @@ Current follow-up work is tracked in [render optimization](plans/plan2.md),
 File Open/Save/Save As and five 250-frame presets (frames 0–249 at 24 FPS) are implemented.
 Camera orbit speed (degrees/second) and phase are animatable World attributes; old scenes default
 to zero speed. Timeline evaluation supports independent seeking and animated speed.
-The earlier preset suite passed 144 tests; the latest WarpBro suite passed 181 tests.
+The current release suite passed 211 tests with 8 ignored GPU/visual probes (62.07 s).
 The earlier final production release build passed without Rust warnings; the latest startup build
 passed with two dead-code warnings. All 250 final preset curves
 are covered by CPU tests. The 1,250-frame GPU run at 160×90/4 SPP preceded only the last bounded
@@ -321,11 +325,11 @@ QP/preset tradeoff and verified zero-origin rational video timing on determinist
 
 ## Startup diagnostics
 
-A successful render can still wait at startup for embedded CUDA-module loading. The current
-instrumentation separates context creation from that load. In the latest contended-machine
-check they took 123 ms and 152.37 s respectively; this is not an idle baseline. See
-[the reproduction and pending loader work](docs/cuda-startup.md). Compiled-module caching
-and a viewport initialization overlay remain unimplemented.
+The default bootstrap build warms the CUDA driver's JIT cache before reporting success.
+This moves cold compilation out of the next workspace launch. Clearing/disabling the cache,
+changing drivers, or moving to another GPU may require warming again. Context and kernel-load timings remain
+logged separately. See [startup measurements and build choices](docs/cuda-startup.md).
+A reusable runtime module cache and a viewport initialization overlay remain unimplemented.
 
 ## Performance
 

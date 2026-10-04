@@ -9,7 +9,9 @@ use cuda_core::{CudaContext, CudaStream, DeviceBuffer, LaunchConfig1D};
 use crate::gpu::kernels;
 use crate::palette::{PaletteScheme, build_lut};
 use crate::params::*;
-use crate::scene::{MaterialModel, Scene};
+#[cfg(test)]
+use crate::scene::MaterialModel;
+use crate::scene::Scene;
 
 const BLOCK: u32 = 128;
 
@@ -81,6 +83,10 @@ fn same_material(a: &crate::scene::Material, b: &crate::scene::Material) -> bool
         specular_ior,
         specular_anisotropy,
         specular_rotation,
+        transmission,
+        transmission_color,
+        transmission_extra_roughness,
+        transmission_depth,
         sheen,
         sheen_color,
         sheen_roughness,
@@ -451,6 +457,12 @@ impl Gpu {
         log::info!("CUDA startup: loading embedded kernels");
         // SAFETY: this package owns the embedded device bundle for `kernels`.
         let module = unsafe { kernels::load(&ctx) }.map_err(|e| format!("load module: {e:?}"))?;
+        // Validate the host/device constant-memory contract before reporting Ready.
+        // A stripped/mismatched artifact must surface as a startup error, not kill
+        // the shared worker when its first viewport or thumbnail request arrives.
+        module
+            .set_params_blocking(&[0.0; P_COUNT])
+            .map_err(|e| format!("CUDA parameter block: {e:?}"))?;
         log::info!(
             "CUDA startup: kernels ready in {:?}",
             module_started.elapsed()
@@ -755,15 +767,16 @@ impl Gpu {
         p[P_SAMPLE_BEGIN] = target.samples as f32;
         p[P_SPP] = spp as f32;
         p[P_SEED] = seed as f32;
-        self.module
-            .set_params(&self.stream, &p)
-            .expect("params upload");
+        if let Err(error) = self.module.set_params(&self.stream, &p) {
+            target.colour_error = Some(format!("CUDA parameter upload: {error:?}"));
+            return;
+        }
 
         let t0 = Instant::now();
         if spp > 0 {
             let padded = target.accum.len() as u32;
             let cfg = LaunchConfig1D::new(padded.div_ceil(BLOCK), BLOCK, 0);
-            let full = scene.material.model == MaterialModel::StandardSurface;
+            let full = p[P_MATERIAL_MODEL] != 0.0;
             let (m, s, lut, acc) = (&self.module, &self.stream, &self.lut, &mut target.accum);
             macro_rules! launch {
                 ($prep:ident, $run:ident) => {{
@@ -985,6 +998,7 @@ pub(crate) fn scene_trace_data(scene: &Scene) -> Vec<f32> {
         let p = object.pack(1, 1);
         values.extend_from_slice(&p[P_FAMILY..P_LIGHT_DIR]);
         values.extend_from_slice(&p[P_BASE..P_EXPOSURE]);
+        values.extend_from_slice(&p[P_TRANSMISSION..P_COUNT]);
         values.push(p[P_MATERIAL_MODEL]);
         if let Some(matrix) = object.object_world {
             values.push(1.0);
@@ -1248,6 +1262,170 @@ fn pq16(nits: f32) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Explicit visual probe; artifacts remain under target and are not scene templates.
+    #[test]
+    #[ignore = "renders CUDA glass comparison PNGs; run explicitly with --ignored --nocapture"]
+    fn cuda_glass_visual_probe() {
+        let _ = env_logger::try_init();
+        let output = std::env::current_dir().unwrap().join("target/glass-probe");
+        std::fs::create_dir_all(&output).unwrap();
+        let environment = output.join("studio-checker.exr");
+        exr::prelude::write_rgb_file(&environment, 512, 256, |x, y| {
+            let band = (x / 32 + y / 32) % 2;
+            if y < 48 {
+                (2.0f32, 2.0f32, 2.0f32)
+            } else if band == 0 {
+                (0.16f32, 0.32f32, 0.70f32)
+            } else {
+                (0.85f32, 0.60f32, 0.28f32)
+            }
+        })
+        .unwrap();
+        let mut gpu = Gpu::new().unwrap();
+        for (family, shape) in [(FAMILY_KIFS, "sphere"), (FAMILY_BULB, "bulb")] {
+            for preset in ["GlassClear", "GlassBottleGreen", "GlassWaterGreen"] {
+                let mut object = Scene::preset(family);
+                if family == FAMILY_KIFS {
+                    object.render.iterations = 0;
+                }
+                crate::materials::PRESETS
+                    .iter()
+                    .find(|p| p.path == preset)
+                    .unwrap()
+                    .apply(&mut object.material);
+                object.render.max_bounces = 12;
+                object.render.max_steps = 384;
+                object.render.denoise.enabled = false;
+                object.colour.on = false;
+                object.camera.distance = 3.8;
+                object.camera.pitch_degrees = 10.0;
+                object.environment.enabled = true;
+                object.environment.path = environment.to_string_lossy().into_owned();
+                object.environment.intensity = 1.0;
+                object.lighting.sky_intensity = 0.0;
+                object.lighting.sun_intensity = 0.0;
+                object.world_render = true;
+                let mut child = object.clone();
+                child.object_world = Some(glam::Mat4::IDENTITY.to_cols_array_2d());
+                object.objects = vec![child];
+                let mut target = gpu.target(192, 128);
+                for _ in 0..8 {
+                    gpu.step(&mut target, &object, 8, 29, None, false);
+                }
+                assert!(target.colour_error.is_none(), "{:?}", target.colour_error);
+                let path = output.join(format!("{shape}-{preset}.png"));
+                target.save_png(&path).unwrap();
+                eprintln!("glass_visual {} samples={}", path.display(), target.samples);
+            }
+        }
+    }
+
+    #[test]
+    fn transmission_packing_promotes_fast_and_invalidates_preparation() {
+        let mut scene = dark_world();
+        scene
+            .objects
+            .push(world_object(FAMILY_BULB, [0.0; 3], [1.0; 3], [1.0; 3]));
+        let mut cache = PreparationCache::default();
+        let opaque = cache.get(&scene, 17, 17).unwrap();
+        scene.objects[0].material.transmission = 1.0;
+        let glass = cache.get(&scene, 17, 17).unwrap();
+        assert_eq!(glass.world_material, WorldMaterial::Full);
+        assert!(!Arc::ptr_eq(&opaque, &glass));
+        scene.objects[0].material.transmission_depth = 0.5;
+        scene.objects[0].material.transmission_color = [0.12, 0.82, 0.25];
+        let absorbed = cache.get(&scene, 17, 17).unwrap();
+        assert!(!Arc::ptr_eq(&glass, &absorbed));
+        let p = scene.objects[0].pack(17, 17);
+        assert_eq!(p[P_TRANSMISSION], 1.0);
+        assert_eq!(p[P_TRANSMISSION_DEPTH], 0.5);
+        assert_eq!(
+            &p[P_TRANSMISSION_COLOR..P_TRANSMISSION_COLOR + 3],
+            &[0.12, 0.82, 0.25]
+        );
+        assert_eq!(cache.builds, 3);
+    }
+
+    #[test]
+    fn cuda_glass_exits_signed_and_unsigned_solids_and_absorbs_green_by_depth() {
+        let mut gpu = Gpu::new().unwrap();
+        for family in [FAMILY_KIFS, FAMILY_BULB] {
+            let mut object = Scene::preset(family);
+            if family == FAMILY_KIFS {
+                object.formula = crate::scene::Formula::Kifs(crate::scene::Kifs::preset(
+                    crate::scene::KifsKind::Menger,
+                ));
+                object.render.iterations = 0;
+            }
+            object.material = crate::scene::Material {
+                // Prove the dispatch also promotes manually edited Fast materials.
+                model: MaterialModel::Fast,
+                color_source: crate::scene::ColorSource::Material,
+                transmission: 1.0,
+                specular_ior: 1.0,
+                specular_roughness: 0.0,
+                ..Default::default()
+            };
+            object.camera.pitch_degrees = 0.0;
+            object.camera.yaw_degrees = 0.0;
+            object.camera.target = [0.0; 3];
+            object.camera.distance = 4.0;
+            object.colour.on = false;
+            object.render.denoise.enabled = false;
+            object.render.max_bounces = 8;
+            object.render.max_steps = 512;
+            object.lighting.sun_intensity = 0.0;
+            object.lighting.sky_intensity = 1.0;
+            object.lighting.sky_horizon = [1.0; 3];
+            object.lighting.sky_zenith = [1.0; 3];
+            for world in [false, true] {
+                let mut scene = object.clone();
+                if world {
+                    scene.world_render = true;
+                    let mut child = object.clone();
+                    child.object_world = Some(glam::Mat4::IDENTITY.to_cols_array_2d());
+                    scene.objects = vec![child];
+                }
+                let mut target = gpu.target(17, 17);
+                gpu.step(&mut target, &scene, 16, 19, None, false);
+                let raw = gpu.raw_scene_linear(&target);
+                let center = 8 * 17 + 8;
+                assert!(
+                    raw[center][..3].iter().all(|v| (*v - 1.0).abs() < 0.03),
+                    "clear family={family} world={world}: {:?}",
+                    raw[center]
+                );
+                assert!(
+                    gpu.guide_sums(&target, &target.normal)[center][..3]
+                        .iter()
+                        .any(|v| v.abs() > 0.1),
+                    "fixture must actually intersect the solid"
+                );
+                if family == FAMILY_KIFS {
+                    let material = if world {
+                        &mut scene.objects[0].material
+                    } else {
+                        &mut scene.material
+                    };
+                    material.transmission_color = [0.12, 0.82, 0.25];
+                    material.transmission_depth = 2.0;
+                    gpu.step(&mut target, &scene, 256, 19, None, false);
+                    let green = gpu.raw_scene_linear(&target)[center];
+                    assert!(
+                        green[1] > green[0] * 5.0 && green[1] > green[2] * 2.0,
+                        "{green:?}"
+                    );
+                    for (value, expected) in green[..3].iter().zip([0.12, 0.82, 0.25]) {
+                        assert!(
+                            (*value - expected).abs() < expected * 0.15 + 0.01,
+                            "depth family={family} world={world}: {green:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     #[test]
     fn prepared_world_material_tracks_packed_objects_and_model_edits() {

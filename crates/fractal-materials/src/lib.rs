@@ -38,6 +38,8 @@ pub struct MaterialPreset {
     pub opacity: f32,
     /// Index of refraction (1.5 default dielectric; ~1.45 for frosted glass).
     pub ior: f32,
+    /// Reference depth for Beer-Lambert absorption in host world units; zero = interface tint.
+    pub transmission_depth: f32,
     /// Emissive radiance (ACEScg energy units; `[0, 0, 0]` for non-emissive).
     pub emissive: [f32; 3],
     /// OPTIONAL Charlie **sheen** (velvet): `(color_rec709, roughness)`. When
@@ -84,6 +86,7 @@ impl MaterialPreset {
             metallic,
             opacity,
             ior,
+            transmission_depth: 0.0,
             emissive,
             sheen: None,
             anisotropy: None,
@@ -414,6 +417,7 @@ pub const PRESETS: &[MaterialPreset] = &[
         metallic: 1.0,
         opacity: 1.0,
         ior: 1.5,
+        transmission_depth: 0.0,
         emissive: [0.0, 0.0, 0.0],
         sheen: None,
         anisotropy: Some((0.6, [1.0, 0.0, 0.0])),
@@ -427,6 +431,7 @@ pub const PRESETS: &[MaterialPreset] = &[
         metallic: 1.0,
         opacity: 1.0,
         ior: 1.5,
+        transmission_depth: 0.0,
         emissive: [0.0, 0.0, 0.0],
         sheen: None,
         anisotropy: Some((0.6, [1.0, 0.0, 0.0])),
@@ -536,6 +541,7 @@ pub const PRESETS: &[MaterialPreset] = &[
         metallic: 0.0,
         opacity: 1.0,
         ior: 1.5,
+        transmission_depth: 0.0,
         emissive: [0.0, 0.0, 0.0],
         sheen: Some(([0.85, 0.20, 0.30], 0.3)),
         anisotropy: None,
@@ -549,6 +555,7 @@ pub const PRESETS: &[MaterialPreset] = &[
         metallic: 0.0,
         opacity: 1.0,
         ior: 1.5,
+        transmission_depth: 0.0,
         emissive: [0.0, 0.0, 0.0],
         sheen: Some(([0.30, 0.40, 0.90], 0.3)),
         anisotropy: None,
@@ -562,6 +569,7 @@ pub const PRESETS: &[MaterialPreset] = &[
         metallic: 0.0,
         opacity: 1.0,
         ior: 1.5,
+        transmission_depth: 0.0,
         emissive: [0.0, 0.0, 0.0],
         sheen: Some(([0.50, 0.48, 0.42], 0.5)),
         anisotropy: None,
@@ -575,6 +583,7 @@ pub const PRESETS: &[MaterialPreset] = &[
         metallic: 0.0,
         opacity: 1.0,
         ior: 1.5,
+        transmission_depth: 0.0,
         emissive: [0.0, 0.0, 0.0],
         sheen: Some(([0.35, 0.36, 0.40], 0.6)),
         anisotropy: None,
@@ -655,6 +664,7 @@ pub const PRESETS: &[MaterialPreset] = &[
         metallic: 0.0,
         opacity: 1.0,
         ior: 1.5,
+        transmission_depth: 0.0,
         emissive: [0.0, 0.0, 0.0],
         sheen: None,
         anisotropy: None,
@@ -669,6 +679,7 @@ pub const PRESETS: &[MaterialPreset] = &[
         metallic: 0.0,
         opacity: 1.0,
         ior: 1.5,
+        transmission_depth: 0.0,
         emissive: [0.0, 0.0, 0.0],
         sheen: None,
         anisotropy: None,
@@ -691,6 +702,15 @@ pub const PRESETS: &[MaterialPreset] = &[
     MaterialPreset::metal("MetalTungsten", [0.47, 0.46, 0.43], 0.22),
     MaterialPreset::metal("MetalPalladium", [0.78, 0.77, 0.74], 0.16),
     MaterialPreset::metal("MetalMagnesium", [0.84, 0.85, 0.83], 0.34),
+    // Absorption looks: colour is transmittance after transmission_depth world units.
+    MaterialPreset {
+        transmission_depth: 0.5,
+        ..MaterialPreset::plain("GlassBottleGreen", "Glass", [0.12, 0.82, 0.25], 0.03, 0.0, 0.0, 1.52, [0.0; 3])
+    },
+    MaterialPreset {
+        transmission_depth: 2.0,
+        ..MaterialPreset::plain("GlassWaterGreen", "Glass", [0.70, 0.94, 0.78], 0.01, 0.0, 0.0, 1.333, [0.0; 3])
+    },
 ];
 
 /// Category order of the library tab (usd-mat-lib's grouping).
@@ -706,7 +726,7 @@ impl MaterialPreset {
 
     /// Whether the preset needs the Standard Surface kernels (sheen / anisotropy lobes).
     pub fn needs_standard_surface(&self) -> bool {
-        self.sheen.is_some() || self.anisotropy.is_some()
+        self.opacity < 1.0 || self.sheen.is_some() || self.anisotropy.is_some()
     }
 
     /// UsdPreviewSurface -> Standard Surface (usd-hd-pt material.rs): diffuseColor -> base_color
@@ -714,9 +734,9 @@ impl MaterialPreset {
     /// emissiveColor -> emission_color (weight 1 when non-zero). The fractal colour source
     /// switches to the material colour.
     ///
-    /// Legacy glass approximation: this host currently maps opacity to a coated
-    /// dielectric and does not upload transmission. This is an integration limitation,
-    /// not a claim that distance-estimated surfaces cannot support refraction.
+    /// Hosts map opacity to dielectric transmission. Absorption-capable hosts use
+    /// diffuse as transmittance at transmission_depth when the depth is positive;
+    /// otherwise diffuse is the interface tint.
     pub fn apply<T: MaterialTarget>(&self, material: &mut T) {
         material.apply_material_preset(self);
     }
@@ -728,7 +748,7 @@ mod tests {
 
     #[test]
     fn catalog_is_complete_and_ids_are_unique() {
-        assert_eq!(PRESETS.len(), 67);
+        assert_eq!(PRESETS.len(), 69);
         assert_eq!(CATEGORIES.len(), 12);
         assert_eq!(
             &PRESETS[..5]
@@ -747,7 +767,7 @@ mod tests {
         }
         assert_eq!(
             PRESETS.last().map(MaterialPreset::name),
-            Some("MetalMagnesium")
+            Some("GlassWaterGreen")
         );
     }
 

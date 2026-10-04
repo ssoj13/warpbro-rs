@@ -1,6 +1,140 @@
 use super::*;
 
 #[test]
+fn glass_node_transmission_is_keyable_shared_and_roundtrips() {
+    let mut e = editor();
+    let first = find(&e, WorldKind::Fractal);
+    e.execute(WorldCommand::Duplicate(first)).unwrap();
+    let second = e.selection.unwrap();
+    let material = find(&e, WorldKind::Material);
+    e.execute(WorldCommand::AssignMaterial {
+        id: second,
+        material: Some(material),
+    })
+    .unwrap();
+    set(&mut e, material, "/material/transmission", json!(1.0), 0.0);
+    set(
+        &mut e,
+        material,
+        "/material/transmission_color",
+        json!([0.12, 0.82, 0.25]),
+        0.0,
+    );
+    e.document
+        .set_attribute(
+            material,
+            "/material/transmission_depth",
+            json!(0.5),
+            0.0,
+            true,
+            CurveKind::Linear,
+        )
+        .unwrap();
+    e.document
+        .set_attribute(
+            material,
+            "/material/transmission_depth",
+            json!(1.5),
+            20.0,
+            true,
+            CurveKind::Linear,
+        )
+        .unwrap();
+    let attrs = e.document.attributes(material, 10.0).unwrap();
+    let depth = attrs
+        .iter()
+        .find(|a| a.path == "/material/transmission_depth")
+        .unwrap();
+    assert!(depth.keyable);
+    assert_eq!(depth.frames, vec![0.0, 20.0]);
+    let scene = e.document.snapshot(10.0).unwrap();
+    assert_eq!(scene.objects.len(), 2);
+    for object in &scene.objects {
+        assert_eq!(object.material.transmission, 1.0);
+        assert!((object.material.transmission_depth - 1.0).abs() < 1e-6);
+        assert_eq!(object.material.transmission_color, [0.12, 0.82, 0.25]);
+    }
+    let loaded: WorldDocument =
+        serde_json::from_str(&serde_json::to_string(&e.document).unwrap()).unwrap();
+    assert_eq!(
+        loaded.material(material, 10.0).unwrap(),
+        scene.objects[0].material
+    );
+}
+
+#[test]
+fn old_material_schema_gains_glass_controls_without_losing_existing_keys() {
+    fn strip_transmission(value: &mut Value) {
+        match value {
+            Value::Object(map) => {
+                map.retain(|key, _| {
+                    !key.starts_with("/material/transmission") && !key.starts_with("transmission")
+                });
+                for value in map.values_mut() {
+                    strip_transmission(value);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    strip_transmission(value);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut e = editor();
+    let id = find(&e, WorldKind::Material);
+    e.document
+        .set_attribute(
+            id,
+            "/material/specular_roughness",
+            json!(0.2),
+            0.0,
+            true,
+            CurveKind::Linear,
+        )
+        .unwrap();
+    e.document
+        .set_attribute(
+            id,
+            "/material/specular_roughness",
+            json!(0.8),
+            20.0,
+            true,
+            CurveKind::Linear,
+        )
+        .unwrap();
+    let expected = e.document.material(id, 10.0).unwrap();
+    let mut old = serde_json::to_value(&e.document).unwrap();
+    strip_transmission(&mut old);
+    let old: WorldDocument = serde_json::from_value(old).unwrap();
+    assert!(
+        old.attrs(id)
+            .unwrap()
+            .get("/material/transmission")
+            .is_none()
+    );
+    let upgraded = WorldEditor::new(old);
+    assert_eq!(upgraded.document.material(id, 10.0).unwrap(), expected);
+    let attrs = upgraded.document.attributes(id, 10.0).unwrap();
+    assert!(
+        attrs
+            .iter()
+            .any(|a| a.path == "/material/transmission_depth")
+    );
+    assert_eq!(
+        attrs
+            .iter()
+            .find(|a| a.path == "/material/specular_roughness")
+            .unwrap()
+            .frames,
+        vec![0.0, 20.0]
+    );
+    let once = upgraded.document.clone();
+    assert_eq!(WorldEditor::new(once.clone()).document, once);
+}
+
+#[test]
 fn standalone_material_creation_selects_one_node_without_assigning_and_undo_restores_selection() {
     let mut e = editor();
     let fractal = find(&e, WorldKind::Fractal);

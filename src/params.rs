@@ -78,6 +78,9 @@ slots! {
     // Dedicated deterministic Direct shading; PT defaults remain zero.
     P_DIRECT = 1, P_DIRECT_GRID = 1, P_SHADOW_STRENGTH = 1, P_SHADOW_STEPS = 1,
     P_AO_STRENGTH = 1, P_AO_STEPS = 1, P_AO_RADIUS = 1, P_LIGHT_HALF_ANGLE = 1,
+    // Append-only extension: pre-existing OFX/global slot offsets stay unchanged.
+    P_TRANSMISSION = 1, P_TRANSMISSION_COLOR = 3,
+    P_TRANSMISSION_EXTRA_ROUGHNESS = 1, P_TRANSMISSION_DEPTH = 1,
 }
 
 /// Formula families (ofx-fractal Formula3d codes).
@@ -92,7 +95,7 @@ pub const FAMILY_HYBRID: u32 = 7;
 pub const FAMILY_WORLD: u32 = 8;
 
 /// Each object starts with the existing parameter layout, then a row-major inverse affine.
-pub const WORLD_ABI_VERSION: u32 = 1;
+pub const WORLD_ABI_VERSION: u32 = 2;
 pub const O_INVERSE: usize = P_COUNT;
 pub const O_DISTANCE_SCALE: usize = O_INVERSE + 12;
 pub const O_CLIP_RADIUS: usize = O_DISTANCE_SCALE + 1;

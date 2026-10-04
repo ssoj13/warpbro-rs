@@ -20,7 +20,9 @@ Assign a material through any of these paths:
 
 Only nodes that support material assignment are receivers; a placeholder metadata field does not make a camera or light a material consumer. Unsupported selection clears the remembered target.
 
-The separate **Material Library** window shows 67 presets across 12 categories from the shared `fractal-materials` catalog. Opening it does not create nodes. Clicking a preset creates and selects a workspace Material node without assigning it. **Apply preset to this material** updates an existing material UUID. **Refresh preview** retries a failed preview. Galleries adapt their column count to panel width.
+The separate **Material Library** window shows 69 presets across 12 categories from the shared `fractal-materials` catalog. Opening it does not create nodes. Clicking a preset creates and selects a workspace Material node without assigning it. **Apply preset to this material** updates an existing material UUID. **Refresh preview** retries a failed preview. Galleries adapt their column count to panel width.
+
+Transparent and absorbing materials use the same node editor and assignment commands. See [glass, refraction, and depth-dependent color](glass.md) for parameters and presets.
 
 ## Save scenes and templates
 

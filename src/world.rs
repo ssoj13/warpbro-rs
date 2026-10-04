@@ -187,7 +187,10 @@ pub struct WorldEditor {
     revision: u64,
 }
 impl WorldEditor {
-    pub fn new(document: WorldDocument) -> Self {
+    pub fn new(mut document: WorldDocument) -> Self {
+        if let Err(error) = document.upgrade_material_schema() {
+            log::warn!("Material schema upgrade: {error}");
+        }
         let selection = document
             .nodes()
             .iter()
@@ -985,6 +988,8 @@ fn attribute_range(path: &str) -> Option<(f64, f64)> {
     match path {
         "/camera/fov_y_degrees" => Some((1.0, 179.0)),
         "/render/denoise/interval" => Some((0.0, u32::MAX as f64)),
+        "/material/transmission" => Some((0.0, 1.0)),
+        "/material/transmission_depth" => Some((0.0, f32::MAX as f64)),
         p if p.ends_with("roughness") || p.ends_with("metallic") || p == "/material/opacity" => {
             Some((0.0, 1.0))
         }
@@ -1119,9 +1124,49 @@ fn set_pointer(root: &mut Value, path: &str, value: Value, create: bool) -> Resu
     put(root, &parts, value, create)
 }
 impl WorldDocument {
+    /// Add newly supported material fields once on load. Existing values, UUIDs,
+    /// animation channels and legacy authored looks remain intact; old glass presets
+    /// can be reapplied explicitly to opt into the corrected transmission model.
+    fn upgrade_material_schema(&mut self) -> Result<(), String> {
+        let defaults = [
+            ("/material/transmission", json!(0.0)),
+            ("/material/transmission_color", json!(([1.0; 3]))),
+            ("/material/transmission_extra_roughness", json!(0.0)),
+            ("/material/transmission_depth", json!(0.0)),
+        ];
+        let mut updates = Vec::new();
+        for node in self.nodes().into_iter().filter(|n| n.kind == WorldKind::Material) {
+            let mut attrs = self.attrs(node.id)?;
+            let mut gpu = self.node(node.id)?["gpu"].clone();
+            let mut changed = false;
+            for (path, default) in &defaults {
+                if attrs.get(path).is_none() {
+                    let value = gpu.pointer(path).cloned().unwrap_or_else(|| default.clone());
+                    attrs.set(*path, to_attr(&value));
+                    let key = path.trim_start_matches("/material/");
+                    gpu["material"][key] = value;
+                    changed = true;
+                }
+            }
+            if changed {
+                updates.push((node.id, serde_json::to_value(attrs).map_err(|e| e.to_string())?, gpu));
+            }
+        }
+        for (id, host, gpu) in updates {
+            let node = self.node_mut(id)?;
+            node["host"] = host;
+            node["gpu"] = gpu;
+        }
+        Ok(())
+    }
+
     pub fn from_scene(scene: &Scene) -> Self {
         if let Some(world) = &scene.document {
-            return (**world).clone();
+            let mut document = (**world).clone();
+            if let Err(error) = document.upgrade_material_schema() {
+                log::warn!("Material schema upgrade: {error}");
+            }
+            return document;
         }
         let mut document = Self {
             graph: SubnetFile {

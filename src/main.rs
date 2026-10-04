@@ -36,6 +36,7 @@ mod render_bench;
 mod render_service;
 mod scene;
 mod transfer;
+mod transmission;
 mod templates;
 mod ui_style;
 mod window;
@@ -194,6 +195,15 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
+        // Build-time warmup initializes the exact embedded module without opening
+        // a window or authoring scene state. The CUDA driver owns its JIT cache;
+        // this does not populate the Timeline frame cache or wait on the UI thread.
+        Some("--warmup-cuda") => {
+            let started = std::time::Instant::now();
+            let gpu = render::Gpu::new().map_err(anyhow::Error::msg)?;
+            println!("CUDA ready: {} ({:?})", gpu.name, started.elapsed());
+            Ok(())
+        }
         Some("--world-bench") => render_bench::run(&args),
         Some("--animated-fixtures") => animated_fixtures(
             args.get(2)

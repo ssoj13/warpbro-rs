@@ -24,6 +24,7 @@ pub mod kernels {
     use crate::path_sampling::{
         allows_surface_vertex, fast_ggx_pdf, fast_ggx_sample_local, fast_spec_probability,
     };
+    use crate::transmission::{AIR, exit_distance, medium_after_scatter, volume_transmittance};
     use standard_surface_bsdf::microfacet::mx_average_alpha;
     use standard_surface_bsdf::sample::pdf_with;
     use standard_surface_bsdf::sample::sample_with;
@@ -91,7 +92,8 @@ pub mod kernels {
         if ctx.world
             && ((i >= P_FAMILY && i < P_LIGHT_DIR)
                 || (i >= P_BASE && i < P_EXPOSURE)
-                || i == P_MATERIAL_MODEL)
+                || i == P_MATERIAL_MODEL
+                || (i >= P_TRANSMISSION && i < P_COUNT))
         {
             ctx.objects[ctx.object * OBJECT_STRIDE + i]
         } else {
@@ -986,6 +988,67 @@ pub mod kernels {
         miss
     }
 
+    /// Trace the exit of the occupied dielectric using its own field, not the union.
+    /// An unresolved exit is absorbed by the integrator instead of becoming a sky miss.
+    /// The transformed local sphere bounds the probe interval even with nonuniform TRS.
+    #[inline(always)]
+    fn march_exit<const F: u32>(ctx: Context<'_>, origin: V3, dir: V3, eps: f32) -> Hit {
+        let q = object_point(ctx, origin);
+        let v = sub(object_point(ctx, add(origin, dir)), q);
+        let radius = if ctx.world {
+            ctx.objects[ctx.object * OBJECT_STRIDE + O_CLIP_RADIUS]
+        } else {
+            pr(ctx, P_CLIP_RADIUS) / pr(ctx, P_OBJ_SCALE)
+        };
+        let a = dot(v, v);
+        let b = dot(q, v);
+        let disc = b * b - a * (dot(q, q) - radius * radius);
+        let bound = if disc > 0.0 && a > 0.0 {
+            ((-b + disc.sqrt()) / a).max(0.0) + 2.0 * eps
+        } else {
+            2.0 * eps
+        };
+        let extent = bound.min(pr(ctx, P_MAX_DISTANCE));
+        let distance = exit_distance(
+            |t| {
+                let point = add(origin, mul(dir, t));
+                if F == FAMILY_WORLD {
+                    world_estimate(ctx, point, 0).0
+                } else {
+                    signed_distance_and_trap::<F>(ctx, point, 0).0
+                }
+            },
+            extent,
+            eps,
+            pr(ctx, P_SECONDARY_STEPS) as u32,
+            pr(ctx, P_STEP_FACTOR),
+            family_signed::<F>(ctx),
+        );
+        let Some(t) = distance else {
+            return Hit {
+                hit: false,
+                point: origin,
+                trap: TRAP_START,
+                eps,
+                object: ctx.object,
+            };
+        };
+        let point = add(origin, mul(dir, t));
+        let trap_mode = pr(ctx, P_COLOR_MODE) as u32;
+        let trap = if F == FAMILY_WORLD {
+            world_estimate(ctx, point, trap_mode).1
+        } else {
+            signed_distance_and_trap::<F>(ctx, point, trap_mode).1
+        };
+        Hit {
+            hit: true,
+            point,
+            trap,
+            eps,
+            object: ctx.object,
+        }
+    }
+
     // =========================================================================
     // normals: tetrahedral stencil (4 estimates instead of 6), with the exterior
     // step halving of fractal3d.wgsl stencil_normal
@@ -1505,7 +1568,7 @@ pub mod kernels {
     }
 
     /// The full model's inputs (fractal3d.wgsl surface_inputs): palette * base_tint as base colour;
-    /// transmission and subsurface off.
+    /// Transmission tint is applied at interfaces only when volume absorption is disabled.
     #[inline(always)]
     fn surface_inputs(
         ctx: Context<'_>,
@@ -1524,6 +1587,13 @@ pub mod kernels {
             specular_ior: pr(ctx, P_SPECULAR_IOR),
             specular_anisotropy: pr(ctx, P_SPECULAR_ANISOTROPY),
             specular_rotation: pr(ctx, P_SPECULAR_ROTATION),
+            transmission: pr(ctx, P_TRANSMISSION),
+            transmission_color: if pr(ctx, P_TRANSMISSION_DEPTH) > 0.0 {
+                [1.0; 3]
+            } else {
+                pv3(ctx, P_TRANSMISSION_COLOR)
+            },
+            transmission_extra_roughness: pr(ctx, P_TRANSMISSION_EXTRA_ROUGHNESS),
             sheen: pr(ctx, P_SHEEN),
             sheen_color: pv3(ctx, P_SHEEN_COLOR),
             sheen_roughness: pr(ctx, P_SHEEN_ROUGHNESS),
@@ -1765,6 +1835,10 @@ pub mod kernels {
         let mut primary_albedo = [0.0; 3];
         let mut primary_normal = [0.0; 3];
         let mut bounce = 0u32;
+        let mut medium = AIR;
+        let mut medium_eps = 0.0f32;
+        // The last exact interface point includes the numerical ray offset in absorption.
+        let mut interface_point = origin;
         loop {
             let base = if bounce == 0 {
                 0.0
@@ -1772,7 +1846,19 @@ pub mod kernels {
                 slope * length(sub(ro, cam))
             };
             let kind = if bounce == 0 { RAY_PRIMARY } else { RAY_BOUNCE };
-            let m = march::<F>(ctx, ro, rd, kind, base, slope);
+            let inside = medium != AIR;
+            let m = if inside {
+                let occupied = Context {
+                    object: medium as usize,
+                    ..ctx
+                };
+                march_exit::<F>(occupied, ro, rd, medium_eps)
+            } else {
+                march::<F>(ctx, ro, rd, kind, base, slope)
+            };
+            if inside && !m.hit {
+                break;
+            }
             if !m.hit {
                 let w = if mis_env {
                     power_heuristic(mis_bsdf_pdf, env_pdf(ctx, lut, rd))
@@ -1810,7 +1896,17 @@ pub mod kernels {
             } else {
                 mat3(ctx, P_OBJ_AXES, [0.0, 1.0, 0.0])
             };
-            let n = surface_normal::<F>(ctx, m.point, rd, m.eps);
+            if inside {
+                throughput = had(
+                    throughput,
+                    volume_transmittance(
+                        pv3(ctx, P_TRANSMISSION_COLOR),
+                        pr(ctx, P_TRANSMISSION_DEPTH),
+                        length(sub(m.point, interface_point)),
+                    ),
+                );
+            }
+            let n = surface_normal::<F>(ctx, m.point, if inside { neg(rd) } else { rd }, m.eps);
             let geo_n = if dot(n, rd) > 0.0 { neg(n) } else { n };
             let eps = 4.0 * m.eps;
             let wo = neg(rd);
@@ -1851,7 +1947,7 @@ pub mod kernels {
                 frame = ShadingFrame {
                     n: geo_n,
                     tangent: up,
-                    inside: false,
+                    inside,
                     curvature: 0.0,
                 };
                 fast = Fast {
@@ -1904,7 +2000,7 @@ pub mod kernels {
             let r1 = rand(r);
             let r2 = rand(r);
             let (ld, lpdf) = env_sample(ctx, lut, r1, r2);
-            if lpdf > 0.0 {
+            if lpdf > 0.0 && !inside && dot(ld, geo_n) > 0.0 {
                 let (f, bpdf) = if full {
                     let lobes = eval_light(&full_inputs, &frame, wo, ld);
                     let f = add(add(lobes.base, lobes.specular), lobes.transmission);
@@ -1946,7 +2042,15 @@ pub mod kernels {
             }
             throughput = had(throughput, weight);
             mis_bsdf_pdf = pdf;
-            mis_env = !delta;
+            let crossed = full && full_inputs.transmission > 0.0 && dot(wi, geo_n) < 0.0;
+            // NEE never connects through an interface, so a transmitted escape has no
+            // competing light-sampling strategy and must retain weight one.
+            mis_env = !delta && !crossed;
+            medium = medium_after_scatter(medium, m.object as u32, crossed);
+            if crossed && medium != AIR {
+                medium_eps = m.eps;
+            }
+            interface_point = m.point;
             ro = add(
                 m.point,
                 mul(geo_n, if dot(wi, geo_n) < 0.0 { -eps } else { eps }),

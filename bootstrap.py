@@ -6,8 +6,9 @@ Cross-platform-ish (Linux / WSL2), Python 3, stdlib only. Adapted from the gitne
 bootstrap.
 
 WarpBro builds through cuda-oxide: its GPU kernels (src/gpu.rs) are Rust compiled to PTX by the
-rustc_codegen_cuda backend, which `cargo oxide` enables. Plain `cargo build` cannot link them
-(build.rs stops it with an explanation). This script checks the toolchain first, then drives
+rustc_codegen_cuda backend, which `cargo oxide` enables. Builds warm the CUDA driver's JIT
+cache before reporting success, so the next workspace launch does not wait for a cold compile.
+Plain `cargo build` cannot link them (build.rs stops it with an explanation). This script checks the toolchain first, then drives
 `cargo oxide`.
 
 Toolchain (see README.md):
@@ -355,16 +356,25 @@ def build(args: argparse.Namespace) -> int:
     cmd = ["cargo", "oxide", "build"]
     if getattr(args, "arch", None):
         cmd += ["--arch", args.arch]
-    step("cargo oxide build (release; kernels -> PTX embedded in the binary)")
+    step("cargo oxide build (release; embedded PTX)")
     print()
     code, _, elapsed = run(cmd)
-    if code == 0 and RELEASE_BIN.is_file():
-        ok(f"Build successful ({fmt_time(elapsed)})")
-        step(f"Binary: {RELEASE_BIN}")
-    else:
+    if code != 0 or not RELEASE_BIN.is_file():
         err("Build failed")
+        return code or 1
+    if not getattr(args, "skip_cuda_warmup", False):
+        # Prime the driver's cache for this exact executable, on the same GPU the
+        # workspace uses. Fail here if its module/parameter ABI cannot initialize.
+        step("Preparing CUDA kernels for the next application launch ...")
+        code, _, warmup_ms = run([str(RELEASE_BIN), "--warmup-cuda"])
+        if code != 0:
+            err("CUDA warmup failed; see the module/parameter error above")
+            return code
+        step(f"CUDA warmup: {fmt_time(warmup_ms)}")
+    ok(f"Build successful ({fmt_time(elapsed)})")
+    step(f"Binary: {RELEASE_BIN}")
     print()
-    return code
+    return 0
 
 
 def run_build(args: argparse.Namespace) -> int:
@@ -578,6 +588,8 @@ def main() -> int:
     parser.add_argument("command", nargs="?", choices=COMMANDS, default="h", help=", ".join(COMMANDS))
     parser.add_argument("rest", nargs="*", help="positional arguments for g / bench")
     parser.add_argument("--arch", help="CUDA architecture, e.g. sm_86")
+    parser.add_argument("--skip-cuda-warmup", action="store_true",
+                        help="Build without initializing CUDA (for packaging/cross-builds)")
     parser.add_argument("--fix", action="store_true", help="doctor: install missing user-level tools")
     parser.add_argument("-f", "--force", dest="force_install", action="store_true", help="install: rebuild first")
 

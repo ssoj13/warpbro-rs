@@ -1,4 +1,6 @@
 /target/
+/.oxide-artifacts/
+__pycache__/
 **/*.bc
 .DS_Store
 **/*.cubin

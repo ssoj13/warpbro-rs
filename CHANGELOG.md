@@ -1,6 +1,28 @@
 # Changelog
 
-## Unreleased — 2026-10-03
+## Unreleased — 2026-10-04
+
+### Glass and absorption
+
+- Add keyable Material-node transmission, transmission color, extra roughness, and world-space absorption depth.
+- Correct glass preset translation, promote transmissive Fast materials to Full dispatch, and connect existing Standard Surface refraction with enter/exit tracking.
+- Add bounded interior exit search for signed and exterior-only fractal fields; unresolved exits terminate rather than leaking sky.
+- Apply Beer-Lambert absorption to traveled interior segments, including internal reflections, without double-tinting interfaces.
+- Add GlassBottleGreen and GlassWaterGreen; the catalog now has 69 presets in 12 categories.
+- Invalidate preparation, accumulation, and preview identities for every new material field.
+- Add missing controls to older node schemas while preserving existing authored values and keys. Reapply old glass presets explicitly to adopt corrected transmission.
+- Document single-medium and probe-resolution limits in [the glass guide](docs/glass.md).
+
+### Render startup
+
+- Warm the CUDA driver's JIT cache for the exact executable during bootstrap builds, before reporting success; add `--warmup-cuda` and a packaging opt-out.
+- Validate the constant-memory parameter block before reporting the CUDA worker ready. Initialization failures now fail the default bootstrap build.
+- Keep the tested PTX path: cubin materialization was rejected after a missing-parameter-symbol failure and an excessively slow compiler workaround.
+- Return parameter-upload failures as render-target errors instead of panicking the shared worker.
+
+The accepted production build and CUDA warmup passed. The following native launch loaded/validated kernels in 87.5814 ms; viewport, material preview, Gallery, and OIDN rendered. The baseline preset regression failed as expected. The release suite passed 211 tests with 8 ignored probes (62.07 s); the separate glass visual probe passed and its six images were inspected. The targeted CUDA glass regression covers signed/unsigned geometry, legacy/World dispatch, and green absorption.
+
+## 2026-10-03 workspace checkpoint
 
 ### Changed
 
@@ -22,4 +44,4 @@
 
 The production release build passed. The release test executable passed **199 tests, 0 failed, 7 ignored** on the final repeat (72.71 s). The first run had 198 passes and one 90-second export-cancellation timeout under load; its isolated repeat passed in 1.39 s. The seven ignored GPU tests were not rerun in this update. The rebuilt and retried 32×32 legacy headless checks completed successfully. Shared Timeline, attribute-grid, and layout/configuration tests passed after combining the toolkit branches. See [CUDA startup](docs/cuda-startup.md) for exact timings and load caveats. Earlier full-suite counts and native-check limits remain in the dated plans.
 
-Disk preview caching, Curve Editor integration, true refractive glass, and CUDA compiled-module caching remain open.
+Disk preview caching, Curve Editor integration, and CUDA compiled-module caching remain open. The subsequent glass update is described above.
