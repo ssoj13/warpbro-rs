@@ -75,6 +75,9 @@ slots! {
     // Optional OFX ABI: zeros retain WarpBro's full-frame guide sample counts.
     P_OFX = 1, P_TILE_X = 1, P_TILE_Y = 1, P_TILE_WIDTH = 1, P_TILE_HEIGHT = 1,
     P_OFX_NO_CLIP = 1, P_OFX_THIN_FILM_ENERGY = 1, P_OFX_SEED_HIGH = 1, P_OFX_SKY_ALPHA = 1,
+    // Dedicated deterministic Direct shading; PT defaults remain zero.
+    P_DIRECT = 1, P_DIRECT_GRID = 1, P_SHADOW_STRENGTH = 1, P_SHADOW_STEPS = 1,
+    P_AO_STRENGTH = 1, P_AO_STEPS = 1, P_AO_RADIUS = 1, P_LIGHT_HALF_ANGLE = 1,
 }
 
 /// Formula families (ofx-fractal Formula3d codes).
