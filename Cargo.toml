@@ -42,7 +42,9 @@ vfx-ocio = { git = "ssh://git@github.com/ssoj13/oiio-rs.git", branch = "main", f
 egui-display = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", rev = "afad4c31f5066f34eca69994248a33735874fb12" }
 egui-hdr-view = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", rev = "afad4c31f5066f34eca69994248a33735874fb12" }
 gpu-info = { package = "gpu-info-rs", git = "ssh://git@github.com/ssoj13/gpu-info-rs.git", branch = "main", default-features = false, features = ["wgpu"] }
-exr = "1.74"
+# OpenEXR = our own 1:1 port (exr-rs), never crates.io `exr`; same source as vfx-io so it unifies.
+exr-core = { git = "ssh://git@github.com/ssoj13/exr-rs.git", branch = "main" }
+imath-rs = { git = "ssh://git@github.com/ssoj13/exr-rs.git", branch = "main" }
 egui-encode-dialog = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", rev = "afad4c31f5066f34eca69994248a33735874fb12" }
 egui-layout-manager = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", rev = "afad4c31f5066f34eca69994248a33735874fb12" }
 av-codec = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main", default-features = false, features = ["enc-hevc", "hwaccel-vulkan"] }
@@ -81,7 +83,8 @@ egui-widgets-config = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git",
 egui-track-timeline = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", rev = "afad4c31f5066f34eca69994248a33735874fb12" }
 curves = { git = "ssh://git@github.com/ssoj13/curves-rs.git", branch = "main", features = ["serde"] }
 box-rs = { git = "ssh://git@github.com/ssoj13/box-rs.git", branch = "main" }
-image = { version = "0.25", default-features = false, features = ["hdr", "exr"] }
+# Radiance .hdr only: EXR environments are read by `exr_io` (exr-core); the `exr` feature would pull crates.io exrs.
+image = { version = "0.25", default-features = false, features = ["hdr"] }
 
 [dev-dependencies]
 av-format-mov = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }

@@ -157,25 +157,7 @@ impl Frame {
         if let Some(e) = &self.colour_error {
             return Err(format!("Colour transform failed: {e}"));
         }
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        }
-        use exr::prelude::*;
-        let mut image = Image::from_channels(
-            (self.width, self.height),
-            SpecificChannels::rgb(|pos: Vec2<usize>| {
-                let p = self.light[pos.y() * self.width + pos.x()];
-                (p[0], p[1], p[2])
-            }),
-        );
-        image.attributes.chromaticities = Some(attribute::Chromaticities {
-            red: Vec2(0.64, 0.33),
-            green: Vec2(0.30, 0.60),
-            blue: Vec2(0.15, 0.06),
-            white: Vec2(0.3127, 0.3290),
-        });
-        image.layer_data.attributes.white_luminance = Some(100.0);
-        image.write().to_file(path).map_err(|e| e.to_string())
+        crate::exr_io::write_rgb(path, self.width, self.height, &self.light, Some(100.0), true)
     }
 }
 

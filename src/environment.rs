@@ -41,6 +41,10 @@ impl Map {
         if !extension.eq_ignore_ascii_case("hdr") && !extension.eq_ignore_ascii_case("exr") {
             return Err("Environment must be a lat-long .hdr or .exr image".into());
         }
+        if extension.eq_ignore_ascii_case("exr") {
+            let (w, h, pixels) = crate::exr_io::read_rgb(path)?;
+            return Self::from_pixels(w, h, pixels);
+        }
         let reader = image::ImageReader::open(path)
             .map_err(|e| format!("Environment {}: {e}", path.display()))?
             .with_guessed_format()
@@ -114,7 +118,7 @@ mod tests {
         image::codecs::hdr::HdrEncoder::new(std::fs::File::create(&hdr).unwrap())
             .encode(&pixels, 4, 2)
             .unwrap();
-        exr::prelude::write_rgb_file(&exr, 4, 2, |_, _| (4.0f32, 2.0f32, 1.0f32)).unwrap();
+        crate::exr_io::write_rgb(&exr, 4, 2, &[[4.0, 2.0, 1.0, 1.0]; 8], None, true).unwrap();
         for path in [&hdr, &exr] {
             let map = Map::load(path).unwrap();
             assert_eq!((map.width, map.height), (4, 2));

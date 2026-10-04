@@ -1233,25 +1233,7 @@ impl Target {
         if let Some(e) = &self.colour_error {
             return Err(format!("Colour transform failed: {e}"));
         }
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-        }
-        use exr::prelude::*;
-        let mut image = Image::from_channels(
-            (self.width, self.height),
-            SpecificChannels::rgb(|pos: Vec2<usize>| {
-                let p = self.light[pos.y() * self.width + pos.x()];
-                (p[0], p[1], p[2])
-            }),
-        );
-        image.attributes.chromaticities = Some(attribute::Chromaticities {
-            red: Vec2(0.64, 0.33),
-            green: Vec2(0.30, 0.60),
-            blue: Vec2(0.15, 0.06),
-            white: Vec2(0.3127, 0.3290),
-        });
-        image.layer_data.attributes.white_luminance = Some(100.0);
-        image.write().to_file(path).map_err(|e| e.to_string())
+        crate::exr_io::write_rgb(path, self.width, self.height, &self.light, Some(100.0), true)
     }
 }
 
@@ -2385,10 +2367,10 @@ mod tests {
     #[test]
     fn hdr_background_interpolates_texels_instead_of_showing_nearest_blocks() {
         let path = std::env::temp_dir().join(format!("frac-env-filter-{}.exr", std::process::id()));
-        exr::prelude::write_rgb_file(&path, 2, 2, |x, y| {
-            (8.0f32 * x as f32, 4.0f32 * y as f32, 2.0f32)
-        })
-        .unwrap();
+        let texels: Vec<[f32; 4]> = (0..4)
+            .map(|i| [8.0 * (i % 2) as f32, 4.0 * (i / 2) as f32, 2.0, 1.0])
+            .collect();
+        crate::exr_io::write_rgb(&path, 2, 2, &texels, None, true).unwrap();
         let mut gpu = Gpu::new().unwrap();
         let mut target = gpu.target(64, 32);
         let mut scene = Scene::preset(FAMILY_QUAT);
@@ -2416,7 +2398,7 @@ mod tests {
     #[test]
     fn hdr_environment_lights_surfaces_and_preserves_background_radiance() {
         let path = std::env::temp_dir().join(format!("frac-env-gpu-{}.exr", std::process::id()));
-        exr::prelude::write_rgb_file(&path, 8, 4, |_, _| (4.0f32, 2.0f32, 1.0f32)).unwrap();
+        crate::exr_io::write_rgb(&path, 8, 4, &[[4.0, 2.0, 1.0, 1.0]; 32], None, true).unwrap();
         let mut gpu = Gpu::new().unwrap();
         let mut target = gpu.target(16, 8);
         let mut scene = Scene::preset(FAMILY_QUAT);
@@ -2526,9 +2508,11 @@ mod tests {
         assert_eq!(reader.info().width, 17);
         let exr_path = dir.join("display.exr");
         target.save_display_exr(&exr_path).unwrap();
-        let image = exr::prelude::read_all_flat_layers_from_file(&exr_path).unwrap();
-        assert!(image.attributes.chromaticities.is_some());
-        assert_eq!(image.layer_data[0].attributes.white_luminance, Some(100.0));
+        assert_eq!(
+            crate::exr_io::read_attr::<exr_core::attr::Chromaticities>(&exr_path, "chromaticities"),
+            Some(exr_core::attr::Chromaticities::default())
+        );
+        assert_eq!(crate::exr_io::read_attr::<f32>(&exr_path, "whiteLuminance"), Some(100.0));
         scene.colour.view = "missing view".into();
         gpu.step(&mut target, &scene, 0, 0, None, false);
         assert!(target.colour_error.is_some());

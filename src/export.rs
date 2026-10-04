@@ -713,31 +713,10 @@ impl Drop for ExportWriter {
 }
 
 fn write_exr(path: &Path, frame: &Frame, overwrite: bool) -> Result<(), String> {
-    use exr::prelude::*;
     if frame.radiance.len() != frame.width * frame.height {
         return Err("Scene-linear radiance is missing".into());
     }
-    let mut out =
-        av_util_core::outfile::AtomicOut::create(path, overwrite).map_err(|e| e.to_string())?;
-    let file = out.take_file().map_err(|e| e.to_string())?;
-    let mut image = Image::from_channels(
-        (frame.width, frame.height),
-        SpecificChannels::rgb(|position: Vec2<usize>| {
-            let p = frame.radiance[position.y() * frame.width + position.x()];
-            (p[0], p[1], p[2])
-        }),
-    );
-    image.attributes.chromaticities = Some(attribute::Chromaticities {
-        red: Vec2(0.64, 0.33),
-        green: Vec2(0.30, 0.60),
-        blue: Vec2(0.15, 0.06),
-        white: Vec2(0.3127, 0.3290),
-    });
-    image
-        .write()
-        .to_buffered(std::io::BufWriter::new(file))
-        .map_err(|e| e.to_string())?;
-    out.commit().map_err(|e| e.to_string())
+    crate::exr_io::write_rgb(path, frame.width, frame.height, &frame.radiance, None, overwrite)
 }
 
 struct HevcSink {
@@ -1158,21 +1137,8 @@ mod tests {
             writer.events.recv_timeout(Duration::from_secs(30)).unwrap(),
             WriteEvent::Finished
         ));
-        use exr::prelude::*;
-        let image = read_first_rgba_layer_from_file(
-            settings.frame_path(7),
-            |resolution, _| {
-                vec![vec![(0f32, 0f32, 0f32, 0f32); resolution.width()]; resolution.height()]
-            },
-            |pixels, position, rgba: (f32, f32, f32, f32)| {
-                pixels[position.y()][position.x()] = rgba
-            },
-        )
-        .unwrap();
-        let pixel = image.layer_data.channel_data.pixels[0][0];
-        assert_eq!(pixel.0, 2.);
-        assert_eq!(pixel.1, 0.5);
-        assert_eq!(pixel.2, 0.125);
+        let (_, _, pixels) = crate::exr_io::read_rgb(&settings.frame_path(7)).unwrap();
+        assert_eq!(pixels[0], [2., 0.5, 0.125]);
         assert!(settings.frame_path(8).exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1462,27 +1428,10 @@ mod tests {
         assert_eq!(controller.status, "Export complete");
         assert!(controller.settings.frame_path(3).exists());
         assert!(controller.settings.frame_path(4).exists());
-        let pixel = |number| {
-            exr::prelude::read_first_rgba_layer_from_file(
-                controller.settings.frame_path(number),
-                |resolution, _| {
-                    vec![
-                        vec![(0.0f32, 0.0f32, 0.0f32, 0.0f32); resolution.width()];
-                        resolution.height()
-                    ]
-                },
-                |pixels, position, rgba: (f32, f32, f32, f32)| {
-                    pixels[position.y()][position.x()] = rgba
-                },
-            )
-            .unwrap()
-            .layer_data
-            .channel_data
-            .pixels[0][0]
-        };
-        assert_eq!(pixel(3).0, 0.0);
+        let pixel = |number| crate::exr_io::read_rgb(&controller.settings.frame_path(number)).unwrap().2[0];
+        assert_eq!(pixel(3)[0], 0.0);
         assert!(
-            pixel(4).0 > 0.0,
+            pixel(4)[0] > 0.0,
             "Each exported frame must evaluate its animation"
         );
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
