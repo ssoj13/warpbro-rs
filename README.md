@@ -317,6 +317,8 @@ QP/preset tradeoff and verified zero-origin rational video timing on determinist
 
 ## Performance
 
+Current production-world CUDA profiling and convergence work is tracked in [Plan 7](plans/plan7.md). The new `--world-bench DIR W H SPP --case fast-metal --seed 0 --batch 4` route retains raw linear RGB f32, PNG and frozen-scene JSON. Other cases are `fast-dielectric`, `chrome-mid`, `diffuse-mid` and `opal-mid`. `tools/convergence.py` compares multiple independent seeds against a common high-SPP reference and reports error and elapsed time. The validated base passed 193 CPU/CUDA tests. On five-seed 256×256/32-SPP paired runs, Fast metal/dielectric throughput improved about 1.61×; Full cases were 1–6% slower after the corrected final environment ray. At 128×128, metal error fell about 11.6% at fixed SPP; MSE×time estimates improved 1.63× for metal and 1.52× for dielectric. These are workload-specific measurements, not a universal convergence guarantee. A Full shading helper experiment was rejected because its paired speed changes were inconclusive; Plan 7 records the accepted base, experiment and exact limits.
+
 These numbers are from an RTX 3080 Ti, 1280×720, 6 bounces, at the preset views (`--bench`;
 the full table is in [docs/bench-1280x720.txt](docs/bench-1280x720.txt)):
 

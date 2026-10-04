@@ -149,16 +149,52 @@ impl PreparationInputs {
                 .all(|(input, object)| input.matches(object, false))
     }
 }
+/// Material specialization belongs to the evaluated world, not the root scene's legacy
+/// material. Cache it with the packed upload so launches do not rescan authoring nodes.
+/// Only homogeneous Fast worlds use specialized kernels; Full and mixed worlds retain
+/// the universal dispatcher because material specialization did not establish a speed gain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorldMaterial {
+    Fast,
+    Full,
+    Mixed,
+}
+impl WorldMaterial {
+    fn from_upload(upload: &WorldUpload) -> Self {
+        let mut objects = upload.objects.chunks_exact(OBJECT_STRIDE);
+        let Some(first) = objects.next() else {
+            return Self::Mixed;
+        };
+        let full = first[P_MATERIAL_MODEL] != 0.0;
+        if objects.any(|object| (object[P_MATERIAL_MODEL] != 0.0) != full) {
+            Self::Mixed
+        } else if full {
+            Self::Full
+        } else {
+            Self::Fast
+        }
+    }
+}
 struct PreparedScene {
     upload: WorldUpload,
+    world_material: WorldMaterial,
+    /// Inline the known DE only for one actual Fast Mandelbulb object.
+    single_fast_bulb: bool,
     trace: Vec<f32>,
     palettes: Vec<PaletteScheme>,
     environment: Option<(String, u64)>,
 }
 impl PreparedScene {
     fn new(scene: &Scene, width: u32, height: u32) -> Result<Self, String> {
+        let upload = WorldUpload::new(scene, width, height)?;
+        let world_material = WorldMaterial::from_upload(&upload);
+        let single_fast_bulb = world_material == WorldMaterial::Fast
+            && upload.objects.len() == OBJECT_STRIDE
+            && upload.objects[P_FAMILY] as u32 == FAMILY_BULB;
         Ok(Self {
-            upload: WorldUpload::new(scene, width, height)?,
+            upload,
+            world_material,
+            single_fast_bulb,
             trace: scene_trace_data(scene),
             palettes: std::iter::once(scene.palette)
                 .chain(
@@ -368,6 +404,9 @@ pub struct Gpu {
     colour: crate::color::ColorPipeline,
     colour_revision: u64,
     denoiser: Option<Result<crate::denoise::Processor, String>>,
+    /// Regression oracle only: exercise the unchanged runtime material dispatcher.
+    #[cfg(test)]
+    force_mixed_world: bool,
 }
 
 /// A progressive render of one scene at one size.
@@ -429,6 +468,8 @@ impl Gpu {
             colour: crate::color::ColorPipeline::new(),
             colour_revision: 0,
             denoiser: None,
+            #[cfg(test)]
+            force_mixed_world: false,
         })
     }
 
@@ -732,7 +773,21 @@ impl Gpu {
                 }};
             }
             if scene.world_render {
-                launch!(prepare_world, world);
+                #[cfg(test)]
+                let world_material = if self.force_mixed_world {
+                    WorldMaterial::Mixed
+                } else {
+                    prepared.world_material
+                };
+                #[cfg(not(test))]
+                let world_material = prepared.world_material;
+                match world_material {
+                    WorldMaterial::Fast if prepared.single_fast_bulb => {
+                        launch!(prepare_world_fast_bulb, world_fast_bulb)
+                    }
+                    WorldMaterial::Fast => launch!(prepare_world_fast, world_fast),
+                    WorldMaterial::Full | WorldMaterial::Mixed => launch!(prepare_world, world),
+                }
             } else {
                 match (full, scene.formula.code()) {
                     (false, FAMILY_BULB) => launch!(prepare_fast_bulb, fast_bulb),
@@ -1184,6 +1239,217 @@ fn pq16(nits: f32) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_world_material_tracks_packed_objects_and_model_edits() {
+        let mut cache = PreparationCache::default();
+        let mut scene = dark_world();
+        scene.material.model = MaterialModel::StandardSurface;
+        scene.objects = vec![
+            world_object(
+                FAMILY_BULB,
+                [-0.6, 0.0, 0.0],
+                [0.6, 0.8, 0.5],
+                [0.8, 0.2, 0.1],
+            ),
+            world_object(
+                FAMILY_QUAT,
+                [0.6, 0.0, 0.0],
+                [0.5, 0.65, 0.4],
+                [0.1, 0.2, 0.8],
+            ),
+        ];
+        for object in &mut scene.objects {
+            object.material.model = MaterialModel::Fast;
+        }
+        let fast = cache.get(&scene, 32, 24).unwrap();
+        assert_eq!(fast.world_material, WorldMaterial::Fast);
+        assert!(Arc::ptr_eq(&fast, &cache.get(&scene, 32, 24).unwrap()));
+        scene.objects[1].material.model = MaterialModel::StandardSurface;
+        let mixed = cache.get(&scene, 32, 24).unwrap();
+        assert_eq!(mixed.world_material, WorldMaterial::Mixed);
+        assert!(!Arc::ptr_eq(&fast, &mixed));
+        scene.objects[0].material.model = MaterialModel::StandardSurface;
+        assert_eq!(
+            cache.get(&scene, 32, 24).unwrap().world_material,
+            WorldMaterial::Full
+        );
+        scene.objects.clear();
+        assert_eq!(
+            cache.get(&scene, 32, 24).unwrap().world_material,
+            WorldMaterial::Mixed
+        );
+        assert_eq!(cache.builds, 4);
+        scene.objects.push(world_object(
+            FAMILY_BULB,
+            [0.0; 3],
+            [1.0; 3],
+            [0.8, 0.2, 0.1],
+        ));
+        scene.objects[0].material.model = MaterialModel::StandardSurface;
+        assert!(!cache.get(&scene, 32, 24).unwrap().single_fast_bulb);
+        scene.objects[0].material.model = MaterialModel::Fast;
+        let single = cache.get(&scene, 32, 24).unwrap();
+        assert!(single.single_fast_bulb);
+        assert!(Arc::ptr_eq(&single, &cache.get(&scene, 32, 24).unwrap()));
+        scene.objects[0].formula = crate::scene::Formula::preset(FAMILY_QUAT);
+        assert!(!cache.get(&scene, 32, 24).unwrap().single_fast_bulb);
+        scene.objects.push(world_object(
+            FAMILY_BULB,
+            [1.0, 0.0, 0.0],
+            [1.0; 3],
+            [0.1, 0.2, 0.8],
+        ));
+        assert!(!cache.get(&scene, 32, 24).unwrap().single_fast_bulb);
+    }
+
+    /// A compiler-specialized material path must preserve the complete world estimator,
+    /// transformed normals, direct/secondary lighting and progressive guide accumulation.
+    /// Inlining the single-bulb estimator can reorder f32 transcendental arithmetic;
+    /// that route has a tight numerical contract, while the other routes remain exact.
+    #[test]
+    #[ignore = "requires CUDA; compares specialized kernels against the mixed-world oracle"]
+    fn cuda_specialized_world_materials_preserve_radiance_and_affine_guides() {
+        fn compare_pixels(
+            actual: &[[f32; 4]],
+            expected: &[[f32; 4]],
+            approximate: bool,
+            label: &str,
+        ) {
+            assert_eq!(actual.len(), expected.len());
+            let mut max_absolute = 0.0f32;
+            let mut max_relative = 0.0f32;
+            let mut passed = true;
+            for (a, b) in actual.iter().zip(expected) {
+                for channel in 0..4 {
+                    let difference = (a[channel] - b[channel]).abs();
+                    max_absolute = max_absolute.max(difference);
+                    max_relative = max_relative.max(difference / b[channel].abs().max(1e-12));
+                    passed &= if approximate {
+                        a[channel].is_finite()
+                            && b[channel].is_finite()
+                            && difference <= 3e-5 + 3e-5 * b[channel].abs()
+                    } else {
+                        a[channel] == b[channel]
+                    };
+                }
+            }
+            assert!(
+                passed,
+                "{label}: max_absolute={max_absolute:e}, max_relative={max_relative:e}, approximate={approximate}"
+            );
+        }
+        fn compare_guides(
+            actual: &[[f32; 4]],
+            expected: &[[f32; 4]],
+            approximate: bool,
+            label: &str,
+        ) {
+            assert_eq!(actual.len(), expected.len());
+            // Alpha stores the accumulated sample count. Zero RGB identifies a miss
+            // for the nonblack materials/normals used by this fixture.
+            for (index, (a, b)) in actual.iter().zip(expected).enumerate() {
+                assert!(a[3] == b[3], "{label}: count differs at pixel {index}");
+                let hit = |p: &[f32; 4]| p[..3].iter().any(|channel| *channel != 0.0);
+                assert!(
+                    hit(a) == hit(b),
+                    "{label}: hit/miss differs at pixel {index}"
+                );
+            }
+            compare_pixels(actual, expected, approximate, label);
+        }
+        let mut gpu = Gpu::new().unwrap();
+        for model in [MaterialModel::Fast, MaterialModel::StandardSurface] {
+            for object_count in [1usize, 2] {
+                let mut scene = dark_world();
+                // Deliberately contradict the root material: the world objects own the BSDFs.
+                scene.material.model = if model == MaterialModel::Fast {
+                    MaterialModel::StandardSurface
+                } else {
+                    MaterialModel::Fast
+                };
+                scene.lighting.sky_intensity = 2.0;
+                scene.lighting.background = true;
+                scene.lights.push(scene.lighting);
+                scene.render.max_bounces = 2;
+                scene.objects = vec![
+                    world_object(
+                        FAMILY_BULB,
+                        [-0.6, 0.0, 0.0],
+                        [0.55, 0.8, 0.5],
+                        [0.8, 0.2, 0.1],
+                    ),
+                    world_object(
+                        FAMILY_QUAT,
+                        [0.65, 0.0, 0.0],
+                        [0.5, 0.65, 0.4],
+                        [0.1, 0.2, 0.8],
+                    ),
+                ];
+                scene.objects.truncate(object_count);
+                for (index, object) in scene.objects.iter_mut().enumerate() {
+                    object.material.model = model;
+                    object.material.emission = 0.0;
+                    object.material.specular = 1.0;
+                    object.material.specular_roughness = 0.35;
+                    object.material.metalness = if index == 0 { 0.8 } else { 0.0 };
+                    let mut matrix = glam::Mat4::from_cols_array_2d(&object.object_world.unwrap());
+                    matrix.y_axis += matrix.x_axis * 0.35;
+                    object.object_world = Some(matrix.to_cols_array_2d());
+                }
+                let mut specialized = gpu.target(48, 32);
+                let mut reference = gpu.target(48, 32);
+                gpu.force_mixed_world = false;
+                for count in [1, 3, 4] {
+                    gpu.step(&mut specialized, &scene, count, 17, None, false);
+                }
+                gpu.force_mixed_world = true;
+                for count in [1, 3, 4] {
+                    gpu.step(&mut reference, &scene, count, 17, None, false);
+                }
+                assert!(
+                    specialized.colour_error.is_none(),
+                    "{:?}",
+                    specialized.colour_error
+                );
+                assert!(
+                    reference.colour_error.is_none(),
+                    "{:?}",
+                    reference.colour_error
+                );
+                assert_eq!(specialized.samples, 8);
+                assert_eq!(specialized.samples, reference.samples);
+                let specialized_radiance = gpu.raw_scene_linear(&specialized);
+                let reference_radiance = gpu.raw_scene_linear(&reference);
+                assert!(specialized_radiance.iter().any(|p| p[0] > 0.0));
+                let approximate = model == MaterialModel::Fast && object_count == 1;
+                compare_pixels(
+                    &specialized_radiance,
+                    &reference_radiance,
+                    approximate,
+                    &format!("radiance for {model:?}, objects={object_count}"),
+                );
+                let specialized_albedo = gpu.guide_sums(&specialized, &specialized.albedo);
+                assert!(specialized_albedo.iter().any(|p| p[0] > 0.0 && p[0] > p[2]));
+                if object_count == 2 {
+                    assert!(specialized_albedo.iter().any(|p| p[2] > 0.0 && p[2] > p[0]));
+                }
+                compare_guides(
+                    &specialized_albedo,
+                    &gpu.guide_sums(&reference, &reference.albedo),
+                    approximate,
+                    &format!("albedo for {model:?}, objects={object_count}"),
+                );
+                compare_guides(
+                    &gpu.guide_sums(&specialized, &specialized.normal),
+                    &gpu.guide_sums(&reference, &reference.normal),
+                    approximate,
+                    &format!("normals for {model:?}, objects={object_count}"),
+                );
+            }
+        }
+        gpu.force_mixed_world = false;
+    }
 
     #[test]
     fn preparation_reuses_display_edits_and_invalidates_runtime_geometry() {

@@ -3,10 +3,11 @@
 //! `pathtrace.wgsl` + render-rs `pt-integrator` (path tracing with sun/sky NEE and MIS), with the
 //! render-rs `standard-surface-bsdf` crate called directly as the full material model.
 //!
-//! Kernels:
-//! - `trace_fast` / `trace_full`: add `P_SPP` samples per pixel into the f32 accumulator; fast =
-//!   diffuse + GGX (cheap, for exploring), full = Autodesk Standard Surface (MaterialX port).
-//!   Two kernels, not a runtime branch, so the fast one keeps its low register count.
+//! Kernel dispatch:
+//! - Family-specific Fast/Full kernels serve legacy single-fractal renders.
+//! - `world` evaluates node worlds with per-object material selection. `world_fast` removes
+//!   unused Standard Surface branches in homogeneous Fast worlds; `world_fast_bulb` also
+//!   specializes the DE for one evaluated Mandelbulb while retaining world transforms/lights.
 //! - `tonemap`: running mean -> exposure / saturation -> scene-linear RGBA32F for vfx-ocio.
 //!
 //! Pixels are traced in 8x4 tiles (one warp each) so neighbouring rays share their march paths.
@@ -20,6 +21,9 @@ use cuda_host::cuda_module;
 #[cuda_module]
 pub mod kernels {
     use super::*;
+    use crate::path_sampling::{
+        allows_surface_vertex, fast_ggx_pdf, fast_ggx_sample_local, fast_spec_probability,
+    };
     use standard_surface_bsdf::ThinFilmEnergy;
     use standard_surface_bsdf::sample::pdf_with;
     use standard_surface_bsdf::sample::sample_with;
@@ -743,7 +747,7 @@ pub mod kernels {
             d
         };
         // Use the same clipped field for marching and its normal stencil.
-        let d = if F == FAMILY_WORLD {
+        let d = if F == FAMILY_WORLD || ctx.world {
             d.max(length(q) - ctx.objects[ctx.object * OBJECT_STRIDE + O_CLIP_RADIUS])
         } else {
             d
@@ -1421,7 +1425,7 @@ pub mod kernels {
         let rough = roughness.max(0.03);
         let diffuse_w = 1.0 - metal;
         let lf = luminance(f0);
-        let spec_prob = (lf / (lf + diffuse_w * luminance(base) + 1.0e-4)).clamp(0.15, 0.9);
+        let spec_prob = fast_spec_probability(lf, diffuse_w * luminance(base), diffuse_w);
         Fast {
             albedo: base,
             f0,
@@ -1457,14 +1461,15 @@ pub mod kernels {
         let a2 = m.alpha * m.alpha;
         let dd = nh * nh * (a2 - 1.0) + 1.0;
         let d = a2 / (PI * dd * dd);
-        let g = smith_g1(a2, nv) * smith_g1(a2, nl);
+        let g1v = smith_g1(a2, nv);
+        let g = g1v * smith_g1(a2, nl);
         let f = schlick(m.f0, vh);
         let spec = mul(f, d * g / (4.0 * nv));
         let diff = mul(
             had(mul(sub([1.0, 1.0, 1.0], f), m.diffuse_w), m.albedo),
             nl / PI,
         );
-        let pdf = m.spec_prob * d * nh / (4.0 * vh) + (1.0 - m.spec_prob) * nl / PI;
+        let pdf = m.spec_prob * fast_ggx_pdf(d, g1v, nv) + (1.0 - m.spec_prob) * nl / PI;
         (add(spec, diff), pdf)
     }
 
@@ -1473,12 +1478,9 @@ pub mod kernels {
     fn fast_sample(m: &Fast, n: V3, wo: V3, u: V3) -> (V3, V3, f32, bool) {
         let (t, b) = basis(n);
         let wi = if u[0] < m.spec_prob {
-            let a2 = m.alpha * m.alpha;
-            let cos_h = ((1.0 - u[1]) / (1.0 + (a2 - 1.0) * u[1])).sqrt();
-            let sin_h = (1.0 - cos_h * cos_h).max(0.0).sqrt();
-            let (sp, cp) = (2.0 * PI * u[2]).sin_cos();
-            let h = add(add(mul(t, sin_h * cp), mul(b, sin_h * sp)), mul(n, cos_h));
-            sub(mul(h, 2.0 * dot(wo, h)), wo)
+            let local =
+                fast_ggx_sample_local([dot(wo, t), dot(wo, b), dot(wo, n)], m.alpha, [u[1], u[2]]);
+            add(add(mul(t, local[0]), mul(b, local[1])), mul(n, local[2]))
         } else {
             let r = u[1].sqrt();
             let (sp, cp) = (2.0 * PI * u[2]).sin_cos();
@@ -1538,7 +1540,7 @@ pub mod kernels {
 
     /// One camera path. `FULL` picks the material model at compile time.
     #[inline(always)]
-    fn trace_path<const FULL: bool, const F: u32>(
+    fn trace_path<const FULL: bool, const F: u32, const MIXED: bool>(
         ctx: Context<'_>,
         lut: &[[f32; 4]],
         origin: V3,
@@ -1560,9 +1562,6 @@ pub mod kernels {
         let mut primary_normal = [0.0; 3];
         let mut bounce = 0u32;
         loop {
-            if bounce > max_bounces {
-                break;
-            }
             let base = if bounce == 0 {
                 0.0
             } else {
@@ -1582,6 +1581,13 @@ pub mod kernels {
                 );
                 break;
             }
+            // The final BSDF ray still supplies its complementary MIS estimate
+            // when it sees the environment. A surface beyond the depth limit must
+            // not contribute emission or shading; testing depth before a miss used
+            // to discard the environment estimate and bias the final NEE dark.
+            if !allows_surface_vertex(bounce, max_bounces) {
+                break;
+            }
             if bounce == 0 {
                 primary_hit = true;
             }
@@ -1589,12 +1595,12 @@ pub mod kernels {
                 object: m.object,
                 ..ctx
             };
-            let full = if F == FAMILY_WORLD {
+            let full = if MIXED && F == FAMILY_WORLD {
                 pr(ctx, P_MATERIAL_MODEL) != 0.0
             } else {
                 FULL
             };
-            let up = if F == FAMILY_WORLD {
+            let up = if F == FAMILY_WORLD || ctx.world {
                 let b = ctx.object * OBJECT_STRIDE + O_TANGENT;
                 [ctx.objects[b], ctx.objects[b + 1], ctx.objects[b + 2]]
             } else {
@@ -1760,7 +1766,7 @@ pub mod kernels {
     }
 
     #[inline(always)]
-    fn trace_pixel<const FULL: bool, const F: u32>(
+    fn trace_pixel<const FULL: bool, const F: u32, const MIXED: bool>(
         ctx: Context<'_>,
         lut: &[[f32; 4]],
         i: u32,
@@ -1814,7 +1820,7 @@ pub mod kernels {
                 ro = add(origin, add(mul(right, rr * ca), mul(up, rr * sa)));
                 dir = normalize(sub(focus, ro));
             }
-            let (l, hit, a, n) = trace_path::<FULL, F>(ctx, lut, ro, dir, &mut r);
+            let (l, hit, a, n) = trace_path::<FULL, F, MIXED>(ctx, lut, ro, dir, &mut r);
             albedo_sum = add(albedo_sum, a);
             normal_sum = add(normal_sum, n);
             let l = if hit || background { l } else { [0.0; 3] };
@@ -1858,7 +1864,7 @@ pub mod kernels {
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
         ) {
-            trace_pixel::<false, FAMILY_BULB>(
+            trace_pixel::<false, FAMILY_BULB, false>(
                 Context {
                     world: false,
                     objects,
@@ -1892,7 +1898,7 @@ pub mod kernels {
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
         ) {
-            trace_pixel::<false, FAMILY_BOX>(
+            trace_pixel::<false, FAMILY_BOX, false>(
                 Context {
                     world: false,
                     objects,
@@ -1926,7 +1932,7 @@ pub mod kernels {
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
         ) {
-            trace_pixel::<false, FAMILY_QUAT>(
+            trace_pixel::<false, FAMILY_QUAT, false>(
                 Context {
                     world: false,
                     objects,
@@ -1960,7 +1966,7 @@ pub mod kernels {
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
         ) {
-            trace_pixel::<false, FAMILY_KIFS>(
+            trace_pixel::<false, FAMILY_KIFS, false>(
                 Context {
                     world: false,
                     objects,
@@ -1994,7 +2000,7 @@ pub mod kernels {
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
         ) {
-            trace_pixel::<false, FAMILY_KLEINIAN>(
+            trace_pixel::<false, FAMILY_KLEINIAN, false>(
                 Context {
                     world: false,
                     objects,
@@ -2028,7 +2034,7 @@ pub mod kernels {
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
         ) {
-            trace_pixel::<false, FAMILY_PSEUDO_KLEINIAN>(
+            trace_pixel::<false, FAMILY_PSEUDO_KLEINIAN, false>(
                 Context {
                     world: false,
                     objects,
@@ -2062,7 +2068,7 @@ pub mod kernels {
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
         ) {
-            trace_pixel::<false, FAMILY_APOLLONIAN>(
+            trace_pixel::<false, FAMILY_APOLLONIAN, false>(
                 Context {
                     world: false,
                     objects,
@@ -2096,7 +2102,7 @@ pub mod kernels {
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
         ) {
-            trace_pixel::<false, FAMILY_HYBRID>(
+            trace_pixel::<false, FAMILY_HYBRID, false>(
                 Context {
                     world: false,
                     objects,
@@ -2130,7 +2136,7 @@ pub mod kernels {
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
         ) {
-            trace_pixel::<true, FAMILY_BULB>(
+            trace_pixel::<true, FAMILY_BULB, false>(
                 Context {
                     world: false,
                     objects,
@@ -2164,7 +2170,7 @@ pub mod kernels {
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
         ) {
-            trace_pixel::<true, FAMILY_BOX>(
+            trace_pixel::<true, FAMILY_BOX, false>(
                 Context {
                     world: false,
                     objects,
@@ -2198,7 +2204,7 @@ pub mod kernels {
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
         ) {
-            trace_pixel::<true, FAMILY_QUAT>(
+            trace_pixel::<true, FAMILY_QUAT, false>(
                 Context {
                     world: false,
                     objects,
@@ -2232,7 +2238,7 @@ pub mod kernels {
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
         ) {
-            trace_pixel::<true, FAMILY_KIFS>(
+            trace_pixel::<true, FAMILY_KIFS, false>(
                 Context {
                     world: false,
                     objects,
@@ -2266,7 +2272,7 @@ pub mod kernels {
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
         ) {
-            trace_pixel::<true, FAMILY_KLEINIAN>(
+            trace_pixel::<true, FAMILY_KLEINIAN, false>(
                 Context {
                     world: false,
                     objects,
@@ -2300,7 +2306,7 @@ pub mod kernels {
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
         ) {
-            trace_pixel::<true, FAMILY_PSEUDO_KLEINIAN>(
+            trace_pixel::<true, FAMILY_PSEUDO_KLEINIAN, false>(
                 Context {
                     world: false,
                     objects,
@@ -2334,7 +2340,7 @@ pub mod kernels {
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
         ) {
-            trace_pixel::<true, FAMILY_APOLLONIAN>(
+            trace_pixel::<true, FAMILY_APOLLONIAN, false>(
                 Context {
                     world: false,
                     objects,
@@ -2368,7 +2374,7 @@ pub mod kernels {
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
         ) {
-            trace_pixel::<true, FAMILY_HYBRID>(
+            trace_pixel::<true, FAMILY_HYBRID, false>(
                 Context {
                     world: false,
                     objects,
@@ -2402,7 +2408,80 @@ pub mod kernels {
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
         ) {
-            trace_pixel::<false, FAMILY_WORLD>(
+            trace_pixel::<false, FAMILY_WORLD, true>(
+                Context {
+                    world: true,
+                    objects,
+                    lights,
+                    object: 0,
+                },
+                lut,
+                i,
+                acc,
+                albedo,
+                normal,
+            );
+        }
+    }
+
+    // Uniform-model worlds omit the unused BSDF at compile time, reducing register
+    // pressure without bypassing world transforms, clipping, materials or lights.
+    #[kernel]
+    #[launch_bounds(128)]
+    #[launch_contract(domain = 1, block = (128, 1, 1))]
+    pub fn world_fast(
+        lut: &[[f32; 4]],
+        objects: &[f32],
+        lights: &[f32],
+        mut accum: DisjointSlice<[f32; 4]>,
+        mut albedo: DisjointSlice<[f32; 4]>,
+        mut normal: DisjointSlice<[f32; 4]>,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if let (Some(acc), Some(albedo), Some(normal)) = (
+            accum.get_mut(idx),
+            albedo.get_mut(thread::index_1d()),
+            normal.get_mut(thread::index_1d()),
+        ) {
+            trace_pixel::<false, FAMILY_WORLD, false>(
+                Context {
+                    world: true,
+                    objects,
+                    lights,
+                    object: 0,
+                },
+                lut,
+                i,
+                acc,
+                albedo,
+                normal,
+            );
+        }
+    }
+
+    /// One evaluated Fast Mandelbulb can use its compile-time DE without the eight-family
+    /// dispatcher. Context::world remains true: full affine inverse, conservative distance
+    /// scale, world clipping, palette offsets and world illumination are still authoritative.
+    #[kernel]
+    #[launch_bounds(128)]
+    #[launch_contract(domain = 1, block = (128, 1, 1))]
+    pub fn world_fast_bulb(
+        lut: &[[f32; 4]],
+        objects: &[f32],
+        lights: &[f32],
+        mut accum: DisjointSlice<[f32; 4]>,
+        mut albedo: DisjointSlice<[f32; 4]>,
+        mut normal: DisjointSlice<[f32; 4]>,
+    ) {
+        let idx = thread::index_1d();
+        let i = idx.get() as u32;
+        if let (Some(acc), Some(albedo), Some(normal)) = (
+            accum.get_mut(idx),
+            albedo.get_mut(thread::index_1d()),
+            normal.get_mut(thread::index_1d()),
+        ) {
+            trace_pixel::<false, FAMILY_BULB, false>(
                 Context {
                     world: true,
                     objects,

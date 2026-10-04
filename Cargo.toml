@@ -53,7 +53,7 @@ av-util-core = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "ma
 av-util-frame = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
 av-util-pixfmt = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
 
-standard-surface-bsdf = { git = "ssh://git@github.com/ssoj13/render-rs.git", rev = "13c757e45aecc490352bc82ebd5de6ce2e234274", features = ["cuda-math"] }
+standard-surface-bsdf = { git = "ssh://git@github.com/ssoj13/render-rs.git", rev = "cd72eb3ac4ad28b7b31c78826f192f383f4b6989", features = ["cuda-math"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 png = "0.18.1"

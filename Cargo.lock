@@ -8043,7 +8043,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 [[package]]
 name = "standard-surface-bsdf"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?rev=13c757e45aecc490352bc82ebd5de6ce2e234274#13c757e45aecc490352bc82ebd5de6ce2e234274"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?rev=cd72eb3ac4ad28b7b31c78826f192f383f4b6989#cd72eb3ac4ad28b7b31c78826f192f383f4b6989"
 dependencies = [
  "libm",
 ]

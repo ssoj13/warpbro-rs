@@ -26,9 +26,11 @@ mod materials;
 mod ocio;
 mod palette;
 mod params;
+mod path_sampling;
 mod presets;
 mod preview;
 mod render;
+mod render_bench;
 mod render_service;
 mod scene;
 mod transfer;
@@ -189,6 +191,7 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
+        Some("--world-bench") => render_bench::run(&args),
         Some("--animated-fixtures") => animated_fixtures(
             args.get(2)
                 .map(String::as_str)
