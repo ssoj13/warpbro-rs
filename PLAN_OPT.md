@@ -49,15 +49,34 @@ The per-pixel count already in `acc[3]` means adaptive sampling needs no new buf
       error distribution (better for OIDN). Keep only if unbiased and MSE x time improves.
 
 ## Phase 2 — adaptive sampling (V-Ray noise threshold / Redshift adaptive error)
-- [ ] Per-pixel error estimate from data the accumulator already has plus one value: accumulate
+- [x] Per-pixel error estimate from data the accumulator already has plus one value: accumulate
       luminance and luminance squared (or a second half-sample buffer, Cycles style). Error metric:
       relative standard error of the pixel mean, with a floor for dark pixels.
-- [ ] Decide per 8x4 tile (warp-uniform): a tile stops when all its pixels are under the threshold
+- [x] Decide per 8x4 tile (warp-uniform): a tile stops when all its pixels are under the threshold
       after `min_samples`; converged tiles are skipped by the launch, not branched inside a warp.
-- [ ] Controls in Render settings: Adaptive on/off, Noise threshold, Min samples; the existing target
+- [x] Controls in Render settings: Adaptive on/off, Noise threshold, Min samples; the existing target
       SPP stays the maximum. Export and preview cache use the same rule.
 - [ ] Viewport status shows active tiles / converged %. Optional heat-map overlay later.
-- [ ] Measure: time to a fixed MSE on every case; check tile borders and dark regions for bias.
+- [x] Measure: time to a fixed MSE on every case; check tile borders and dark regions for bias.
+
+### Phase 2 result (256x256, budget 1024 SPP, 5 seeds, against uniform 256 SPP)
+
+| Case | MSE x time gain, threshold 0.02 | 0.01 | Stopped at (0.02) |
+|---|---:|---:|---:|
+| sky-wide | 1.01x | 1.01x | 1024 (budget) |
+| ember-mid | 1.20x | 1.10x | 1024 |
+| fast-metal | 1.10x | 1.07x | 1024 |
+| cavity | 1.08x (relMSE 1.28x) | 0.96x | 1024 |
+| diffuse-mid | **0.51x** | 0.81x | 641 |
+
+- Correct (GPU test: sky tiles stop at the minimum, sky radiance exact) but **not an accelerator here**:
+  converged tiles (sky, smooth areas) are the cheap ones — their rays miss or hit after few march
+  steps; the time is spent on the noisy fractal tiles, which never stop. Redistribution cannot win
+  much when the converged region is already cheap.
+- The threshold is a visible-noise target, not an MSE minimiser: at 0.02 a smooth diffuse scene stops
+  early with higher MSE.
+- Kept as **automatic stopping by quality** (V-Ray noise threshold role: viewport and final renders end
+  when noise is below the threshold), default 0.01. Speed has to come from marching cost and fireflies.
 
 ## Phase 3 — firefly clamp (Max ray intensity, Clamp secondary)
 - [ ] Optional clamp of indirect (bounce >= 1) path contributions by AP1 luminance, off by default,
@@ -97,3 +116,7 @@ The per-pixel count already in `acc[3]` means adaptive sampling needs no new buf
 ## Progress log
 - 2026-10-04: plan written from the code survey above.
 - 2026-10-04: Phase 0 and Phase 1 done (Owen-scrambled Sobol, 1.2-2.4x lower error at equal time).
+- 2026-10-04: Phase 2 done (adaptive sampling, `51b1d1b`): correct, quality-based stopping, <= 1.2x
+  efficiency on these cases. Next levers by measurement: marching cost (Phase 5 profile), fireflies (3, 4).
+- Note: ofx-rs keeps its own copy of the kernel source (fx/ofx-fractal/kernels/source); the kernel
+  signatures gained `active` / `moment`, so its host must pass them when that copy is resynced.
