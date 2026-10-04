@@ -355,21 +355,21 @@ impl WorldEditor {
         if nodes.is_empty() {
             return Err("Nothing to paste".into());
         }
+        // Copies hold references (UUIDs), never the referenced nodes; a reference that resolves
+        // in neither the fragment nor this document is cleared (reported by `unresolved_references`).
+        let mut nodes = nodes;
+        for (key, field) in self.document.unresolved_references(&nodes) {
+            if let Some(data) = nodes.get_mut(&key) {
+                data[field] = Value::Null;
+            }
+        }
         let mut fragment = SubnetFile { nodes, ..self.document.graph.clone() };
         let map = playa_graph::remap_node_ids(&mut fragment);
         let fresh: HashSet<NodeId> = map.values().copied().collect();
-        let exists = |id: NodeId| fresh.contains(&id) || self.document.graph.nodes.contains_key(&id.to_string());
         for data in fragment.nodes.values_mut() {
             // Host UUID references are ordinary data, remapped alongside Playa graph references.
-            if let Some(old) = data["material"].as_str().and_then(NodeId::parse) {
-                data["material"] = match map.get(&old) {
-                    Some(new) => json!(new),
-                    None if exists(old) => json!(old),
-                    None => Value::Null,
-                };
-            }
-            if data["parent"].as_str().and_then(NodeId::parse).is_some_and(|p| !exists(p)) {
-                data["parent"] = Value::Null;
+            if let Some(new) = data["material"].as_str().and_then(NodeId::parse).and_then(|old| map.get(&old)) {
+                data["material"] = json!(new);
             }
         }
         let roots: Vec<NodeId> = fragment
@@ -1476,6 +1476,20 @@ impl WorldDocument {
             out.insert(id.to_string(), self.node(id)?.clone());
         }
         Ok(out)
+    }
+    /// References of a fragment that point outside it and are absent from this document
+    /// (material, parent), by node key. A paste clears exactly these; the UI reports them.
+    pub fn unresolved_references(&self, nodes: &HashMap<String, Value>) -> Vec<(String, &'static str)> {
+        let resolves = |id: &str| nodes.contains_key(id) || self.graph.nodes.contains_key(id);
+        let mut out = Vec::new();
+        for (key, data) in nodes {
+            for field in ["material", "parent"] {
+                if data[field].as_str().is_some_and(|id| !resolves(id)) {
+                    out.push((key.clone(), field));
+                }
+            }
+        }
+        out
     }
     /// The system-clipboard text of `ids` (with descendants): see `parse_clipboard`.
     pub fn copy_fragment(&self, ids: &[NodeId]) -> Result<String, String> {

@@ -1665,9 +1665,20 @@ impl App {
             };
         }
         if let Some(text) = hotkeys::take_paste(ctx, |text| crate::world::parse_clipboard(text).is_some()) {
+            let unresolved = crate::world::parse_clipboard(&text)
+                .map(|nodes| self.world.document.unresolved_references(&nodes))
+                .unwrap_or_default();
             self.world.finish_edit();
             self.status = match self.world.execute(crate::world::WorldCommand::Paste(text)) {
-                Ok(()) => format!("Pasted {} node(s)", self.world.selected.len()),
+                Ok(()) if unresolved.is_empty() => format!("Pasted {} node(s)", self.world.selected.len()),
+                Ok(()) => {
+                    let materials = unresolved.iter().filter(|(_, field)| *field == "material").count();
+                    let parents = unresolved.len() - materials;
+                    format!(
+                        "Pasted {} node(s); not in this scene, cleared: {materials} material and {parents} parent reference(s)",
+                        self.world.selected.len()
+                    )
+                }
                 Err(error) => error,
             };
         }

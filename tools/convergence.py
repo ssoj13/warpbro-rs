@@ -91,7 +91,7 @@ def main():
         }
     assert results
     report = {
-        "metric": "raw scene-linear Rec.709 RGB, no denoise or display transform",
+        "metric": "raw scene-linear ACEScg RGB, no denoise or display transform",
         "limits": "Finite noisy reference; at least three independent low-SPP seeds; MSE*time predicts asymptotic efficiency, not measured time to a stopping threshold. Timing includes presentation and background GPU contention.",
         "cases": results,
     }

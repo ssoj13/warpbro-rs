@@ -1728,6 +1728,16 @@ fn clipboard_copy_paste_and_duplicate_remap_ids_in_one_undo_step() {
     e.execute(WorldCommand::Paste(text)).unwrap();
     assert_ne!(e.selection.unwrap(), pasted, "every paste is a new node");
 
+    // A copy holds the material's UUID, not the material: once the material is gone the
+    // reference is reported as unresolved and the paste clears it.
+    let text = e.document.copy_fragment(&[pasted]).unwrap();
+    let nodes = parse_clipboard(&text).unwrap();
+    assert!(e.document.unresolved_references(&nodes).is_empty());
+    e.execute(WorldCommand::Delete(material)).unwrap();
+    assert_eq!(e.document.unresolved_references(&nodes).len(), 1);
+    e.execute(WorldCommand::Paste(text)).unwrap();
+    assert_eq!(e.document.assigned_material(e.selection.unwrap()).unwrap(), None);
+
     // Foreign clipboard text is not WarpBro nodes and changes nothing.
     assert!(parse_clipboard("hello").is_none());
     let before = e.document.nodes().len();

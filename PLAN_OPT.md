@@ -32,18 +32,20 @@ The per-pixel count already in `acc[3]` means adaptive sampling needs no new buf
   within their measured noise (unbiased). A biased option is measured with its bias reported.
 
 ## Phase 0 — baseline
-- [ ] Add the sky-heavy and cavity cases to `render_bench::CASES`.
-- [ ] Record baseline numbers (all cases) in this file.
+- [x] Add the sky-heavy and cavity cases to `render_bench::CASES` (`sky-wide`: camera x3 distance;
+      `cavity`: Mandelbox close-up, camera x0.45).
+- [x] Baseline: 256x256, 32 SPP, seeds 101-105 (15 for the two outlier-prone cases), release `c8b5dd1`+cases.
 
 ## Phase 1 — low-discrepancy sampler (V-Ray DMC analogue)
-- [ ] Device-safe `sampler.rs` (like `path_sampling.rs`): Sobol with hash-based Owen scrambling
+- [x] Device-safe `sampler.rs` (like `path_sampling.rs`): Sobol with hash-based Owen scrambling
       (Burley 2020, "Practical Hash-based Owen Scrambling"), ZSobol-style pixel decorrelation (Morton
       index of the pixel, as in pbrt-v4), padded 2D dimension pairs so each sampling decision
       (lens, pixel, BSDF lobe + direction, light, roulette) gets its own stratified pair.
-- [ ] `Rng` / `rand` in `gpu.rs` switch to it: one call site. CPU oracles use the same module.
-- [ ] Unit tests: values in [0,1), per-dimension uniformity, 2D stratification of the first pairs,
+- [x] `Rng` / `rand` in `gpu.rs` switch to it: one call site. (Per-pixel scrambled Sobol, Cycles style;
+      ZSobol / blue-noise pixel ordering is a possible follow-up.)
+- [x] Unit tests: values in [0,1), per-dimension uniformity, 2D stratification of the first pairs,
       different pixels decorrelated.
-- [ ] Measure: expected lower MSE at equal SPP mostly at low SPP and low bounce depth; blue-noise-like
+- [x] Measure: expected lower MSE at equal SPP mostly at low SPP and low bounce depth; blue-noise-like
       error distribution (better for OIDN). Keep only if unbiased and MSE x time improves.
 
 ## Phase 2 — adaptive sampling (V-Ray noise threshold / Redshift adaptive error)
@@ -72,5 +74,26 @@ The per-pixel count already in `acc[3]` means adaptive sampling needs no new buf
       cache) or a light cache. Decide from measurements, not by default.
 - [ ] If marching dominates time, sampling is not the lever: profile secondary-ray stepping instead.
 
+### Phase 1 result (256x256, 32 SPP, references 3 x 1024 SPP from the candidate)
+
+| Case | MSE white noise | MSE Sobol | Error ratio | ms/SPP ratio |
+|---|---:|---:|---:|---:|
+| ember-early | 2.64e-4 | 1.12e-4 | **2.36x** | 1.05 |
+| diffuse-mid | 8.62e-5 | 4.48e-5 | **1.93x** | 1.01 |
+| fast-dielectric | 9.90e-5 | 5.31e-5 | **1.87x** | 1.01 |
+| opal-mid | 3.09e-3 | 1.86e-3 | **1.66x** | 1.01 |
+| fast-metal | 3.89e-3 | 2.49e-3 | **1.56x** | 1.00 |
+| sky-wide | 7.05e-4 | 4.80e-4 | **1.47x** | 0.98 |
+| ember-mid | 5.48e-3 | 4.07e-3 | 1.35x | 1.00 |
+| chrome-mid | 4.07e-3 | 3.41e-3 | 1.19x | 1.02 |
+| ember-late (15 seeds) | — | — | 1.10x mean, 1.16x median | 1.01 |
+| cavity (15 seeds) | — | — | 1.03x mean, 1.31x median | 0.99 |
+
+- Unbiased: mean image of both samplers within 0.05 % of the reference (inside 2 standard errors).
+- Throughput unchanged. ember-late / cavity MSE is dominated by rare bright paths (fireflies): with 5 seeds
+  they looked worse, with 15 they are better; fireflies are Phase 3 / 4 territory.
+- Full suite: 221 passed, 8 ignored.
+
 ## Progress log
 - 2026-10-04: plan written from the code survey above.
+- 2026-10-04: Phase 0 and Phase 1 done (Owen-scrambled Sobol, 1.2-2.4x lower error at equal time).

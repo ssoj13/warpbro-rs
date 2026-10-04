@@ -14,7 +14,7 @@ use serde_json::json;
 use crate::render::Gpu;
 use crate::scene::{Material, MaterialModel};
 
-const CASES: [(&str, usize, u32, bool); 8] = [
+const CASES: [(&str, usize, u32, bool); 10] = [
     ("ember-early", 0, 0, false),
     ("ember-mid", 0, 124, false),
     ("ember-late", 0, 249, false),
@@ -23,6 +23,10 @@ const CASES: [(&str, usize, u32, bool); 8] = [
     ("opal-mid", 2, 124, false),
     ("fast-metal", 0, 124, false),
     ("fast-dielectric", 0, 124, false),
+    // Sampling-plan cases: most pixels miss the fractal (sky converges at once) and a close
+    // camera where light reaches surfaces through narrow gaps (adaptive sampling targets).
+    ("sky-wide", 0, 124, false),
+    ("cavity", 1, 124, false),
 ];
 
 /// Run a bounded world benchmark. A separate warm-up target removes driver compilation and
@@ -140,6 +144,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
                 object.material.specular_ior = 1.5;
                 object.material.emission = 0.0;
             }
+        }
+        match name {
+            "sky-wide" => scene.camera.distance *= 3.0,
+            "cavity" => scene.camera.distance *= 0.45,
+            _ => {}
         }
         gpu.prepare_scene(&scene, width, height)
             .map_err(anyhow::Error::msg)?;

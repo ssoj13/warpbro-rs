@@ -36,6 +36,7 @@ mod preview;
 mod render;
 mod render_bench;
 mod render_service;
+mod sampler;
 mod scene;
 mod transfer;
 mod transmission;

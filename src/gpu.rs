@@ -130,7 +130,7 @@ pub mod kernels {
     const DERIVATIVE_LIMIT: f32 = 1.0e38;
 
     // =========================================================================
-    // RNG: render-rs ss_rng (pcg4d over pixel x, pixel y, sample, dimension)
+    // RNG: Owen-scrambled Sobol per pixel (`crate::sampler`), dimensions in groups of four
     // =========================================================================
 
     pub struct Rng {
@@ -142,7 +142,7 @@ pub mod kernels {
 
     #[inline(always)]
     fn rand(r: &mut Rng) -> f32 {
-        let u = standard_surface_bsdf::sampling::rng(r.px, r.py, r.sample, r.dim, 0);
+        let u = crate::sampler::sample(r.px, r.py, r.sample, r.dim);
         r.dim += 1;
         u
     }
