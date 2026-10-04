@@ -1,5 +1,7 @@
 # Timeline, library and export follow-up
 
+Current status (2026-10-03): [workspace guide](../docs/workspace.md), [startup investigation](../docs/cuda-startup.md), and [changelog](../CHANGELOG.md) describe the current host/toolkit integration. The dated checkpoints below remain historical evidence; unchecked native checks are not implied complete.
+
 Date: 2026-10-03. Base: WarpBro main c0627ac.
 
 ## Changes

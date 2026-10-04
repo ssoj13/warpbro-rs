@@ -1,5 +1,7 @@
 # Plan 7: CUDA throughput and convergence
 
+Current status (2026-10-03): [workspace guide](../docs/workspace.md), [startup investigation](../docs/cuda-startup.md), and [changelog](../CHANGELOG.md) describe the current host/toolkit integration. The dated checkpoints below remain historical evidence; unchecked native checks are not implied complete.
+
 Date: 2026-10-03. Base: WarpBro main `bd7bf07`.
 Status: Bounded optimization and convergence phase complete. Accepted base has paired timings/quality, Nsight evidence, repaired CUDA BSDF defect and passing tests. The inconclusive Full helper was rejected; restored shipping release build and raw-output verification pass. Published to WarpBro main at `6f16697` over GitHub SSH.
 
@@ -40,13 +42,13 @@ The new `--world-bench DIR W H SPP --case CASE --seed N --batch 4` path exercise
 
 The preliminary baseline suite at 128×128 and 32 SPP used seeds 0, 1 and 2, with a 1024-SPP seed-101 reference; its artifacts remain under `target/verification/convergence/baseline`. These small seeds were later found to produce correlated permutations and are excluded from the final comparison. The final paired suite covers 128×128 and 256×256 at 32 SPP with five seeds: 65537, 131075, 262151, 524303 and 1048607. Before/after execution order alternates. Independent 1024-SPP reference seeds are 101, 4194305 and 8388611. Binary hashes are retained in `target/verification/convergence/final-manifest.json`.
 
-| Case | Preliminary baseline median ms/SPP |
-|---|---:|
-| Fast metal | 4.247 |
-| Fast dielectric | 4.492 |
-| Chrome mid | 4.298 |
-| Diffuse mid | 4.806 |
-| Opal mid | 4.171 |
+| Case            | Preliminary baseline median ms/SPP |
+| --------------- | ---------------------------------: |
+| Fast metal      |                              4.247 |
+| Fast dielectric |                              4.492 |
+| Chrome mid      |                              4.298 |
+| Diffuse mid     |                              4.806 |
+| Opal mid        |                              4.171 |
 
 These preliminary production timings include the selected batching/presentation policy and are not Nsight replay timings. The final accepted-base comparison appears below.
 
@@ -86,25 +88,25 @@ An independent CPU reproduction against the actual pinned Standard Surface depen
 
 At 256×256, 32 SPP and five independent seeds, before/after runs alternate order and use the same frozen scenes and batch-4 presentation policy. `target/verification/convergence/timing-paired-report.json` retains the per-run data. The ratio column is the median paired baseline/new ratio, so it need not equal the ratio of the two separate medians.
 
-| Case | Baseline median ms/SPP | New median ms/SPP | Paired throughput ratio |
-|---|---:|---:|---:|
-| Fast metal | 10.9387 | 6.7927 | 1.609× |
-| Fast dielectric | 10.9686 | 6.7299 | 1.618× |
-| Chrome mid | 9.0512 | 9.4819 | 0.956× |
-| Diffuse mid | 11.2526 | 11.9687 | 0.942× |
-| Opal mid | 8.5860 | 8.7109 | 0.986× |
+| Case            | Baseline median ms/SPP | New median ms/SPP | Paired throughput ratio |
+| --------------- | ---------------------: | ----------------: | ----------------------: |
+| Fast metal      |                10.9387 |            6.7927 |                  1.609× |
+| Fast dielectric |                10.9686 |            6.7299 |                  1.618× |
+| Chrome mid      |                 9.0512 |            9.4819 |                  0.956× |
+| Diffuse mid     |                11.2526 |           11.9687 |                  0.942× |
+| Opal mid        |                 8.5860 |            8.7109 |                  0.986× |
 
 Fast cases improve by approximately 61% in samples/time on these workloads. Full material cases are slightly slower: the corrected finite-depth estimator actually traces the final environment ray instead of discarding it. These results do not establish a speedup for every world or material.
 
 At 128×128/32 SPP, all five final references pass the reliability gate; independently estimated reference noise contributes approximately 1% of the measured low-SPP error. `quality-final.json` records the full assessment.
 
-| Case | Baseline linear RGB MSE | New linear RGB MSE | Estimated MSE×time efficiency gain |
-|---|---:|---:|---:|
-| Fast metal | 0.012940688 | 0.011435995 | 1.625× |
-| Fast dielectric | 0.000290187 | 0.000284789 | 1.524× |
-| Chrome mid | 0.001699349 | 0.001697601 | 0.946× |
-| Diffuse mid | 0.000261949 | 0.000263724 | 0.936× |
-| Opal mid | 0.002954307 | 0.002952560 | 0.964× |
+| Case            | Baseline linear RGB MSE | New linear RGB MSE | Estimated MSE×time efficiency gain |
+| --------------- | ----------------------: | -----------------: | ---------------------------------: |
+| Fast metal      |             0.012940688 |        0.011435995 |                             1.625× |
+| Fast dielectric |             0.000290187 |        0.000284789 |                             1.524× |
+| Chrome mid      |             0.001699349 |        0.001697601 |                             0.946× |
+| Diffuse mid     |             0.000261949 |        0.000263724 |                             0.936× |
+| Opal mid        |             0.002954307 |        0.002952560 |                             0.964× |
 
 Metal MSE is about 11.6% lower at fixed SPP. The dielectric reduction is small (about 1.9%); Full-case errors are approximately unchanged. MSE×time is an efficiency estimate, not a directly measured stopping time to a chosen visual threshold. The lower noise depends on the tested workload and finite independent sample set.
 
@@ -120,12 +122,12 @@ Against the validated base at 256×256, median paired ratios are Chrome 1.01562,
 
 Chrome Nsight captures at 256×256/4 SPP, seed 65537, show corrected-base 44.35 ms at 1.51 GHz / 66,939,998 cycles versus helper 41.64 ms at 1.55 GHz / 64,685,268 cycles. Both use 255 registers and have 404,014 spill requests. Artifacts are `world-full-corrected-base` and `world-full-prepared-candidate`. The final 512×512/32-SPP comparison used seven seeds, three Full cases and a Fast dielectric control (`convergence-prepared-512.out`). Results are:
 
-| Case | Paired median ratio | Geometric mean ratio | Log standard error |
-|---|---:|---:|---:|
-| Chrome | 1.01463 | 1.02745 | 0.01138 |
-| Diffuse | 1.01245 | 1.01096 | 0.00613 |
-| Opal | 1.00716 | 1.00245 | 0.01687 |
-| Fast dielectric control | 0.99634 | 0.99068 | 0.00963 |
+| Case                    | Paired median ratio | Geometric mean ratio | Log standard error |
+| ----------------------- | ------------------: | -------------------: | -----------------: |
+| Chrome                  |             1.01463 |              1.02745 |            0.01138 |
+| Diffuse                 |             1.01245 |              1.01096 |            0.00613 |
+| Opal                    |             1.00716 |              1.00245 |            0.01687 |
+| Fast dielectric control |             0.99634 |              0.99068 |            0.00963 |
 
 Broad overlap, outliers and inconsistent Full improvements do not demonstrate a coherent application gain. GPU integration was therefore rejected despite correct raw outputs and the isolated profile improvement. The accepted base is retained; this experiment adds no speedup claim.
 

@@ -1,5 +1,7 @@
 # Plan 4: Scene files, animated presets and orbit animation
 
+Current status (2026-10-03): [workspace guide](../docs/workspace.md), [startup investigation](../docs/cuda-startup.md), and [changelog](../CHANGELOG.md) describe the current host/toolkit integration. The dated checkpoints below remain historical evidence; unchecked native checks are not implied complete.
+
 Date: 2026-10-03.
 Status: File menus, five animated presets and orbit evaluation implemented; final system suite passed 144 tests. Final tuned build, two preset tests, 15 key shots and all 1,250 GPU frames passed; five low-resolution 32-frame MP4 comparisons passed; manual native File/UI checks remain pending.
 

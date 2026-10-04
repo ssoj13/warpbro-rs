@@ -12,6 +12,12 @@ Requested 2026-10-03. This is a future extraction plan, not implemented function
 - [ ] Share global/panel hotkey dispatch, keyed file-dialog history, compact UI metrics and cache coverage presentation.
 - [ ] Evaluate scene templates and reusable preview-cache transport as separate host services.
 
+## Implemented foundations (2026-10-03)
+
+Shared attribute-row geometry and optional editor hooks already live in egui-widgets-rs. Its Timeline now exposes a pinned-ruler host API with clipping/input regression coverage. These are reusable primitives, not the complete World-panel adapters listed above.
+
+The renderer-independent material catalog was extracted into WarpBro's `crates/fractal-materials` and reused by the OFX integration. Moving/publishing the complete catalog and generic browser in the toolkit remains pending.
+
 ## Architecture constraints
 
 Widgets receive borrowed, stable projections and emit edit intents. Applications retain scene ownership, animation evaluation, renderer scheduling, Undo/Redo and I/O. No WarpBro node types, CUDA dependencies or file-system operations in generic widgets. Rebuild projections only on model revisions; retain scratch storage between repaints. Dependency pins remain SSH Git refs.

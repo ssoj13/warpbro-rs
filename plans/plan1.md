@@ -1,5 +1,7 @@
 # Plan 1: Consistent interface using Playa's original widgets
 
+Current status (2026-10-03): [workspace guide](../docs/workspace.md), [startup investigation](../docs/cuda-startup.md), and [changelog](../CHANGELOG.md) describe the current host/toolkit integration. The dated checkpoints below remain historical evidence; unchecked native checks are not implied complete.
+
 Date: 2026-10-03.
 Status: toolkit revision e953b2c published; 40 toolkit tests and strict Clippy passed. Final e953 validation passed all 118 CPU/GPU tests and the release build; scaled native inspection and manual latency checks pending.
 

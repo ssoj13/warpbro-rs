@@ -1189,6 +1189,7 @@ impl WorldUi {
         };
 
         let mut actions = vec![];
+        let ruler_top = ui.cursor().min.y;
         egui::ScrollArea::vertical()
             .id_salt("world_timeline_scroll")
             .auto_shrink([false, false])
@@ -1228,7 +1229,7 @@ impl WorldUi {
                         .max_rect(right_rect),
                 );
                 canvas.set_clip_rect(canvas.clip_rect().intersect(right_rect));
-                let resp = TrackTimeline::new(cfg).show(&mut canvas, &mut self.view, &model);
+                let resp = TrackTimeline::new(cfg).show_pinned_ruler(&mut canvas, &mut self.view, &model, ruler_top);
                 let painter = canvas.painter().with_clip_rect(resp.ruler_rect.intersect(canvas.clip_rect()));
                 let color = if self.cache_draft { Color32::from_rgb(75, 155, 235) } else { Color32::from_rgb(75, 205, 110) };
                 for &frame in self.cached_frames.iter() {
@@ -1239,7 +1240,7 @@ impl WorldUi {
                     }
                 }
                 let header =
-                    Rect::from_min_size(origin, Vec2::new(left_w, resp.ruler_rect.height()));
+                    Rect::from_min_size(Pos2::new(origin.x, ruler_top), Vec2::new(left_w, resp.ruler_rect.height()));
                 ui.painter()
                     .rect_filled(header, 0.0, ui.visuals().faint_bg_color);
                 ui.painter().text(
@@ -1251,6 +1252,10 @@ impl WorldUi {
                 );
                 ui.interact(header, ui.id().with("timeline-shortcuts-help"), Sense::hover())
                     .on_hover_text("P / T: Translate · R: Rotate · S: Scale · U: Keyed properties\nShift + property shortcut: add / remove filter\nI / O: selection In / Out · Space: Play / pause\nInsert: Play selection · Shift + Insert: Cache selection, then play\nCtrl + Shift + Insert: Cache selection at 1 spp, then play\nGreen: final cache · Blue: draft cache");
+                let full_clip = ui.clip_rect();
+                let mut rows_clip = full_clip;
+                rows_clip.min.y = rows_clip.min.y.max(resp.ruler_rect.bottom() + 4.0);
+                ui.set_clip_rect(rows_clip);
                 for (ti, n) in nodes.iter().enumerate() {
                     let y = resp.track_tops[ti];
                     let row = Rect::from_min_size(
@@ -1283,6 +1288,7 @@ impl WorldUi {
                         }
                     }
                 }
+                ui.set_clip_rect(full_clip);
                 // Register last so row and canvas hit regions cannot capture
                 // the splitter gesture.
                 let splitter = ui.interact(handle, splitter_id, Sense::click_and_drag())

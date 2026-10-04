@@ -1,5 +1,7 @@
 # Plan 5: Materials, Timeline controls and cached playback
 
+Current status (2026-10-03): [workspace guide](../docs/workspace.md), [startup investigation](../docs/cuda-startup.md), and [changelog](../CHANGELOG.md) describe the current host/toolkit integration. The dated checkpoints below remain historical evidence; unchecked native checks are not implied complete.
+
 Date: 2026-10-03.
 Status: WarpBro rename and current Materials/Timeline/HDR/shortcut/cache/Camera changes implemented; all 181 Final5 tests passed, including GPU tests. Release build and revised 1,250-frame/15-still fixtures passed. Final production build and Chrome start-frame inspection passed; final 15-still rerun passed; native/DPI/latency verification pending.
 

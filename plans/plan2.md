@@ -1,5 +1,7 @@
 # Plan 2: Measured render optimization
 
+Current status (2026-10-03): [workspace guide](../docs/workspace.md), [startup investigation](../docs/cuda-startup.md), and [changelog](../CHANGELOG.md) describe the current host/toolkit integration. The dated checkpoints below remain historical evidence; unchecked native checks are not implied complete.
+
 Date: 2026-10-03.
 Status: Nsight baseline captured; CPU scene-preparation cache measured and integration checkpoint passed. Final system tests and tuned build passed; end-to-end GPU performance measurements pending.
 

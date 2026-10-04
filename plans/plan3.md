@@ -1,5 +1,7 @@
 # Plan 3: MP4 export quality
 
+Current status (2026-10-03): [workspace guide](../docs/workspace.md), [startup investigation](../docs/cuda-startup.md), and [changelog](../CHANGELOG.md) describe the current host/toolkit integration. The dated checkpoints below remain historical evidence; unchecked native checks are not implied complete.
+
 Date: 2026-10-03.
 Status: QP 18/medium defaults and zero-origin rational video timing implemented and tested; relocated CPU harness passed. Final tuned release build passed; five-fractal low-resolution MP4 comparison passed.
 

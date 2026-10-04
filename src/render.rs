@@ -442,10 +442,19 @@ impl Gpu {
         self.colour_revision = self.colour_revision.wrapping_add(1);
     }
     pub fn new() -> Result<Self, String> {
+        let started = std::time::Instant::now();
+        log::info!("CUDA startup: creating context");
         let ctx = CudaContext::new(0).map_err(|e| format!("CUDA context: {e:?}"))?;
+        log::info!("CUDA startup: context ready in {:?}", started.elapsed());
         let stream = ctx.default_stream();
+        let module_started = std::time::Instant::now();
+        log::info!("CUDA startup: loading embedded kernels");
         // SAFETY: this package owns the embedded device bundle for `kernels`.
         let module = unsafe { kernels::load(&ctx) }.map_err(|e| format!("load module: {e:?}"))?;
+        log::info!(
+            "CUDA startup: kernels ready in {:?}",
+            module_started.elapsed()
+        );
         let name = ctx.device_name().unwrap_or_else(|_| "CUDA GPU".into());
         let lut =
             DeviceBuffer::zeroed(&stream, PALETTE_SAMPLES + 1).map_err(|e| format!("{e:?}"))?;

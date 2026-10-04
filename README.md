@@ -9,6 +9,8 @@ The project repository is [WarpBro](https://github.com/ssoj13/WarpBro), with SSH
 
 ![WarpBro browsing the Menger sponge](docs/ui-menger.jpg)
 
+Current usage and verification: [documentation index](docs/README.md), [workspace and cached playback](docs/workspace.md), [CUDA startup investigation](docs/cuda-startup.md), and [changelog](CHANGELOG.md).
+
 ## What it does
 
 - **Eight distance-estimated families:** Mandelbulb (Mandelbrot or Julia form, angle scales,
@@ -26,21 +28,21 @@ The project repository is [WarpBro](https://github.com/ssoj13/WarpBro), with SSH
 - **GPU OIDN:** periodic scene-linear HDR denoising with primary-hit albedo/normal guides,
   followed by exposure and the display transform. Raw samples remain available.
 - **Two material models**, supported by both the world tracer and legacy specialized kernels:
-  - *Fast*: Lambert plus GGX.
-  - *Standard Surface*: the full Autodesk Standard Surface (MaterialX port) with coat, sheen,
-    thin film and anisotropy. The [`standard-surface-bsdf`](https://github.com/ssoj13/render-rs/tree/13c757e45aecc490352bc82ebd5de6ce2e234274) crate
+  - _Fast_: Lambert plus GGX.
+  - _Standard Surface_: the full Autodesk Standard Surface (MaterialX port) with coat, sheen,
+    thin film and anisotropy. The [`standard-surface-bsdf`](https://github.com/ssoj13/render-rs/tree/cd72eb3ac4ad28b7b31c78826f192f383f4b6989) crate
     is called directly from the kernel.
 - **14 palettes** and orbit-trap colouring (origin, plane, point).
 - **Material Gallery:** actual World material nodes appear as asynchronous GPU-rendered sphere cards.
-  The separate **Material Library** window shows the 50 curated presets of usd-rs `usd-mat-lib` in adaptive grids across 12 categories (metals,
+  The separate **Material Library** window shows the 67 curated presets from `fractal-materials` (derived from usd-rs `usd-mat-lib`) in adaptive grids across 12 categories (metals,
   brushed metals, plastics, car paint, ceramic, stone, wood, leather, velvet and fabric, rubber,
   paper, glass, emissive).
   - Presets are translated the way usd-rs `usd-hd-pt` maps UsdPreviewSurface to Standard
     Surface. Sheen (velvet) and anisotropy (brushed metal) select the Standard Surface kernels.
   - The `pt-material-ext` facing mix (pearlescent, oil slick) works in both models.
   - The fractal colour comes from either the palette or the material.
-  - Glass renders opaque: a distance-estimated fractal has no interior to refract through, so
-    glass becomes a clear-coated smooth dielectric.
+  - Glass currently renders as a clear-coated smooth dielectric. True transmission and
+    refraction are not implemented; this is a renderer limitation.
 - **Unreal-style flight:** hold the right mouse button in the viewport to fly.
   - The mouse looks around; WASD moves; R/C moves up/down; Q/E rolls and enables free flight;
     Shift boosts; the wheel sets the speed.
@@ -71,16 +73,16 @@ The project repository is [WarpBro](https://github.com/ssoj13/WarpBro), with SSH
 WarpBro is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX plug-ins
 (WGPU/WGSL):
 
-| ofx-rs / render-rs | WarpBro |
-|---|---|
-| `fractal3d.wgsl`: estimates, march, normals, palette, sky | `src/gpu.rs` |
-| `pathtrace.wgsl` + render-rs `pt-integrator` | `src/gpu.rs`, `trace_path` |
-| `fractal3d.rs`: presets, `Frames`, `max_distance`, footprint | `src/scene.rs` |
-| `uniform3d.rs`: the uniform layout | `src/params.rs` |
-| `ofx-gen/palette.rs` | `src/palette.rs` |
-| render-rs `standard-surface-bsdf` | pinned SSH crate with opt-in `cuda-math` (`libm::*` → `f32` methods) |
-| usd-rs `usd-mat-lib` presets, `usd-hd-pt` translator, `pt-material-ext` facing mix | `src/materials.rs`, `src/gpu.rs` |
-| gitnexus-rs `cam-controls` / `cam-viewport` | pinned SSH crates; opt-in `inertial-look` for `SpaceFlight::Look` |
+| ofx-rs / render-rs                                                                 | WarpBro                                                              |
+| ---------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| `fractal3d.wgsl`: estimates, march, normals, palette, sky                          | `src/gpu.rs`                                                         |
+| `pathtrace.wgsl` + render-rs `pt-integrator`                                       | `src/gpu.rs`, `trace_path`                                           |
+| `fractal3d.rs`: presets, `Frames`, `max_distance`, footprint                       | `src/scene.rs`                                                       |
+| `uniform3d.rs`: the uniform layout                                                 | `src/params.rs`                                                      |
+| `ofx-gen/palette.rs`                                                               | `src/palette.rs`                                                     |
+| render-rs `standard-surface-bsdf`                                                  | pinned SSH crate with opt-in `cuda-math` (`libm::*` → `f32` methods) |
+| usd-rs `usd-mat-lib` presets, `usd-hd-pt` translator, `pt-material-ext` facing mix | `src/materials.rs`, `src/gpu.rs`                                     |
+| gitnexus-rs `cam-controls` / `cam-viewport`                                        | pinned SSH crates; opt-in `inertial-look` for `SpaceFlight::Look`    |
 
 ## Requirements
 
@@ -101,16 +103,19 @@ WarpBro is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX
 
   `python bootstrap.py d --fix` also installs or migrates the CLI to this revision; regular builds
   check its source without reinstalling it.
+
 - Git dependencies resolve through GitHub SSH; Cargo.lock records their exact commits.
   Playa is pinned to `00d90428d6c931b69b7117fd2a4cdf143d075413`. OIDN reuses squarebob-rs
   `pt-denoise-oidn` and `render-core` at `3dedf872cddb06b4aa5689f5cfe022468cdb6f3b`;
   the shared `oidn-rs` branch source is locked to `a93300d744953865cad3f1ba610107e981d8deee`.
   `cam-controls` and `cam-viewport` use gitnexus-rs commit
   `268bcfc8f31d291aefd0e67e2358a6d1e69b39cd`, with `inertial-look` enabled on controls.
-  `standard-surface-bsdf` uses render-rs commit `13c757e45aecc490352bc82ebd5de6ce2e234274`
+  `standard-surface-bsdf` uses render-rs commit `cd72eb3ac4ad28b7b31c78826f192f383f4b6989`
   with `cuda-math`. These upstream features preserve their crates' default behaviour.
-  The final audit resolved 214 Git packages, all over SSH, with no local path dependencies.
-  The release build and all 95 tests passed after this source switch.
+  The workspace material catalog lives in `crates/fractal-materials`; external dependencies
+  use pinned or lockfile-resolved SSH Git sources. All widget crates share revision
+  `afad4c31f5066f34eca69994248a33735874fb12`. Historical source-switch verification counts
+  describe their dated checkpoints, not the current release.
 
 ## Build and run
 
@@ -129,16 +134,16 @@ cargo oxide run                                         # the browser
 
 **Controls:**
 
-| input | action |
-|---|---|
-| left drag | orbit |
-| middle drag | pan |
-| wheel | zoom |
+| input             | action                                                                                                     |
+| ----------------- | ---------------------------------------------------------------------------------------------------------- |
+| left drag         | orbit                                                                                                      |
+| middle drag       | pan                                                                                                        |
+| wheel             | zoom                                                                                                       |
 | hold right button | fly: mouse looks, WASD moves, R/C up/down, Q/E rolls (enables free flight), Shift boosts, wheel sets speed |
-| double-click | recentre |
-| `Tab` | hide the panels |
-| `Space` | pause |
-| backtick / tilde | switch horizon / free flight (Q/E roll, R/C up/down in free mode) |
+| double-click      | recentre                                                                                                   |
+| `Tab`             | hide the panels                                                                                            |
+| `Space`           | pause                                                                                                      |
+| backtick / tilde  | switch horizon / free flight (Q/E roll, R/C up/down in free mode)                                          |
 
 The interface uses `egui-dock`: drag tabs to rearrange, split or float panels, including Settings.
 The top bar uses **File**, **Edit**, **View**, **Render** and **Window** menus, following Playa.
@@ -167,26 +172,24 @@ in the card context menu. The sibling toolbar buttons **+ New material** and **C
 create a default node or a preset-based node respectively, without assigning it. The card's **Apply preset to this material** action updates the existing UUID
 and every consumer. **Library…** opens the separate preset library; clicking a preset creates and selects a workspace node without assigning it. Gallery and Bookmarks also adapt their columns to panel width. **Refresh preview** retries terminal rendering/colour failures; stale
 thumbnail results are rejected. Ordinary clicks only select the material for the shared editor.
-Gallery thumbnails compare evaluated Material values per UUID and become dirty only when those
-parameters change. Renames, unrelated edits and unchanged animated values retain their textures;
-parameter changes invalidate pending preview tickets and reject stale results. Final5 passed
-181 tests, including the preview-error regression, and the production release build passed.
-Native interaction checks remain pending in
-[Plan 5](plans/plan5.md).
-Toolkit changes are published at `e953b2cc6836db2bb47aa44bb7995d9696636034` over GitHub SSH;
-40 toolkit tests and strict Clippy for five crates passed. The grid and Timeline use the same
-label/value/row geometry. Narrow panels now shrink labels to preserve numeric editor space
-without changing the saved splitter width. The preceding 8aad revision passed 118 host CPU/GPU
-tests and a release build; native inspection found narrow-panel clipping at 150% scale,
-which prompted this shared-widget fix. Final e953 validation passed all 118 CPU/GPU tests
-with `--include-ignored` and the release build. Cargo.lock uses this one SSH revision for all
-21 widget sources. The new scaled snapshot, manual interactions and UI latency remain pending in
-[the UI layout plan](plans/plan1.md).
+**Apply to object** in the material Attribute Editor assigns to the remembered eligible object
+selection through one validated Undo command. Material preview identity follows evaluated
+parameters; renames and unchanged values retain previews, while parameter changes reject
+stale pending results.
+
+The shared toolkit combines aligned Attribute Editor APIs and the pinned Timeline ruler.
+The production release build and headless render checks passed after updating the host pin.
+Native narrow-panel, cached-playback and latency checks remain pending; see
+[workspace behavior](docs/workspace.md) and [Plan 1](plans/plan1.md).
 
 The **Outliner** uses `egui-outliner` for the parent tree. The **Timeline** shows the same
 objects as layers with spans, property groups and component lanes; stopwatch and diamond
 controls enable animation and add/remove keys. Rename, reparent and layer order preserve
-UUID-based property addresses. Selection chooses the editing target; visibility and solo
+UUID-based property addresses. During vertical scrolling the ruler and outline header stay
+fixed while layer names, property lanes and bars scroll together. Green/blue coverage marks
+resident final/draft RAM frames. Ins plays the selection; Shift+Ins caches at target samples
+then plays; Ctrl+Shift+Ins caches at 1 SPP then plays. Only completed native viewport frames
+enter the automatic final cache. Disk caching remains pending. Selection chooses the editing target; visibility and solo
 filter the rendered world. Solo is saved and applies equally to preview and export.
 Visibility and the half-open span `[start, end)` inherit through parents; a locked ancestor
 prevents edits. The active camera remains active when its layer is hidden.
@@ -299,7 +302,8 @@ File Open/Save/Save As and five 250-frame presets (frames 0–249 at 24 FPS) are
 Camera orbit speed (degrees/second) and phase are animatable World attributes; old scenes default
 to zero speed. Timeline evaluation supports independent seeking and animated speed.
 The earlier preset suite passed 144 tests; the latest WarpBro suite passed 181 tests.
-The final production release build passed without Rust warnings. All 250 final preset curves
+The earlier final production release build passed without Rust warnings; the latest startup build
+passed with two dead-code warnings. All 250 final preset curves
 are covered by CPU tests. The 1,250-frame GPU run at 160×90/4 SPP preceded only the last bounded
 Chrome tune; the final 15-still rerun at 640×360/32 SPP passed and its
 [contact sheet](target/verification/unfolding-v2/contact.png) was inspected, including Chrome's accepted first frame. Native File interactions and manual UI latency remain pending.
@@ -315,6 +319,14 @@ The current hardware backend, safe CPU mode, partial-video cancellation and inde
 The [MP4 quality harness](plans/plan3.md#reproduce-the-quality-comparison) reproduces the measured
 QP/preset tradeoff and verified zero-origin rational video timing on deterministic CPU patterns.
 
+## Startup diagnostics
+
+A successful render can still wait at startup for embedded CUDA-module loading. The current
+instrumentation separates context creation from that load. In the latest contended-machine
+check they took 123 ms and 152.37 s respectively; this is not an idle baseline. See
+[the reproduction and pending loader work](docs/cuda-startup.md). Compiled-module caching
+and a viewport initialization overlay remain unimplemented.
+
 ## Performance
 
 Current production-world CUDA profiling and convergence work is tracked in [Plan 7](plans/plan7.md). The new `--world-bench DIR W H SPP --case fast-metal --seed 0 --batch 4` route retains raw linear RGB f32, PNG and frozen-scene JSON. Other cases are `fast-dielectric`, `chrome-mid`, `diffuse-mid` and `opal-mid`. `tools/convergence.py` compares multiple independent seeds against a common high-SPP reference and reports error and elapsed time. The validated base passed 193 CPU/CUDA tests. On five-seed 256×256/32-SPP paired runs, Fast metal/dielectric throughput improved about 1.61×; Full cases were 1–6% slower after the corrected final environment ray. At 128×128, metal error fell about 11.6% at fixed SPP; MSE×time estimates improved 1.63× for metal and 1.52× for dielectric. These are workload-specific measurements, not a universal convergence guarantee. A Full shading helper experiment was rejected because its paired speed changes were inconclusive; Plan 7 records the accepted base, experiment and exact limits.
@@ -322,16 +334,16 @@ Current production-world CUDA profiling and convergence work is tracked in [Plan
 These numbers are from an RTX 3080 Ti, 1280×720, 6 bounces, at the preset views (`--bench`;
 the full table is in [docs/bench-1280x720.txt](docs/bench-1280x720.txt)):
 
-| preset | ms / spp | Msamples/s |
-|---|---:|---:|
-| KIFS (tetrahedron) | 5.2 | 177 |
-| Octahedron KIFS | 8.6 | 107 |
-| Quaternion Julia | 12.6 | 73 |
-| Apollonian | 12.2 | 76 |
-| Kleinian | 13.3 | 69 |
-| Mandelbulb | 35.4 | 26 |
-| Menger sponge, Standard Surface | 20.0 | 46 |
-| Mandelbulb power 12, gold, Standard Surface | 69.2 | 13 |
+| preset                                      | ms / spp | Msamples/s |
+| ------------------------------------------- | -------: | ---------: |
+| KIFS (tetrahedron)                          |      5.2 |        177 |
+| Octahedron KIFS                             |      8.6 |        107 |
+| Quaternion Julia                            |     12.6 |         73 |
+| Apollonian                                  |     12.2 |         76 |
+| Kleinian                                    |     13.3 |         69 |
+| Mandelbulb                                  |     35.4 |         26 |
+| Menger sponge, Standard Surface             |     20.0 |         46 |
+| Mandelbulb power 12, gold, Standard Surface |     69.2 |         13 |
 
 **What makes it fast:**
 
@@ -384,7 +396,10 @@ src/color.rs      cached vfx-ocio GPU colour processing (linear Rec.709 input)
 src/ocio.rs       OCIO controls and background config loader, adapted from exr-view (BSD-3-Clause)
 src/window.rs     winit/wgpu shell + egui-display float canvas and SDR/HDR swapchain
 src/palette.rs    the 14 palettes
-src/materials.rs  the usd-rs material library and its Standard Surface translation
+src/materials.rs  host adapter for the shared fractal-materials catalog
+crates/fractal-materials   renderer-independent material preset definitions
+src/preview.rs    bounded final/draft Playa RAM cache and playback state
+src/hotkeys.rs    global-first, panel-scoped command bindings
 standard-surface-bsdf   SSH dependency: Autodesk Standard Surface (MaterialX port, Apache-2.0)
 cam-controls, cam-viewport   SSH dependencies: gitnexus-rs camera rigs (PolyForm-Noncommercial-1.0.0)
 ```
