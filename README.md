@@ -273,7 +273,12 @@ playhead). A one-frame range writes `name.ext`; a longer range writes `name.0000
 
 - **PNG:** the monitor rendering baked in, as **SDR · 8-bit sRGB / BT.709**, **HDR10 · 16-bit PQ /
   BT.2020** (`cICP`, `mDCV`, `cLLI`) or **HLG · 16-bit BT.2020** (`cICP`, `mDCV`), with the HDR
-  mastering peak in nits. HDR keeps SDR white at 100 nits; choose an HDR view for HDR highlights.
+  mastering peak in nits. HDR keeps SDR white at 100 nits.
+
+Every output renders through its **own output transform** from ACEScg, independent of the viewport:
+EXR stays scene-linear; SDR PNG and video use the scene's SDR view (or the config's first SDR
+display); HDR10 PNG uses a PQ display and the HDR view nearest the chosen peak; HLG PNG an HLG
+display. The panel shows the choice under **Output transform** and lets you override display / view.
 - **EXR sequence:** float RGB scene-linear ACEScg tagged with AP1 chromaticities; exposure and the
   display transform are excluded.
 - **HEVC / ffmpeg-rs:** hardware **GPU · Vulkan Video** encoding to MP4 or MOV by default, with rational FPS and QP 0–51. **CPU · Kvazaar (I-frames)** is an explicit software alternative using independent frames to avoid reproduced corruption in the pinned inter-prediction path; hardware initialization failures are reported instead of silently switching encoders. Output is SDR 8-bit YUV 4:2:0 with Rec.709 primaries and sRGB transfer;

@@ -78,6 +78,26 @@ pub fn source(sel_config: &str) -> String {
         .unwrap_or_else(|| "ocio://default".to_owned())
 }
 
+/// What kind of display an output file is encoded for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputKind {
+    /// SDR: sRGB / BT.709 style displays.
+    Sdr,
+    /// HDR, BT.2100 PQ (HDR10).
+    Pq,
+    /// HDR, BT.2100 HLG.
+    Hlg,
+}
+
+/// The luminance in a view name ("ACES 2.0 - HDR 1000 nits (P3 D65)" -> 1000).
+fn view_nits(view: &str) -> Option<f32> {
+    let words: Vec<&str> = view.split_whitespace().collect();
+    words
+        .windows(2)
+        .find(|w| w[1].eq_ignore_ascii_case("nits"))
+        .and_then(|w| w[0].parse().ok())
+}
+
 /// Names a [`Sel`] resolves to in one config.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Names {
@@ -203,6 +223,76 @@ impl Ocio {
             .colorspace(view.effective_colorspace(display))?
             .encoding();
         (enc != Encoding::Unknown).then_some(enc)
+    }
+
+    /// The encoding of view `view` of `display`, by name.
+    fn view_encoding(&self, display: &str, view: &str) -> Option<Encoding> {
+        let v = self.cfg.get_views(display).into_iter().find(|v| v.name() == view)?;
+        self.encoding(display, v)
+    }
+
+    /// Whether `display` is a `kind` display. OCIO records only "hdr-video", not PQ or HLG, so
+    /// HDR displays are told apart by their names (the ACES configs' convention, as Nuke and
+    /// Resolve do); the export panel shows the choice and lets it be overridden.
+    pub fn display_is(&self, display: &str, kind: OutputKind) -> bool {
+        let name = display.to_ascii_uppercase();
+        match kind {
+            OutputKind::Sdr => true,
+            OutputKind::Pq => name.contains("PQ") || name.contains("ST2084") || name.contains("ST-2084"),
+            OutputKind::Hlg => name.contains("HLG"),
+        }
+    }
+
+    /// Whether view `view` of `display` renders for `kind` (HDR views for PQ / HLG, picture SDR
+    /// views for SDR).
+    pub fn view_is(&self, display: &str, view: &str, kind: OutputKind) -> bool {
+        let enc = self.view_encoding(display, view);
+        match kind {
+            OutputKind::Sdr => enc != Some(Encoding::Hdr) && enc != Some(Encoding::Data),
+            OutputKind::Pq | OutputKind::Hlg => enc == Some(Encoding::Hdr),
+        }
+    }
+
+    /// Display and view an output of `kind` renders through. The scene's own choice (`current`)
+    /// wins when it already fits; otherwise the config's first fitting display, with its view
+    /// closest to `peak_nits` for HDR (from the "N nits" in ACES view names), its first view for SDR.
+    pub fn output_transform(&self, current: &Sel, kind: OutputKind, peak_nits: f32) -> Result<(String, String)> {
+        let hdr = kind != OutputKind::Sdr;
+        if let Ok(n) = self.resolve(current, hdr)
+            && self.display_is(&n.display, kind)
+            && self.view_is(&n.display, &n.view, kind)
+        {
+            return Ok((n.display, n.view));
+        }
+        for display in self.displays(hdr) {
+            if !self.display_is(display, kind) {
+                continue;
+            }
+            let views: Vec<&str> = self
+                .views(display, hdr)
+                .into_iter()
+                .filter(|v| self.view_is(display, v, kind))
+                .collect();
+            let view = if hdr {
+                views.iter().copied().min_by(|a, b| {
+                    let d = |v: &str| view_nits(v).map_or(f32::MAX, |n| (n - peak_nits).abs());
+                    d(a).total_cmp(&d(b))
+                })
+            } else {
+                views.first().copied()
+            };
+            if let Some(view) = view {
+                return Ok((display.to_owned(), view.to_owned()));
+            }
+        }
+        bail!(
+            "the config has no {} display: choose the output transform",
+            match kind {
+                OutputKind::Sdr => "SDR",
+                OutputKind::Pq => "PQ (HDR10)",
+                OutputKind::Hlg => "HLG",
+            }
+        )
     }
 
     /// Every look.
@@ -676,7 +766,8 @@ impl State {
         true
     }
 
-    fn config(&self) -> Result<&Ocio, String> {
+    /// The loaded config, or why there is none yet.
+    pub fn config(&self) -> Result<&Ocio, String> {
         match &self.cfg {
             Some((_, Ok(config))) => Ok(config.as_ref()),
             Some((_, Err(error))) => Err(error.clone()),
@@ -942,7 +1033,7 @@ fn config_combo(ui: &mut egui::Ui, config: &mut String) {
 }
 
 /// A combo over `items` with an empty choice labelled `empty` (the default).
-fn combo(ui: &mut egui::Ui, id: &str, cur: &mut String, items: &[String], empty: &str) {
+pub(crate) fn combo(ui: &mut egui::Ui, id: &str, cur: &mut String, items: &[String], empty: &str) {
     let text = if cur.is_empty() {
         format!("{empty} (default)")
     } else {

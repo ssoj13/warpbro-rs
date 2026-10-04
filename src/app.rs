@@ -1693,7 +1693,8 @@ impl App {
         );
         let scene = &self.scene;
         let world = &mut self.world;
-        self.export.ui(ui, timeline, &self.renderer, || {
+        let ocio = self.colour.config().ok();
+        self.export.ui(ui, timeline, &self.renderer, ocio, &self.scene.colour, || {
             world.finish_edit();
             freeze_world_scene(scene, &world.document)
         });
@@ -3375,6 +3376,8 @@ mod tests {
                         ui,
                         (frame, frame + 250, 24.0, frame),
                         &app.renderer,
+                        None,
+                        &crate::color::default_selection(),
                         || panic!("An idle export panel must not clone the authoring document"),
                     );
                 });

@@ -86,6 +86,13 @@ pub struct ExportSettings {
     pub png: PngEncoding,
     /// Mastering display peak of HDR PNGs (`mDCV`, HLG system gamma).
     pub png_peak_nits: f32,
+    /// OCIO display / view overriding the automatic output transform; empty = automatic.
+    pub output_display: String,
+    pub output_view: String,
+    /// The display / view this export renders through (`resolve_transform`); None = scene-linear
+    /// (EXR) or the scene's own built-in SDR display.
+    #[serde(skip)]
+    pub transform: Option<(String, String)>,
 }
 impl Default for ExportSettings {
     fn default() -> Self {
@@ -107,6 +114,9 @@ impl Default for ExportSettings {
             denoise_at_completion: false,
             png: PngEncoding::Sdr8,
             png_peak_nits: 1000.0,
+            output_display: String::new(),
+            output_view: String::new(),
+            transform: None,
         }
     }
 }
@@ -145,6 +155,52 @@ impl ExportSettings {
             scene.render.denoise.interval = 0;
         }
     }
+    /// The display a file of this format is encoded for; None for scene-linear EXR.
+    pub fn output_kind(&self) -> Option<crate::ocio::OutputKind> {
+        use crate::ocio::OutputKind;
+        match self.format {
+            ExportFormat::Exr => None,
+            ExportFormat::Hevc => Some(OutputKind::Sdr),
+            ExportFormat::Png => Some(match self.png {
+                PngEncoding::Sdr8 => OutputKind::Sdr,
+                PngEncoding::Hdr10 => OutputKind::Pq,
+                PngEncoding::Hlg => OutputKind::Hlg,
+            }),
+        }
+    }
+
+    /// The output transform from ACEScg for this format, independent of the viewport: the
+    /// override when set, else `Ocio::output_transform`. An SDR output with OCIO off keeps the
+    /// built-in display (None); HDR always needs an OCIO HDR view.
+    pub fn resolve_transform(&self, ocio: &crate::ocio::Ocio, current: &crate::ocio::Sel) -> Result<Option<(String, String)>, String> {
+        let Some(kind) = self.output_kind() else {
+            return Ok(None);
+        };
+        if kind == crate::ocio::OutputKind::Sdr && !current.on {
+            return Ok(None);
+        }
+        if !self.output_display.is_empty() {
+            let picked = crate::ocio::Sel {
+                display: self.output_display.clone(),
+                view: self.output_view.clone(),
+                ..current.clone()
+            };
+            let names = ocio.resolve(&picked, kind != crate::ocio::OutputKind::Sdr).map_err(|e| e.to_string())?;
+            return Ok(Some((names.display, names.view)));
+        }
+        ocio.output_transform(current, kind, self.png_peak_nits)
+            .map(Some)
+            .map_err(|e| e.to_string())
+    }
+    /// The frame scene rendered through this export's output transform.
+    pub fn apply_transform(&self, scene: &mut Scene) {
+        if let Some((display, view)) = &self.transform {
+            scene.colour.on = true;
+            scene.colour.display = display.clone();
+            scene.colour.view = view.clone();
+        }
+    }
+
     /// Target `dir/<name>.<ext>` for the current format.
     pub fn resolve(&mut self, dir: &Path) {
         self.output = dir.join(format!("{}.{}", self.name.trim(), self.format.extension())).display().to_string();
@@ -349,6 +405,13 @@ impl ExportController {
         // Validate against the output root first so a rejected export leaves no empty folder.
         settings.resolve(&self.out_root);
         settings.validate()?;
+        settings.transform = match settings.output_kind() {
+            Some(_) => {
+                let ocio = crate::ocio::Ocio::load(&crate::ocio::source(&scene.colour.config)).map_err(|e| e.to_string())?;
+                settings.resolve_transform(&ocio, &scene.colour)?
+            }
+            None => None,
+        };
         settings.resolve(&crate::new_out_dir(&self.out_root)?);
         let scene = scene.clone();
         let port = service.port();
@@ -415,10 +478,13 @@ impl ExportController {
         ui: &mut egui::Ui,
         timeline: (u32, u32, f64, u32),
         service: &RenderService,
+        ocio: Option<&crate::ocio::Ocio>,
+        current: &crate::ocio::Sel,
         freeze: impl FnOnce() -> Scene,
     ) {
         ui.heading("Render / Encode");
         let running = self.is_running();
+        let kind_before = self.settings.output_kind();
         ui.add_enabled_ui(!running, |ui| {
             ui.horizontal(|ui| {
                 for format in ExportFormat::ALL {
@@ -443,6 +509,9 @@ impl ExportController {
                         self.settings.last = timeline.3;
                     }
                 }); ui.end_row();
+                if let (Some(kind), Some(ocio)) = (self.settings.output_kind(), ocio) {
+                    self.output_transform_ui(ui, ocio, current, kind);
+                }
                 if self.settings.format == ExportFormat::Png {
                     ui.label("Encoding");
                     egui::ComboBox::from_id_salt("png_encoding").selected_text(self.settings.png.label()).show_ui(ui, |ui| {
@@ -496,6 +565,11 @@ impl ExportController {
                 self.settings.set_fps(timeline.2);
             }
             ui.label("Animation is sampled at each frame. The scene and keys are frozen when export starts.");
+            // An override names a display of one kind (SDR / PQ / HLG): a new kind starts automatic.
+            if self.settings.output_kind() != kind_before {
+                self.settings.output_display.clear();
+                self.settings.output_view.clear();
+            }
             ui.small(self.settings.format.schema().codecs[0].hint.as_deref().unwrap_or(""));
             let validation = {
                 let mut preview = self.settings.clone();
@@ -524,6 +598,51 @@ impl ExportController {
         }
         ui.label(&self.status);
     }
+    /// "Output transform": what this export renders through from ACEScg, automatic by default.
+    fn output_transform_ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        ocio: &crate::ocio::Ocio,
+        current: &crate::ocio::Sel,
+        kind: crate::ocio::OutputKind,
+    ) {
+        let hdr = kind != crate::ocio::OutputKind::Sdr;
+        let resolved = self.settings.resolve_transform(ocio, current);
+        ui.label("Output transform").on_hover_text(
+            "The OCIO display / view this file is rendered through from ACEScg, independent of the viewport. Automatic: the scene's own view when it fits the format, else the config's first fitting display (PQ / HLG by name) and, for HDR, the view nearest the peak.",
+        );
+        ui.vertical(|ui| {
+            match &resolved {
+                Ok(Some((display, view))) => ui.label(format!("{display} · {view}")),
+                Ok(None) => ui.label("Built-in display (OCIO off)"),
+                Err(error) => ui.colored_label(egui::Color32::LIGHT_RED, error),
+            };
+            ui.horizontal(|ui| {
+                let owned = |v: Vec<&str>| v.into_iter().map(str::to_owned).collect::<Vec<_>>();
+                let displays = owned(ocio.displays(hdr).into_iter().filter(|d| ocio.display_is(d, kind)).collect());
+                let before = self.settings.output_display.clone();
+                crate::ocio::combo(ui, "export.output_display", &mut self.settings.output_display, &displays, "auto");
+                if self.settings.output_display != before {
+                    self.settings.output_view.clear();
+                }
+                let display = if self.settings.output_display.is_empty() {
+                    resolved.as_ref().ok().and_then(Option::as_ref).map(|(d, _)| d.clone()).unwrap_or_default()
+                } else {
+                    self.settings.output_display.clone()
+                };
+                let views = owned(
+                    ocio.views(&display, hdr)
+                        .into_iter()
+                        .filter(|v| ocio.view_is(&display, v, kind))
+                        .collect(),
+                );
+                ui.add_enabled_ui(!self.settings.output_display.is_empty(), |ui| {
+                    crate::ocio::combo(ui, "export.output_view", &mut self.settings.output_view, &views, "first");
+                });
+            });
+        });
+        ui.end_row();
+    }
 }
 
 /// Autonomous coordinator: GUI ticks are never required to render or publish the next frame.
@@ -541,6 +660,7 @@ fn coordinate_export(
         for number in settings.first..=settings.last {
             let mut frame_scene = scene.evaluated(f64::from(number))?;
             settings.apply_denoise_policy(&mut frame_scene);
+            settings.apply_transform(&mut frame_scene);
             let id = first_id + u64::from(number - settings.first);
             loop {
                 if cancel.load(Ordering::Acquire) {
@@ -1576,6 +1696,35 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[test]
+    fn each_format_renders_through_its_own_output_transform() {
+        use crate::ocio::{Ocio, OutputKind};
+        let ocio = Ocio::load("ocio://studio-config-latest").unwrap();
+        let scene = crate::color::default_selection(); // SDR sRGB view in the viewport
+        let mut s = ExportSettings { format: ExportFormat::Png, ..Default::default() };
+        let sdr = s.resolve_transform(&ocio, &scene).unwrap().unwrap();
+        assert_eq!((sdr.0.as_str(), sdr.1.as_str()), (scene.display.as_str(), scene.view.as_str()));
+        s.png = PngEncoding::Hdr10;
+        let (display, view) = s.resolve_transform(&ocio, &scene).unwrap().unwrap();
+        assert!(ocio.display_is(&display, OutputKind::Pq) && view.contains("1000 nits"), "{display} / {view}");
+        s.png_peak_nits = 500.0;
+        assert!(s.resolve_transform(&ocio, &scene).unwrap().unwrap().1.contains("500 nits"));
+        s.png = PngEncoding::Hlg;
+        let (display, _) = s.resolve_transform(&ocio, &scene).unwrap().unwrap();
+        assert!(display.contains("HLG"), "{display}");
+        // EXR is scene-linear; an SDR file with OCIO off keeps the built-in display.
+        s.format = ExportFormat::Exr;
+        assert_eq!(s.resolve_transform(&ocio, &scene).unwrap(), None);
+        s.format = ExportFormat::Hevc;
+        let off = crate::ocio::Sel { on: false, ..scene.clone() };
+        assert_eq!(s.resolve_transform(&ocio, &off).unwrap(), None);
+        // The frame scene gets the resolved display / view.
+        s.transform = Some((display.clone(), "view".into()));
+        let mut frame = Scene::preset(crate::params::FAMILY_BULB);
+        frame.colour.on = false;
+        s.apply_transform(&mut frame);
+        assert!(frame.colour.on && frame.colour.display == display);
+    }
     #[test]
     fn sequence_paths_and_validation() {
         let mut s = ExportSettings::default();
