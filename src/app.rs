@@ -320,6 +320,9 @@ struct Controls {
     /// Thrust multipliers while Shift (fast) / Alt (slow) are held.
     fast_multiplier: f32,
     slow_multiplier: f32,
+    /// Slot strips (CamClip, colour presets): the left button stores and the right recalls,
+    /// instead of the default left = recall, right = store (`hotkeys::slot_click`).
+    swap_slot_buttons: bool,
 }
 impl Default for Controls {
     fn default() -> Self {
@@ -332,6 +335,7 @@ impl Default for Controls {
             flip_degrees: 60.0,
             fast_multiplier: 4.0,
             slow_multiplier: 0.1,
+            swap_slot_buttons: false,
         }
     }
 }
@@ -656,7 +660,7 @@ impl App {
                         ui.label("Monitor presets choose rendering and export. PQ/HDR remains available on SDR screens using an SDR preview. HDR 1000 nits is the rendering peak; SDR reference white controls UI brightness.");
                         if ui.button("Display output & reference white…").clicked() { destination = Some(SettingsPage::Display); }
                         ui.add_space(8.0);
-                        changed = self.colour.ui(ui, &mut browse);
+                        changed = self.colour.ui(ui, &mut browse, self.controls.swap_slot_buttons);
                     }
                     SettingsPage::Fonts => self.fonts_ui(ui),
                     SettingsPage::Controls => {
@@ -671,6 +675,14 @@ impl App {
                             t.row("Shift fast ×").default(4.0).slider(&mut self.controls.fast_multiplier, 1.0..=20.0);
                             t.row("Alt slow ×").default(0.1).slider(&mut self.controls.slow_multiplier, 0.01..=1.0);
                         });
+                        egui_prefs2::section_header(ui, "Slot buttons");
+                        egui_attr_table::attr_table(ui, |t| {
+                            t.row("Swap copy/paste mouse buttons").default(false).checkbox(&mut self.controls.swap_slot_buttons);
+                        });
+                        ui.label(format!(
+                            "CamClip and colour presets · {}",
+                            crate::hotkeys::slot_hint(self.controls.swap_slot_buttons, "copy", "paste")
+                        ));
                         egui_prefs2::section_header(ui, "Attribute controls");
                         let defaults = egui_attr_grid::AttrMetrics::default();
                         let metrics = &mut self.world_ui.attribute_metrics;

@@ -1,5 +1,5 @@
-//! Camera slots: five viewport-toolbar buttons that copy (left click) and paste (right click)
-//! the viewport camera. A paste only assigns the camera; the viewport's ordinary edit path
+//! Camera slots: five viewport-toolbar buttons that copy and paste the viewport camera (the
+//! mouse mapping is `hotkeys::slot_click`, shared with the colour presets). A paste only assigns the camera; the viewport's ordinary edit path
 //! (`WorldEditor::navigate_camera`) authors it, so Auto Key, undo gestures and locks apply.
 //! The slots are an application clipboard persisted with the settings, not part of a scene.
 use crate::scene::Camera;
@@ -37,8 +37,10 @@ impl CameraSlots {
         }
     }
 
-    /// The strip of slot buttons: LMB stores `camera`, RMB restores into it.
-    pub fn ui(&mut self, ui: &mut egui::Ui, camera: &mut Camera) -> Option<SlotAction> {
+    /// The strip of slot buttons: one click stores `camera`, the other restores into it
+    /// (`hotkeys::slot_click`; `swap` exchanges the buttons).
+    pub fn ui(&mut self, ui: &mut egui::Ui, camera: &mut Camera, swap: bool) -> Option<SlotAction> {
+        use crate::hotkeys::{SlotClick, slot_click, slot_hint};
         let mut action = None;
         let right_to_left = ui.layout().prefer_right_to_left();
         if !right_to_left {
@@ -52,9 +54,10 @@ impl CameraSlots {
         };
         for index in order {
             let stored = self.slots[index];
+            let mapping = slot_hint(swap, "copy the current camera", "paste this camera");
             let hint = match stored {
                 Some(c) => format!(
-                    "CamClip {}\nLeft click: copy the current camera · Right click: paste this camera\n\nTarget {:.3} {:.3} {:.3}\nYaw {:.1}° Pitch {:.1}° Roll {:.1}°\nDistance {:.3} · FOV {:.1}°",
+                    "CamClip {}\n{mapping}\n\nTarget {:.3} {:.3} {:.3}\nYaw {:.1}° Pitch {:.1}° Roll {:.1}°\nDistance {:.3} · FOV {:.1}°",
                     index + 1,
                     c.target[0],
                     c.target[1],
@@ -65,16 +68,20 @@ impl CameraSlots {
                     c.distance,
                     c.fov_y_degrees
                 ),
-                None => format!("CamClip {} (empty)\nLeft click: copy the current camera · Right click: paste after copying", index + 1),
+                None => format!("CamClip {} (empty)\n{mapping}", index + 1),
             };
             let response = ui
                 .add(egui::Button::new((index + 1).to_string()).selected(stored.is_some()))
                 .on_hover_text(hint);
-            if response.clicked() {
-                self.store(index, camera);
-                action = Some(SlotAction::Stored(index));
-            } else if response.secondary_clicked() && self.restore(index, camera) {
-                action = Some(SlotAction::Restored(index));
+            match slot_click(&response, swap) {
+                Some(SlotClick::Store) => {
+                    self.store(index, camera);
+                    action = Some(SlotAction::Stored(index));
+                }
+                Some(SlotClick::Recall) if self.restore(index, camera) => {
+                    action = Some(SlotAction::Restored(index));
+                }
+                _ => {}
             }
         }
         if right_to_left {

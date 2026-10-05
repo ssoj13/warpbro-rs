@@ -3,6 +3,38 @@
 //! focus survives pointer exit. Text editors keep their keys.
 use egui::{Context, Id, Key, Modifiers, Rect, Ui};
 
+/// What a click on a slot strip (CamClip, colour presets) asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SlotClick {
+    /// Put the current value into the slot.
+    Store,
+    /// Bring the slot's value back.
+    Recall,
+}
+
+/// The one mouse mapping of every slot strip: the left button recalls and the right stores, or
+/// the reverse with `swap` (Settings > Controls > Swap copy/paste mouse buttons).
+pub fn slot_click(response: &egui::Response, swap: bool) -> Option<SlotClick> {
+    let (left, right) = if swap {
+        (SlotClick::Store, SlotClick::Recall)
+    } else {
+        (SlotClick::Recall, SlotClick::Store)
+    };
+    if response.clicked() {
+        Some(left)
+    } else if response.secondary_clicked() {
+        Some(right)
+    } else {
+        None
+    }
+}
+
+/// The hover line that names the mapping, e.g. "Left click: paste · Right click: copy".
+pub fn slot_hint(swap: bool, store: &str, recall: &str) -> String {
+    let (left, right) = if swap { (store, recall) } else { (recall, store) };
+    format!("Left click: {left} · Right click: {right}")
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Scope {
     Global,

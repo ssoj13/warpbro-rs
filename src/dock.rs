@@ -489,20 +489,21 @@ impl App {
             {
                 self.toggle_flight_mode();
             }
-            ui.separator();
-            if ui
+            // One button keeps the toolbar narrow: click saves as displayed, the context menu
+            // (right click) offers the other snapshot files, as File does.
+            let snapshot = ui
                 .button(ph::CAMERA)
-                .on_hover_text("Save the viewport as displayed (PNG)")
-                .clicked()
-            {
+                .on_hover_text("Save the viewport as displayed (PNG) · right click: more formats");
+            if snapshot.clicked() {
                 self.save_frame(None);
             }
-            ui.menu_button(ph::CARET_DOWN, |ui| self.snapshot_menu(ui))
-                .response
-                .on_hover_text("Save the viewport as…");
+            snapshot.context_menu(|ui| self.snapshot_menu(ui));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(ui.spacing().item_spacing.x);
-                match self.camera_slots.ui(ui, &mut self.scene.camera) {
+                match self
+                    .camera_slots
+                    .ui(ui, &mut self.scene.camera, self.controls.swap_slot_buttons)
+                {
                     Some(crate::camera_slots::SlotAction::Stored(i)) => {
                         self.status = format!("Camera {} stored", i + 1);
                     }

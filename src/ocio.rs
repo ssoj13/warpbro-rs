@@ -846,11 +846,12 @@ impl State {
 
     /// The Colour panel. Returns whether the choice changed; `browse` is set when the
     /// user asks for a config file (the app runs the file dialog).
-    pub fn ui(&mut self, ui: &mut egui::Ui, browse: &mut bool) -> bool {
+    /// `swap` exchanges the preset buttons' store / recall clicks (`hotkeys::slot_click`).
+    pub fn ui(&mut self, ui: &mut egui::Ui, browse: &mut bool, swap: bool) -> bool {
         self.poll();
         let before = self.sel.clone();
         let mut reload = false;
-        self.presets.ui(ui, &mut self.sel, &mut self.preset_edit);
+        self.presets.ui(ui, &mut self.sel, &mut self.preset_edit, swap);
         ui.add_space(4.0);
         ui.checkbox(&mut self.sel.on, "OCIO display transform")
             .on_hover_text("Show the colour image through the OCIO display / view (isolated channels stay raw).\nOff: the built-in sRGB display with the tone operator.");
@@ -1001,13 +1002,15 @@ impl ColourPresets {
         true
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, selection: &mut Sel, edit: &mut Option<PresetEdit>) {
+    fn ui(&mut self, ui: &mut egui::Ui, selection: &mut Sel, edit: &mut Option<PresetEdit>, swap: bool) {
+        use crate::hotkeys::{SlotClick, slot_click, slot_hint};
+        let mapping = slot_hint(swap, "name and save the current colour settings", "restore this preset");
         ui.horizontal_wrapped(|ui| {
             ui.label("Color presets");
             for (index, slot) in self.slots.iter().enumerate() {
                 let s = &slot.selection;
                 let hint = format!(
-                    "Left click: name and save current colour settings\nRight click: restore this preset\n\nConfig: {}\nInput: {}\nDisplay: {}\nView: {}\nLook: {}\nOCIO: {}",
+                    "{mapping}\n\nConfig: {}\nInput: {}\nDisplay: {}\nView: {}\nLook: {}\nOCIO: {}",
                     source(&s.config),
                     if s.working_input.is_empty() { "auto ACEScg" } else { &s.working_input },
                     s.display, s.view,
@@ -1015,10 +1018,12 @@ impl ColourPresets {
                     if s.on { "on" } else { "off" },
                 );
                 let response = ui.add(egui::Button::new(&slot.name).selected(s == selection)).on_hover_text(hint);
-                if response.clicked() {
-                    *edit = Some(PresetEdit { index, name: slot.name.clone(), selection: selection.clone(), focus: true });
-                } else if response.secondary_clicked() {
-                    *selection = slot.selection.clone();
+                match slot_click(&response, swap) {
+                    Some(SlotClick::Store) => {
+                        *edit = Some(PresetEdit { index, name: slot.name.clone(), selection: selection.clone(), focus: true });
+                    }
+                    Some(SlotClick::Recall) => *selection = slot.selection.clone(),
+                    None => {}
                 }
             }
         });
@@ -1101,17 +1106,30 @@ pub(crate) fn combo(ui: &mut egui::Ui, id: &str, cur: &mut String, items: &[Stri
 mod tests {
     use super::*;
 
+    /// The store click opens the naming prompt (Enter saves, Escape cancels), the recall click
+    /// restores; both mappings of `hotkeys::slot_click` (default and swapped).
     #[test]
     fn colour_slot_clicks_prompt_save_cancel_and_restore() {
-        fn frame(ctx: &egui::Context, presets: &mut ColourPresets, sel: &mut Sel, edit: &mut Option<PresetEdit>, events: Vec<egui::Event>) -> egui::FullOutput {
+        for swap in [false, true] {
+            slot_clicks(swap);
+        }
+    }
+
+    fn slot_clicks(swap: bool) {
+        let (store, recall) = if swap {
+            (egui::PointerButton::Primary, egui::PointerButton::Secondary)
+        } else {
+            (egui::PointerButton::Secondary, egui::PointerButton::Primary)
+        };
+        let frame = |ctx: &egui::Context, presets: &mut ColourPresets, sel: &mut Sel, edit: &mut Option<PresetEdit>, events: Vec<egui::Event>| -> egui::FullOutput {
             ctx.run_ui(egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0))),
                 events,
                 ..Default::default()
             }, |root| {
-                egui::CentralPanel::default().show(root, |ui| presets.ui(ui, sel, edit));
+                egui::CentralPanel::default().show(root, |ui| presets.ui(ui, sel, edit, swap));
             })
-        }
+        };
         fn mouse(pos: egui::Pos2, button: egui::PointerButton, pressed: bool) -> Vec<egui::Event> {
             vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton { pos, button, pressed, modifiers: Default::default() }]
         }
@@ -1130,8 +1148,8 @@ mod tests {
             egui::epaint::Shape::Text(t) if t.galley.text() == "SDR · sRGB" => Some(t.pos + t.galley.rect.center().to_vec2()),
             _ => None,
         }).unwrap();
-        frame(&ctx, &mut presets, &mut sel, &mut edit, mouse(pos, egui::PointerButton::Primary, true));
-        frame(&ctx, &mut presets, &mut sel, &mut edit, mouse(pos, egui::PointerButton::Primary, false));
+        frame(&ctx, &mut presets, &mut sel, &mut edit, mouse(pos, store, true));
+        frame(&ctx, &mut presets, &mut sel, &mut edit, mouse(pos, store, false));
         assert!(edit.is_some());
         assert_eq!(presets, original, "opening the prompt does not overwrite");
         frame(&ctx, &mut presets, &mut sel, &mut edit, vec![]);
@@ -1149,8 +1167,8 @@ mod tests {
         sel = Sel::default();
         frame(&ctx, &mut presets, &mut sel, &mut edit, vec![]);
         frame(&ctx, &mut presets, &mut sel, &mut edit, vec![]);
-        frame(&ctx, &mut presets, &mut sel, &mut edit, mouse(pos, egui::PointerButton::Secondary, true));
-        frame(&ctx, &mut presets, &mut sel, &mut edit, mouse(pos, egui::PointerButton::Secondary, false));
+        frame(&ctx, &mut presets, &mut sel, &mut edit, mouse(pos, recall, true));
+        frame(&ctx, &mut presets, &mut sel, &mut edit, mouse(pos, recall, false));
         assert_eq!(sel, expected);
         assert!(edit.is_none());
     }
@@ -1422,7 +1440,7 @@ mod tests {
         let mut browse = false;
         let _ = ctx.run_ui(Default::default(), |root| {
             egui::CentralPanel::default().show(root, |ui| {
-                assert!(!state.ui(ui, &mut browse));
+                assert!(!state.ui(ui, &mut browse, false));
                 ui.label("The rest of the UI still draws");
             });
         });
