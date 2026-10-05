@@ -50,8 +50,10 @@ CHANGELOG.md, add new requests as they come. Reusable UI goes into egui-widgets-
       hits: the old statistics mixed in the phantoms); 6-probe normal cost (isolated benchmark)
 - [ ] Port the march fix to the OFX plug-in's kernel copy (`ofx-rs/crates/ofx-fractal/kernels/source/src/gpu.rs`
       still has the full-pixel closest-sample rule and `2 span / max_steps`), then check silhouettes
-- [ ] Per-object "March steps" does nothing in world renders: `P_MAX_STEPS` / `P_SECONDARY_STEPS`
-      are read globally (pre-existing) - make it a render (global) setting or honour it per object
+- [ ] Fractal nodes carry a full `render` block but only `/render/iterations` is per object (the
+      Attribute Editor hides the rest, world.rs `attributes`; march settings live on the settings
+      node, one march traces the union of objects). Not user-visible; drop the dead per-object
+      fields when the object model is split (low priority)
 - [ ] Over-relaxation sphere tracing (Keinert 3.1) for grazing rays: only with a safety check,
       Hybrid DEs are not Lipschitz bounds
 - [ ] `cuda_specialized_world_materials_preserve_radiance_and_affine_guides` (ignored test) fails on
