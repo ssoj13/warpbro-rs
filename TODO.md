@@ -5,16 +5,16 @@ CHANGELOG.md, add new requests as they come. Reusable UI goes into egui-widgets-
 (operator, 2026-10-04: "все эти фичи в крейтах egui-widgets-rs, чтобы другие могли пользоваться").
 
 ## Timeline
-- [ ] Home / End: time cursor to work area start / end (Timeline scope, Playa bindings)
-- [ ] B / N: work area start / end at the time cursor
-- [ ] Shift+0-9 set time mark, 0-9 jump (physical keys; `WorldDocument.marks`, undoable);
+- [x] Home / End: time cursor to work area start / end (Timeline scope, Playa bindings)
+- [x] B / N: work area start / end at the time cursor
+- [x] Shift+0-9 set time mark, 0-9 jump (physical keys; `WorldDocument.marks`, undoable);
       Ctrl+click on a ruler mark clears it (as in Playa); slot numbers drawn on the ruler
-- [ ] U (and P/R/S) expand caret desync: caret follows the track's real expanded state;
+- [x] U (and P/R/S) expand caret desync: caret follows the track's real expanded state;
       toggling the last filter off collapses
-- [ ] Zoom slider twice as long
+- [x] Zoom slider twice as long
 
 ## Viewport / camera
-- [ ] Shift + LMB orbit snaps the view parallel to the nearest world axis (X/Y/Z)
+- [x] Shift + LMB orbit snaps the view parallel to the nearest world axis (X/Y/Z)
 - [ ] Toolbar: gear right of the view transform ("ACES") opens Settings > Colour
 - [ ] Toolbar: EV reset-to-0 button left of EV
 - [ ] Toolbar: denoiser quick toggle (off = raw radiance, on = current denoised result)
@@ -35,7 +35,7 @@ CHANGELOG.md, add new requests as they come. Reusable UI goes into egui-widgets-
       — plan for operator approval first
 
 ## Bugs
-- [ ] Adaptive sampling: with 1 sample per frame it renders that sample and stops
+- [x] Adaptive sampling: with 1 sample per frame it renders that sample and stops
 - [ ] HEVC export tests flaky under the full parallel suite (Vulkan Video `Posix(38)`);
       pass alone
 

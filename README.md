@@ -139,7 +139,7 @@ python bootstrap.py r                                  # build, warm the CUDA ca
 
 | input             | action                                                                                                     |
 | ----------------- | ---------------------------------------------------------------------------------------------------------- |
-| left drag         | orbit (coasts on release)                                                                                  |
+| left drag         | orbit (coasts on release); Shift: snap to the views along the world axes                                  |
 | middle drag       | pan (coasts on release)                                                                                    |
 | wheel             | zoom                                                                                                       |
 | hold right button | fly: mouse looks, WASD moves, R/Space up, C down, Q/E rolls (tilts under the lock), Shift x4, Alt x0.1, wheel speed |

@@ -1881,8 +1881,9 @@ impl App {
         ui.ctx().request_repaint();
     }
 
-    /// Houdini orbit through the shared rig: LMB tumbles about world up, MMB pans, the wheel
-    /// zooms toward the target, and released drags coast. The camera roll is an overlay the
+    /// Houdini orbit through the shared rig: LMB tumbles about world up (Shift: snapped to the
+    /// views along the world axes), MMB pans, the wheel zooms toward the target, and released
+    /// drags coast. The camera roll is an overlay the
     /// turntable leaves alone (as do pan and zoom); pan turns the cursor motion by it so the
     /// view follows the cursor.
     fn orbit_camera(&mut self, ui: &egui::Ui, resp: &egui::Response, over_toolbar: bool) {
@@ -1904,10 +1905,13 @@ impl App {
         rig.pitch_limit = 89.0_f32.to_radians();
         rig.projection.distance_min = 0.05 * radius;
         rig.projection.distance_max = f32::MAX;
-        let seed = OrbitPose::looking(
-            Vec3::from_array(cam.target),
-            cam.orientation() * -Vec3::Z,
+        // Seeded from yaw / pitch, not the view vector: straight up or down keeps its heading.
+        // The rig's turntable yaw is the camera yaw minus a quarter turn (its offset axis is +X).
+        let seed = OrbitPose::from_yaw_pitch(
+            (cam.yaw_degrees - 90.0).to_radians(),
+            cam.pitch_degrees.to_radians(),
             cam.distance * radius,
+            Vec3::from_array(cam.target),
         );
         rig.pose = seed;
 
@@ -1915,6 +1919,8 @@ impl App {
             // RMB belongs to flight.
             dolly: None,
             wheel: !over_toolbar,
+            // Shift + tumble: views parallel to the world axes.
+            shift_snap: true,
             ..cam_controls_egui::OrbitButtons::HOUDINI
         };
         let frame =
@@ -1948,7 +1954,9 @@ impl App {
         // Write back only real changes: a still drag must not restart the progressive render.
         let pose = rig.pose;
         if pose != seed {
-            cam.set_forward(pose.target - pose.eye());
+            let (yaw, pitch) = cam_controls::yaw_pitch_from_orientation(pose.orientation);
+            cam.yaw_degrees = yaw.to_degrees() + 90.0;
+            cam.pitch_degrees = pitch.to_degrees();
             cam.target = pose.target.to_array();
             cam.distance = pose.distance / radius;
         }
@@ -3680,6 +3688,42 @@ mod tests {
             "no drift across the rolled axis: {moved}"
         );
         assert_eq!(app.scene.camera.roll_degrees, 90.0);
+
+        // Shift + LMB: the view snaps parallel to the nearest world axis; dragging up far
+        // enough gives the top view, square to the world, which a plain orbit then continues
+        // from without losing its heading.
+        app.scene.camera.roll_degrees = 0.0;
+        app.scene.camera.yaw_degrees = 20.0;
+        app.scene.camera.pitch_degrees = 10.0;
+        let shift = egui::Modifiers::SHIFT;
+        let shifted = |button, pressed, pos| egui::Event::PointerButton { pos, button, pressed, modifiers: shift };
+        frame(&mut app, vec![egui::Event::ModifiersChanged(shift), shifted(egui::PointerButton::Primary, true, pos)]);
+        for _ in 0..4 {
+            pos.x += 2.0;
+            frame(&mut app, vec![egui::Event::PointerMoved(pos)]);
+        }
+        let cam = app.scene.camera;
+        assert_eq!((cam.yaw_degrees.round(), cam.pitch_degrees.round()), (0.0, 0.0), "snapped to -Z");
+        // 1 degree per point keeps the 120 degree drag inside the window.
+        app.controls.look_sensitivity = 10.0;
+        for _ in 0..12 {
+            pos.y += 10.0;
+            frame(&mut app, vec![egui::Event::PointerMoved(pos)]);
+        }
+        frame(&mut app, vec![shifted(egui::PointerButton::Primary, false, pos), egui::Event::ModifiersChanged(egui::Modifiers::NONE)]);
+        let top = app.scene.camera;
+        assert!((top.pitch_degrees - 90.0).abs() < 1e-3, "top view: pitch {}", top.pitch_degrees);
+        assert!((top.yaw_degrees.rem_euclid(90.0)).min(90.0 - top.yaw_degrees.rem_euclid(90.0)) < 1e-3, "square yaw {}", top.yaw_degrees);
+        frame(&mut app, vec![button(egui::PointerButton::Primary, true, pos)]);
+        pos.y -= 10.0;
+        frame(&mut app, vec![egui::Event::PointerMoved(pos)]);
+        frame(&mut app, vec![button(egui::PointerButton::Primary, false, pos)]);
+        assert!(
+            (app.scene.camera.yaw_degrees - top.yaw_degrees).abs() < 1e-2,
+            "leaving the top view keeps the heading: {} -> {}",
+            top.yaw_degrees,
+            app.scene.camera.yaw_degrees
+        );
     }
 
     #[test]
