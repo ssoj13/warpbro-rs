@@ -374,7 +374,7 @@ struct Settings {
     gui_fps: u32,
     status_layout: egui_statusbar::StatusBarLayout,
     status_resizable: bool,
-    attribute_metrics: crate::ui_style::AttributeMetrics,
+    attribute_metrics: egui_attr_grid::AttrMetrics,
     auto_key: bool,
     timeline_outline_width: f32,
     file_dialogs: crate::file_dialogs::History,
@@ -652,14 +652,14 @@ impl App {
                             t.row("Alt slow ×").default(0.1).slider(&mut self.controls.slow_multiplier, 0.01..=1.0);
                         });
                         egui_prefs2::section_header(ui, "Attribute controls");
-                        let defaults = crate::ui_style::AttributeMetrics::default();
+                        let defaults = egui_attr_grid::AttrMetrics::default();
                         let metrics = &mut self.world_ui.attribute_metrics;
                         egui_attr_table::attr_table(ui, |table| {
-                            table.row("Field height").default(defaults.field_height).slider(&mut metrics.field_height, crate::ui_style::AttributeMetrics::FIELD_HEIGHT_RANGE);
-                            table.row("Numeric field width").default(defaults.numeric_width).slider(&mut metrics.numeric_width, crate::ui_style::AttributeMetrics::NUMERIC_WIDTH_RANGE);
-                            table.row("Icon size").default(defaults.icon_side).slider(&mut metrics.icon_side, crate::ui_style::AttributeMetrics::ICON_SIDE_RANGE);
-                            table.row("Row spacing").default(defaults.row_gap).slider(&mut metrics.row_gap, crate::ui_style::AttributeMetrics::ROW_GAP_RANGE);
-                            table.row("Component spacing").default(defaults.component_gap).slider(&mut metrics.component_gap, crate::ui_style::AttributeMetrics::COMPONENT_GAP_RANGE);
+                            table.row("Field height").default(defaults.field_height).slider(&mut metrics.field_height, egui_attr_grid::AttrMetrics::FIELD_HEIGHT_RANGE);
+                            table.row("Numeric field width").default(defaults.numeric_width).slider(&mut metrics.numeric_width, egui_attr_grid::AttrMetrics::NUMERIC_WIDTH_RANGE);
+                            table.row("Icon size").default(defaults.icon_side).slider(&mut metrics.icon_side, egui_attr_grid::AttrMetrics::ICON_SIDE_RANGE);
+                            table.row("Row spacing").default(defaults.row_gap).slider(&mut metrics.row_gap, egui_attr_grid::AttrMetrics::ROW_GAP_RANGE);
+                            table.row("Component spacing").default(defaults.component_gap).slider(&mut metrics.component_gap, egui_attr_grid::AttrMetrics::COMPONENT_GAP_RANGE);
                         });
                         *metrics = metrics.normalized();
                         ui.label("Attribute Editor, Timeline and Render Settings share these sizes.");
@@ -2973,7 +2973,7 @@ impl App {
                     self.status = error;
                 }
             }
-            let gesture = crate::world_ui::parameter_gesture(&ctx)
+            let gesture = egui_attr_grid::edit_gesture(&ctx)
                 .or(camera_gesture)
                 .or_else(|| {
                     ctx.input(|input| input.pointer.primary_released())
@@ -3000,7 +3000,7 @@ impl App {
         self.remember_material_targets();
         self.process_preview_intent(&ctx);
         self.world
-            .finish_edit_unless(crate::world_ui::parameter_gesture(&ctx).or(camera_gesture));
+            .finish_edit_unless(egui_attr_grid::edit_gesture(&ctx).or(camera_gesture));
         if let Err(error) = self.refresh_scene() {
             self.status = error;
         }

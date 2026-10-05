@@ -121,7 +121,7 @@ pub fn render(
     resolution: &mut f32,
     seed: &mut u32,
     label_width: &mut f32,
-    metrics: crate::ui_style::AttributeMetrics,
+    metrics: egui_attr_grid::AttrMetrics,
 ) {
     let metrics = metrics.normalized();
     metrics.apply(ui);

@@ -41,7 +41,6 @@ mod scene;
 mod transfer;
 mod transmission;
 mod templates;
-mod ui_style;
 mod window;
 mod world;
 mod world_ui;

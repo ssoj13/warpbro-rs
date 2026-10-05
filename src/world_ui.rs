@@ -1,5 +1,5 @@
 //! Object panels. Widgets report intents; WorldEditor owns all document changes.
-use crate::ui_style::AttributeMetrics;
+use egui_attr_grid::{AnimIntent, AnimState, AttrMetrics, ChannelExpansion};
 use crate::world::{NodeId, WorldAttribute, WorldCommand, WorldEditor, WorldKind, WorldNodeInfo};
 use curves::CurveKind;
 use egui::{Color32, Pos2, Rect, Sense, Vec2};
@@ -11,23 +11,12 @@ use egui_track_timeline::{
     Track, TrackTimeline, WorkArea,
 };
 use egui_widgets_config::attr_layout::{
-    ValueEditorLayout, cell_ui, square_icon, square_icon_with_paint,
+    ValueEditorLayout, cell_ui, square_icon,
 };
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
-pub(crate) fn parameter_gesture(ctx: &egui::Context) -> Option<u64> {
-    ctx.dragged_id()
-        .or_else(|| {
-            if ctx.text_edit_focused() {
-                ctx.memory(|memory| memory.focused())
-            } else {
-                None
-            }
-        })
-        .map(|id| id.value())
-}
 fn value_gesture_eligible(attr: &WorldAttribute, value: &Value) -> bool {
     value.is_number()
         || value
@@ -176,7 +165,6 @@ struct GridSectionCache {
     indices: Vec<usize>,
     revision: u64,
     frame: u64,
-    projection: u64,
 }
 
 pub struct WorldUi {
@@ -187,7 +175,7 @@ pub struct WorldUi {
     pub attribute_label_width: f32,
     /// Authored outline/canvas split; narrow panels only clamp its drawn width.
     pub timeline_outline_width: f32,
-    pub attribute_metrics: AttributeMetrics,
+    pub attribute_metrics: AttrMetrics,
     pub material_library_requested: bool,
     pub preview_action: Option<PreviewAction>,
     pub playback_range: Option<(u32, u32)>,
@@ -198,8 +186,8 @@ pub struct WorldUi {
     view: TimelineView,
     expanded: HashSet<NodeId>,
     groups: HashSet<(NodeId, String)>,
-    component_open: HashMap<NodeId, HashSet<String>>,
-    component_closed: HashMap<NodeId, HashSet<String>>,
+    /// Which vectors show their channels, per node; the Attribute Editor and the timeline share it.
+    channels: HashMap<NodeId, ChannelExpansion>,
     section_closed: HashMap<NodeId, HashSet<&'static str>>,
     /// Attribute lane the timeline scrolls to on its next draw (Attribute Editor > Show in
     /// timeline), and whether the Timeline panel must be opened for it.
@@ -232,7 +220,7 @@ impl Default for WorldUi {
             looping: true,
             attribute_label_width: 180.0,
             timeline_outline_width: 340.0,
-            attribute_metrics: AttributeMetrics::default(),
+            attribute_metrics: AttrMetrics::default(),
             material_library_requested: false,
             preview_action: None,
             playback_range: None,
@@ -243,8 +231,7 @@ impl Default for WorldUi {
             view: TimelineView::default(),
             expanded: HashSet::new(),
             groups: HashSet::new(),
-            component_open: HashMap::new(),
-            component_closed: HashMap::new(),
+            channels: HashMap::new(),
             section_closed: HashMap::new(),
             reveal: None,
             reveal_panel: false,
@@ -551,7 +538,7 @@ impl WorldUi {
         }
     }
     fn value_command(&mut self, ui: &egui::Ui, e: &mut WorldEditor, c: WorldCommand) {
-        let gesture = parameter_gesture(ui.ctx()).or_else(|| {
+        let gesture = egui_attr_grid::edit_gesture(ui.ctx()).or_else(|| {
             if ui.input(|input| input.pointer.primary_released()) {
                 e.active_edit()
             } else {
@@ -892,27 +879,22 @@ impl WorldUi {
         cache.frame = frame;
         cache
     }
+    /// The grid rows of one Attribute Editor section: each property, a vector carrying its
+    /// channel rows (the grid shows them by the node's channel expansion). `indices` / `labels` /
+    /// `values` follow the same walk (property, then its channels), so hooks find any row's
+    /// attribute by key; a frame change only refreshes the values.
     fn prepare_section(
         &self,
         section: &mut GridSectionCache,
         attrs: &[WorldAttribute],
-        id: NodeId,
         group: &'static str,
         revision: u64,
         frame: u64,
     ) {
-        let mut hash = std::collections::hash_map::DefaultHasher::new();
-        for attr in attrs
-            .iter()
-            .filter(|a| a.component.is_none() && a.value.is_array() && category(&a.path) == group)
-        {
-            self.components_open(id, &attr.path, attrs).hash(&mut hash);
-        }
-        let projection = hash.finish();
-        if section.fields.is_empty()
-            || section.revision != revision
-            || section.projection != projection
-        {
+        let field = |attr: &WorldAttribute| {
+            AttrField::new(&attr.path, grid_value(&attr.value)).with_ui_options(grid_hints(attr))
+        };
+        if section.fields.is_empty() || section.revision != revision {
             section.indices.clear();
             section.fields.clear();
             section.labels.clear();
@@ -922,69 +904,62 @@ impl WorldUi {
                 .enumerate()
                 .filter(|(_, a)| a.component.is_none() && category(&a.path) == group)
             {
-                section.indices.push(index);
-                if self.components_open(id, &attr.path, attrs) {
-                    section.indices.extend(
-                        attrs
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, a)| {
-                                a.component.is_some()
-                                    && a.path
-                                        .rsplit_once('/')
-                                        .is_some_and(|(parent, _)| parent == attr.path)
-                            })
-                            .map(|(i, _)| i),
+                let channels: Vec<usize> = attrs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, a)| {
+                        a.component.is_some()
+                            && a.path
+                                .rsplit_once('/')
+                                .is_some_and(|(parent, _)| parent == attr.path)
+                    })
+                    .map(|(i, _)| i)
+                    .collect();
+                let order = section.fields.len() as f32;
+                section.fields.push(
+                    field(attr)
+                        .with_order(order)
+                        .with_channels(channels.iter().map(|&i| field(&attrs[i])).collect()),
+                );
+                for i in std::iter::once(index).chain(channels) {
+                    let attr = &attrs[i];
+                    section.indices.push(i);
+                    section.labels.push(
+                        attr.component
+                            .map(component_label)
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| property_label(&attr.path)),
                     );
+                    section.values.push(attr.value.clone());
                 }
             }
-            for (order, &index) in section.indices.iter().enumerate() {
-                let attr = &attrs[index];
-                section.fields.push(
-                    AttrField::new(&attr.path, grid_value(&attr.value))
-                        .with_order(order as f32)
-                        .with_ui_options(grid_hints(attr)),
-                );
-                section.labels.push(
-                    attr.component
-                        .map(component_label)
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| property_label(&attr.path)),
-                );
-                section.values.push(attr.value.clone());
-            }
             section.revision = revision;
-            section.projection = projection;
             section.frame = frame;
         } else if section.frame != frame {
-            for ((field, value), &index) in section
+            let rows = section
                 .fields
                 .iter_mut()
-                .zip(&mut section.values)
-                .zip(&section.indices)
-            {
-                field.value = grid_value(&attrs[index].value);
+                .flat_map(|field| {
+                    let (parent, channels) = (&mut field.value, &mut field.channels);
+                    std::iter::once(parent).chain(channels.iter_mut().map(|c| &mut c.value))
+                });
+            for ((grid, value), &index) in rows.zip(&mut section.values).zip(&section.indices) {
+                *grid = grid_value(&attrs[index].value);
                 value.clone_from(&attrs[index].value);
             }
             section.frame = frame;
         }
     }
 
+    /// Does vector `path` of node `id` show its channels (the grid's rule: the user's choice, else
+    /// open while a channel is animated)?
     fn components_open(&self, id: NodeId, path: &str, attrs: &[WorldAttribute]) -> bool {
-        self.component_open
-            .get(&id)
-            .is_some_and(|paths| paths.contains(path))
-            || (!self
-                .component_closed
-                .get(&id)
-                .is_some_and(|paths| paths.contains(path))
-                && attrs.iter().any(|a| {
-                    a.component.is_some()
-                        && a.path
-                            .rsplit_once('/')
-                            .is_some_and(|(parent, _)| parent == path)
-                        && !a.frames.is_empty()
-                }))
+        let animated = attrs.iter().any(|a| {
+            a.component.is_some()
+                && a.path.rsplit_once('/').is_some_and(|(parent, _)| parent == path)
+                && !a.frames.is_empty()
+        });
+        self.channels.get(&id).map_or(animated, |e| e.is_open(path, animated))
     }
     /// Show `attr` of node `id` in the timeline: expand the layer (no property filter), its
     /// attribute group and, for a vector component, the component channels; the next timeline
@@ -998,8 +973,7 @@ impl WorldUi {
         self.property_filters.remove(&id);
         self.groups.insert((id, format!("@{}", category(parent))));
         if attr.component.is_some() {
-            // `toggle_components(.., open = false)` opens them.
-            self.toggle_components(id, parent, false);
+            self.channels.entry(id).or_default().set(parent, true);
         }
         self.reveal = Some((id, attr.path.clone()));
         self.reveal_panel = true;
@@ -1007,25 +981,6 @@ impl WorldUi {
     /// The Timeline panel must be shown for a pending reveal (taken once by the app).
     pub(crate) fn take_timeline_request(&mut self) -> bool {
         std::mem::take(&mut self.reveal_panel)
-    }
-    fn toggle_components(&mut self, id: NodeId, path: &str, open: bool) {
-        if let Some(paths) = self.component_open.get_mut(&id) {
-            paths.remove(path);
-        }
-        if let Some(paths) = self.component_closed.get_mut(&id) {
-            paths.remove(path);
-        }
-        if open {
-            self.component_closed
-                .entry(id)
-                .or_default()
-                .insert(path.into());
-        } else {
-            self.component_open
-                .entry(id)
-                .or_default()
-                .insert(path.into());
-        }
     }
     fn lanes(&self, id: NodeId, attrs: &[WorldAttribute]) -> Vec<Lane> {
         let filter = self.property_filters.get(&id).copied().unwrap_or_default();
@@ -1479,7 +1434,7 @@ impl WorldUi {
                 ("/locked", n.locked, ph::LOCK, ph::LOCK_OPEN, "Lock"),
                 ("/solo", n.solo, "S", "s", "Solo"),
             ] {
-                if icon_cell(ui, next(), if state { on } else { off }, state, true)
+                if egui_widgets_config::icon_toggle(ui, next(), if state { on } else { off }, state, true)
                     .on_hover_text(tip)
                     .clicked()
                 {
@@ -1655,15 +1610,16 @@ impl WorldUi {
             let Some(attr) = lane.attr.as_ref() else {
                 return;
             };
-            if let Some(command) = animation_controls(
-                ui,
-                id,
-                attr,
-                self.playhead as f64,
-                cells.prefix,
-                self.attribute_metrics,
-            ) {
-                self.command(e, command);
+            let frame = self.playhead as f64;
+            if let Some(intent) = anim_state(attr, frame).and_then(|anim| {
+                egui_attr_grid::animation_controls(
+                    ui,
+                    &self.attribute_metrics.grid_config(),
+                    cells.prefix,
+                    anim,
+                )
+            }) {
+                self.command(e, anim_command(id, attr, frame, intent));
             }
             let label = Rect::from_min_max(
                 cells.label.min
@@ -1694,24 +1650,12 @@ impl WorldUi {
                     self.command(e, command);
                 }
             }
-            let left = Rect::from_min_size(
-                cells.actions.min,
-                Vec2::new(
-                    (cells.actions.width() * 0.5 - self.attribute_metrics.component_gap * 0.5)
-                        .max(0.0),
-                    cells.actions.height(),
-                ),
-            );
-            let right = Rect::from_min_max(
-                Pos2::new(
-                    cells.actions.center().x + self.attribute_metrics.component_gap * 0.5,
-                    cells.actions.top(),
-                ),
-                cells.actions.max,
-            );
+            // The row icons sit in the grid's slots: own toggles left, the channel caret right.
+            let config = self.attribute_metrics.grid_config();
+            let (left, _) = config.icon_slots(ui, cells.actions);
             if path == "/julia" {
                 let enabled = !lane.value.is_null();
-                if icon_cell(ui, left, ph::POWER, enabled, true)
+                if egui_widgets_config::icon_toggle(ui, left, ph::POWER, enabled, true)
                     .on_hover_text("Enable / disable Julia")
                     .clicked()
                 {
@@ -1754,21 +1698,8 @@ impl WorldUi {
             }
             if attr.component.is_none() && lane.value.is_array() {
                 let open = self.components_open(id, path, attrs);
-                if icon_cell(
-                    ui,
-                    right,
-                    if open {
-                        ph::CARET_DOWN
-                    } else {
-                        ph::CARET_RIGHT
-                    },
-                    false,
-                    true,
-                )
-                .on_hover_text("Show component channels")
-                .clicked()
-                {
-                    self.toggle_components(id, path, open);
+                if egui_attr_grid::channel_caret(ui, &config, cells.actions, open) {
+                    self.channels.entry(id).or_default().set(path, !open);
                 }
             }
         });
@@ -2125,7 +2056,7 @@ impl WorldUi {
                         }
                     });
             });
-            if icon_cell(ui, button, ph::PALETTE, false, true)
+            if egui_widgets_config::icon_toggle(ui, button, ph::PALETTE, false, true)
                 .on_hover_text("Open material library")
                 .clicked()
             {
@@ -2287,7 +2218,7 @@ impl WorldUi {
                         .get(&id)
                         .is_some_and(|sections| sections.contains(group));
                     let section = cache.sections.entry((id, group)).or_default();
-                    self.prepare_section(section, attrs, id, group, revision, frame);
+                    self.prepare_section(section, attrs, group, revision, frame);
                     let response = egui_titlebar::CollapsingSection::new(group)
                         .id_salt((wid(id), group))
                         .open(open)
@@ -2426,20 +2357,18 @@ impl AttrGridHooks for WorldGridHooks<'_> {
             .map(|index| self.labels[index].as_str())
             .unwrap_or(&field.key)
     }
-    fn prefix(&mut self, ui: &mut egui::Ui, field: &AttrField) {
+    fn anim(&self, field: &AttrField) -> Option<AnimState> {
+        anim_state(&self.attrs[self.indices[self.index(field)?]], self.frame)
+    }
+    fn anim_intent(&mut self, field: &AttrField, intent: AnimIntent) {
         if let Some(index) = self.index(field) {
-            let rect = ui.max_rect();
-            if let Some(command) = animation_controls(
-                ui,
-                self.id,
-                &self.attrs[self.indices[index]],
-                self.frame,
-                rect,
-                self.ui_state.attribute_metrics,
-            ) {
-                self.commands.push(command);
-            }
+            let attr = &self.attrs[self.indices[index]];
+            self.commands.push(anim_command(self.id, attr, self.frame, intent));
         }
+    }
+    /// One expansion per node, shared with the timeline's lanes.
+    fn expansion(&mut self) -> Option<&mut ChannelExpansion> {
+        Some(self.ui_state.channels.entry(self.id).or_default())
     }
     fn disabled(&self, field: &AttrField) -> Option<String> {
         let attr = &self.attrs[self.indices[self.index(field)?]];
@@ -2466,15 +2395,11 @@ impl AttrGridHooks for WorldGridHooks<'_> {
             return;
         };
         let attr = &self.attrs[self.indices[index]];
-        let rect = ui.max_rect();
-        let left = Rect::from_min_size(
-            rect.min,
-            Vec2::new((rect.width() * 0.5 - 2.0).max(0.0), rect.height()),
-        );
-        let right = Rect::from_min_max(Pos2::new(rect.center().x + 2.0, rect.top()), rect.max);
+        let config = self.ui_state.attribute_metrics.grid_config();
+        let (left, _) = config.icon_slots(ui, ui.max_rect());
         if attr.path == "/julia" {
             let enabled = !self.values[index].is_null();
-            if icon_cell(ui, left, ph::POWER, enabled, true)
+            if egui_widgets_config::icon_toggle(ui, left, ph::POWER, enabled, true)
                 .on_hover_text("Enable / disable Julia")
                 .clicked()
             {
@@ -2488,27 +2413,6 @@ impl AttrGridHooks for WorldGridHooks<'_> {
                     },
                     frame: self.frame,
                 });
-            }
-        }
-        if attr.component.is_none() && attr.value.is_array() {
-            let open = self
-                .ui_state
-                .components_open(self.id, &attr.path, self.attrs);
-            if icon_cell(
-                ui,
-                right,
-                if open {
-                    ph::CARET_DOWN
-                } else {
-                    ph::CARET_RIGHT
-                },
-                false,
-                true,
-            )
-            .on_hover_text("Show component channels")
-            .clicked()
-            {
-                self.ui_state.toggle_components(self.id, &attr.path, open);
             }
         }
     }
@@ -2653,7 +2557,7 @@ const ATTRIBUTE_GROUPS: [&str; 9] = [
 fn property_rects(
     row: Rect,
     label_width: f32,
-    metrics: AttributeMetrics,
+    metrics: AttrMetrics,
 ) -> egui_widgets_config::attr_layout::AttrRowRects {
     metrics.grid_config().row_rects(row, label_width)
 }
@@ -2661,13 +2565,13 @@ fn transport_icon(
     ui: &mut egui::Ui,
     glyph: &str,
     active: bool,
-    metrics: AttributeMetrics,
+    metrics: AttrMetrics,
 ) -> egui::Response {
     let (rect, _) = ui.allocate_exact_size(
         Vec2::new(metrics.icon_side, metrics.row_height()),
         Sense::hover(),
     );
-    icon_cell(ui, rect, glyph, active, true)
+    egui_widgets_config::icon_toggle(ui, rect, glyph, active, true)
 }
 fn component_label(index: usize) -> &'static str {
     ["X", "Y", "Z", "W"].get(index).copied().unwrap_or("")
@@ -2701,74 +2605,27 @@ fn property_label(path: &str) -> String {
         .collect::<Vec<_>>()
         .join(" · ")
 }
-fn icon_cell(
-    ui: &mut egui::Ui,
-    rect: Rect,
-    icon: &str,
-    active: bool,
-    enabled: bool,
-) -> egui::Response {
-    let side = ui.spacing().icon_width.min(rect.width()).min(rect.height());
-    let rect = Rect::from_center_size(rect.center(), Vec2::splat(side));
-    let mut font = egui::TextStyle::Button.resolve(ui.style());
-    font.size = side * 0.8;
-    let color = active.then(|| ui.visuals().selection.stroke.color);
-    square_icon_with_paint(ui, rect, icon, enabled, Some(font), color)
+/// An attribute's animation for the shared controls (egui-attr-grid): animated = it has keys,
+/// keyed = one of them at `frame`. None for a non-keyable attribute (no controls).
+fn anim_state(attr: &WorldAttribute, frame: f64) -> Option<AnimState> {
+    attr.keyable.then(|| AnimState {
+        animated: !attr.frames.is_empty(),
+        keyed: attr.frames.contains(&frame),
+    })
 }
-fn animation_controls(
-    ui: &mut egui::Ui,
-    id: NodeId,
-    attr: &WorldAttribute,
-    frame: f64,
-    rect: Rect,
-    metrics: AttributeMetrics,
-) -> Option<WorldCommand> {
-    if !attr.keyable {
-        return None;
-    }
-    let width = metrics
-        .icon_side
-        .min(((rect.width() - metrics.component_gap) / 2.0).max(0.0));
-    let rect = Rect::from_center_size(
-        rect.center(),
-        Vec2::new(rect.width(), metrics.icon_side.min(rect.height())),
-    );
-    let timer = Rect::from_min_size(rect.min, Vec2::new(width, rect.height()));
-    let diamond = Rect::from_min_size(
-        Pos2::new(timer.right() + metrics.component_gap, rect.top()),
-        Vec2::new(width, rect.height()),
-    );
-    if icon_cell(ui, timer, ph::TIMER, !attr.frames.is_empty(), true)
-        .on_hover_text("Enable or disable animation")
-        .clicked()
-    {
-        return Some(WorldCommand::SetAnimation {
+/// The document command of a click on an attribute's animation controls.
+fn anim_command(id: NodeId, attr: &WorldAttribute, frame: f64, intent: AnimIntent) -> WorldCommand {
+    let path = attr.path.clone();
+    match intent {
+        AnimIntent::Animate | AnimIntent::Static => WorldCommand::SetAnimation {
             id,
-            path: attr.path.clone(),
-            enabled: attr.frames.is_empty(),
+            path,
+            enabled: intent == AnimIntent::Animate,
             frame,
-        });
+        },
+        AnimIntent::Key => WorldCommand::Key { id, path, frame },
+        AnimIntent::Unkey => WorldCommand::RemoveKey { id, path, frame },
     }
-    let keyed = attr.frames.contains(&frame);
-    if icon_cell(ui, diamond, ph::DIAMOND, keyed, true)
-        .on_hover_text("Add / remove a key at the current frame")
-        .clicked()
-    {
-        return Some(if keyed {
-            WorldCommand::RemoveKey {
-                id,
-                path: attr.path.clone(),
-                frame,
-            }
-        } else {
-            WorldCommand::Key {
-                id,
-                path: attr.path.clone(),
-                frame,
-            }
-        });
-    }
-    None
 }
 
 fn numeric_value(template: &Value, n: f64) -> Value {
@@ -3730,7 +3587,7 @@ mod tests {
 
     #[test]
     fn resetting_document_ui_preserves_appearance_preferences() {
-        let metrics = AttributeMetrics {
+        let metrics = AttrMetrics {
             field_height: 22.0,
             numeric_width: 74.0,
             ..Default::default()
@@ -4353,8 +4210,8 @@ mod tests {
     #[test]
     fn numeric_cells_keep_compact_and_large_hit_rectangles_with_long_negative_values() {
         for metrics in [
-            AttributeMetrics::default(),
-            AttributeMetrics {
+            AttrMetrics::default(),
+            AttrMetrics {
                 field_height: 24.0,
                 numeric_width: 84.0,
                 icon_side: 18.0,
@@ -4412,7 +4269,7 @@ mod tests {
                 }
             });
         }
-        fn row_center(metrics: AttributeMetrics) -> f32 {
+        fn row_center(metrics: AttrMetrics) -> f32 {
             50.0 + metrics.row_height() * 0.5
         }
     }
@@ -4528,7 +4385,7 @@ mod tests {
                 },
             );
             output.textures_delta.clear();
-            e.finish_edit_unless(parameter_gesture(&ctx));
+            e.finish_edit_unless(egui_attr_grid::edit_gesture(&ctx));
             GRID_RECT_TRACES.with(|trace| trace.borrow()["/transform/position"])
         };
         let cell = render(&mut state, &mut e, vec![], 0.0);
@@ -4724,7 +4581,7 @@ mod tests {
             let nodes = e.document.nodes();
             let mut state = WorldUi::default();
             let mut section = GridSectionCache::default();
-            state.prepare_section(&mut section, &attrs, id, "Custom", 0, 0);
+            state.prepare_section(&mut section, &attrs, "Custom", 0, 0);
             state.attribute_label_width = 210.0;
             section.state.table.widths.resize(1, 0.0);
             section.state.table.widths[0] = state.attribute_label_width;
@@ -4859,7 +4716,7 @@ mod tests {
                 .iter()
                 .any(|l| l.path.as_deref() == Some("/transform/position/0"))
         );
-        state.toggle_components(id, "/transform/position", true);
+        state.channels.entry(id).or_default().set("/transform/position", false);
         assert!(!state.components_open(id, "/transform/position", &attrs));
     }
 
