@@ -489,6 +489,17 @@ impl App {
             {
                 self.toggle_flight_mode();
             }
+            ui.separator();
+            if ui
+                .button(ph::CAMERA)
+                .on_hover_text("Save the viewport as displayed (PNG)")
+                .clicked()
+            {
+                self.save_frame(None);
+            }
+            ui.menu_button(ph::CARET_DOWN, |ui| self.snapshot_menu(ui))
+                .response
+                .on_hover_text("Save the viewport as…");
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(ui.spacing().item_spacing.x);
                 match self.camera_slots.ui(ui, &mut self.scene.camera) {

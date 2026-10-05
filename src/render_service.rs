@@ -60,6 +60,28 @@ impl PngEncoding {
     }
 }
 
+/// The file a viewport snapshot is saved as. All of them encode the frame's display light, so
+/// they show what the viewport shows: an SDR PNG of an HDR view is not offered (its SDR codes
+/// would need another render through an SDR view), an HDR10 PNG of an SDR view holds SDR light.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameFile {
+    Png(PngEncoding),
+    /// Linear display light, display primaries, `whiteLuminance` 100 nits.
+    DisplayExr,
+}
+impl FrameFile {
+    /// The suffix after the file stem; HDR PNGs name their transfer so they are not mistaken
+    /// for SDR (an HDR10 PNG in a viewer that ignores `cICP` looks washed out).
+    pub fn suffix(self) -> &'static str {
+        match self {
+            Self::Png(PngEncoding::Sdr8) => "png",
+            Self::Png(PngEncoding::Hdr10) => "pq.png",
+            Self::Png(PngEncoding::Hlg) => "hlg.png",
+            Self::DisplayExr => "display.exr",
+        }
+    }
+}
+
 /// Write display light as a PNG: the one encoder behind the viewport, export and CLI writers.
 /// `light` is linear Rec.709 display light (1.0 = SDR white = 100 nits); `sdr` yields the 8-bit
 /// sRGB codes, read only for SDR. `peak_nits` is the mastering display (`mDCV`, HLG gamma).
@@ -225,7 +247,17 @@ impl Frame {
         }
         crate::exr_io::write_rgb(path, self.width, self.height, &self.light, &crate::color::DISPLAY_PRIMS, Some(100.0), true)
     }
+    /// Save this frame as `file` (viewport snapshots: File menu and the viewport toolbar).
+    pub fn save(&self, path: &Path, file: FrameFile) -> Result<(), String> {
+        match file {
+            FrameFile::Png(encoding) => self.save_png(path, encoding, SNAPSHOT_PEAK_NITS, true),
+            FrameFile::DisplayExr => self.save_display_exr(path),
+        }
+    }
 }
+
+/// Mastering peak recorded in a viewport snapshot's HDR PNG (`mDCV`, HLG system gamma).
+const SNAPSHOT_PEAK_NITS: f32 = 1000.0;
 
 pub enum Command {
     Thumbnail {
@@ -1910,6 +1942,33 @@ mod tests {
             sdr_bytes: Arc::new(vec![0; 4]),
             hdr_bytes: Arc::new(Vec::new()),
         })
+    }
+
+    /// Every snapshot file goes through `Frame::save`: an SDR frame saved as HDR10 is a PQ /
+    /// BT.2020 PNG (cICP 9/16/0/1), the as-displayed SDR PNG carries no cICP, and the file
+    /// names tell the transfers apart.
+    #[test]
+    fn snapshot_files_encode_what_they_name() {
+        let frame = completed_frame(1, false);
+        let dir = std::env::temp_dir().join(format!("frac-snapshot-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let cicp = |path: &std::path::Path| {
+            let bytes = std::fs::read(path).unwrap();
+            bytes.windows(8).find(|w| &w[..4] == b"cICP").map(|w| w[4..8].to_vec())
+        };
+        for (file, expected) in [
+            (FrameFile::Png(PngEncoding::Sdr8), None),
+            (FrameFile::Png(PngEncoding::Hdr10), Some(vec![9, 16, 0, 1])),
+        ] {
+            let path = dir.join(format!("shot.{}", file.suffix()));
+            frame.save(&path, file).unwrap();
+            assert_eq!(cicp(&path), expected, "{file:?}");
+        }
+        let exr = dir.join(format!("shot.{}", FrameFile::DisplayExr.suffix()));
+        frame.save(&exr, FrameFile::DisplayExr).unwrap();
+        assert!(exr.is_file());
+        assert_eq!(FrameFile::Png(PngEncoding::Hdr10).suffix(), "pq.png");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

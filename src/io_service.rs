@@ -10,7 +10,7 @@ pub enum Command {
     SaveFrame {
         frame: Arc<Frame>,
         path: PathBuf,
-        exr: bool,
+        file: crate::render_service::FrameFile,
     },
     Write {
         path: PathBuf,
@@ -84,13 +84,8 @@ impl IoService {
                 };
                 loop {
                     match rx.recv_timeout(std::time::Duration::from_millis(50)) {
-                        Ok(Command::SaveFrame { frame, path, exr }) => {
-                            let result = if exr {
-                                frame.save_display_exr(&path)
-                            } else {
-                                // Screenshots record what the selected monitor rendering shows.
-                                frame.save_png(&path, crate::render_service::PngEncoding::displayed(frame.hdr), 1000.0, true)
-                            };
+                        Ok(Command::SaveFrame { frame, path, file }) => {
+                            let result = frame.save(&path, file);
                             let _ = done.send(result.map(|_| format!("Saved {}", path.display())));
                         }
                         Ok(Command::Write { path, text }) => {

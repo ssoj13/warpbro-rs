@@ -1580,17 +1580,41 @@ impl App {
         }
     }
 
-    fn screenshot(&mut self) {
-        self.save_frame(false);
+    /// The snapshot choices, shared by the File menu and the viewport toolbar.
+    pub(super) fn snapshot_menu(&mut self, ui: &mut egui::Ui) {
+        use crate::render_service::{FrameFile, PngEncoding};
+        let hdr = self.frame.as_ref().is_some_and(|frame| frame.hdr);
+        let displayed = if hdr {
+            "HDR10 PQ PNG of the HDR view (needs an HDR-aware viewer)"
+        } else {
+            "8-bit sRGB PNG"
+        };
+        let mut items = vec![("Save image (as displayed)", displayed, None)];
+        if !hdr {
+            items.push((
+                "Save HDR10 PQ PNG",
+                "16-bit PQ / BT.2020 with cICP: the SDR view's light in an HDR container",
+                Some(FrameFile::Png(PngEncoding::Hdr10)),
+            ));
+        }
+        items.push(("Save display EXR", "Linear display light, float, display primaries", Some(FrameFile::DisplayExr)));
+        for (label, hint, file) in items {
+            if ui.button(label).on_hover_text(hint).clicked() {
+                self.save_frame(file);
+                ui.close();
+            }
+        }
     }
-    fn screenshot_exr(&mut self) {
-        self.save_frame(true);
-    }
-    fn save_frame(&mut self, exr: bool) {
+
+    /// Save the viewport's current frame. `None` saves it as displayed: an HDR10 PNG for an HDR
+    /// view, an SDR PNG otherwise. One path for the File menu and the viewport toolbar.
+    pub(super) fn save_frame(&mut self, file: Option<crate::render_service::FrameFile>) {
+        use crate::render_service::{FrameFile, PngEncoding};
         let Some(frame) = self.frame.clone() else {
             self.status = "Nothing rendered yet".into();
             return;
         };
+        let file = file.unwrap_or(FrameFile::Png(PngEncoding::displayed(frame.hdr)));
         let dir = match crate::new_out_dir(&crate::out_root()) {
             Ok(dir) => dir,
             Err(error) => {
@@ -1598,14 +1622,10 @@ impl App {
                 return;
             }
         };
-        let path = dir.join(format!(
-            "{}.{}",
-            crate::slug(&self.scene.name),
-            if exr { "display.exr" } else { "png" }
-        ));
+        let path = dir.join(format!("{}.{}", crate::slug(&self.scene.name), file.suffix()));
         self.status = match self
             .io
-            .send(crate::io_service::Command::SaveFrame { frame, path, exr })
+            .send(crate::io_service::Command::SaveFrame { frame, path, file })
         {
             Ok(()) => "Saving image…".into(),
             Err(e) => e,
@@ -2186,14 +2206,7 @@ impl App {
                     self.save_bookmark();
                     ui.close();
                 }
-                if ui.button("Save image…").clicked() {
-                    self.screenshot();
-                    ui.close();
-                }
-                if ui.button("Save display EXR…").clicked() {
-                    self.screenshot_exr();
-                    ui.close();
-                }
+                self.snapshot_menu(ui);
             });
             ui.menu_button("Edit", |ui| {
                 if ui.button("Undo    Ctrl+Z").clicked() {
