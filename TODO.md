@@ -41,7 +41,14 @@ CHANGELOG.md, add new requests as they come. Reusable UI goes into egui-widgets-
       — plan for operator approval first
 
 ## Bugs
+- [x] Clear glass lost energy at grazing angles (BUG1.md; render-rs 207473e, exact smooth interfaces)
+- [ ] Rough dielectric transmission: no multiple-scattering compensation (furnace 0.81-0.93 inside
+      at roughness 0.5) — compensation table for dielectrics
+- [ ] BUG1 open items: march step cap tied to max_steps; cone-accepted hits when steps run out
+      (37% of hits in the turbine frame); Hybrid DE discontinuities at fold / escape transitions
 - [x] Adaptive sampling: with 1 sample per frame it renders that sample and stops
+- [ ] Playa: `playa-engine/tests/ofx_builtin.rs` (feature ofx) expects 8 built-in plug-ins, ofx-effects
+      links 29 now (fails on fce3d93 too, before the per-channel work) — update the test to the set
 - [ ] HEVC export tests flaky under the full parallel suite (Vulkan Video `Posix(38)`);
       pass alone
 
