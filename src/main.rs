@@ -14,6 +14,7 @@ mod camera_slots;
 mod color;
 mod denoise;
 mod environment;
+mod fs_name;
 mod inspector;
 #[cfg(test)]
 mod timeline;
@@ -83,40 +84,6 @@ pub fn new_out_dir(root: &std::path::Path) -> Result<std::path::PathBuf, String>
     Err(format!("{}: no free folder name for {stamp}", root.display()))
 }
 
-/// A file stem for `name`: its slug, which keeps letters of any script ("Медная турбина" ->
-/// "медная-турбина"; NTFS and every target filesystem store Unicode names). Windows device
-/// names (`con`, `nul`, `com1`, ...) get a `_`, since a file named so cannot be created there;
-/// "untitled" only when the name has no letter or digit at all.
-pub fn file_stem(name: &str) -> String {
-    const DEVICES: [&str; 22] = [
-        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7",
-        "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
-    ];
-    let stem = slug(name);
-    if stem.is_empty() {
-        "untitled".into()
-    } else if DEVICES.contains(&stem.as_str()) {
-        format!("{stem}_")
-    } else {
-        stem
-    }
-}
-
-/// The comparison key of a name (templates) and the base of file stems: lowercase letters and
-/// digits of any script, every other run of characters one `-`. Everything a filesystem
-/// forbids (`<>:"/\|?*`, control characters) is not alphanumeric, so it never survives.
-pub fn slug(name: &str) -> String {
-    let mut s = String::with_capacity(name.len());
-    for c in name.chars() {
-        if c.is_alphanumeric() {
-            s.extend(c.to_lowercase());
-        } else if !s.ends_with('-') {
-            s.push('-');
-        }
-    }
-    s.trim_matches('-').to_string()
-}
-
 /// Render (or only time) every gallery preset offscreen.
 fn headless(out: Option<&str>, w: usize, h: usize, spp: u32, hdr: bool, display_exr: bool) {
     let mut gpu = render::Gpu::new().unwrap_or_else(|e| panic!("{e}"));
@@ -150,11 +117,14 @@ fn headless(out: Option<&str>, w: usize, h: usize, spp: u32, hdr: bool, display_
             (w * h) as f64 * traced / secs / 1e6
         );
         if let Some(dir) = out {
-            let encoding = crate::render_service::PngEncoding::displayed(t.hdr);
-            let path = std::path::Path::new(dir).join(format!("{}.{}", file_stem(&scene.name), encoding.suffix()));
-            t.save_png(&path, encoding, crate::render_service::HDR_PEAK_NITS, true).expect("save png");
+            let encoding = crate::render_service::PngEncoding::displayed(t.light_kind.hdr());
+            let dir = std::path::Path::new(dir);
+            let stem = fs_name::stem(&scene.name);
+            let path = dir.join(fs_name::frame_file(&stem, None, encoding.suffix()));
+            t.save_png(&path, encoding, crate::color::BT2408_SDR_WHITE_NITS, true).expect("save png");
             if display_exr {
-                t.save_display_exr(&path.with_extension("display.exr"))
+                let exr = crate::render_service::FrameFile::DisplayExr.suffix();
+                t.save_display_exr(&dir.join(fs_name::frame_file(&stem, None, exr)))
                     .expect("save display EXR");
             }
         }
@@ -188,10 +158,10 @@ fn animated_fixtures(
             .document
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Preset has no document"))?;
-        let output = std::path::Path::new(dir).join(file_stem(descriptor.name));
+        let output = std::path::Path::new(dir).join(fs_name::stem(descriptor.name));
         std::fs::create_dir_all(&output)?;
         serde_json::to_writer_pretty(
-            std::fs::File::create(output.join("scene.frac.json"))?,
+            std::fs::File::create(output.join(fs_name::frame_file("scene", None, fs_name::SCENE_SUFFIX)))?,
             document,
         )?;
         let frames: Vec<u32> = if all_frames {
@@ -228,14 +198,12 @@ fn animated_fixtures(
                 target.samples == samples,
                 "Fixture accumulation did not complete"
             );
+            let encoding = crate::render_service::PngEncoding::displayed(target.light_kind.hdr());
             target
                 .save_png(
-                    &output.join(format!(
-                        "frame.{frame:06}.{}",
-                        crate::render_service::PngEncoding::displayed(target.hdr).suffix()
-                    )),
-                    crate::render_service::PngEncoding::displayed(target.hdr),
-                    crate::render_service::HDR_PEAK_NITS,
+                    &output.join(fs_name::frame_file("frame", Some(frame), encoding.suffix())),
+                    encoding,
+                    crate::color::BT2408_SDR_WHITE_NITS,
                     true,
                 )
                 .map_err(anyhow::Error::msg)?;
@@ -298,20 +266,5 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         _ => app::run(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    /// Names keep their script; only what a filesystem forbids or a device name blocks changes.
-    #[test]
-    fn file_stems_keep_unicode_and_avoid_device_names() {
-        assert_eq!(super::slug("Медная  Турбина №2"), "медная-турбина-2");
-        assert_eq!(super::slug(r#"A<b>:c/d\e|f?g*h"i"#), "a-b-c-d-e-f-g-h-i");
-        assert_eq!(super::file_stem("Медная турбина"), "медная-турбина");
-        assert_eq!(super::file_stem("日本語 シーン"), "日本語-シーン");
-        assert_eq!(super::file_stem("CON"), "con_");
-        assert_eq!(super::file_stem("  ** "), "untitled");
-        assert_eq!(super::file_stem("Copper Turbine (KIFS)"), "copper-turbine-kifs");
     }
 }

@@ -11,8 +11,8 @@ pub enum Command {
         frame: Arc<Frame>,
         path: PathBuf,
         file: crate::render_service::FrameFile,
-        /// Mastering peak of an HDR PNG.
-        peak_nits: f32,
+        /// Nits of relative light's 1.0 in an HDR PNG (`render_service::hdr_scale`).
+        sdr_white_nits: f32,
     },
     Write {
         path: PathBuf,
@@ -86,8 +86,8 @@ impl IoService {
                 };
                 loop {
                     match rx.recv_timeout(std::time::Duration::from_millis(50)) {
-                        Ok(Command::SaveFrame { frame, path, file, peak_nits }) => {
-                            let result = frame.save(&path, file, peak_nits);
+                        Ok(Command::SaveFrame { frame, path, file, sdr_white_nits }) => {
+                            let result = frame.save(&path, file, sdr_white_nits);
                             let _ = done.send(result.map(|_| format!("Saved {}", path.display())));
                         }
                         Ok(Command::Write { path, text }) => {

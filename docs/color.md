@@ -184,14 +184,17 @@ sensitive to steps in the dark.
                                                          │  tone map + gamut compress -> display light
                                                          └─ OCIO off / Reinhard: color::to_709
                                                             -> Reinhard -> sRGB OETF
-                                                                    │ display light: linear BT.709,
-                                                                    │ 1.0 = 100 nits
+                                                                    │ display light: linear BT.709;
+                                                                    │ HDR view: absolute, 1.0 = 100 nits
+                                                                    │ SDR view: relative, 1.0 = SDR white
                   ┌──────────────────────────┬──────────────────────┴─────┬────────────────────────┐
                   ▼                          ▼                            ▼                        ▼
           SDR monitor / PNG 8-bit    HDR monitor / PNG HDR10        PNG HLG                  HEVC video
           sRGB curve, BT.709         BT.709 -> BT.2020 matrix,      BT.2020, HLG curve       8-bit sRGB /
-          (sRGB chunk)               x100 nits, PQ (cICP 9/16,      for the chosen peak      BT.709
-                                     mDCV, cLLI)                    (cICP 9/18, mDCV)
+          (sRGB chunk)               x nits per 1.0 (HDR view 100,  for the view's peak     BT.709
+                                     SDR view: monitor white or     (relative light: the
+                                     BT.2408 203), PQ (cICP 9/16,   BT.2100 1000-nit
+                                     mDCV = measured peak, cLLI)    reference; cICP 9/18)
           Display EXR: linear BT.709 display light, `whiteLuminance` 100
 ```
 

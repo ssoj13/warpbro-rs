@@ -1071,12 +1071,14 @@ fn attribute_choices(path: &str) -> Vec<Value> {
     };
     values.iter().map(|v| json!(v)).collect()
 }
-fn attribute_range(path: &str) -> Option<(f64, f64)> {
+pub(crate) fn attribute_range(path: &str) -> Option<(f64, f64)> {
     match path {
         "/camera/fov_y_degrees" => Some((1.0, 179.0)),
         // Axis index of the trap plane (X, Y, Z); the kernel reads min(2).
         "/trap_axis" => Some((0.0, 2.0)),
         "/render/denoise/interval" => Some((0.0, u32::MAX as f64)),
+        // Zero would trace nothing (no step, no exit probe): one is the least that means a march.
+        "/render/max_steps" | "/render/glass_probes" => Some((1.0, u32::MAX as f64)),
         "/render/adaptive/noise_threshold" => Some((0.0005, 1.0)),
         "/render/adaptive/min_samples" => Some((crate::scene::Adaptive::MIN_SAMPLES_FLOOR as f64, 65536.0)),
         "/material/transmission" => Some((0.0, 1.0)),
@@ -1087,6 +1089,26 @@ fn attribute_range(path: &str) -> Option<(f64, f64)> {
         _ => None,
     }
 }
+/// The attribute grid's options of a numeric attribute: its slider span, a step of 1 for an
+/// integer, "log" for a logarithmic span and "soft" when the hard limits reach past it. One
+/// rule for the Attribute Editor and Render settings.
+pub(crate) fn slider_options(path: &str, integer: bool) -> Vec<String> {
+    let Some(slider) = attribute_slider(path) else {
+        return Vec::new();
+    };
+    let mut options = vec![slider.min.to_string(), slider.max.to_string()];
+    if integer {
+        options.push("1".into());
+    }
+    if slider.log {
+        options.push("log".into());
+    }
+    if attribute_range(path) != Some((slider.min, slider.max)) {
+        options.push("soft".into());
+    }
+    options
+}
+
 /// Slider spans of every numeric parameter, one table (the operator chose explicit spans over
 /// guesses from the current value). Fractal parameters match per family, a Hybrid's sub-formula
 /// like its standalone family. A parameter missing here edits as a plain number.
@@ -1177,11 +1199,164 @@ fn attribute_slider(path: &str) -> Option<Slider> {
         "/render/iterations" => lin(1.0, 256.0),
         "/render/max_bounces" => lin(0.0, 16.0),
         "/render/max_steps" => log(16.0, 16384.0),
+        "/render/glass_probes" => log(16.0, 16384.0),
         "/render/saturation" => lin(0.0, 2.0),
         "/render/step_factor" => lin(0.1, 1.0),
         "/start" | "/end" => lin(0.0, 500.0),
         _ => None,
     }
+}
+
+/// `attribute_hint` for a formula parameter: `family` is the formula (or the Hybrid step it
+/// belongs to), `field` its parameter.
+fn formula_hint(family: &str, field: &str) -> Option<&'static str> {
+    Some(match (family, field) {
+        ("Mandelbulb", "power") => "Mandelbulb exponent: z -> z^power in spherical coordinates. 8 is the classic bulb; higher gives more, finer lobes.",
+        ("Mandelbulb", "angle_scale") => "Multiplies the power for the polar (theta) and azimuth (phi) angles separately; 1, 1 is the plain bulb. Stretches the lobes along one angle.",
+        ("Mandelbulb", "angle_phase_degrees") => "Offsets added to the polar and azimuth angles every iteration: twists the bulb.",
+        ("Mandelbulb" | "QuaternionJulia" | "Hybrid", "bailout") => "Escape radius: an orbit farther than this is outside. Larger is more exact near the surface and slower.",
+        ("Mandelbulb" | "Mandelbox" | "Kifs", "rotation_degrees") => "Rotation applied to the point every iteration: folds the structure into spirals. 0 keeps the formula symmetric.",
+        ("Mandelbox", "scale") => "Mandelbox scale per iteration, typically 2 to 3; negative values give the inverted box.",
+        ("Mandelbox", "min_radius_ratio") => "Inner radius of the sphere fold as a fraction of the fixed radius: points inside it are scaled up by the largest factor.",
+        ("Mandelbox", "fixed_radius") => "Radius of the sphere fold: points between the inner radius and this are inverted.",
+        ("Mandelbox", "fold_limit") => "Box fold: coordinates beyond +/- this are reflected back.",
+        ("Kifs", "kind") => "The polyhedron whose symmetry planes fold space: tetrahedron, octahedron or Menger sponge.",
+        ("Kifs", "scale") => "KIFS scale per iteration (above 1): how much smaller each copy is.",
+        ("Kifs", "offset") => "Shifts the fold centre: the copies move apart or together.",
+        ("QuaternionJulia", "constant") => "The Julia constant c (x, y, z, w) of z -> z^2 + c: the shape of the set.",
+        ("QuaternionJulia", "slice_w") => "The 4D set is cut by a 3D slice at this w.",
+        ("QuaternionJulia", "rotation_degrees") => "Turns the 3D slice through the 4D set.",
+        ("Kleinian", "a") => "Kleinian group parameter a: the generator's translation, the size of the circle-packing cells.",
+        ("Kleinian", "b") => "Kleinian group parameter b: the generator's shear; 0 is the symmetric limit set.",
+        ("PseudoKleinian", "box_size") => "Half sizes of the box the point is folded into every iteration.",
+        ("PseudoKleinian", "size") => "Sphere inversion radius squared: larger opens bigger holes.",
+        ("PseudoKleinian", "c") => "Offset added after every inversion.",
+        ("PseudoKleinian", "offset") => "Centre of the final shape test.",
+        ("PseudoKleinian", "thickness") => "Thickness of the final shape: thicker fills the holes.",
+        ("Apollonian", "scale") | ("Hybrid", "apollonian_scale") => "Apollonian inversion strength: larger packs more, smaller spheres.",
+        ("Kleinian" | "PseudoKleinian" | "Apollonian", "bound_radius") => "Radius of the sphere that holds the whole set: rays only march inside it. Too small cuts the fractal off.",
+        ("Hybrid", "steps") => "The formulas applied in turn every iteration (Off skips a slot); their parameters are the Mandelbulb / Mandelbox / KIFS sub-sections.",
+        _ => return None,
+    })
+}
+
+/// What an attribute does, for its label's hover text (`AttrField::hint`): the one table
+/// every attribute view reads (Attribute Editor, Render settings). Formula parameters match by
+/// their tail, so a Hybrid's Mandelbulb / Mandelbox / KIFS step shares the standalone text.
+/// None: the label says it all.
+pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
+    // A channel row ("/camera/target/1") explains its vector.
+    let path = match path.rsplit_once('/') {
+        Some((parent, last)) if last.parse::<usize>().is_ok() => parent,
+        _ => path,
+    };
+    // "/formula/<Family>/<field>"; a Hybrid's steps sit one level deeper ("bulb/power").
+    if let Some(rest) = path.strip_prefix("/formula/") {
+        let (family, field) = rest.split_once('/')?;
+        let (family, field) = match (family, field.split_once('/')) {
+            ("Hybrid", Some(("bulb", field))) => ("Mandelbulb", field),
+            ("Hybrid", Some(("mandelbox", field))) => ("Mandelbox", field),
+            ("Hybrid", Some(("kifs", field))) => ("Kifs", field),
+            _ => (family, field),
+        };
+        return formula_hint(family, field);
+    }
+    Some(match path {
+        "/formula" => "The fractal family and its parameters.",
+        "/julia" => "Julia mode (Mandelbulb, Mandelbox): every iteration adds this fixed constant instead of the starting point.",
+        "/coloring" => "Where the palette coordinate comes from: Radius (escape radius) or an orbit trap (origin, plane, point).",
+        "/palette" => "The colour ramp the fractal's colouring indexes (when the material takes its colour from the palette).",
+        "/trap_point" => "Orbit trap point: colour by how close the orbit comes to it (Trap point colouring).",
+        "/trap_axis" => "Orbit trap plane normal axis (Trap plane colouring).",
+        "/trap_scale" => "How fast the trap distance runs through the palette.",
+        "/material_id" => "The material this fractal is rendered with.",
+        "/camera/target" => "The point the camera looks at and orbits.",
+        "/camera/yaw_degrees" => "Camera heading around world up.",
+        "/camera/pitch_degrees" => "Camera tilt up / down.",
+        "/camera/roll_degrees" => "Camera roll around the view axis.",
+        "/camera/distance" => "Distance from the target in framing radii of the fractal (1 frames it).",
+        "/camera/fov_y_degrees" => "Vertical field of view.",
+        "/camera/aperture" => "Lens aperture for depth of field; 0 is a pinhole (all sharp).",
+        "/camera/focus_distance" => "Focus distance in framing radii; 0 focuses on the target.",
+        "/camera/free_flight" => "Free flight: roll is free. Off: the horizon stays level.",
+        "/camera/orbit_speed_degrees" => "Turntable: degrees per second the camera orbits the target (integrated over the animation).",
+        "/camera/orbit_phase_degrees" => "Turntable starting angle added to the orbit.",
+        "/environment/enabled" => "Light the scene with the environment image (else the sky gradient).",
+        "/environment/path" => "Lat-long HDR / EXR environment image.",
+        "/environment/intensity" => "Environment brightness multiplier.",
+        "/environment/rotation_degrees" => "Turns the environment around world up.",
+        "/lighting/sun_azimuth" => "Sun direction around world up.",
+        "/lighting/sun_elevation" => "Sun height above the horizon (negative: below).",
+        "/lighting/sun_color" => "Sun colour.",
+        "/lighting/sun_intensity" => "Sun brightness.",
+        "/lighting/sun_angle" => "Sun disc diameter in degrees: larger gives softer shadows (the real sun is ~0.53).",
+        "/lighting/sky_intensity" => "Sky light brightness.",
+        "/lighting/sky_horizon" => "Sky colour at the horizon.",
+        "/lighting/sky_zenith" => "Sky colour straight up.",
+        "/lighting/background" => "Show the sky behind the fractal; off keeps its light but renders the background black.",
+        "/material/model" => "Fast: a quick metal / plastic model. Standard Surface: the full Autodesk Standard Surface (glass, coat, sheen, film); transmission always uses it.",
+        "/material/color_source" => "Base colour from the fractal's palette (colouring) or the solid Base color.",
+        "/material/base_color" => "Solid base colour (when the colour source is Material).",
+        "/material/preset" => "The library preset this material came from (a label only).",
+        "/material/facing" => "Facing blend: toward a second look at grazing angles by (1 - |N.V|)^exponent (pearlescent, falloff).",
+        "/material/facing/color" => "The base colour the facing blend reaches at grazing angles.",
+        "/material/facing/roughness" => "The specular roughness the facing blend reaches at grazing angles.",
+        "/material/facing/metallic" => "The metalness the facing blend reaches at grazing angles.",
+        "/material/facing/exponent" => "Falloff power of the facing blend: higher keeps it to the very edge.",
+        "/material/base" => "Diffuse / base weight.",
+        "/material/base_tint" => "Multiplies the base colour.",
+        "/material/diffuse_roughness" => "Oren-Nayar roughness of the diffuse base: 0 Lambert, 1 dusty.",
+        "/material/metalness" => "0 dielectric, 1 metal (the base colour becomes the reflectance).",
+        "/material/specular" => "Specular reflection weight.",
+        "/material/specular_color" => "Specular tint.",
+        "/material/specular_roughness" => "Microfacet roughness of reflection and refraction: 0 mirror, 1 matte.",
+        "/material/specular_ior" => "Index of refraction: Fresnel reflectance of dielectrics and the bending of glass (1.5 glass, 1.33 water).",
+        "/material/specular_anisotropy" => "Stretches the highlight along the tangent (brushed metal).",
+        "/material/specular_rotation" => "Turns the anisotropy direction.",
+        "/material/transmission" => "Fraction of the dielectric base that refracts through instead of diffusing: 1 is glass.",
+        "/material/transmission_color" => "Glass tint: at the interface when Transmission depth is 0, else the colour left after travelling that depth inside.",
+        "/material/transmission_depth" => "Distance over which light inside the glass is tinted to Transmission color (Beer-Lambert); 0 tints at the surface only.",
+        "/material/transmission_extra_roughness" => "Extra roughness of refraction only (frosted glass).",
+        "/material/sheen" => "Velvet-like sheen weight at grazing angles.",
+        "/material/sheen_color" => "Sheen colour.",
+        "/material/sheen_roughness" => "Sheen spread.",
+        "/material/coat" => "Clear coat layer weight (lacquer over the base).",
+        "/material/coat_color" => "Coat tint (absorbs what passes through it).",
+        "/material/coat_roughness" => "Coat microfacet roughness.",
+        "/material/coat_ior" => "Coat index of refraction.",
+        "/material/coat_affect_color" => "How much the coat darkens and saturates the base.",
+        "/material/coat_affect_roughness" => "How much the coat roughness roughens the base.",
+        "/material/thin_film_thickness" => "Thin-film interference thickness in nanometres (soap bubble, oil): 0 off.",
+        "/material/thin_film_ior" => "Thin-film index of refraction.",
+        "/material/emission" => "Emitted light strength.",
+        "/material/emission_color" => "Emitted light colour.",
+        "/render/iterations" => "Fractal iterations per distance estimate: more resolves finer detail and costs proportionally.",
+        "/render/max_steps" => "Sphere-tracing step budget per ray. A ray that runs out of steps is unresolved: a camera ray shows the background (the OFX Direct preview keeps a sub-pixel near miss), bounce and shadow rays bring no light; the status bar reports the share. Steps a ray does not need cost nothing.",
+        "/render/glass_probes" => "Probes per exit through glass: the most steps an exit march takes and its shortest step (the object's size over this), so the thinnest interior wall or cavity a refracted ray can find. Fields that are zero inside (Mandelbulb and other escape-time fractals) only probe; signed fields (KIFS, Kleinians) march their distance but never step shorter. More finds finer walls and costs proportionally (4096 vs 256: 10-30x on a glass Mandelbulb). An exit it cannot find ends the path and is counted as unresolved.",
+        "/render/hit_epsilon" => "Surface detail: how close a ray must come to count as a hit, relative to the pixel footprint (0.008 is one pixel). Smaller resolves finer detail and needs more steps.",
+        "/render/step_factor" => "Sphere-tracing step as a fraction of the distance estimate: lower is safer on fractals that overestimate, slower.",
+        "/render/max_bounces" => "Path tracing bounces: indirect light, reflections and refractions (glass needs several).",
+        "/render/exposure_stops" => "Exposure in stops before the display transform.",
+        "/render/saturation" => "Saturation of the displayed image (1 unchanged).",
+        "/render/reinhard" => "Legacy Reinhard tone curve instead of the OCIO display transform.",
+        "/render/denoise/enabled" => "OIDN denoising of the displayed image; the raw samples are kept.",
+        "/render/denoise/interval" => "Denoise every N samples while rendering (0: only when the render completes).",
+        "/render/denoise/mode" => "Guide images for OIDN: colour only, + albedo, + albedo and normal (sharpest).",
+        "/render/denoise/quality" => "OIDN quality: faster or sharper.",
+        "/render/adaptive/enabled" => "Adaptive sampling: stop sampling tiles whose noise is below the threshold.",
+        "/render/adaptive/noise_threshold" => "Relative noise a tile must fall under to stop; lower is cleaner and slower.",
+        "/render/adaptive/min_samples" => "Samples every pixel takes before its tile may stop.",
+        "/transform/position" => "Position in the parent's space.",
+        "/transform/rotation_degrees" => "Rotation in degrees.",
+        "/transform/scale" => "Scale per axis.",
+        "/transform/pivot" => "Point the rotation and scale turn around.",
+        "/visible" => "Show this node in renders.",
+        "/locked" => "Lock against edits in the viewport and the editors.",
+        "/solo" => "Render only soloed nodes.",
+        "/start" => "First frame this node exists on.",
+        "/end" => "Last frame this node exists on.",
+        _ => return None,
+    })
 }
 
 /// Why a node's parameter does nothing in its current mode (shown greyed in the Attribute

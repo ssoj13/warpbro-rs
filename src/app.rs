@@ -240,11 +240,32 @@ fn pending_thumbnail_entry(entries: &[Entry], scene: &Scene) -> Option<usize> {
     })
 }
 
-/// The status warning for samples whose march ran out of steps: those rays are misses, so a
-/// nonzero share means holes the step budget (Render > March steps) is too small to close.
-fn march_limit_label(ui: &mut egui::Ui, limited: f32) {
-    if limited > 0.0 {
-        let percent = 100.0 * limited;
+/// What the window shows the viewport on, read from `egui_display::DisplayState` by everything
+/// that depends on it (the viewport canvas and its snapshots): HDR output or not, and the SDR
+/// white in nits the present pass maps canvas 1.0 to. No window state yet: SDR, 100 nits.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Monitor {
+    pub hdr: bool,
+    pub white_nits: f32,
+}
+impl Monitor {
+    pub(crate) fn read(ctx: &egui::Context) -> Self {
+        let state = ctx.data(|d| d.get_temp::<egui_display::DisplayState>(egui_display::state_id()));
+        Self {
+            hdr: state.as_ref().is_some_and(|s| s.output.is_hdr()),
+            white_nits: state.as_ref().map_or(100.0, |s| s.target.white),
+        }
+    }
+}
+
+/// The colour of every status warning (preview, OIDN failure, out of steps).
+const WARNING: Color32 = Color32::from_rgb(230, 180, 60);
+
+/// The status warning for samples with an unresolved march (`gpu::Outcome`): a nonzero share
+/// means holes or missing light the step budget (Render > March steps) is too small to close.
+fn march_limit_label(ui: &mut egui::Ui, unresolved: f32) {
+    if unresolved > 0.0 {
+        let percent = 100.0 * unresolved;
         let text = if percent < 0.01 {
             "<0.01% out of steps".to_owned()
         } else {
@@ -252,10 +273,10 @@ fn march_limit_label(ui: &mut egui::Ui, limited: f32) {
         };
         ui.label(
             RichText::new(text)
-                .color(Color32::from_rgb(230, 180, 60)),
+                .color(WARNING),
         )
         .on_hover_text(
-            "Rays that ran out of march steps count as misses. Raise Render > March steps.",
+            "Samples with a march out of steps: camera rays show the background, bounce and shadow rays bring no light. Raise Render > March steps.",
         );
     }
 }
@@ -301,8 +322,9 @@ impl SettingsPage {
     }
 }
 
-/// Viewport flight preferences (Settings > Camera controls). `inertia` turns them into the
-/// shared `cam_controls` flight settings: the one place WarpBro configures the flight rig.
+/// The Settings > Controls page: viewport flight preferences (`inertia` turns them into the
+/// shared `cam_controls` flight settings, the one place WarpBro configures the flight rig) and
+/// the mouse mapping of the slot strips.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct Controls {
@@ -794,7 +816,7 @@ impl App {
             && saved.timeline_outline_width == self.world_ui.timeline_outline_width
             && export.format == previous.format
             && export.encoder == previous.encoder
-            && export.output == previous.output
+            && export.dir == previous.dir
             && export.width == previous.width
             && export.height == previous.height
             && export.samples == previous.samples
@@ -920,7 +942,11 @@ impl App {
         let template_directory = crate::templates::directory();
         let mut dialog = egui_file_dialog::FileDialog::new()
             .add_file_filter_extensions("Fractal scene", vec!["json"])
-            .default_file_name(&format!("{}.frac.json", crate::file_stem(&self.scene.name)));
+            .default_file_name(&crate::fs_name::frame_file(
+                &crate::fs_name::stem(&self.scene.name),
+                None,
+                crate::fs_name::SCENE_SUFFIX,
+            ));
         dialog = self.world_ui.file_dialogs.prepare(
             dialog,
             action.history_key(),
@@ -953,7 +979,7 @@ impl App {
         let save = action.save();
         self.world.finish_edit();
         if save && path.extension().is_none() {
-            path.set_extension("frac.json");
+            path.set_extension(crate::fs_name::SCENE_SUFFIX);
         }
         let id = self.scene_file_sequence.wrapping_add(1);
         let command = if save {
@@ -1569,7 +1595,7 @@ impl App {
         let path = dir.join(format!(
             "{}-{}.json",
             now_stamp(),
-            crate::file_stem(&self.scene.name)
+            crate::fs_name::stem(&self.scene.name)
         ));
         match serde_json::to_string_pretty(&self.world.document)
             .map_err(|e| e.to_string())
@@ -1592,16 +1618,11 @@ impl App {
         }
     }
 
-    /// Whether the monitor shows the viewport in HDR (the staged canvas), the "as displayed"
-    /// snapshot's encoding.
-    fn monitor_hdr(&self) -> bool {
-        self.staged_output.is_some_and(|(hdr, _)| hdr)
-    }
-
     /// The snapshot choices, shared by the File menu and the viewport toolbar.
     pub(super) fn snapshot_menu(&mut self, ui: &mut egui::Ui) {
         use crate::render_service::{FrameFile, PngEncoding};
-        let displayed = if self.monitor_hdr() {
+        let monitor = Monitor::read(ui.ctx());
+        let displayed = if monitor.hdr {
             "HDR10 PQ PNG: the monitor shows HDR"
         } else {
             "8-bit sRGB PNG: the monitor shows SDR"
@@ -1615,28 +1636,30 @@ impl App {
             ),
             (
                 "Save HDR10 PQ PNG",
-                "16-bit PQ / BT.2020 with cICP: what an HDR monitor shows for this view, highlights above SDR white kept (needs an HDR-aware viewer)",
+                "16-bit PQ / BT.2020 with cICP: what an HDR monitor shows for this view (an SDR view's white at the monitor's, else BT.2408's 203 nits); needs an HDR-aware viewer",
                 Some(FrameFile::Png(PngEncoding::Hdr10)),
             ),
             ("Save display EXR", "Linear display light, float, display primaries", Some(FrameFile::DisplayExr)),
         ];
         for (label, hint, file) in items {
             if ui.button(label).on_hover_text(hint).clicked() {
-                self.save_frame(file);
+                self.save_frame(monitor, file);
                 ui.close();
             }
         }
     }
 
-    /// Save the viewport's current frame. `None` saves it as displayed: an HDR10 PNG when the
-    /// monitor shows HDR, an SDR PNG otherwise. One path for the File menu and the toolbar.
-    pub(super) fn save_frame(&mut self, file: Option<crate::render_service::FrameFile>) {
+    /// Save the viewport's current frame as `monitor` shows it. `None` saves it as displayed:
+    /// an HDR10 PNG when the monitor shows HDR (relative light at the monitor's SDR white, so
+    /// the file is as bright as the screen), an SDR PNG otherwise. One path for the File menu
+    /// and the toolbar.
+    pub(super) fn save_frame(&mut self, monitor: Monitor, file: Option<crate::render_service::FrameFile>) {
         use crate::render_service::{FrameFile, PngEncoding};
         let Some(frame) = self.frame.clone() else {
             self.status = "Nothing rendered yet".into();
             return;
         };
-        let file = file.unwrap_or(FrameFile::Png(PngEncoding::displayed(self.monitor_hdr())));
+        let file = file.unwrap_or(FrameFile::Png(PngEncoding::displayed(monitor.hdr)));
         let dir = match crate::new_out_dir(&crate::out_root()) {
             Ok(dir) => dir,
             Err(error) => {
@@ -1644,13 +1667,11 @@ impl App {
                 return;
             }
         };
-        let path = dir.join(format!("{}.{}", crate::file_stem(&self.scene.name), file.suffix()));
-        // The HDR view's own peak ("... HDR 4000 nits ...") is the file's mastering display.
-        let peak_nits =
-            crate::ocio::view_nits(&self.colour.sel.view).unwrap_or(crate::render_service::HDR_PEAK_NITS);
+        let path = dir.join(crate::fs_name::frame_file(&crate::fs_name::stem(&self.scene.name), None, file.suffix()));
+        let sdr_white_nits = if monitor.hdr { monitor.white_nits } else { crate::color::BT2408_SDR_WHITE_NITS };
         self.status = match self
             .io
-            .send(crate::io_service::Command::SaveFrame { frame, path, file, peak_nits })
+            .send(crate::io_service::Command::SaveFrame { frame, path, file, sdr_white_nits })
         {
             Ok(()) => "Saving image…".into(),
             Err(e) => e,
@@ -2506,7 +2527,7 @@ impl App {
                     3 => {
                         if let Some(frame) = frame {
                             if preview {
-                                ui.colored_label(Color32::from_rgb(230, 180, 60), "preview");
+                                ui.colored_label(WARNING, "preview");
                             } else {
                                 ui.label(format!("{} / {} spp", frame.samples, target_spp));
                                 ui.add(
@@ -2529,7 +2550,7 @@ impl App {
                     6 => {
                         if let Some(frame) = frame {
                             if let Some(error) = &frame.denoise_error {
-                                ui.colored_label(Color32::from_rgb(230, 180, 60), "OIDN failed")
+                                ui.colored_label(WARNING, "OIDN failed")
                                     .on_hover_text(error);
                             } else if frame.denoised_samples > 0 {
                                 ui.label(format!(
@@ -2544,7 +2565,7 @@ impl App {
                     }
                     8 => {
                         if let Some(frame) = frame {
-                            march_limit_label(ui, frame.limited);
+                            march_limit_label(ui, frame.unresolved);
                         }
                     }
                     _ => {
@@ -2570,7 +2591,7 @@ impl App {
                 ui.label(format!("{}×{}", t.width, t.height));
                 ui.separator();
                 if self.showing_preview {
-                    ui.label(RichText::new("preview").color(Color32::from_rgb(230, 180, 60)));
+                    ui.label(RichText::new("preview").color(WARNING));
                 } else {
                     ui.label(format!("{} / {} spp", t.samples, self.target_spp));
                     ui.add(
@@ -2591,17 +2612,17 @@ impl App {
                 }
                 if let Some(error) = &t.denoise_error {
                     ui.separator();
-                    ui.label(RichText::new("OIDN failed").color(Color32::from_rgb(230, 180, 60)))
+                    ui.label(RichText::new("OIDN failed").color(WARNING))
                         .on_hover_text(error);
                 }
             }
             ui.separator();
             ui.label(format!("UI {:.0} fps", 1000.0 / self.frame_ms.max(0.1)));
             if let Some(t) = self.current()
-                && t.limited > 0.0
+                && t.unresolved > 0.0
             {
                 ui.separator();
-                march_limit_label(ui, t.limited);
+                march_limit_label(ui, t.unresolved);
             }
             if !self.status.is_empty() {
                 ui.separator();
@@ -2632,11 +2653,8 @@ impl App {
             ((avail.x * ppp) as usize).max(16),
             ((avail.y * ppp) as usize).max(16),
         );
-        let state = ui
-            .ctx()
-            .data(|d| d.get_temp::<egui_display::DisplayState>(egui_display::state_id()));
-        let output_hdr = state.as_ref().is_some_and(|s| s.output.is_hdr());
-        let white = state.as_ref().map_or(100.0, |s| s.target.white);
+        let monitor = Monitor::read(ui.ctx());
+        let (output_hdr, white) = (monitor.hdr, monitor.white_nits);
         if self.preview_key.is_some_and(|key| key.5 != w || key.6 != h) {
             self.preview.cancel();
             self.preview_key = None;
@@ -3416,7 +3434,7 @@ mod tests {
                 pixels: vec![0xff112233],
                 light: vec![[0.1, 0.2, 0.3, 1.0]],
                 radiance: vec![],
-                hdr: false,
+                light_kind: crate::color::DisplayLight::Relative,
                 colour_error: None,
                 denoised_samples: 0,
                 denoise_ms: 0.0,
@@ -3425,7 +3443,7 @@ mod tests {
                 converged: false,
                 last_ms: 0.0,
                 last_spp: 1,
-                limited: 0.0,
+                unresolved: 0.0,
                 sdr_bytes: Arc::new(vec![]),
                 hdr_bytes: Arc::new(vec![]),
             })

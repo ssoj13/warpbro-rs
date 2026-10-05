@@ -71,9 +71,44 @@ impl PngEncoding {
     }
 }
 
-/// Mastering display peak of an HDR PNG (`mDCV`, HLG system gamma) when nothing names one: the
-/// export default and the fallback of a snapshot whose view names no luminance.
-pub const HDR_PEAK_NITS: f32 = 1000.0;
+/// How a frame's display light becomes nits in an HDR PNG.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HdrScale {
+    /// Nits of the light's 1.0: 100 for an HDR view's absolute light, the SDR white for
+    /// relative light (the monitor's when it shows HDR, else BT.2408's 203).
+    pub unit_nits: f32,
+    /// The mastering display (`mDCV`, HLG system gamma): the HDR view's measured peak, or the
+    /// brightest relative light in nits.
+    pub peak_nits: f32,
+}
+
+/// The BT.2100 HLG reference display: the peak an HLG file of relative light is graded for,
+/// so its SDR white (BT.2408: 203 nits) lands near 75 % signal, not at full signal.
+pub const HLG_REFERENCE_PEAK_NITS: f32 = 1000.0;
+
+/// The most light PQ carries (BT.2100).
+const PQ_PEAK_NITS: f32 = 10_000.0;
+
+/// The one rule from a frame's light to HDR file nits (`HdrScale`) for `encoding`, for every
+/// PNG writer. Absolute light: 1.0 = 100 nits, the view's measured peak. Relative light: 1.0
+/// at `sdr_white_nits`; the peak is the brightest light for PQ, the HLG reference display for
+/// HLG (HLG is relative to its display).
+pub fn hdr_scale(
+    kind: crate::color::DisplayLight,
+    light: &[[f32; 4]],
+    sdr_white_nits: f32,
+    encoding: PngEncoding,
+) -> HdrScale {
+    let (unit_nits, peak_nits) = match (kind, encoding) {
+        (crate::color::DisplayLight::Absolute { peak_nits }, _) => (100.0, peak_nits),
+        (crate::color::DisplayLight::Relative, PngEncoding::Hlg) => (sdr_white_nits, HLG_REFERENCE_PEAK_NITS),
+        (crate::color::DisplayLight::Relative, _) => {
+            let max = light.iter().map(|p| p[0].max(p[1]).max(p[2])).fold(1.0f32, f32::max);
+            (sdr_white_nits, sdr_white_nits * max)
+        }
+    };
+    HdrScale { unit_nits, peak_nits: peak_nits.min(PQ_PEAK_NITS) }
+}
 
 /// The file a viewport snapshot (or a PNG export) is saved as. An SDR PNG holds the SDR
 /// rendering (an HDR view is rendered for SDR too, `Frame::sdr_bytes`); an HDR PNG and the
@@ -95,8 +130,8 @@ impl FrameFile {
 }
 
 /// Write display light as a PNG: the one encoder behind the viewport, export and CLI writers.
-/// `light` is linear Rec.709 display light (1.0 = SDR white = 100 nits); `sdr` yields the 8-bit
-/// sRGB codes, read only for SDR. `peak_nits` is the mastering display (`mDCV`, HLG gamma).
+/// `light` is linear Rec.709 display light, `scale` says how it becomes nits (`hdr_scale`);
+/// `sdr` yields the 8-bit sRGB codes, read only for SDR.
 #[allow(clippy::too_many_arguments)]
 pub fn write_png(
     path: &Path,
@@ -105,15 +140,16 @@ pub fn write_png(
     light: &[[f32; 4]],
     sdr: impl FnOnce() -> Vec<u8>,
     encoding: PngEncoding,
-    peak_nits: f32,
+    scale: HdrScale,
     overwrite: bool,
 ) -> Result<(), String> {
+    let peak_nits = scale.peak_nits;
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     av_util_core::outfile::check_overwrite(path, overwrite).map_err(|e| e.to_string())?;
     let u16s = |codes: [f32; 3]| codes.map(|c| (c.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16);
-    let nits = |p: &[f32; 4]| egui_display::rec2020_nits([p[0], p[1], p[2]], 100.0);
+    let nits = |p: &[f32; 4]| egui_display::rec2020_nits([p[0], p[1], p[2]], scale.unit_nits);
     let hdr = |code: &dyn Fn([f32; 3]) -> [f32; 3]| {
         egui_display::screenshot::Pixels::Rgba16(
             light
@@ -140,8 +176,9 @@ pub fn write_png(
         output,
         width: width as u32,
         height: height as u32,
-        white_nits: 100.0,
-        peak_nits: if encoding.hdr() { peak_nits } else { 100.0 },
+        // The file says where its SDR white is and which display it was graded for.
+        white_nits: scale.unit_nits,
+        peak_nits: if encoding.hdr() { peak_nits } else { scale.unit_nits },
         pixels,
     };
     capture.save(path).map(|_| ()).map_err(|e| e.to_string())
@@ -157,7 +194,8 @@ pub struct Frame {
     pub light: Vec<[f32; 4]>,
     /// Unexposed linear ACEScg radiance, populated for final export frames only.
     pub radiance: Vec<[f32; 4]>,
-    pub hdr: bool,
+    /// Relative (SDR view) or absolute (HDR view, with its peak) display light.
+    pub light_kind: crate::color::DisplayLight,
     pub colour_error: Option<String>,
     pub denoised_samples: u32,
     pub denoise_ms: f32,
@@ -167,8 +205,8 @@ pub struct Frame {
     pub converged: bool,
     pub last_ms: f32,
     pub last_spp: u32,
-    /// Share of the accumulated samples whose march ran out of steps ([`crate::render::Target::limited`]).
-    pub limited: f32,
+    /// Share of the accumulated samples with an unresolved march ([`crate::render::Target::unresolved`]).
+    pub unresolved: f32,
     pub sdr_bytes: Arc<Vec<u8>>,
     /// Extended-sRGB encoded RGBA32F, prepared with the requested output reference white.
     pub hdr_bytes: Arc<Vec<u8>>,
@@ -198,7 +236,7 @@ impl Frame {
         let pixels = target.pixels.clone();
         let light = target.light.clone();
         let sdr_bytes = Arc::new(pixels.iter().flat_map(|p| p.to_le_bytes()).collect());
-        let gain = if target.hdr && output_hdr {
+        let gain = if target.light_kind.hdr() && output_hdr {
             100.0 / white_nits.max(1.0)
         } else {
             1.0
@@ -216,7 +254,7 @@ impl Frame {
             pixels,
             light,
             radiance: Vec::new(),
-            hdr: target.hdr,
+            light_kind: target.light_kind,
             colour_error: target.colour_error.clone(),
             // What the image shows: a raw viewport A/B reports no denoise.
             denoised_samples: if target.denoise_shown() {
@@ -230,7 +268,7 @@ impl Frame {
             converged: target.converged,
             last_ms: target.last_ms,
             last_spp: target.last_spp,
-            limited: target.limited,
+            unresolved: target.unresolved,
             sdr_bytes,
             hdr_bytes,
         }
@@ -247,11 +285,13 @@ impl Frame {
             / (self.last_ms as f64 / 1000.0)
             / 1.0e6
     }
-    pub fn save_png(&self, path: &Path, encoding: PngEncoding, peak_nits: f32, overwrite: bool) -> Result<(), String> {
+    /// `sdr_white_nits`: the nits of relative light's 1.0 in an HDR file (`hdr_scale`).
+    pub fn save_png(&self, path: &Path, encoding: PngEncoding, sdr_white_nits: f32, overwrite: bool) -> Result<(), String> {
         if let Some(e) = &self.colour_error {
             return Err(format!("Colour transform failed: {e}"));
         }
-        write_png(path, self.width, self.height, &self.light, || self.sdr_bytes.as_ref().clone(), encoding, peak_nits, overwrite)
+        let scale = hdr_scale(self.light_kind, &self.light, sdr_white_nits, encoding);
+        write_png(path, self.width, self.height, &self.light, || self.sdr_bytes.as_ref().clone(), encoding, scale, overwrite)
     }
     pub fn save_display_exr(&self, path: &Path) -> Result<(), String> {
         if let Some(e) = &self.colour_error {
@@ -260,10 +300,10 @@ impl Frame {
         crate::exr_io::write_rgb(path, self.width, self.height, &self.light, &crate::color::DISPLAY_PRIMS, Some(100.0), true)
     }
     /// Save this frame as `file` (viewport snapshots: File menu and the viewport toolbar);
-    /// `peak_nits` is the mastering peak of an HDR PNG.
-    pub fn save(&self, path: &Path, file: FrameFile, peak_nits: f32) -> Result<(), String> {
+    /// `sdr_white_nits` as in [`Self::save_png`].
+    pub fn save(&self, path: &Path, file: FrameFile, sdr_white_nits: f32) -> Result<(), String> {
         match file {
-            FrameFile::Png(encoding) => self.save_png(path, encoding, peak_nits, true),
+            FrameFile::Png(encoding) => self.save_png(path, encoding, sdr_white_nits, true),
             FrameFile::DisplayExr => self.save_display_exr(path),
         }
     }
@@ -872,7 +912,7 @@ fn empty_presentation() -> Frame {
         pixels: Vec::new(),
         light: Vec::new(),
         radiance: Vec::new(),
-        hdr: false,
+        light_kind: crate::color::DisplayLight::Relative,
         colour_error: None,
         denoised_samples: 0,
         denoise_ms: 0.0,
@@ -881,7 +921,7 @@ fn empty_presentation() -> Frame {
         converged: false,
         last_ms: 0.0,
         last_spp: 0,
-        limited: 0.0,
+        unresolved: 0.0,
         sdr_bytes: Arc::new(Vec::new()),
         hdr_bytes: Arc::new(Vec::new()),
     }
@@ -1939,7 +1979,7 @@ mod tests {
             pixels: vec![0],
             light: vec![[0.0; 4]],
             radiance: Vec::new(),
-            hdr: false,
+            light_kind: crate::color::DisplayLight::Relative,
             colour_error: None,
             denoised_samples: 0,
             denoise_ms: 0.0,
@@ -1948,10 +1988,53 @@ mod tests {
             converged: false,
             last_ms: 1.0,
             last_spp: 1,
-            limited: 0.0,
+            unresolved: 0.0,
             sdr_bytes: Arc::new(vec![0; 4]),
             hdr_bytes: Arc::new(Vec::new()),
         })
+    }
+
+    /// Relative light's 1.0 lands on the SDR white it is given (the monitor's, or BT.2408's
+    /// 203), absolute light keeps 1.0 = 100 nits and its view's peak: an HDR10 snapshot is as
+    /// bright as the screen.
+    #[test]
+    fn hdr_scale_puts_sdr_white_where_the_monitor_shows_it() {
+        use crate::color::DisplayLight;
+        let light = [[1.0, 0.5, 0.25, 1.0], [2.0, 0.0, 0.0, 1.0]];
+        let relative = hdr_scale(DisplayLight::Relative, &light, 203.0, PngEncoding::Hdr10);
+        assert_eq!(relative, HdrScale { unit_nits: 203.0, peak_nits: 406.0 });
+        let hlg = hdr_scale(DisplayLight::Relative, &light, 203.0, PngEncoding::Hlg);
+        assert_eq!(hlg, HdrScale { unit_nits: 203.0, peak_nits: HLG_REFERENCE_PEAK_NITS });
+        let absolute = hdr_scale(DisplayLight::Absolute { peak_nits: 1000.0 }, &light, 203.0, PngEncoding::Hdr10);
+        assert_eq!(absolute, HdrScale { unit_nits: 100.0, peak_nits: 1000.0 });
+        let unbounded = hdr_scale(DisplayLight::Relative, &[[1.0e3, 0.0, 0.0, 1.0]], 203.0, PngEncoding::Hdr10);
+        assert_eq!(unbounded.peak_nits, 10_000.0, "mDCV never exceeds what PQ carries");
+
+        // The written PQ code of white is PQ(203 nits).
+        let mut frame = Arc::try_unwrap(completed_frame(1, false)).ok().unwrap();
+        frame.light = vec![[1.0, 1.0, 1.0, 1.0]];
+        let dir = std::env::temp_dir().join(format!("frac-hdr-scale-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("white.pq.png");
+        frame.save(&path, FrameFile::Png(PngEncoding::Hdr10), 203.0).unwrap();
+        let decoder = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap()));
+        let mut reader = decoder.read_info().unwrap();
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut buf).unwrap();
+        let green = u16::from_be_bytes([buf[2], buf[3]]);
+        let expected = (egui_display::pq(203.0) * 65535.0 + 0.5) as u16;
+        assert!(green.abs_diff(expected) <= 1, "{green} vs PQ(203) {expected}");
+        // The metadata says the same: SDR white at 203 nits, mastered for the brightest light.
+        let info = reader.info();
+        let white = info
+            .uncompressed_latin1_text
+            .iter()
+            .find(|t| t.keyword == "SDRReferenceWhite")
+            .map(|t| t.text.clone());
+        assert_eq!(white.as_deref(), Some("203 nits"));
+        let mdcv = info.mastering_display_color_volume.expect("mDCV");
+        assert_eq!(mdcv.max_luminance, 2_030_000, "203 nits in 0.0001 cd/m2");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// Every snapshot file goes through `Frame::save`: an SDR frame saved as HDR10 is a PQ /
@@ -1972,15 +2055,14 @@ mod tests {
             (FrameFile::Png(PngEncoding::Hdr10), Some(vec![9, 16, 0, 1])),
         ] {
             let path = dir.join(format!("shot.{}", file.suffix()));
-            frame.save(&path, file, HDR_PEAK_NITS).unwrap();
+            frame.save(&path, file, crate::color::BT2408_SDR_WHITE_NITS).unwrap();
             assert_eq!(cicp(&path), expected, "{file:?}");
             // SDR says so with the sRGB chunk (egui-display's contract), HDR with cICP.
             assert_eq!(srgb(&path), expected.is_none(), "{file:?}");
         }
         let exr = dir.join(format!("shot.{}", FrameFile::DisplayExr.suffix()));
-        frame.save(&exr, FrameFile::DisplayExr, HDR_PEAK_NITS).unwrap();
+        frame.save(&exr, FrameFile::DisplayExr, crate::color::BT2408_SDR_WHITE_NITS).unwrap();
         assert!(exr.is_file());
-        assert_eq!(FrameFile::Png(PngEncoding::Hdr10).suffix(), "pq.png");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

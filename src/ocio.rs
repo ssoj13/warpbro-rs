@@ -89,15 +89,6 @@ pub enum OutputKind {
     Hlg,
 }
 
-/// The luminance in a view name ("ACES 2.0 - HDR 1000 nits (P3 D65)" -> 1000).
-pub(crate) fn view_nits(view: &str) -> Option<f32> {
-    let words: Vec<&str> = view.split_whitespace().collect();
-    words
-        .windows(2)
-        .find(|w| w[1].eq_ignore_ascii_case("nits"))
-        .and_then(|w| w[0].parse().ok())
-}
-
 /// Names a [`Sel`] resolves to in one config.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Names {
@@ -117,6 +108,9 @@ pub struct Ocio {
     cfg: vfx_ocio::Config,
     /// [`Ocio::working_space`], found once per load.
     working: std::sync::OnceLock<Option<String>>,
+    /// Measured peaks of the HDR views [`Ocio::output_transform`] ranks, by (display, view):
+    /// building a view's processor to probe it is too slow to repeat every UI frame.
+    peaks: std::sync::Mutex<std::collections::HashMap<(String, String), Option<f32>>>,
 }
 
 /// The load counter behind [`Ocio::serial`].
@@ -135,6 +129,7 @@ impl Ocio {
             serial: LOADS.fetch_add(1, Ordering::Relaxed),
             cfg,
             working: std::sync::OnceLock::new(),
+            peaks: Default::default(),
         })
     }
 
@@ -255,7 +250,8 @@ impl Ocio {
 
     /// Display and view an output of `kind` renders through. The scene's own choice (`current`)
     /// wins when it already fits; otherwise the config's first fitting display, with its view
-    /// closest to `peak_nits` for HDR (from the "N nits" in ACES view names), its first view for SDR.
+    /// whose measured peak ([`Ocio::view_peak`]) is closest to `peak_nits` for HDR, its first
+    /// view for SDR.
     pub fn output_transform(&self, current: &Sel, kind: OutputKind, peak_nits: f32) -> Result<(String, String)> {
         let hdr = kind != OutputKind::Sdr;
         if let Ok(n) = self.resolve(current, hdr)
@@ -275,7 +271,10 @@ impl Ocio {
                 .collect();
             let view = if hdr {
                 views.iter().copied().min_by(|a, b| {
-                    let d = |v: &str| view_nits(v).map_or(f32::MAX, |n| (n - peak_nits).abs());
+                    let d = |v: &str| {
+                        self.view_peak(current, display, v)
+                            .map_or(f32::MAX, |n| (n - peak_nits).abs())
+                    };
                     d(a).total_cmp(&d(b))
                 })
             } else {
@@ -293,6 +292,31 @@ impl Ocio {
                 OutputKind::Hlg => "HLG",
             }
         )
+    }
+
+    /// The measured peak in nits of HDR `view` on `display` (with `current`'s input and look),
+    /// cached per load; None when it is not an HDR view or cannot be built / measured.
+    fn view_peak(&self, current: &Sel, display: &str, view: &str) -> Option<f32> {
+        let key = (display.to_owned(), view.to_owned());
+        if let Ok(peaks) = self.peaks.lock()
+            && let Some(peak) = peaks.get(&key)
+        {
+            return *peak;
+        }
+        let sel = Sel { display: display.into(), view: view.into(), ..current.clone() };
+        let peak = self
+            .resolve(&sel, true)
+            .and_then(|names| self.transform(&names, true))
+            .ok()
+            .and_then(|t| t.light().ok())
+            .and_then(|light| match light {
+                crate::color::DisplayLight::Absolute { peak_nits } => Some(peak_nits),
+                crate::color::DisplayLight::Relative => None,
+            });
+        if let Ok(mut peaks) = self.peaks.lock() {
+            peaks.insert(key, peak);
+        }
+        peak
     }
 
     /// Every look.
@@ -451,6 +475,10 @@ pub struct Transform {
     absolute: bool,
 }
 
+/// Scene light (working space) far above every view's range, so a tone-mapped view returns its
+/// peak for it (ACES 2.0's tone scale is asymptotic: at 1e5 it is at its peak to f32 precision).
+const PEAK_PROBE: f32 = 1.0e5;
+
 impl Transform {
     pub(crate) fn processor(&self) -> &Processor {
         &self.proc
@@ -471,6 +499,25 @@ impl Transform {
             linear,
             absolute,
         })
+    }
+
+    /// What its light is: relative to SDR white, or the absolute light of an HDR view with the
+    /// view's peak, measured on the transform itself: a probe far above any view's range goes
+    /// through its processor, and the view's tone curve returns its peak. A view whose probe
+    /// exceeds what PQ can carry (10 000 nits) has no tone curve to measure - an error, not a
+    /// peak. Only for linear transforms (`Ocio::transform(.., true)`).
+    pub fn light(&self) -> Result<crate::color::DisplayLight, String> {
+        if !self.absolute {
+            return Ok(crate::color::DisplayLight::Relative);
+        }
+        let mut probe = [[PEAK_PROBE, PEAK_PROBE, PEAK_PROBE, 1.0]];
+        self.proc.apply_rgba(&mut probe);
+        // Display reference 1.0 = 100 nits.
+        let peak_nits = 100.0 * probe[0][0].max(probe[0][1]).max(probe[0][2]);
+        if !(peak_nits.is_finite() && peak_nits > 0.0 && peak_nits <= 10_000.0 * 1.001) {
+            return Err(format!("OCIO view has no measurable peak ({peak_nits} nits): not a tone-mapped HDR view"));
+        }
+        Ok(crate::color::DisplayLight::Absolute { peak_nits })
     }
 
     /// The gain from the transform's light to the canvas (1.0 = SDR white of
@@ -1229,6 +1276,23 @@ mod tests {
 
     fn cg() -> Ocio {
         Ocio::load("ocio://default").expect("the default built-in config")
+    }
+
+    /// An HDR output picks the view whose MEASURED peak is nearest the requested one (no name
+    /// parsing): from an SDR scene, 4000 asks for the 4000-nit PQ view, 1000 for the 1000-nit.
+    #[test]
+    fn hdr_output_picks_the_view_by_its_measured_peak() {
+        let o = Ocio::load("ocio://studio-config-latest").unwrap();
+        let sdr = crate::color::default_selection();
+        for (want, nits) in [(4000.0, "4000"), (1000.0, "1000")] {
+            let (_, view) = o.output_transform(&sdr, OutputKind::Pq, want).unwrap();
+            assert!(view.contains(nits), "{want} nits -> {view}");
+        }
+        let names = o.resolve(&Sel { display: "Rec.2100-PQ - Display".into(), view: "ACES 2.0 - HDR 1000 nits (P3 D65)".into(), ..sdr.clone() }, true).unwrap();
+        match o.transform(&names, true).unwrap().light().unwrap() {
+            crate::color::DisplayLight::Absolute { peak_nits } => assert!((peak_nits - 1000.0).abs() < 10.0, "{peak_nits}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     /// The defaults of the ACES 2.0 CG config, and scene 18 % grey through them at

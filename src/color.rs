@@ -99,13 +99,30 @@ pub fn default_selection() -> crate::ocio::Sel {
         display: "sRGB - Display".into(), view: SDR_VIEW.into(), ..Default::default() }
 }
 
+/// BT.2408: the level of SDR (graphics) white in an HDR signal, the nits a relative light's 1.0
+/// gets in an HDR file when no HDR monitor says otherwise.
+pub const BT2408_SDR_WHITE_NITS: f32 = 203.0;
+
+/// The light a display transform ends in. Relative: 1.0 is SDR white (an SDR view, OCIO off).
+/// Absolute: an HDR view's light, display reference 1.0 = 100 nits, reaching `peak_nits`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DisplayLight {
+    Relative,
+    Absolute { peak_nits: f32 },
+}
+impl DisplayLight {
+    pub fn hdr(self) -> bool {
+        matches!(self, Self::Absolute { .. })
+    }
+}
+
 struct Cached {
     selection: crate::ocio::Sel,
     linear: vfx_ocio::GpuBufferExecutor,
     encoded: vfx_ocio::GpuBufferExecutor,
-    absolute: bool,
+    light: DisplayLight,
 }
-type DisplayPixels = (Vec<[f32; 4]>, Vec<[f32; 4]>, bool);
+type DisplayPixels = (Vec<[f32; 4]>, Vec<[f32; 4]>, DisplayLight);
 pub struct ColorPipeline { cached: Vec<Cached> }
 impl ColorPipeline {
     pub fn new() -> Self { Self { cached: Vec::new() } }
@@ -119,7 +136,7 @@ impl ColorPipeline {
                 [f(r), f(g), f(b), 1.0]
             }).collect();
             let encoded = light.iter().map(|p| [oetf(p[0]), oetf(p[1]), oetf(p[2]), 1.0]).collect();
-            return Ok((light, encoded, false));
+            return Ok((light, encoded, DisplayLight::Relative));
         }
         if !self.cached.iter().any(|c| c.selection == *sel) {
             let ocio = crate::ocio::Ocio::load(&crate::ocio::source(&sel.config)).map_err(|e| e.to_string())?;
@@ -132,15 +149,19 @@ impl ColorPipeline {
                 ocio.resolve(&sdr, false).map_err(|e| e.to_string())?
             } else { names };
             let encoded = ocio.transform(&preview_names, false).map_err(|e| e.to_string())?;
+            // Everything fallible first: a failure keeps the cache as it was.
+            let kind = light.light()?;
+            let linear = vfx_ocio::GpuBufferExecutor::compile(light.processor()).map_err(|e| e.to_string())?;
+            let encoded = vfx_ocio::GpuBufferExecutor::compile(encoded.processor()).map_err(|e| e.to_string())?;
             if self.cached.len() == 8 { self.cached.remove(0); }
-            self.cached.push(Cached { selection: sel.clone(),
-                linear: vfx_ocio::GpuBufferExecutor::compile(light.processor()).map_err(|e| e.to_string())?,
-                encoded: vfx_ocio::GpuBufferExecutor::compile(encoded.processor()).map_err(|e| e.to_string())?, absolute });
+            self.cached.push(Cached { selection: sel.clone(), linear, encoded, light: kind });
         }
-        let c = self.cached.iter().find(|c| c.selection == *sel).unwrap();
+        let Some(c) = self.cached.iter().find(|c| c.selection == *sel) else {
+            return Err("Colour cache lost its selection".into());
+        };
         let light = c.linear.execute(width as u32, height as u32, pixels).map_err(|e| e.to_string())?;
         let encoded = c.encoded.execute(width as u32, height as u32, pixels).map_err(|e| e.to_string())?;
-        Ok((light, encoded, c.absolute))
+        Ok((light, encoded, c.light))
     }
 }
 
@@ -207,8 +228,12 @@ mod tests {
             let pixels: Vec<_> = (0..64).map(|i| { let x = 2.0f32.powf(i as f32 / 4.0 - 8.0); [x, x * 0.6, x * 0.1, 1.0] }).collect();
             let mut expected = pixels.clone();
             processor(hdr).unwrap().apply_rgba(&mut expected);
-            let (actual, _, absolute) = pipeline.apply(8, 8, &pixels, &sel, false).unwrap();
-            assert_eq!(absolute, hdr);
+            let (actual, _, kind) = pipeline.apply(8, 8, &pixels, &sel, false).unwrap();
+            assert_eq!(kind.hdr(), hdr);
+            // The peak is measured on the transform: the 1000-nit view reaches 1000 nits.
+            if let DisplayLight::Absolute { peak_nits } = kind {
+                assert!((peak_nits - 1000.0).abs() < 10.0, "1000-nit view peak {peak_nits}");
+            }
             for (got, want) in actual.iter().zip(expected) {
                 for c in 0..3 { assert!((got[c]-want[c]).abs() < 0.004 * want[c].abs().max(1.0), "HDR {hdr}: {got:?} vs {want:?}"); }
             }

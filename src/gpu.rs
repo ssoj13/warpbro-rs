@@ -799,41 +799,61 @@ pub mod kernels {
     const RAY_PRIMARY: u32 = 0;
     const RAY_BOUNCE: u32 = 1;
     const RAY_VISIBILITY: u32 = 2;
-    /// The OFX Direct preview's camera ray: a primary ray with Keinert's out-of-steps rule.
+    /// The OFX Direct preview's camera ray: a primary ray whose unresolved result may stand in
+    /// for the surface (Keinert, see `trace_direct`).
     const RAY_DIRECT: u32 = 3;
     /// The longest sphere-tracing step is `2 (t_exit - t_enter) / STEP_CAP_STEPS`, a fixed share
-    /// of the ray's interval. It used to divide by `max_steps`, so raising the step budget also
-    /// shortened every step (BUG1: the two could not be compared apart); 256 keeps the former
-    /// default exactly. Mandelbulber's step limits do not depend on its step budget either.
+    /// of the ray's interval, independent of the step budget (Mandelbulber's step limits are
+    /// too). It used to divide by `max_steps`, so a larger budget also shortened every step.
+    /// Measured on BUG1 frame 27 (BUG1.md, "Марш"): with a budget large enough to converge,
+    /// divisors 256 and 8192 give 69 531 and 69 537 hits of 147 456 rays - the cap barely
+    /// matters once rays converge; 256 is the former default's cap.
     const STEP_CAP_STEPS: f32 = 256.0;
-    /// Probes of an unsigned field's interior exit march (`exit_distance`): a sampling
-    /// resolution, not a step budget. It used to be the march budget, so raising that to 4096
-    /// made every refraction exit up to 16x more estimates; 256 keeps the former default.
-    const EXIT_PROBES: u32 = 256;
     const HIT_REFINEMENTS: u32 = 16;
     const FOOTPRINT_RELATIVE_FLOOR: f32 = 0.000_001_907_348_6;
 
+    /// How a march ended. The march only reports; the integrator applies one policy per ray
+    /// kind (`trace_path`, `trace_direct`).
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    pub enum Outcome {
+        /// The ray reached the surface (within its footprint).
+        Hit,
+        /// The ray left its interval: nothing to hit along it.
+        Miss,
+        /// The step budget ran out inside the interval: not converged. `Hit::point` / `ratio`
+        /// hold the closest sample, which is not a surface point (BUG1: 52% of such samples are
+        /// rays passing the surface, 48% lie 0.3 units before the real hit).
+        Unresolved,
+    }
+
     #[derive(Clone, Copy)]
     pub struct Hit {
-        hit: bool,
+        outcome: Outcome,
         point: V3,
         trap: f32,
         eps: f32,
         // Each evaluated object owns one packed material, so this is also its material index.
         object: usize,
-        /// The march ran out of steps inside the ray's interval: the result is not converged.
-        limited: bool,
+        /// `Unresolved`: the closest sample's estimate in footprints (`d / eps`).
+        ratio: f32,
+    }
+    impl Hit {
+        #[inline(always)]
+        fn hit(&self) -> bool {
+            self.outcome == Outcome::Hit
+        }
     }
 
     /// One camera sample: its radiance, whether the camera ray hit, the primary guides
-    /// (albedo, normal) and whether a camera or bounce march ran out of steps.
+    /// (albedo, normal) and whether any march of the path (camera, bounce, visibility) was
+    /// unresolved, i.e. ran out of steps.
     #[derive(Clone, Copy)]
     pub struct PathSample {
         radiance: V3,
         hit: bool,
         albedo: V3,
         normal: V3,
-        limited: bool,
+        unresolved: bool,
     }
 
     #[inline(always)]
@@ -866,6 +886,8 @@ pub mod kernels {
         best
     }
 
+    /// Sphere-trace from `origin` along `dir` and report how it ended (`Outcome`); the caller
+    /// decides what an unresolved march means for its ray.
     #[inline(always)]
     fn march<const F: u32>(
         ctx: Context<'_>,
@@ -876,12 +898,12 @@ pub mod kernels {
         slope: f32,
     ) -> Hit {
         let miss = Hit {
-            hit: false,
+            outcome: Outcome::Miss,
             point: origin,
             trap: TRAP_START,
             eps: 0.0,
             object: 0,
-            limited: false,
+            ratio: 0.0,
         };
         let primary = kind == RAY_PRIMARY || kind == RAY_DIRECT;
         let max_steps = if primary {
@@ -926,11 +948,18 @@ pub mod kernels {
         };
         let step_cap = 2.0 * (max_distance - t_enter) / STEP_CAP_STEPS;
         let step_factor = pr(ctx, P_STEP_FACTOR);
+        let sample = |point: V3, trap: f32, eps: f32, object: usize, ratio: f32| Hit {
+            outcome: Outcome::Hit,
+            point,
+            trap,
+            eps,
+            object,
+            ratio,
+        };
         let mut t = t_enter;
-        let mut outside = miss;
-        let mut outside_t = 0.0f32;
-        let mut closest = miss;
-        let mut closest_ratio = 0.0f32;
+        // The last sample outside the surface and its ray length (the refinement bracket).
+        let mut outside: Option<(Hit, f32)> = None;
+        let mut closest: Option<Hit> = None;
         let mut i = 0u32;
         while i < max_steps {
             if t > max_distance {
@@ -945,19 +974,13 @@ pub mod kernels {
                 d < eps
             };
             if hit {
-                if !(outside.hit && d <= 0.0 && kind != RAY_VISIBILITY) {
-                    return Hit {
-                        hit: true,
-                        point,
-                        trap,
-                        eps,
-                        object,
-                        limited: false,
-                    };
-                }
-                let mut lo = outside_t;
+                let bracket = match outside {
+                    Some(bracket) if d <= 0.0 && kind != RAY_VISIBILITY => bracket,
+                    _ => return sample(point, trap, eps, object, d / eps),
+                };
+                // Stepped inside: bisect the bracket from the last outside sample.
+                let (mut best, mut lo) = bracket;
                 let mut hi = t;
-                let mut best = outside;
                 let mut k = 0u32;
                 while k < HIT_REFINEMENTS {
                     if hi - lo <= 0.5 * best.eps {
@@ -968,14 +991,8 @@ pub mod kernels {
                     let (rd, rt, object) = march_sample::<F>(ctx, inner, trap_mode);
                     if rd > 0.0 {
                         lo = mid;
-                        best = Hit {
-                            hit: true,
-                            point: inner,
-                            trap: rt,
-                            eps: footprint(base, slope, mid, inner),
-                            object,
-                            limited: false,
-                        };
+                        let eps = footprint(base, slope, mid, inner);
+                        best = sample(inner, rt, eps, object, rd / eps);
                     } else {
                         hi = mid;
                     }
@@ -983,56 +1000,26 @@ pub mod kernels {
                 }
                 return best;
             }
-            let ratio = d / eps;
-            if !closest.hit || ratio < closest_ratio {
-                closest = Hit {
-                    hit: true,
-                    point,
-                    trap,
-                    eps,
-                    object,
-                    limited: false,
-                };
-                closest_ratio = ratio;
+            let here = sample(point, trap, eps, object, d / eps);
+            if closest.is_none_or(|c| here.ratio < c.ratio) {
+                closest = Some(here);
             }
-            outside = Hit {
-                hit: true,
-                point,
-                trap,
-                eps,
-                object,
-                limited: false,
-            };
-            outside_t = t;
+            outside = Some((here, t));
             t += (step_factor * d).max(eps * 0.5).min(step_cap);
             i += 1;
         }
-        if t > max_distance || !closest.hit {
-            return miss;
-        }
-        // Out of steps inside the interval: the march did not converge. A visibility ray counts
-        // as blocked (conservative). The Direct preview keeps Keinert et al. 2014 (Enhanced
-        // Sphere Tracing, 3.2): one ray per pixel, so the closest sample within half a pixel
-        // (`P_SAMPLE_CONE` footprints is a pixel; at least one footprint when the footprint
-        // exceeds a pixel) stands in for the surface, shaded at pixel scale. A path-traced ray misses, as in Mandelbulber and Fragmentarium: measured on
-        // BUG1 frame 27, 52% of such closest samples were rays that pass the surface and 48%
-        // lay 0.3 scene units before the real hit - phantom shells with normals ~48 deg off.
-        if kind == RAY_VISIBILITY
-            || (kind == RAY_DIRECT && closest_ratio <= 0.5 * pr(ctx, P_SAMPLE_CONE))
-        {
-            return Hit {
-                limited: true,
+        match closest {
+            Some(closest) if t <= max_distance => Hit {
+                outcome: Outcome::Unresolved,
                 ..closest
-            };
-        }
-        Hit {
-            limited: true,
-            ..miss
+            },
+            _ => miss,
         }
     }
 
     /// Trace the exit of the occupied dielectric using its own field, not the union.
-    /// An unresolved exit is absorbed by the integrator instead of becoming a sky miss.
+    /// An exit that cannot be found is `Unresolved`: absorbed by the integrator (never a sky
+    /// miss) and counted like any march out of steps.
     /// The transformed local sphere bounds the probe interval even with nonuniform TRS.
     #[inline(always)]
     fn march_exit<const F: u32>(ctx: Context<'_>, origin: V3, dir: V3, eps: f32) -> Hit {
@@ -1063,18 +1050,21 @@ pub mod kernels {
             },
             extent,
             eps,
-            EXIT_PROBES,
+            // A resolution of its own (`Render::glass_probes`), not the march's step budget.
+            pr(ctx, P_GLASS_PROBES) as u32,
             pr(ctx, P_STEP_FACTOR),
             family_signed::<F>(ctx),
         );
+        // No exit found (probe count spent, or a non-finite estimate): unresolved, so the
+        // integrator absorbs the path and the status bar counts it.
         let Some(t) = distance else {
             return Hit {
-                hit: false,
+                outcome: Outcome::Unresolved,
                 point: origin,
                 trap: TRAP_START,
                 eps,
                 object: ctx.object,
-                limited: false,
+                ratio: 0.0,
             };
         };
         let point = add(origin, mul(dir, t));
@@ -1085,12 +1075,12 @@ pub mod kernels {
             signed_distance_and_trap::<F>(ctx, point, trap_mode).1
         };
         Hit {
-            hit: true,
+            outcome: Outcome::Hit,
             point,
             trap,
             eps,
             object: ctx.object,
-            limited: false,
+            ratio: 0.0,
         }
     }
 
@@ -1697,7 +1687,7 @@ pub mod kernels {
         let mut mis_bsdf_pdf = 0.0f32;
         let mut mis_env = false;
         let mut primary_hit = false;
-        let mut limited = false;
+        let mut unresolved = false;
         let mut primary_albedo = [0.0; 3];
         let mut primary_normal = [0.0; 3];
         let mut bounce = 0u32;
@@ -1722,11 +1712,21 @@ pub mod kernels {
             } else {
                 march::<F>(ctx, ro, rd, kind, base, slope)
             };
-            limited |= m.limited;
-            if inside && !m.hit {
+            // One policy per ray kind for an unresolved march (`Outcome::Unresolved`): the camera
+            // ray shows the background (Mandelbulber, Fragmentarium), a bounce ray ends the
+            // path - an unknown direction brings no light (its environment would leak into
+            // crevices) - and every case is counted for the status bar.
+            if m.outcome == Outcome::Unresolved {
+                unresolved = true;
+                if bounce > 0 {
+                    break;
+                }
+            }
+            // An interior exit that cannot be found ends the path, absorbed (`march_exit`).
+            if inside && !m.hit() {
                 break;
             }
-            if !m.hit {
+            if !m.hit() {
                 let w = if mis_env {
                     power_heuristic(mis_bsdf_pdf, env_pdf(ctx, lut, rd))
                 } else {
@@ -1883,7 +1883,10 @@ pub mod kernels {
                 if max3(f) > 0.0 {
                     let so = add(m.point, mul(geo_n, eps));
                     let sb = slope * length(sub(so, cam));
-                    if !march::<F>(ctx, so, ld, RAY_VISIBILITY, sb, 0.0).hit {
+                    // An unresolved shadow ray counts as blocked: no light from an unknown path.
+                    let shadow = march::<F>(ctx, so, ld, RAY_VISIBILITY, sb, 0.0);
+                    unresolved |= shadow.outcome == Outcome::Unresolved;
+                    if shadow.outcome == Outcome::Miss {
                         let w = power_heuristic(lpdf, bpdf);
                         radiance = add(
                             radiance,
@@ -1930,7 +1933,7 @@ pub mod kernels {
             hit: primary_hit,
             albedo: primary_albedo,
             normal: primary_normal,
-            limited,
+            unresolved,
         }
     }
 
@@ -2002,8 +2005,8 @@ pub mod kernels {
         let mut primary_hits = 0.0;
         // Sum of squared sample luminance: with `acc` it gives the pixel's sample variance.
         let mut luma2 = 0.0f32;
-        // Samples whose camera or bounce march ran out of steps (reported, see `march`).
-        let mut limited = 0.0f32;
+        // Samples with an unresolved march (out of steps; see `Outcome`), for the status bar.
+        let mut unresolved = 0.0f32;
         let mut s = 0u32;
         while s < spp {
             let mut r = Rng {
@@ -2059,8 +2062,8 @@ pub mod kernels {
                 normal: n,
                 ..
             } = sample;
-            if sample.limited {
-                limited += 1.0;
+            if sample.unresolved {
+                unresolved += 1.0;
             }
             primary_hits += if hit {
                 1.0
@@ -2086,7 +2089,7 @@ pub mod kernels {
             s += 1;
         }
         *acc = [sum[0], sum[1], sum[2], acc[3] + spp as f32];
-        *stats = [stats[0] + luma2, stats[1] + limited];
+        *stats = [stats[0] + luma2, stats[1] + unresolved];
         *albedo = [
             albedo_sum[0],
             albedo_sum[1],
@@ -3227,13 +3230,13 @@ pub mod kernels {
         let stride = sums.len();
         let mut k = idx.get();
         if let Some(sum) = sums.get_mut(idx) {
-            let (mut limited, mut samples) = (0.0f64, 0.0f64);
+            let (mut unresolved, mut samples) = (0.0f64, 0.0f64);
             while let (Some(s), Some(a)) = (stats.get(k), accum.get(k)) {
-                limited += f64::from(s[1]);
+                unresolved += f64::from(s[1]);
                 samples += f64::from(a[3]);
                 k += stride;
             }
-            *sum = [limited, samples];
+            *sum = [unresolved, samples];
         }
     }
 

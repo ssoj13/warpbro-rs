@@ -44,8 +44,9 @@ CHANGELOG.md, add new requests as they come. Reusable UI goes into egui-widgets-
 - [x] Clear glass lost energy at grazing angles (BUG1.md; render-rs 207473e, exact smooth interfaces)
 - [ ] Rough dielectric transmission: no multiple-scattering compensation (furnace 0.81-0.93 inside
       at roughness 0.5) — compensation table for dielectrics
-- [x] BUG1 march: out of steps is a miss (was 37% phantom hits in frame 27), step cap decoupled
-      from the budget, presets 4096 steps, status reports the out-of-steps share
+- [x] BUG1 march: `Outcome::Unresolved` with one policy per ray kind (was 37% phantom hits in
+      frame 27), step cap decoupled from the budget, presets 4096 steps, glass interior probes a
+      setting, every unresolved march (shadow, exit included) counted in the status bar
 - [ ] BUG1 open: Hybrid DE discontinuities at fold / escape transitions (re-measure on converged
       hits: the old statistics mixed in the phantoms); 6-probe normal cost (isolated benchmark)
 - [ ] Port the march fix to the OFX plug-in's kernel copy (`ofx-rs/crates/ofx-fractal/kernels/source/src/gpu.rs`

@@ -495,7 +495,7 @@ impl App {
                 .button(ph::CAMERA)
                 .on_hover_text("Save the viewport as displayed (PNG) · right click: more formats");
             if snapshot.clicked() {
-                self.save_frame(None);
+                self.save_frame(super::Monitor::read(ui.ctx()), None);
             }
             snapshot.context_menu(|ui| self.snapshot_menu(ui));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

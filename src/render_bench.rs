@@ -206,14 +206,12 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             }
         }
         raw.flush()?;
+        let encoding = crate::render_service::PngEncoding::displayed(target.light_kind.hdr());
         target
             .save_png(
-                &base.join(format!(
-                    "{stem}.{}",
-                    crate::render_service::PngEncoding::displayed(target.hdr).suffix()
-                )),
-                crate::render_service::PngEncoding::displayed(target.hdr),
-                crate::render_service::HDR_PEAK_NITS,
+                &base.join(crate::fs_name::frame_file(&stem, None, encoding.suffix())),
+                encoding,
+                crate::color::BT2408_SDR_WHITE_NITS,
                 true,
             )
             .map_err(anyhow::Error::msg)?;

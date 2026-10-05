@@ -268,8 +268,10 @@ and [the explicitly enabled GPU suite](target/verification/ssh-final-gpu-tests.o
 All output goes to `~/.warpbro/out/<local date_time>/`, one new folder per export or screenshot.
 **Snapshots** (the camera button of the viewport toolbar, or File): a click saves the viewport as
 the monitor shows it - 8-bit sRGB PNG on an SDR monitor, HDR10 BT.2020/PQ 16-bit PNG with `cICP`,
-`mDCV` (the view's peak) and measured `cLLI` on an HDR one. Right click (or File) also offers the SDR
-PNG and the HDR10 PNG explicitly, and **Display EXR**: unquantized linear Rec.709 display light with
+`mDCV` and measured `cLLI` on an HDR one. An HDR view's light keeps its absolute nits and its
+measured peak; an SDR view's white lands at the monitor's SDR white (BT.2408's 203 nits without an
+HDR monitor), so the file is as bright as the screen. Right click (or File) also offers the SDR PNG
+and the HDR10 PNG explicitly, and **Display EXR**: unquantized linear Rec.709 display light with
 chromaticities and `whiteLuminance = 100` (display-referred, not a scene-linear master). HDR PNGs are
 named `*.pq.png` / `*.hlg.png`: in a viewer that ignores `cICP` they look washed out.
 
@@ -283,11 +285,13 @@ CUDA_HOME=/usr/local/cuda CUDA_OXIDE_LLC=/usr/bin/llc-22 cargo oxide test -- --r
 Open **Render → Render / Encode…** or **Window → Render / Encode**. This dockable panel
 uses Playa's shared encoder schema. Pick the format tab, a file **Name**, resolution,
 **Samples / frame** and the inclusive frame range (**Current frame** renders the frame under the
-playhead). A one-frame range writes `name.ext`; a longer range writes `name.000001.ext`, ...
+playhead). A one-frame range writes `name.<suffix>`; a longer range writes
+`name.000001.<suffix>`, ... (the number before the whole suffix: `name.000001.pq.png`).
 
 - **PNG:** the monitor rendering baked in, as **SDR · 8-bit sRGB / BT.709**, **HDR10 · 16-bit PQ /
-  BT.2020** (`cICP`, `mDCV`, `cLLI`) or **HLG · 16-bit BT.2020** (`cICP`, `mDCV`), with the HDR
-  mastering peak in nits. HDR keeps SDR white at 100 nits.
+  BT.2020** (`cICP`, `mDCV`, `cLLI`) or **HLG · 16-bit BT.2020** (`cICP`, `mDCV`). An HDR output
+  renders through the scene's view when it is an HDR view of that kind, else through the HDR view
+  whose measured peak is nearest the HDR peak setting; `mDCV` records that view's measured peak.
 
 Every output renders through its **own output transform** from ACEScg, independent of the viewport:
 EXR stays scene-linear; SDR PNG and video use the scene's SDR view (or the config's first SDR

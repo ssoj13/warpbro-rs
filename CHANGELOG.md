@@ -5,17 +5,35 @@
 ### Snapshots, slot buttons, Render / Encode panel
 
 - Viewport snapshot: a camera button on the toolbar (click: as the monitor shows it; right click and
-  File: SDR PNG, HDR10 PQ PNG, display EXR), one `Frame::save` path. Every PNG writer (snapshot,
-  export, CLI) names HDR PNGs `*.pq.png` / `*.hlg.png` (`PngEncoding::suffix`) and takes the peak from
-  one constant; a snapshot records its HDR view's own peak.
+  File: SDR PNG, HDR10 PQ PNG, display EXR), one `Frame::save` path. The monitor is read from
+  `egui_display::DisplayState` when saving (`Monitor`): on an HDR monitor an SDR view's white is
+  written at the monitor's SDR white, so the file is as bright as the screen (no HDR monitor:
+  BT.2408's 203 nits).
+- One display-light model (`color::DisplayLight`): an HDR view's light is absolute with its peak
+  measured on the OCIO transform itself (a very bright probe through the view's tone curve), not
+  parsed from the view's name; `render_service::hdr_scale` turns it into file nits for every PNG
+  writer. An HDR PNG export records the rendered view's peak. The export renders through the
+  scene's view when it is an HDR view of the right kind, else through the view whose measured peak
+  is nearest the export's HDR peak (no view-name parsing). An OCIO export turns the legacy Reinhard
+  curve off, which would bypass the output transform.
+- One file-name module (`fs_name`): stems keep any script ("Медная турбина" -> `медная-турбина`),
+  Windows device names get `_`, a typed export name is checked like the filesystem would; every
+  sequence numbers before the whole suffix (`shot.000042.pq.png`).
+- Attribute hover hints: `egui-attr-grid` `AttrField::hint`, filled from one table
+  (`world::attribute_hint`) for the Attribute Editor and Render settings; a test fails for any
+  attribute without one.
 - **Changed default:** CamClip and colour presets now restore on left click and store on right
   click; Settings → Controls → Swap copy/paste mouse buttons restores the old layout for both.
-- Render / Encode: shared settings once above the format tabs; file names fall back to "untitled".
+- Render / Encode: one grid, the settings every format shares once, then the Format row and that
+  format's options.
 
-### Sphere tracing: out of steps is a miss (BUG1)
+### Sphere tracing: an unresolved march has one policy per ray (BUG1)
 
-- A path-traced camera or bounce ray that runs out of march steps is a miss, as in Mandelbulber and
-  Fragmentarium. It used to take its closest sample within a pixel (Keinert et al. 2014, Enhanced
+- `march` reports `Hit`, `Miss` or `Unresolved` (out of steps inside the interval); the integrator
+  decides: a camera ray shows the background (as in Mandelbulber and Fragmentarium), a bounce ray
+  ends the path (an unknown direction brings no light - its environment would leak into crevices),
+  a shadow ray counts as blocked. Every unresolved march is counted for the status bar. A camera
+  ray used to take its closest sample within a pixel (Keinert et al. 2014, Enhanced
   Sphere Tracing 3.2, a real-time technique): on BUG1 frame 27, 37% of the primary hits were such
   samples - 52% of them rays passing the surface, 48% lying 0.3 scene units before the real hit,
   normals ~48 degrees off. WarpBro's opt-in `ofx-direct` kernels keep Keinert's rule at his half
@@ -25,10 +43,12 @@
 - Every preset's step budget is `DEFAULT_MAX_STEPS = 4096` (was 256, KIFS 128). Only rays that
   need the steps pay for them: on frame 27 primary rays alone take 47.4 ms against 37.1 ms at 256,
   the full render with 6 bounces 958 ms against 978 ms (no phantom paths to shade). The March steps
-  slider goes to 16384. The status bar reports the share of samples out of steps (`Target::limited`,
-  per-tile `tally` kernel); the per-pixel `moment` buffer became `stats` [luma², out-of-steps].
-- The interior exit probe of unsigned fields (`exit_distance`) uses `EXIT_PROBES = 256` instead of
-  the step budget, so the larger budget does not make refraction exits 16x more expensive.
+  slider goes to 16384. The status bar reports the share of samples out of steps (`Target::unresolved`,
+  `tally` kernel); the per-pixel `moment` buffer became `stats` [luma², unresolved samples].
+- Glass interior probes (`Render::glass_probes`, Render settings, default 256 as before): the
+  probe count of an exit through glass whose field is zero inside. It is the resolution of
+  interior walls, not a step budget: tied to the 4096-step budget a glass Mandelbulb rendered
+  10-30x slower and visibly darker (more walls found), so the trade-off is an explicit setting.
 - The out-of-steps share is reduced on the GPU to 4096 f64 partial sums (64 KiB readback per batch
   at any resolution).
 - Saved scenes keep their budget and now show misses where they showed phantoms (the status bar

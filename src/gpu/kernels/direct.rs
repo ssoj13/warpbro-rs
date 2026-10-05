@@ -122,13 +122,20 @@ pub(super) fn trace_direct<const F: u32>(
     dir: V3,
 ) -> PathSample {
     let m = march::<F>(ctx, origin, dir, RAY_DIRECT, 0.0, global(P_FOOTPRINT));
-    if !m.hit {
+    let unresolved = m.outcome == Outcome::Unresolved;
+    // Keinert et al. 2014 (Enhanced Sphere Tracing, 3.2): one ray per pixel, so an unresolved
+    // ray's closest sample stands in for the surface when its screen-space error is under half
+    // a pixel (`P_SAMPLE_CONE` footprints is a pixel). A sample that is not a hit is over one
+    // footprint away, so with a footprint of half a pixel or more nothing qualifies - right:
+    // such an error is visible.
+    let accepted = m.hit() || (unresolved && m.ratio <= 0.5 * global(P_SAMPLE_CONE));
+    if !accepted {
         return PathSample {
             radiance: sky_radiance(ctx, dir),
             hit: false,
             albedo: [0.0; 3],
             normal: [0.0; 3],
-            limited: m.limited,
+            unresolved,
         };
     }
     let center = if family_signed::<F>(ctx) {
@@ -206,6 +213,6 @@ pub(super) fn trace_direct<const F: u32>(
         hit: true,
         albedo: color,
         normal: n,
-        limited: m.limited,
+        unresolved,
     }
 }

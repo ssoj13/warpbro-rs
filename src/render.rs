@@ -428,15 +428,16 @@ pub struct Target {
     accum: DeviceBuffer<[f32; 4]>,
     albedo: DeviceBuffer<[f32; 4]>,
     normal: DeviceBuffer<[f32; 4]>,
-    /// Per pixel: sum of squared sample luminance (adaptive sampling variance).
-    /// Per pixel: [sum of squared sample luminance, samples whose march ran out of steps].
+    /// Per pixel: [sum of squared sample luminance (adaptive sampling variance), samples with
+    /// an unresolved march].
     stats: DeviceBuffer<[f32; 2]>,
     /// [out-of-steps samples, samples] partial sums (the `tally` kernel) and its host copy.
     tally: DeviceBuffer<[f64; 2]>,
     tally_host: Vec<[f64; 2]>,
-    /// Share of the accumulated samples whose camera or bounce march ran out of steps before
-    /// converging; those rays count as misses, so a visible share means "raise max steps".
-    pub limited: f32,
+    /// Share of the accumulated samples with an unresolved march (camera, bounce or shadow ray
+    /// out of steps, `gpu::Outcome`): a visible share means holes or missing light - raise the
+    /// step budget.
+    pub unresolved: f32,
     /// Per 8x4 tile: 1 = keep sampling, 0 = converged (written by the `adapt` kernel).
     active: DeviceBuffer<u32>,
     active_host: Vec<u32>,
@@ -454,7 +455,8 @@ pub struct Target {
     /// Linear display Rec.709 (HDR: 1 = 100 nits); never quantized.
     pub light: Vec<[f32; 4]>,
     raw: Vec<[f32; 4]>,
-    pub hdr: bool,
+    /// Relative (SDR view) or absolute (HDR view, with its peak) display light.
+    pub light_kind: crate::color::DisplayLight,
     pub colour_error: Option<String>,
     display_key: Option<DisplayKey>,
     pub samples: u32,
@@ -489,7 +491,7 @@ impl Gpu {
         target.converged = false;
     }
 
-    /// The share of accumulated samples that ran out of march steps ([`Target::limited`]).
+    /// The share of accumulated samples that ran out of march steps ([`Target::unresolved`]).
     fn tally(&self, target: &mut Target) {
         let cfg = LaunchConfig1D::new(TALLY_THREADS as u32 / BLOCK, BLOCK, 0);
         let prepared = self.module.prepare_tally(cfg).expect("prepare tally");
@@ -500,11 +502,11 @@ impl Gpu {
             .tally
             .copy_to_host(&self.stream, &mut target.tally_host)
             .expect("tally readback");
-        let (limited, samples) = target
+        let (unresolved, samples) = target
             .tally_host
             .iter()
             .fold((0.0f64, 0.0f64), |(l, s), t| (l + t[0], s + t[1]));
-        target.limited = if samples > 0.0 { (limited / samples) as f32 } else { 0.0 };
+        target.unresolved = if samples > 0.0 { (unresolved / samples) as f32 } else { 0.0 };
     }
 
     /// Adaptive sampling after a traced batch: the `adapt` kernel decides per tile, the host reads
@@ -597,7 +599,7 @@ impl Gpu {
             stats: DeviceBuffer::zeroed(&self.stream, padded).expect("sample statistics"),
             tally: DeviceBuffer::zeroed(&self.stream, TALLY_THREADS).expect("tally sums"),
             tally_host: vec![[0.0; 2]; TALLY_THREADS],
-            limited: 0.0,
+            unresolved: 0.0,
             active: {
                 let mut active = DeviceBuffer::zeroed(&self.stream, padded / 32).expect("tile flags");
                 active.copy_from_host(&self.stream, &vec![1u32; padded / 32]).expect("activate tiles");
@@ -613,7 +615,7 @@ impl Gpu {
             pixels: vec![0; width * height],
             light: vec![[0.0; 4]; width * height],
             raw: vec![[0.0; 4]; width * height],
-            hdr: false,
+            light_kind: crate::color::DisplayLight::Relative,
             colour_error: None,
             display_key: None,
             samples: 0,
@@ -708,7 +710,7 @@ impl Gpu {
             .stats
             .zero_async(&self.stream)
             .expect("clear sample statistics");
-        target.limited = 0.0;
+        target.unresolved = 0.0;
         self.activate_all(target);
         target.denoise.reset();
         target.denoise_selected = false;
@@ -1000,9 +1002,9 @@ impl Gpu {
             &scene.colour,
             scene.render.reinhard,
         ) {
-            Ok((light, encoded, absolute)) => {
+            Ok((light, encoded, kind)) => {
                 target.light = light;
-                target.hdr = absolute;
+                target.light_kind = kind;
                 target.colour_error = None;
                 if display_changed {
                     target.display_key = Some(DisplayKey::new(scene, self.colour_revision));
@@ -1312,14 +1314,15 @@ impl Target {
         &self,
         path: &std::path::Path,
         encoding: crate::render_service::PngEncoding,
-        peak_nits: f32,
+        sdr_white_nits: f32,
         overwrite: bool,
     ) -> Result<(), String> {
         if let Some(e) = &self.colour_error {
             return Err(format!("Colour transform failed: {e}"));
         }
         let sdr = || self.pixels.iter().flat_map(|p| p.to_le_bytes()).collect();
-        crate::render_service::write_png(path, self.width, self.height, &self.light, sdr, encoding, peak_nits, overwrite)
+        let scale = crate::render_service::hdr_scale(self.light_kind, &self.light, sdr_white_nits, encoding);
+        crate::render_service::write_png(path, self.width, self.height, &self.light, sdr, encoding, scale, overwrite)
     }
 
     /// Display light, linear Rec.709, normalized to 100 nits (matching exr-view).
@@ -1390,7 +1393,7 @@ mod tests {
                 }
                 assert!(target.colour_error.is_none(), "{:?}", target.colour_error);
                 let path = output.join(format!("{shape}-{preset}.png"));
-                target.save_png(&path, crate::render_service::PngEncoding::displayed(target.hdr), 1000.0, true).unwrap();
+                target.save_png(&path, crate::render_service::PngEncoding::displayed(target.light_kind.hdr()), crate::color::BT2408_SDR_WHITE_NITS, true).unwrap();
                 eprintln!("glass_visual {} samples={}", path.display(), target.samples);
             }
         }
@@ -2161,20 +2164,21 @@ mod tests {
         (
             gpu.guide_sums(&target, &target.albedo),
             gpu.guide_sums(&target, &target.normal),
-            target.limited,
+            target.unresolved,
         )
     }
 
-    /// A march that runs out of steps is a miss, not the closest sample (BUG1): at the default
+    /// A march that runs out of steps is unresolved (a camera ray: the background), never the
+    /// closest sample as a hit (BUG1): at the default
     /// budget no ray of frame 27 runs out and the hits equal a 4x budget's bit for bit; at 256
     /// steps the shortfall is reported and every remaining hit is a converged one.
     #[test]
     fn cuda_march_out_of_steps_is_a_reported_miss_not_a_phantom_hit() {
         let mut gpu = Gpu::new().unwrap();
         let budget = crate::scene::DEFAULT_MAX_STEPS;
-        let (albedo, normal, limited) = frame27_guides(&mut gpu, budget);
+        let (albedo, normal, unresolved) = frame27_guides(&mut gpu, budget);
         let (ref_albedo, ref_normal, _) = frame27_guides(&mut gpu, 4 * budget);
-        assert_eq!(limited, 0.0, "the default budget converges every ray");
+        assert_eq!(unresolved, 0.0, "the default budget converges every ray");
         assert!(albedo == ref_albedo && normal == ref_normal);
         let hits = normal.iter().filter(|n| n[..3] != [0.0; 3]).count();
         assert!(hits > 60_000, "{hits} primary hits");
@@ -2810,7 +2814,7 @@ mod tests {
         gpu.step(&mut target, &scene, 0, 0, None, false);
         assert_eq!(target.samples, 2);
         assert!(
-            target.hdr && target.colour_error.is_none(),
+            target.light_kind.hdr() && target.colour_error.is_none(),
             "{:?}",
             target.colour_error
         );
@@ -2829,7 +2833,7 @@ mod tests {
             (PngEncoding::Hlg, png::BitDepth::Sixteen, Some(18)),
             (PngEncoding::Sdr8, png::BitDepth::Eight, None),
         ] {
-            target.save_png(&png, encoding, 1000.0, true).unwrap();
+            target.save_png(&png, encoding, crate::color::BT2408_SDR_WHITE_NITS, true).unwrap();
             let bytes = std::fs::read(&png).unwrap();
             let at = bytes.windows(4).position(|b| b == b"cICP");
             assert_eq!(at.map(|i| bytes[i + 5]), cicp, "{encoding:?} transfer");
@@ -2840,7 +2844,7 @@ mod tests {
             assert_eq!(reader.info().bit_depth, depth, "{encoding:?}");
             assert_eq!(reader.info().width, 17);
         }
-        assert!(target.save_png(&png, PngEncoding::Sdr8, 1000.0, false).is_err(), "existing file without overwrite");
+        assert!(target.save_png(&png, PngEncoding::Sdr8, crate::color::BT2408_SDR_WHITE_NITS, false).is_err(), "existing file without overwrite");
         let exr_path = dir.join("display.exr");
         target.save_display_exr(&exr_path).unwrap();
         assert_eq!(
@@ -2851,7 +2855,7 @@ mod tests {
         scene.colour.view = "missing view".into();
         gpu.step(&mut target, &scene, 0, 0, None, false);
         assert!(target.colour_error.is_some());
-        assert!(target.save_png(&png, crate::render_service::PngEncoding::Sdr8, 1000.0, true).is_err());
+        assert!(target.save_png(&png, crate::render_service::PngEncoding::Sdr8, crate::color::BT2408_SDR_WHITE_NITS, true).is_err());
         let display_before_reset = target.light.clone();
         scene.camera.yaw_degrees += 5.0;
         assert!(gpu.prepare_target(&mut target, &scene, None));

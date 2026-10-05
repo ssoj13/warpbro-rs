@@ -1873,3 +1873,40 @@ fn hybrid_marks_unpacked_sub_formula_parameters_and_limits_keep_their_floor() {
     assert_eq!(numeric_like(&json!(0), 0.0005), json!(0.0005), "a float floor never rounds away");
     assert_eq!(numeric_like(&json!(9), 2.0), json!(2));
 }
+
+/// Every attribute the Attribute Editor shows (any family, any node kind) explains itself on
+/// hover: a new parameter without a line in `attribute_hint` fails here.
+#[test]
+fn every_attribute_has_a_hover_hint() {
+    let mut missing = std::collections::BTreeSet::new();
+    // Optional attributes appear only when set: a facing blend and a Julia constant.
+    let mut optional = Scene::preset(crate::params::FAMILY_BULB);
+    optional.julia = Some([0.1, 0.2, 0.3]);
+    optional.material.facing = Some(crate::scene::Facing {
+        color: [1.0, 0.5, 0.2],
+        roughness: 0.3,
+        metallic: 0.5,
+        exponent: 2.0,
+    });
+    for scene in (0..8).map(Scene::preset).chain([optional]) {
+        let doc = WorldDocument::from_scene(&scene);
+        for node in doc.nodes() {
+            for attr in doc.attributes(node.id, 0.0).unwrap() {
+                if attribute_hint(&attr.path).is_none() {
+                    missing.insert(attr.path);
+                }
+            }
+        }
+    }
+    assert!(missing.is_empty(), "attributes without a hint: {missing:?}");
+    // A channel row explains its vector; the Hybrid's sub-formulas share their family's text.
+    assert_eq!(attribute_hint("/camera/target/1"), attribute_hint("/camera/target"));
+    assert_eq!(
+        attribute_hint("/formula/Hybrid/bulb/power"),
+        attribute_hint("/formula/Mandelbulb/power")
+    );
+    assert_ne!(
+        attribute_hint("/formula/Apollonian/scale"),
+        attribute_hint("/formula/Mandelbox/scale")
+    );
+}

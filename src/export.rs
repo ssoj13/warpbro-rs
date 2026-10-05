@@ -16,6 +16,8 @@ use std::{
 };
 
 const HIGH_QUALITY_QP: u8 = 18;
+/// The HDR PNG export's default target peak (`ExportSettings::png_peak_nits`).
+const DEFAULT_PNG_PEAK_NITS: f32 = 1000.0;
 const HIGH_QUALITY_PRESET: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,9 +74,10 @@ pub struct ExportSettings {
     pub encoder: VideoEncoder,
     /// File name stem; every export writes into a new `~/.warpbro/out/<timestamp>` folder.
     pub name: String,
-    /// The resolved target file (`resolve`); a sequence numbers it per frame (`frame_path`).
+    /// The folder this export writes into (`resolve`: a new dated one per export). The files are
+    /// derived from it, `name` and the format's suffix only (`output`, `frame_path`).
     #[serde(skip)]
-    pub output: String,
+    pub dir: PathBuf,
     pub width: usize,
     pub height: usize,
     pub samples: u32,
@@ -89,7 +92,9 @@ pub struct ExportSettings {
     /// Override world cadence for offline renders: OIDN runs once at the final sample.
     pub denoise_at_completion: bool,
     pub png: PngEncoding,
-    /// Mastering display peak of HDR PNGs (`mDCV`, HLG system gamma).
+    /// The HDR view an HDR PNG export renders through when the scene's own view is not an HDR
+    /// view of that kind: the one whose measured peak is nearest this (`Ocio::output_transform`).
+    /// The file records the rendered view's measured peak (`render_service::hdr_scale`).
     pub png_peak_nits: f32,
     /// OCIO display / view overriding the automatic output transform; empty = automatic.
     pub output_display: String,
@@ -105,7 +110,7 @@ impl Default for ExportSettings {
             format: ExportFormat::Exr,
             encoder: VideoEncoder::Vulkan,
             name: "frame".into(),
-            output: String::new(),
+            dir: PathBuf::new(),
             width: 1920,
             height: 1080,
             samples: 256,
@@ -118,7 +123,7 @@ impl Default for ExportSettings {
             overwrite: false,
             denoise_at_completion: false,
             png: PngEncoding::Sdr8,
-            png_peak_nits: crate::render_service::HDR_PEAK_NITS,
+            png_peak_nits: DEFAULT_PNG_PEAK_NITS,
             output_display: String::new(),
             output_view: String::new(),
             transform: None,
@@ -197,12 +202,15 @@ impl ExportSettings {
             .map(Some)
             .map_err(|e| e.to_string())
     }
-    /// The frame scene rendered through this export's output transform.
+    /// The frame scene rendered through this export's output transform. An OCIO output replaces
+    /// the legacy Reinhard curve, which would otherwise bypass OCIO (`ColorPipeline::apply`) and
+    /// write an HDR file of SDR-relative light.
     pub fn apply_transform(&self, scene: &mut Scene) {
         if let Some((display, view)) = &self.transform {
             scene.colour.on = true;
             scene.colour.display = display.clone();
             scene.colour.view = view.clone();
+            scene.render.reinhard = false;
         }
     }
 
@@ -214,15 +222,16 @@ impl ExportSettings {
             format => format.extension(),
         }
     }
-    /// Target `dir/<name>.<suffix>` for the current format.
+    /// Write into `dir`.
     pub fn resolve(&mut self, dir: &Path) {
-        self.output = dir.join(format!("{}.{}", self.name.trim(), self.suffix())).display().to_string();
+        self.dir = dir.to_path_buf();
+    }
+    /// The file of a single frame or a video: `dir/<name>.<suffix>` (`fs_name::frame_file`).
+    pub fn output(&self) -> PathBuf {
+        self.dir.join(crate::fs_name::frame_file(self.name.trim(), None, self.suffix()))
     }
     pub fn validate(&self) -> Result<(), String> {
-        let name = self.name.trim();
-        if name.is_empty() || name.contains(['/', '\\', ':', '*', '?', '"', '<', '>', '|']) {
-            return Err("The name must be a plain file name".into());
-        }
+        crate::fs_name::check(self.name.trim())?;
         if !(100.0..=10000.0).contains(&self.png_peak_nits) {
             return Err("HDR peak must be 100–10000 nits".into());
         }
@@ -242,8 +251,8 @@ impl ExportSettings {
         if self.first > self.last || self.last - self.first > 100_000 {
             return Err("Frame range must be ordered and contain at most 100001 frames".into());
         }
-        if self.output.trim().is_empty() {
-            return Err("Output is not resolved".into());
+        if self.dir.as_os_str().is_empty() {
+            return Err("The output folder is not resolved".into());
         }
         if self.fps_num == 0 || self.fps_den == 0 {
             return Err("FPS numerator and denominator must be positive".into());
@@ -251,42 +260,24 @@ impl ExportSettings {
         if self.qp > 51 {
             return Err("Invalid encoder quality".into());
         }
-        let extension = Path::new(&self.output)
-            .extension()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        match self.format {
-            ExportFormat::Exr if extension != "exr" => {
-                return Err("EXR output must have an .exr extension".into());
-            }
-            ExportFormat::Png if extension != "png" => {
-                return Err("PNG output must have a .png extension".into());
-            }
-            ExportFormat::Hevc if !["mp4", "mov"].contains(&extension.as_str()) => {
-                return Err("HEVC output must have an .mp4 or .mov extension".into());
-            }
-            ExportFormat::Hevc
-                if !self.width.is_multiple_of(2) || !self.height.is_multiple_of(2) =>
-            {
-                return Err("HEVC 4:2:0 requires even width and height".into());
-            }
-            _ => {}
+        // The suffix follows the format (`suffix`), so only the encoder's own limits remain.
+        if self.format == ExportFormat::Hevc
+            && (!self.width.is_multiple_of(2) || !self.height.is_multiple_of(2))
+        {
+            return Err("HEVC 4:2:0 requires even width and height".into());
         }
         Ok(())
     }
     pub fn frame_count(&self) -> u32 {
         self.last.saturating_sub(self.first).saturating_add(1)
     }
-    /// The file of frame `number`: the output itself for a single frame, else `stem.NNNNNN.ext`.
+    /// The file of frame `number`: `output` for a single frame, else `name.000042.<suffix>` (the
+    /// number before the whole suffix, as in every writer).
     pub fn frame_path(&self, number: u32) -> PathBuf {
-        let p = Path::new(&self.output);
         if self.first == self.last {
-            return p.to_path_buf();
+            return self.output();
         }
-        let stem = p.file_stem().unwrap_or_default().to_string_lossy();
-        let ext = p.extension().unwrap_or_default().to_string_lossy();
-        p.with_file_name(format!("{stem}.{number:06}.{ext}"))
+        self.dir.join(crate::fs_name::frame_file(self.name.trim(), Some(number), self.suffix()))
     }
 }
 
@@ -401,7 +392,7 @@ impl ExportController {
                         if config.format == ExportFormat::Hevc && completed > 0 {
                             format!(
                                 "Export cancelled; saved {completed} frames to {}",
-                                config.output
+                                config.output().display()
                             )
                         } else if config.format == ExportFormat::Hevc {
                             "Export cancelled before any complete frames".into()
@@ -490,7 +481,7 @@ impl ExportController {
                     if self.settings.png.hdr() {
                         ui.label("HDR peak");
                         ui.add(egui::DragValue::new(&mut self.settings.png_peak_nits).range(100.0..=10000.0).suffix(" nits"))
-                            .on_hover_text("Mastering display peak recorded in mDCV; HLG also derives its system gamma from it.");
+                            .on_hover_text("When the scene's view is not an HDR view of this kind, the HDR view whose measured peak is nearest this. The file records the rendered view's measured peak (mDCV, HLG system gamma).");
                         ui.end_row();
                     }
                 }
@@ -571,7 +562,7 @@ impl ExportController {
         let hdr = kind != crate::ocio::OutputKind::Sdr;
         let resolved = self.settings.resolve_transform(ocio, current);
         ui.label("Output transform").on_hover_text(
-            "The OCIO display / view this file is rendered through from ACEScg, independent of the viewport. Automatic: the scene's own view when it fits the format, else the config's first fitting display (PQ / HLG by name) and, for HDR, the view nearest the peak.",
+            "The OCIO display / view this file is rendered through from ACEScg, independent of the viewport. Automatic: the scene's own view when it fits the format, else the config's first fitting display (PQ / HLG by name) and, for HDR, the view whose measured peak is nearest the HDR peak.",
         );
         ui.vertical(|ui| {
             match &resolved {
@@ -839,7 +830,10 @@ impl ExportWriter {
                         match settings.format {
                             ExportFormat::Hevc => hevc.as_mut().ok_or("HEVC sink missing")?.write(&frame)?,
                             ExportFormat::Exr => write_exr(&path, &frame, settings.overwrite)?,
-                            ExportFormat::Png => frame.save_png(&path, settings.png, settings.png_peak_nits, settings.overwrite)?,
+                            // The mastering peak is the rendered view's measured one (`hdr_scale`);
+                            // an OCIO export never has relative light (Reinhard is off), so the
+                            // SDR white argument only matters for an SDR file.
+                            ExportFormat::Png => frame.save_png(&path, settings.png, crate::color::BT2408_SDR_WHITE_NITS, settings.overwrite)?,
                         }
                         let _ = tx.send(WriteEvent::Written(number));
                         if number == settings.last {
@@ -1011,7 +1005,7 @@ impl HevcSink {
             None
         };
         let mut output = av_util_core::outfile::AtomicOut::create(
-            Path::new(&settings.output),
+            &settings.output(),
             settings.overwrite,
         )
         .map_err(|e| e.to_string())?;
@@ -1066,7 +1060,7 @@ impl HevcSink {
         Ok(())
     }
     fn write(&mut self, frame: &Frame) -> Result<(), String> {
-        if frame.hdr {
+        if frame.light_kind.hdr() {
             return Err("HEVC SDR sink cannot encode HDR display codes".into());
         }
         if let Some(error) = &frame.colour_error {
@@ -1246,7 +1240,7 @@ mod tests {
             pixels: vec![u32::from_le_bytes([180, 80, 20, 255]); width * height],
             light: vec![[0.5, 0.2, 0.05, 1.]; width * height],
             radiance: vec![[2., 0.5, 0.125, 1.]; width * height],
-            hdr: false,
+            light_kind: crate::color::DisplayLight::Relative,
             colour_error: None,
             denoised_samples: 0,
             denoise_ms: 0.0,
@@ -1255,7 +1249,7 @@ mod tests {
             converged: false,
             last_ms: 1.,
             last_spp: 4,
-            limited: 0.0,
+            unresolved: 0.0,
             sdr_bytes: Arc::new(Vec::new()),
             hdr_bytes: Arc::new(Vec::new()),
         }
@@ -1282,7 +1276,8 @@ mod tests {
     fn exr_sequence_writer_preserves_float_radiance() {
         let dir = temp_dir("exr");
         let mut settings = ExportSettings::default();
-        settings.output = dir.join("frame.exr").display().to_string();
+        settings.name = "seq".into();
+        settings.dir = dir.clone();
         settings.width = 2;
         settings.height = 2;
         settings.samples = 4;
@@ -1318,7 +1313,8 @@ mod tests {
         let mut settings = ExportSettings::default();
         settings.format = ExportFormat::Hevc;
         settings.encoder = VideoEncoder::Kvazaar;
-        settings.output = dir.join("clip.mp4").display().to_string();
+        settings.name = "clip".into();
+        settings.dir = dir.clone();
         settings.width = 64;
         settings.height = 64;
         settings.preset = 0;
@@ -1326,15 +1322,15 @@ mod tests {
         sink.write(&frame(64, 64)).unwrap();
         sink.write(&frame(64, 64)).unwrap();
         sink.finish(&AtomicBool::new(false)).unwrap();
-        let bytes = std::fs::read(&settings.output).unwrap();
+        let bytes = std::fs::read(settings.output()).unwrap();
         for name in [b"ftyp", b"moov", b"hvcC", b"hvc1"] {
             assert!(bytes.windows(4).any(|b| b == name), "{:?}", name);
         }
-        settings.output = dir.join("cancelled.mp4").display().to_string();
+        settings.name = "cancelled".into();
         let mut sink = HevcSink::new(&settings).unwrap();
         sink.write(&frame(64, 64)).unwrap();
         sink.finish(&AtomicBool::new(true)).unwrap();
-        assert!(!Path::new(&settings.output).exists());
+        assert!(!settings.output().exists());
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1346,10 +1342,8 @@ mod tests {
             let settings = ExportSettings {
                 format: ExportFormat::Hevc,
                 encoder: VideoEncoder::Kvazaar,
-                output: dir
-                    .join(format!("partial-{count}.mp4"))
-                    .display()
-                    .to_string(),
+                name: format!("partial-{count}"),
+                dir: dir.clone(),
                 width: 66,
                 height: 50,
                 samples: 4,
@@ -1384,9 +1378,9 @@ mod tests {
             }
             assert_eq!(written, count);
             if count == 0 {
-                assert!(!Path::new(&settings.output).exists());
+                assert!(!settings.output().exists());
             } else {
-                let demux = av_format_mov::Demuxer::open(Path::new(&settings.output)).unwrap();
+                let demux = av_format_mov::Demuxer::open(settings.output()).unwrap();
                 assert_eq!(demux.sample_count(), count as usize);
                 assert_eq!(demux.start_time(), 0);
                 assert_eq!(demux.presented_frame_count().unwrap(), count as usize);
@@ -1405,7 +1399,8 @@ mod tests {
         let settings = ExportSettings {
             format: ExportFormat::Hevc,
             encoder: VideoEncoder::Vulkan,
-            output: dir.join("partial.mp4").display().to_string(),
+            name: "partial".into(),
+            dir: dir.clone(),
             width: 256,
             height: 256,
             samples: 4,
@@ -1449,7 +1444,7 @@ mod tests {
             }
         }
         assert_eq!(written, 9);
-        let demux = av_format_mov::Demuxer::open(Path::new(&settings.output)).unwrap();
+        let demux = av_format_mov::Demuxer::open(settings.output()).unwrap();
         assert_eq!(demux.sample_count(), 9);
         assert_eq!(demux.start_time(), 0);
         assert_eq!(demux.presented_frame_count().unwrap(), 9);
@@ -1481,10 +1476,8 @@ mod tests {
                     width: 256,
                     height: 256,
                     preset: HIGH_QUALITY_PRESET,
-                    output: dir
-                        .join(format!("motion-{encoder:?}.mp4"))
-                        .display()
-                        .to_string(),
+                    name: format!("motion-{encoder:?}"),
+                    dir: dir.clone(),
                     ..Default::default()
                 };
                 HevcSink::new(&settings).unwrap()
@@ -1530,7 +1523,8 @@ mod tests {
             let settings = ExportSettings {
                 format: ExportFormat::Hevc,
                 encoder: VideoEncoder::Kvazaar,
-                output: dir.join(format!("clip-{preset}.mp4")).display().to_string(),
+                name: format!("clip-{preset}"),
+                dir: dir.clone(),
                 width: 66,
                 height: 50,
                 preset,
@@ -1543,7 +1537,7 @@ mod tests {
                 sink.write(&frame(66, 50)).unwrap();
             }
             sink.finish(&AtomicBool::new(false)).unwrap();
-            let demux = av_format_mov::Demuxer::open(Path::new(&settings.output)).unwrap();
+            let demux = av_format_mov::Demuxer::open(settings.output()).unwrap();
             assert_eq!(demux.sample_count(), 32);
             assert_eq!(demux.timescale(), 24000);
             assert_eq!(demux.start_time(), 0);
@@ -1651,7 +1645,7 @@ mod tests {
             "{}",
             controller.status
         );
-        let demux = av_format_mov::Demuxer::open(Path::new(&controller.last.clone().unwrap().output)).unwrap();
+        let demux = av_format_mov::Demuxer::open(&controller.last.clone().unwrap().output()).unwrap();
         assert_eq!(
             demux.presented_frame_count().unwrap(),
             controller.completed as usize
@@ -1692,15 +1686,20 @@ mod tests {
     #[test]
     fn sequence_paths_and_validation() {
         let mut s = ExportSettings::default();
-        s.output = "some folder/image.exr".into();
+        s.name = "image".into();
+        s.resolve(Path::new("some folder"));
         s.first = 7;
         s.last = 9;
         assert_eq!(s.frame_count(), 3);
-        assert_eq!(
-            s.frame_path(8),
-            PathBuf::from("some folder/image.000008.exr")
-        );
+        assert_eq!(s.frame_path(8), Path::new("some folder").join("image.000008.exr"));
         assert!(s.validate().is_ok());
+        // An HDR PNG sequence numbers before the whole suffix (`fs_name::frame_file`).
+        s.format = ExportFormat::Png;
+        s.png = PngEncoding::Hdr10;
+        s.name = "shot".into();
+        s.resolve(Path::new("out"));
+        assert_eq!(s.frame_path(8), Path::new("out").join("shot.000008.pq.png"));
+        s.png = PngEncoding::Sdr8;
         // A one-frame range is a still: the resolved file itself, no frame number.
         s.format = ExportFormat::Png;
         s.name = "still".into();
@@ -1713,12 +1712,14 @@ mod tests {
         assert!(s.validate().unwrap_err().contains("peak"));
         s.png_peak_nits = 1000.0;
         s.name = "a/b".into();
-        assert!(s.validate().unwrap_err().contains("plain file name"));
+        assert!(s.validate().unwrap_err().contains("cannot hold"));
+        s.name = "CON".into();
+        assert!(s.validate().unwrap_err().contains("device"));
         s.name = "frame".into();
         s.first = 7;
         s.last = 9;
         s.format = ExportFormat::Hevc;
-        s.output = "clip.mp4".into();
+        s.dir = PathBuf::from("out");
         s.width = 17;
         assert!(s.validate().unwrap_err().contains("even"));
         s.width = 64;

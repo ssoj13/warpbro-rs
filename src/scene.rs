@@ -208,10 +208,31 @@ impl Hybrid {
 const BOUND_FRAMING: f32 = 1.2;
 const REACH_MARGIN_FRAMES: f32 = 2.5;
 /// The march step budget of every preset. A budget, not a quality knob: a ray that runs out of
-/// steps is a miss (`gpu.rs` `march`), and only rays that need the steps pay for them. Measured
+/// steps is `Outcome::Unresolved` (the integrator's per-ray policy in `gpu.rs` `trace_path`),
+/// and only rays that need the steps pay for them. Measured
 /// on BUG1 frame 27: grazing rays need up to 889 steps; 256 left 37% of the hits as phantoms;
 /// primary rays cost 28% more at 4096, the full 6-bounce render the same.
 pub const DEFAULT_MAX_STEPS: u32 = 4096;
+
+#[cfg(test)]
+mod glass_probe_tests {
+    /// A scene saved before the setting existed renders glass as it did (256 probes).
+    #[test]
+    fn scenes_without_glass_probes_load_with_the_former_count() {
+        let mut json = serde_json::to_value(super::Scene::preset(0).render).unwrap();
+        json.as_object_mut().unwrap().remove("glass_probes");
+        let render: super::Render = serde_json::from_value(json).unwrap();
+        assert_eq!(render.glass_probes, super::DEFAULT_GLASS_PROBES);
+        assert_eq!(super::DEFAULT_GLASS_PROBES, 256);
+    }
+}
+
+/// The glass interior resolution of every preset and of scenes saved before the setting
+/// (`Render::glass_probes`): the probe count every exit used before it was a setting.
+pub const DEFAULT_GLASS_PROBES: u32 = 256;
+fn default_glass_probes() -> u32 {
+    DEFAULT_GLASS_PROBES
+}
 
 /// fractal3d.rs HIT_EPSILON_PER_PIXEL: a footprint is hit_epsilon / this of a pixel.
 const HIT_EPSILON_PER_PIXEL: f32 = 0.008;
@@ -419,6 +440,14 @@ pub struct Render {
     /// unbiased on the presets at 1.5x the speed).
     pub step_factor: f32,
     pub max_bounces: u32,
+    /// Probes per exit through a transmissive object (`exit_distance`): the most steps an exit
+    /// march takes and its shortest step (extent / probes), so the thinnest interior wall or
+    /// cavity a refracted ray can find. Fields that are zero inside only probe; signed fields
+    /// march their distance but never step shorter. A resolution, not the march's step budget:
+    /// on a glass Mandelbulb 4096 against 256 is 10-30x the render time and a darker, more
+    /// structured interior. An exit not found is `Outcome::Unresolved` (counted).
+    #[serde(default = "default_glass_probes")]
+    pub glass_probes: u32,
     pub exposure_stops: f32,
     pub saturation: f32,
     pub reinhard: bool,
@@ -694,6 +723,7 @@ impl Scene {
             render: Render {
                 iterations,
                 max_steps: DEFAULT_MAX_STEPS,
+                glass_probes: DEFAULT_GLASS_PROBES,
                 hit_epsilon,
                 step_factor: 0.85,
                 max_bounces: 6,
@@ -888,6 +918,7 @@ impl Scene {
         p[P_MAX_BOUNCES] = r.max_bounces as f32;
         p[P_SECONDARY_STEPS] = r.max_steps as f32;
         p[P_SECONDARY_EPS] = 1.0;
+        p[P_GLASS_PROBES] = r.glass_probes as f32;
         p[P_STEP_FACTOR] = r.step_factor;
         p[P_MATERIAL_MODEL] = (self.material.model == MaterialModel::StandardSurface
             || self.material.transmission > 0.0) as u32 as f32;

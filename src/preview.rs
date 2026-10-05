@@ -382,12 +382,12 @@ impl PreviewController {
 
 #[derive(Clone)]
 struct FrameMetadata {
-    hdr: bool,
+    light_kind: crate::color::DisplayLight,
     samples: u32,
     converged: bool,
     last_ms: f32,
     last_spp: u32,
-    limited: f32,
+    unresolved: f32,
     denoised_samples: u32,
     denoise_ms: f32,
     denoise_error: Option<String>,
@@ -484,12 +484,12 @@ impl PreviewCache {
             return Err("Viewport frame does not match preview quality or dimensions".into());
         }
         let meta = FrameMetadata {
-            hdr: frame.hdr,
+            light_kind: frame.light_kind,
             samples: frame.samples,
             converged: frame.converged,
             last_ms: frame.last_ms,
             last_spp: frame.last_spp,
-            limited: frame.limited,
+            unresolved: frame.unresolved,
             denoised_samples: frame.denoised_samples,
             denoise_ms: frame.denoise_ms,
             denoise_error: frame.denoise_error.clone(),
@@ -564,7 +564,7 @@ impl PreviewCache {
         let hdr = Arc::get_mut(&mut frame.hdr_bytes)?;
         hdr.clear();
         if self.request.output_hdr {
-            let gain = if meta.hdr {
+            let gain = if meta.light_kind.hdr() {
                 100.0 / self.request.white_nits
             } else {
                 1.0
@@ -585,7 +585,7 @@ impl PreviewCache {
         frame.width = self.request.width;
         frame.height = self.request.height;
         frame.radiance.clear();
-        frame.hdr = meta.hdr;
+        frame.light_kind = meta.light_kind;
         frame.colour_error = None;
         frame.denoised_samples = meta.denoised_samples;
         frame.denoise_ms = meta.denoise_ms;
@@ -594,7 +594,7 @@ impl PreviewCache {
         frame.converged = meta.converged;
         frame.last_ms = meta.last_ms;
         frame.last_spp = meta.last_spp;
-        frame.limited = meta.limited;
+        frame.unresolved = meta.unresolved;
         Some(())
     }
 }
@@ -637,7 +637,7 @@ mod tests {
             pixels: vec![0xff123456],
             light: vec![[-2.0, 0.125, 40.0, 1.0]],
             radiance: vec![],
-            hdr: true,
+            light_kind: crate::color::DisplayLight::Absolute { peak_nits: 1000.0 },
             colour_error: None,
             denoised_samples: 8,
             denoise_ms: 0.5,
@@ -646,7 +646,7 @@ mod tests {
             converged: false,
             last_ms: 3.0,
             last_spp: 2,
-            limited: 0.0,
+            unresolved: 0.0,
             sdr_bytes: Arc::new(vec![]),
             hdr_bytes: Arc::new(vec![]),
         }

@@ -892,7 +892,11 @@ impl WorldUi {
         frame: u64,
     ) {
         let field = |attr: &WorldAttribute| {
-            AttrField::new(&attr.path, grid_value(&attr.value)).with_ui_options(grid_hints(attr))
+            let field = AttrField::new(&attr.path, grid_value(&attr.value)).with_ui_options(grid_hints(attr));
+            match crate::world::attribute_hint(&attr.path) {
+                Some(hint) => field.with_hint(hint),
+                None => field,
+            }
         };
         if section.fields.is_empty() || section.revision != revision {
             section.indices.clear();
@@ -2483,20 +2487,10 @@ fn grid_hints(attr: &WorldAttribute) -> Vec<String> {
     if attr.color && attr.component.is_none() {
         return vec!["color".into()];
     }
-    let Some(slider) = attr.slider.filter(|_| attr.value.is_number()) else {
+    if !attr.value.is_number() {
         return Vec::new();
-    };
-    let mut hints = vec![slider.min.to_string(), slider.max.to_string()];
-    if attr.value.is_u64() || attr.value.is_i64() {
-        hints.push("1".into());
     }
-    if slider.log {
-        hints.push("log".into());
-    }
-    if attr.range != Some((slider.min, slider.max)) {
-        hints.push("soft".into());
-    }
-    hints
+    crate::world::slider_options(&attr.path, attr.value.is_u64() || attr.value.is_i64())
 }
 fn grid_value(value: &Value) -> GridValue {
     match value {
