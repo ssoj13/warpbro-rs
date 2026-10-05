@@ -12,7 +12,7 @@ use playa_graph::SubnetFile;
 use playa_graph::{Graph, Node, RustBox};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Marker of WarpBro nodes on the system clipboard, so foreign text is never pasted as nodes.
 const CLIPBOARD_KEY: &str = "warpbro_nodes";
@@ -47,6 +47,9 @@ pub struct WorldDocument {
     pub first: u32,
     pub last: u32,
     pub fps: f64,
+    /// Numbered time marks (After Effects composition markers): slot 0-9 -> frame.
+    #[serde(default)]
+    pub marks: BTreeMap<u8, u32>,
 }
 impl PartialEq for WorldDocument {
     fn eq(&self, other: &Self) -> bool {
@@ -136,6 +139,11 @@ pub enum WorldCommand {
         first: u32,
         last: u32,
         fps: f64,
+    },
+    /// Set (Some) or clear (None) time mark `slot` (0-9).
+    SetMark {
+        slot: u8,
+        frame: Option<u32>,
     },
     AssignMaterial {
         id: NodeId,
@@ -588,6 +596,15 @@ impl WorldEditor {
                 self.document.first = first;
                 self.document.last = last;
                 self.document.fps = fps;
+            }
+            WorldCommand::SetMark { slot, frame } => {
+                if slot > 9 {
+                    return Err(format!("Time mark {slot} is not 0-9"));
+                }
+                match frame {
+                    Some(frame) => self.document.marks.insert(slot, frame),
+                    None => self.document.marks.remove(&slot),
+                };
             }
             WorldCommand::CreateMaterial { material, name } => {
                 let scene = Scene {
@@ -1044,7 +1061,7 @@ fn attribute_range(path: &str) -> Option<(f64, f64)> {
         "/camera/fov_y_degrees" => Some((1.0, 179.0)),
         "/render/denoise/interval" => Some((0.0, u32::MAX as f64)),
         "/render/adaptive/noise_threshold" => Some((0.0005, 1.0)),
-        "/render/adaptive/min_samples" => Some((1.0, 65536.0)),
+        "/render/adaptive/min_samples" => Some((crate::scene::Adaptive::MIN_SAMPLES_FLOOR as f64, 65536.0)),
         "/material/transmission" => Some((0.0, 1.0)),
         "/material/transmission_depth" => Some((0.0, f32::MAX as f64)),
         p if p.ends_with("roughness") || p.ends_with("metallic") || p == "/material/opacity" => {
@@ -1240,6 +1257,7 @@ impl WorldDocument {
             first: scene.animation.first,
             last: scene.animation.last,
             fps: scene.animation.fps,
+            marks: BTreeMap::new(),
         };
         let settings = document
             .insert(WorldKind::Group, "World Settings", scene, None)

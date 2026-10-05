@@ -483,7 +483,7 @@ impl Gpu {
             }
             return;
         }
-        if target.samples < adaptive.min_samples {
+        if target.samples < adaptive.min() {
             return;
         }
         let tiles = target.active_host.len() as u32;

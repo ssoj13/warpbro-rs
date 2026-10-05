@@ -37,6 +37,15 @@ pub enum Command {
     Preview,
     CachePreview,
     DraftCachePreview,
+    /// Time cursor to the work area start / end.
+    Start,
+    End,
+    /// Work area start / end at the time cursor.
+    SetStart,
+    SetEnd,
+    /// Time mark slot 0-9: set at the time cursor, or jump to it.
+    SetMark(u8),
+    Mark(u8),
 }
 
 #[derive(Clone, Copy)]
@@ -45,6 +54,9 @@ pub struct Binding {
     pub key: Key,
     pub modifiers: Modifiers,
     additive: bool,
+    /// Match the key position, not the character: Shift+1 types "!" on a US layout and
+    /// "!" / "№" elsewhere, but is always the physical 1 key.
+    physical: bool,
 }
 const fn binding(command: Command, key: Key, modifiers: Modifiers) -> Binding {
     Binding {
@@ -52,6 +64,7 @@ const fn binding(command: Command, key: Key, modifiers: Modifiers) -> Binding {
         key,
         modifiers,
         additive: false,
+        physical: false,
     }
 }
 const fn property(command: Command, key: Key) -> Binding {
@@ -60,6 +73,16 @@ const fn property(command: Command, key: Key) -> Binding {
         key,
         modifiers: Modifiers::NONE,
         additive: true,
+        physical: false,
+    }
+}
+const fn physical(command: Command, key: Key, modifiers: Modifiers) -> Binding {
+    Binding {
+        command,
+        key,
+        modifiers,
+        additive: false,
+        physical: true,
     }
 }
 pub const GLOBAL: &[Binding] = &[
@@ -88,6 +111,30 @@ pub const TIMELINE: &[Binding] = &[
     binding(Command::In, Key::I, Modifiers::NONE),
     binding(Command::Out, Key::O, Modifiers::NONE),
     binding(Command::Play, Key::Space, Modifiers::NONE),
+    binding(Command::Start, Key::Home, Modifiers::NONE),
+    binding(Command::End, Key::End, Modifiers::NONE),
+    binding(Command::SetStart, Key::B, Modifiers::NONE),
+    binding(Command::SetEnd, Key::N, Modifiers::NONE),
+    physical(Command::SetMark(0), Key::Num0, Modifiers::SHIFT),
+    physical(Command::SetMark(1), Key::Num1, Modifiers::SHIFT),
+    physical(Command::SetMark(2), Key::Num2, Modifiers::SHIFT),
+    physical(Command::SetMark(3), Key::Num3, Modifiers::SHIFT),
+    physical(Command::SetMark(4), Key::Num4, Modifiers::SHIFT),
+    physical(Command::SetMark(5), Key::Num5, Modifiers::SHIFT),
+    physical(Command::SetMark(6), Key::Num6, Modifiers::SHIFT),
+    physical(Command::SetMark(7), Key::Num7, Modifiers::SHIFT),
+    physical(Command::SetMark(8), Key::Num8, Modifiers::SHIFT),
+    physical(Command::SetMark(9), Key::Num9, Modifiers::SHIFT),
+    physical(Command::Mark(0), Key::Num0, Modifiers::NONE),
+    physical(Command::Mark(1), Key::Num1, Modifiers::NONE),
+    physical(Command::Mark(2), Key::Num2, Modifiers::NONE),
+    physical(Command::Mark(3), Key::Num3, Modifiers::NONE),
+    physical(Command::Mark(4), Key::Num4, Modifiers::NONE),
+    physical(Command::Mark(5), Key::Num5, Modifiers::NONE),
+    physical(Command::Mark(6), Key::Num6, Modifiers::NONE),
+    physical(Command::Mark(7), Key::Num7, Modifiers::NONE),
+    physical(Command::Mark(8), Key::Num8, Modifiers::NONE),
+    physical(Command::Mark(9), Key::Num9, Modifiers::NONE),
     binding(Command::Preview, Key::Insert, Modifiers::NONE),
     binding(Command::CachePreview, Key::Insert, Modifiers::SHIFT),
     binding(
@@ -104,22 +151,35 @@ pub fn bindings(scope: Scope) -> &'static [Binding] {
         _ => &[],
     }
 }
-fn matches(binding: &Binding, key: Key, mut modifiers: Modifiers) -> bool {
+fn matches(binding: &Binding, key: Key, physical_key: Option<Key>, mut modifiers: Modifiers) -> bool {
     if binding.additive {
         modifiers.shift = false;
     }
-    binding.key == key && binding.modifiers.matches_logically(modifiers)
+    let key = if binding.physical { physical_key.unwrap_or(key) } else { key };
+    // Exact chords (Ctrl / Cmd equivalent): the pressed modifiers are `self`, the binding the
+    // pattern. The reversed `matches_logically` let a Shift binding fire without Shift, so
+    // plain 3 hit "set mark 3" and table order alone kept Insert apart from Shift + Insert.
+    binding.key == key && modifiers.matches_exact(binding.modifiers)
 }
 /// Global-first lookup is shared by every consumer, independent of panel draw order.
 pub fn resolve(scope: Scope, key: Key, modifiers: Modifiers) -> Option<(Scope, Command)> {
+    resolve_key(scope, key, None, modifiers)
+}
+/// [`resolve`] for a key event that also reports its physical key.
+fn resolve_key(
+    scope: Scope,
+    key: Key,
+    physical_key: Option<Key>,
+    modifiers: Modifiers,
+) -> Option<(Scope, Command)> {
     GLOBAL
         .iter()
-        .find(|b| matches(b, key, modifiers))
+        .find(|b| matches(b, key, physical_key, modifiers))
         .map(|b| (Scope::Global, b.command))
         .or_else(|| {
             bindings(scope)
                 .iter()
-                .find(|b| matches(b, key, modifiers))
+                .find(|b| matches(b, key, physical_key, modifiers))
                 .map(|b| (scope, b.command))
         })
 }
@@ -148,19 +208,17 @@ pub fn consume(ctx: &Context, scope: Scope, command: Command) -> bool {
         return false;
     }
     ctx.input_mut(|input| {
-        let chord = input.events.iter().find_map(|event| match event {
-            egui::Event::Key {
+        // Remove the exact event: a physical binding's logical key may be any character.
+        let index = input.events.iter().position(|event| {
+            matches!(event, egui::Event::Key {
                 key,
+                physical_key,
                 pressed: true,
                 repeat: false,
                 modifiers,
-                ..
-            } if resolve(scope, *key, *modifiers) == Some((scope, command)) => {
-                Some((*key, *modifiers))
-            }
-            _ => None,
+            } if resolve_key(scope, *key, *physical_key, *modifiers) == Some((scope, command)))
         });
-        chord.is_some_and(|(key, modifiers)| input.consume_key(modifiers, key))
+        index.map(|i| input.events.remove(i)).is_some()
     })
 }
 /// The platform Copy request (Ctrl+C / Cmd+C, Ctrl+Insert). egui-winit turns it into
@@ -252,6 +310,19 @@ mod tests {
         );
         output.textures_delta = Default::default();
         draw(vec![key], Scope::Export, Scope::Export);
+    }
+    #[test]
+    fn chords_match_exactly_and_digits_by_key_position() {
+        let t = Scope::Timeline;
+        // A Shift binding never fires without Shift, a plain one never with it.
+        assert_eq!(resolve(t, Key::Insert, Modifiers::NONE), Some((t, Command::Preview)));
+        assert_eq!(resolve(t, Key::Insert, Modifiers::SHIFT), Some((t, Command::CachePreview)));
+        assert_eq!(resolve_key(t, Key::Num3, Some(Key::Num3), Modifiers::NONE), Some((t, Command::Mark(3))));
+        // Shift + 3 types "!" (US) or "№" (no egui key) but is the physical 3.
+        let shifted = resolve_key(t, Key::Exclamationmark, Some(Key::Num3), Modifiers::SHIFT);
+        assert_eq!(shifted, Some((t, Command::SetMark(3))));
+        // Property filters keep their additive Shift.
+        assert_eq!(resolve(t, Key::U, Modifiers::SHIFT), Some((t, Command::Keyed)));
     }
     #[test]
     fn global_commands_reserve_chords_and_panel_tables_are_distinct() {

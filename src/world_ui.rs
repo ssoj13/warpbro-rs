@@ -373,7 +373,7 @@ impl WorldUi {
                     .timeline_focus
                     .is_some_and(|id| ctx.memory(|memory| memory.focused()) == Some(id)))
     }
-    fn timeline_shortcuts(&mut self, ui: &egui::Ui, e: &WorldEditor, nodes: &[WorldNodeInfo]) {
+    fn timeline_shortcuts(&mut self, ui: &egui::Ui, e: &mut WorldEditor, nodes: &[WorldNodeInfo]) {
         use crate::hotkeys::{self, Command as Hotkey, Scope};
         hotkeys::register(ui, Scope::Timeline, ui.max_rect());
         let focus = ui.id().with("world-timeline-keyboard");
@@ -420,11 +420,15 @@ impl WorldUi {
                     .copied()
                     .chain(e.selection.filter(|_| e.selected.is_empty()))
                 {
-                    self.property_filters
-                        .entry(id)
-                        .or_default()
-                        .toggle(bit, modifiers.shift);
-                    self.expanded.insert(id);
+                    let filter = self.property_filters.entry(id).or_default();
+                    filter.toggle(bit, modifiers.shift);
+                    // Toggling the last filter off collapses the layer (After Effects U / P / R / S).
+                    if filter.0 == 0 {
+                        self.property_filters.remove(&id);
+                        self.expanded.remove(&id);
+                    } else {
+                        self.expanded.insert(id);
+                    }
                 }
             }
         }
@@ -460,6 +464,33 @@ impl WorldUi {
         }
         if pressed(Hotkey::Play) {
             self.playing = !self.playing;
+        }
+        let (first, last, fps) = (e.document.first, e.document.last, e.document.fps);
+        if pressed(Hotkey::Start) {
+            self.seek(first);
+        }
+        if pressed(Hotkey::End) {
+            self.seek(last);
+        }
+        // B / N move one end of the work area to the time cursor, pushing the other along.
+        let cursor = self.playhead;
+        if pressed(Hotkey::SetStart) {
+            let range = WorldCommand::SetTimeRange { first: cursor, last: last.max(cursor), fps };
+            self.command(e, range);
+        }
+        if pressed(Hotkey::SetEnd) {
+            let range = WorldCommand::SetTimeRange { first: first.min(cursor), last: cursor, fps };
+            self.command(e, range);
+        }
+        for slot in 0..10 {
+            if pressed(Hotkey::SetMark(slot)) {
+                self.command(e, WorldCommand::SetMark { slot, frame: Some(cursor) });
+            }
+            if pressed(Hotkey::Mark(slot))
+                && let Some(&frame) = e.document.marks.get(&slot)
+            {
+                self.seek(frame);
+            }
         }
     }
     /// Fit authored layer bounds into the actual canvas beside the outline.
@@ -1127,10 +1158,12 @@ impl WorldUi {
                             )
                             .with_color(kind_color(n.kind))
                         })
-                        .collect();
+                        .collect::<Vec<_>>();
+                    // Expanded only when there is something to show: the caret reads this too.
+                    let expanded = self.expanded.contains(&n.id) && !props.is_empty();
                     Track::new(n.name.clone(), vec![clip])
                         .with_lanes(props)
-                        .expanded(self.expanded.contains(&n.id))
+                        .expanded(expanded)
                 })
                 .collect();
             timeline.document = cache.document;
@@ -1180,6 +1213,8 @@ impl WorldUi {
             start: e.document.first as i64,
             end: e.document.last as i64 + 1,
         });
+        model.markers.clear();
+        model.markers.extend(e.document.marks.values().map(|&f| i64::from(f)));
         let cfg = TimelineConfig {
             row_height: self.attribute_metrics.row_height(),
             lane_height: self.attribute_metrics.row_height(),
@@ -1189,6 +1224,8 @@ impl WorldUi {
         };
 
         let mut actions = vec![];
+        // Ctrl+click on a time mark of the ruler clears it (as in Playa).
+        let mut unmark = None;
         let ruler_top = ui.cursor().min.y;
         egui::ScrollArea::vertical()
             .id_salt("world_timeline_scroll")
@@ -1239,6 +1276,30 @@ impl WorldUi {
                         painter.rect_filled(Rect::from_min_size(Pos2::new(x, resp.ruler_rect.bottom() - 3.0), Vec2::new(width, 3.0)), 0.0, color);
                     }
                 }
+                // The widget draws the mark glyphs; their slot numbers go beside them.
+                let mark_x = |frame: u32| self.view.frame_to_x(frame as f32, resp.ruler_rect.left(), &cfg);
+                for (&slot, &frame) in &e.document.marks {
+                    painter.text(
+                        Pos2::new(mark_x(frame) + 4.0, resp.ruler_rect.top()),
+                        egui::Align2::LEFT_TOP,
+                        slot.to_string(),
+                        egui::FontId::monospace(10.0),
+                        canvas.visuals().selection.stroke.color,
+                    );
+                }
+                unmark = ui
+                    .input(|i| (i.modifiers.command && i.pointer.primary_clicked()).then(|| i.pointer.interact_pos()))
+                    .flatten()
+                    .filter(|pos| resp.ruler_rect.contains(*pos))
+                    .and_then(|pos| {
+                        e.document
+                            .marks
+                            .iter()
+                            .map(|(&slot, &frame)| (slot, (mark_x(frame) - pos.x).abs()))
+                            .filter(|(_, d)| *d <= 6.0)
+                            .min_by(|a, b| a.1.total_cmp(&b.1))
+                            .map(|(slot, _)| slot)
+                    });
                 let header =
                     Rect::from_min_size(Pos2::new(origin.x, ruler_top), Vec2::new(left_w, resp.ruler_rect.height()));
                 ui.painter()
@@ -1251,7 +1312,7 @@ impl WorldUi {
                     ui.visuals().weak_text_color(),
                 );
                 ui.interact(header, ui.id().with("timeline-shortcuts-help"), Sense::hover())
-                    .on_hover_text("P / T: Translate · R: Rotate · S: Scale · U: Keyed properties\nShift + property shortcut: add / remove filter\nI / O: selection In / Out · Space: Play / pause\nInsert: Play selection · Shift + Insert: Cache selection, then play\nCtrl + Shift + Insert: Cache selection at 1 spp, then play\nGreen: final cache · Blue: draft cache");
+                    .on_hover_text("P / T: Translate · R: Rotate · S: Scale · U: Keyed properties\nShift + property shortcut: add / remove filter\nI / O: selection In / Out · Space: Play / pause\nHome / End: time cursor to work area start / end · B / N: work area start / end at the cursor\nShift + 0-9: set time mark · 0-9: jump to it · Ctrl + click a mark: clear it\nInsert: Play selection · Shift + Insert: Cache selection, then play\nCtrl + Shift + Insert: Cache selection at 1 spp, then play\nGreen: final cache · Blue: draft cache");
                 let full_clip = ui.clip_rect();
                 let mut rows_clip = full_clip;
                 rows_clip.min.y = rows_clip.min.y.max(resp.ruler_rect.bottom() + 4.0);
@@ -1262,7 +1323,7 @@ impl WorldUi {
                         Pos2::new(origin.x, y),
                         Vec2::new(left_w, cfg.row_height),
                     );
-                    self.layer_row(ui, e, n, &nodes, row);
+                    self.layer_row(ui, e, n, &nodes, row, model.tracks[ti].expanded);
                     if model.tracks[ti].expanded {
                         for (li, l) in lanes[ti].iter_mut().enumerate() {
                             let rect = Rect::from_min_size(
@@ -1312,6 +1373,10 @@ impl WorldUi {
                     actions.clear();
                 } else {
                     actions = resp.actions;
+                    // Clearing a mark must not also scrub the time cursor there.
+                    if unmark.is_some() {
+                        actions.retain(|a| !matches!(a, TimelineAction::Seek { .. }));
+                    }
                 }
                 ui.allocate_rect(
                     Rect::from_min_size(
@@ -1323,6 +1388,9 @@ impl WorldUi {
             });
         for a in actions {
             self.timeline_action(e, &nodes, &lanes, a);
+        }
+        if let Some(slot) = unmark {
+            self.command(e, WorldCommand::SetMark { slot, frame: None });
         }
         if ui.input(|i| i.pointer.any_released()) {
             self.drag_order = None;
@@ -1337,6 +1405,7 @@ impl WorldUi {
         n: &WorldNodeInfo,
         nodes: &[WorldNodeInfo],
         r: Rect,
+        expanded: bool,
     ) {
         self.attribute_metrics.apply(ui);
         if !r.intersects(ui.clip_rect()) {
@@ -1371,17 +1440,17 @@ impl WorldUi {
             if square_icon(
                 ui,
                 next(),
-                if self.expanded.contains(&n.id) {
-                    ph::CARET_DOWN
-                } else {
-                    ph::CARET_RIGHT
-                },
+                if expanded { ph::CARET_DOWN } else { ph::CARET_RIGHT },
                 true,
             )
             .on_hover_text("Expand layer properties")
             .clicked()
             {
-                if !self.expanded.remove(&n.id) {
+                if expanded {
+                    self.expanded.remove(&n.id);
+                } else {
+                    // Expanding shows the properties: a filter matching none of them goes.
+                    self.property_filters.remove(&n.id);
                     self.expanded.insert(n.id);
                     self.groups.insert((n.id, "@Transform".into()));
                 }
@@ -1946,12 +2015,15 @@ impl WorldUi {
                 self.fit_timeline(width, &cache.nodes, e);
                 self.cache = cache;
             }
-            ui.add(
-                egui::Slider::new(&mut self.view.zoom, 0.05..=20.0)
-                    .logarithmic(true)
-                    .clamping(egui::SliderClamping::Edits)
-                    .text("Zoom"),
-            );
+            ui.scope(|ui| {
+                ui.spacing_mut().slider_width *= 2.0;
+                ui.add(
+                    egui::Slider::new(&mut self.view.zoom, 0.05..=20.0)
+                        .logarithmic(true)
+                        .clamping(egui::SliderClamping::Edits)
+                        .text("Zoom"),
+                );
+            });
             ui.menu_button("Interpolation", |ui| {
                 for kind in CurveKind::all() {
                     if ui
@@ -2947,7 +3019,7 @@ mod tests {
     fn shortcut_frame(
         ctx: &egui::Context,
         state: &mut WorldUi,
-        e: &WorldEditor,
+        e: &mut WorldEditor,
         mut events: Vec<egui::Event>,
     ) {
         let nodes = e.document.nodes();
@@ -3062,24 +3134,104 @@ mod tests {
     }
 
     #[test]
-    fn timeline_keyboard_focus_survives_pointer_exit_and_clears_on_outside_click() {
-        let e = editor();
+    fn time_cursor_work_area_and_marks_follow_after_effects_keys() {
+        let mut e = editor();
+        let ctx = egui::Context::default();
+        let mut state = WorldUi::default();
+        // Hover the timeline so it owns the keyboard.
+        let inside = Pos2::new(80.0, 80.0);
+        shortcut_frame(&ctx, &mut state, &mut e, vec![egui::Event::PointerMoved(inside)]);
+        let range = WorldCommand::SetTimeRange { first: 10, last: 90, fps: e.document.fps };
+        e.execute(range).unwrap();
+        // Press and release: egui reports a second press without a release as a repeat.
+        let press = |state: &mut WorldUi, e: &mut WorldEditor, event: egui::Event| {
+            let mut release = event.clone();
+            if let egui::Event::Key { pressed, .. } = &mut release {
+                *pressed = false;
+            }
+            shortcut_frame(&ctx, state, e, vec![egui::Event::PointerMoved(inside), event, release]);
+        };
+        press(&mut state, &mut e, shortcut_key(egui::Key::End, false));
+        assert_eq!(state.playhead, 90, "End: work area end");
+        press(&mut state, &mut e, shortcut_key(egui::Key::Home, false));
+        assert_eq!(state.playhead, 10, "Home: work area start");
+
+        state.seek(30);
+        press(&mut state, &mut e, shortcut_key(egui::Key::B, false));
+        state.seek(60);
+        press(&mut state, &mut e, shortcut_key(egui::Key::N, false));
+        assert_eq!((e.document.first, e.document.last), (30, 60), "B / N at the cursor");
+        state.seek(75);
+        press(&mut state, &mut e, shortcut_key(egui::Key::B, false));
+        assert_eq!((e.document.first, e.document.last), (75, 75), "B past the end pushes it");
+
+        // Shift+3 as a keyboard really sends it: the character differs, the key position not.
+        state.seek(42);
+        press(
+            &mut state,
+            &mut e,
+            egui::Event::Key {
+                key: egui::Key::Exclamationmark,
+                physical_key: Some(egui::Key::Num3),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::SHIFT,
+            },
+        );
+        assert_eq!(e.document.marks.get(&3), Some(&42), "Shift+3 sets mark 3");
+        state.seek(0);
+        press(&mut state, &mut e, shortcut_key(egui::Key::Num3, false));
+        assert_eq!(state.playhead, 42, "3 jumps to mark 3");
+        press(&mut state, &mut e, shortcut_key(egui::Key::Num5, false));
+        assert_eq!(state.playhead, 42, "an empty slot leaves the cursor");
+        assert!(e.undo());
+        assert!(e.document.marks.is_empty(), "setting a mark is one undo step");
+    }
+    #[test]
+    fn keyed_filter_without_keys_or_toggled_off_leaves_the_layer_collapsed() {
+        let mut e = editor();
         let object = e.selection.unwrap();
         let ctx = egui::Context::default();
         let mut state = WorldUi::default();
-        shortcut_frame(&ctx, &mut state, &e, vec![]);
+        let inside = Pos2::new(80.0, 80.0);
+        shortcut_frame(&ctx, &mut state, &mut e, vec![egui::Event::PointerMoved(inside)]);
+        let u = || {
+            let mut release = shortcut_key(egui::Key::U, false);
+            if let egui::Event::Key { pressed, .. } = &mut release {
+                *pressed = false;
+            }
+            vec![egui::Event::PointerMoved(inside), shortcut_key(egui::Key::U, false), release]
+        };
+        shortcut_frame(&ctx, &mut state, &mut e, u());
+        let attrs = e.document.attributes(object, 0.0).unwrap();
+        assert!(attrs.iter().all(|a| a.frames.is_empty()), "fixture has no keys");
+        assert!(
+            state.lanes(object, &attrs).is_empty(),
+            "U on an unkeyed layer shows nothing, so its track is not expanded"
+        );
+        shortcut_frame(&ctx, &mut state, &mut e, u());
+        assert!(!state.expanded.contains(&object), "U again collapses the layer");
+        assert!(!state.property_filters.contains_key(&object));
+    }
+    #[test]
+    fn timeline_keyboard_focus_survives_pointer_exit_and_clears_on_outside_click() {
+        let mut e = editor();
+        let object = e.selection.unwrap();
+        let ctx = egui::Context::default();
+        let mut state = WorldUi::default();
+        shortcut_frame(&ctx, &mut state, &mut e, vec![]);
         let inside = Pos2::new(80.0, 80.0);
         let outside = Pos2::new(1100.0, 750.0);
         shortcut_frame(
             &ctx,
             &mut state,
-            &e,
+            &mut e,
             vec![egui::Event::PointerMoved(inside)],
         );
         shortcut_frame(
             &ctx,
             &mut state,
-            &e,
+            &mut e,
             vec![
                 egui::Event::PointerMoved(inside),
                 egui::Event::PointerButton {
@@ -3093,7 +3245,7 @@ mod tests {
         shortcut_frame(
             &ctx,
             &mut state,
-            &e,
+            &mut e,
             vec![
                 egui::Event::PointerButton {
                     pos: inside,
@@ -3106,20 +3258,20 @@ mod tests {
         );
         assert_eq!(ctx.memory(|memory| memory.focused()), state.timeline_focus);
         for _ in 0..3 {
-            shortcut_frame(&ctx, &mut state, &e, vec![]);
+            shortcut_frame(&ctx, &mut state, &mut e, vec![]);
             assert_eq!(ctx.memory(|memory| memory.focused()), state.timeline_focus);
         }
         shortcut_frame(
             &ctx,
             &mut state,
-            &e,
+            &mut e,
             vec![shortcut_key(egui::Key::P, false)],
         );
         assert_eq!(state.property_filters[&object].0, PropertyFilter::POSITION);
         shortcut_frame(
             &ctx,
             &mut state,
-            &e,
+            &mut e,
             vec![egui::Event::PointerButton {
                 pos: outside,
                 button: egui::PointerButton::Primary,
@@ -3131,7 +3283,7 @@ mod tests {
         shortcut_frame(
             &ctx,
             &mut state,
-            &e,
+            &mut e,
             vec![shortcut_key(egui::Key::S, false)],
         );
         assert_eq!(state.property_filters[&object].0, PropertyFilter::POSITION);
@@ -3153,7 +3305,7 @@ mod tests {
         shortcut_frame(
             &ctx,
             &mut state,
-            &e,
+            &mut e,
             vec![
                 egui::Event::PointerMoved(Pos2::new(80.0, 80.0)),
                 shortcut_key(egui::Key::P, false),
@@ -3172,7 +3324,7 @@ mod tests {
                 .iter()
                 .any(|lane| lane.path.as_deref() == Some("/transform/scale"))
         );
-        shortcut_frame(&ctx, &mut state, &e, vec![shortcut_key(egui::Key::R, true)]);
+        shortcut_frame(&ctx, &mut state, &mut e, vec![shortcut_key(egui::Key::R, true)]);
         assert_eq!(
             state.property_filters[&object].0,
             PropertyFilter::POSITION | PropertyFilter::ROTATION
@@ -3180,7 +3332,7 @@ mod tests {
         shortcut_frame(
             &ctx,
             &mut state,
-            &e,
+            &mut e,
             vec![shortcut_key(egui::Key::U, false)],
         );
         assert!(
@@ -3198,7 +3350,7 @@ mod tests {
         shortcut_frame(
             &ctx,
             &mut state,
-            &e,
+            &mut e,
             vec![shortcut_key(egui::Key::S, false)],
         );
         let mut release_u = shortcut_key(egui::Key::U, false);
@@ -3208,13 +3360,13 @@ mod tests {
         shortcut_frame(
             &ctx,
             &mut state,
-            &e,
+            &mut e,
             vec![release_u, shortcut_key(egui::Key::U, false)],
         );
         shortcut_frame(
             &ctx,
             &mut state,
-            &e,
+            &mut e,
             vec![egui::Event::Key {
                 key: egui::Key::S,
                 physical_key: Some(egui::Key::S),
@@ -3255,7 +3407,7 @@ mod tests {
         shortcut_frame(
             &ctx,
             &mut state,
-            &e,
+            &mut e,
             vec![
                 egui::Event::PointerMoved(Pos2::new(80.0, 80.0)),
                 shortcut_key(egui::Key::O, false),
@@ -3265,14 +3417,14 @@ mod tests {
         shortcut_frame(
             &ctx,
             &mut state,
-            &e,
+            &mut e,
             vec![shortcut_key(egui::Key::I, false)],
         );
         assert_eq!(state.playhead, 10);
         shortcut_frame(
             &ctx,
             &mut state,
-            &e,
+            &mut e,
             vec![shortcut_key(egui::Key::Insert, false)],
         );
         assert_eq!(
@@ -3288,11 +3440,11 @@ mod tests {
         if let egui::Event::Key { pressed, .. } = &mut release_insert {
             *pressed = false;
         }
-        shortcut_frame(&ctx, &mut state, &e, vec![release_insert]);
+        shortcut_frame(&ctx, &mut state, &mut e, vec![release_insert]);
         shortcut_frame(
             &ctx,
             &mut state,
-            &e,
+            &mut e,
             vec![shortcut_key(egui::Key::Insert, true)],
         );
         assert_eq!(
@@ -3309,12 +3461,12 @@ mod tests {
         if let egui::Event::Key { pressed, .. } = &mut release {
             *pressed = false;
         }
-        shortcut_frame(&ctx, &mut state, &e, vec![release]);
+        shortcut_frame(&ctx, &mut state, &mut e, vec![release]);
         let mut draft = shortcut_key(egui::Key::Insert, true);
         if let egui::Event::Key { modifiers, .. } = &mut draft {
             *modifiers = egui::Modifiers::CTRL.plus(egui::Modifiers::SHIFT);
         }
-        shortcut_frame(&ctx, &mut state, &e, vec![draft]);
+        shortcut_frame(&ctx, &mut state, &mut e, vec![draft]);
         assert_eq!(
             state.take_preview_action(),
             Some(PreviewAction {
@@ -3329,12 +3481,12 @@ mod tests {
     }
     #[test]
     fn timeline_keyboard_does_not_intercept_text_entry_or_right_mouse_flight() {
-        let e = editor();
+        let mut e = editor();
         let ctx = egui::Context::default();
         let mut state = WorldUi::default();
         let focus = egui::Id::new("timeline-shortcut-text");
         let mut text = String::new();
-        let draw = |events, state: &mut WorldUi, text: &mut String| {
+        let mut draw = |events, state: &mut WorldUi, text: &mut String| {
             let nodes = e.document.nodes();
             let _ = ctx.run_ui(
                 egui::RawInput {
@@ -3346,7 +3498,7 @@ mod tests {
                     egui::CentralPanel::default().show(root, |ui| {
                         ui.add(egui::TextEdit::singleline(text).id(focus))
                             .request_focus();
-                        state.timeline_shortcuts(ui, &e, &nodes);
+                        state.timeline_shortcuts(ui, &mut e, &nodes);
                     });
                 },
             );
@@ -3372,7 +3524,7 @@ mod tests {
         shortcut_frame(
             &ctx,
             &mut state,
-            &e,
+            &mut e,
             vec![
                 egui::Event::PointerButton {
                     pos: Pos2::new(80.0, 80.0),
@@ -3716,6 +3868,7 @@ mod tests {
                             node,
                             &nodes,
                             Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::new(400.0, 24.0)),
+                            false,
                         );
                     });
                 },
@@ -3790,6 +3943,7 @@ mod tests {
                                     Pos2::new(20.0, 20.0 + 24.0 * i as f32),
                                     Vec2::new(400.0, 24.0),
                                 ),
+                                false,
                             );
                         }
                     });

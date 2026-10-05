@@ -439,6 +439,16 @@ impl Default for Adaptive {
         Self { enabled: true, noise_threshold: 0.01, min_samples: 16 }
     }
 }
+impl Adaptive {
+    /// Fewest samples a variance estimate is trusted from. One sample has zero variance, so
+    /// a minimum of 1 stopped every tile after the first sample; Cycles floors the user value
+    /// at 4 the same way (Cycles `scene/integrator.cpp`: `max(4, adaptive_min_samples)`).
+    pub const MIN_SAMPLES_FLOOR: u32 = 4;
+    /// The minimum the kernel and the scheduler use.
+    pub fn min(&self) -> u32 {
+        self.min_samples.max(Self::MIN_SAMPLES_FLOOR)
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Scene {
@@ -1107,7 +1117,7 @@ impl Scene {
         p[P_SATURATION] = r.saturation;
         p[P_TONEMAP] = r.reinhard as u32 as f32;
         p[P_ADAPT_THRESHOLD] = r.adaptive.noise_threshold;
-        p[P_ADAPT_MIN] = r.adaptive.min_samples as f32;
+        p[P_ADAPT_MIN] = r.adaptive.min() as f32;
         p
     }
 }
