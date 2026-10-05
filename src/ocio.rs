@@ -90,7 +90,7 @@ pub enum OutputKind {
 }
 
 /// The luminance in a view name ("ACES 2.0 - HDR 1000 nits (P3 D65)" -> 1000).
-fn view_nits(view: &str) -> Option<f32> {
+pub(crate) fn view_nits(view: &str) -> Option<f32> {
     let words: Vec<&str> = view.split_whitespace().collect();
     words
         .windows(2)

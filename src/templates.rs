@@ -105,7 +105,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let first = crate::presets::ANIMATED[0].name;
         let text = serde_json::to_string(&crate::presets::scene(0).unwrap().document).unwrap();
-        let replaced = dir.join(format!("{}.frac.json", crate::slug(first)));
+        let replaced = dir.join(format!("{}.frac.json", crate::file_stem(first)));
         let user = dir.join("user-scene.json");
         std::fs::write(&replaced, &text).unwrap();
         std::fs::write(&user, &text).unwrap();

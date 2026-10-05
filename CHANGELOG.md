@@ -2,6 +2,16 @@
 
 ## Unreleased — 2026-10-04
 
+### Snapshots, slot buttons, Render / Encode panel
+
+- Viewport snapshot: a camera button on the toolbar (click: as the monitor shows it; right click and
+  File: SDR PNG, HDR10 PQ PNG, display EXR), one `Frame::save` path. Every PNG writer (snapshot,
+  export, CLI) names HDR PNGs `*.pq.png` / `*.hlg.png` (`PngEncoding::suffix`) and takes the peak from
+  one constant; a snapshot records its HDR view's own peak.
+- **Changed default:** CamClip and colour presets now restore on left click and store on right
+  click; Settings → Controls → Swap copy/paste mouse buttons restores the old layout for both.
+- Render / Encode: shared settings once above the format tabs; file names fall back to "untitled".
+
 ### Sphere tracing: out of steps is a miss (BUG1)
 
 - A path-traced camera or bounce ray that runs out of march steps is a miss, as in Mandelbulber and

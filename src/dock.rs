@@ -513,6 +513,9 @@ impl App {
                         self.fly = None;
                         self.status = format!("Camera {} restored", i + 1);
                     }
+                    Some(crate::camera_slots::SlotAction::Empty(i)) => {
+                        self.status = format!("CamClip {} is empty: store a camera first", i + 1);
+                    }
                     None => {}
                 }
                 ui.separator();

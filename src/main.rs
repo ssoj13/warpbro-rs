@@ -83,6 +83,14 @@ pub fn new_out_dir(root: &std::path::Path) -> Result<std::path::PathBuf, String>
     Err(format!("{}: no free folder name for {stamp}", root.display()))
 }
 
+/// A file stem for `name`: its slug, or "untitled" when nothing of the name survives (an
+/// all-Cyrillic or empty name would otherwise write hidden `.png` files). `slug` stays the
+/// comparison key (templates), so it must not invent a name.
+pub fn file_stem(name: &str) -> String {
+    let stem = slug(name);
+    if stem.is_empty() { "untitled".into() } else { stem }
+}
+
 pub fn slug(name: &str) -> String {
     let mut s: String = name
         .chars()
@@ -133,8 +141,9 @@ fn headless(out: Option<&str>, w: usize, h: usize, spp: u32, hdr: bool, display_
             (w * h) as f64 * traced / secs / 1e6
         );
         if let Some(dir) = out {
-            let path = std::path::Path::new(dir).join(format!("{}.png", slug(&scene.name)));
-            t.save_png(&path, crate::render_service::PngEncoding::displayed(t.hdr), 1000.0, true).expect("save png");
+            let encoding = crate::render_service::PngEncoding::displayed(t.hdr);
+            let path = std::path::Path::new(dir).join(format!("{}.{}", file_stem(&scene.name), encoding.suffix()));
+            t.save_png(&path, encoding, crate::render_service::HDR_PEAK_NITS, true).expect("save png");
             if display_exr {
                 t.save_display_exr(&path.with_extension("display.exr"))
                     .expect("save display EXR");
@@ -170,7 +179,7 @@ fn animated_fixtures(
             .document
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Preset has no document"))?;
-        let output = std::path::Path::new(dir).join(slug(descriptor.name));
+        let output = std::path::Path::new(dir).join(file_stem(descriptor.name));
         std::fs::create_dir_all(&output)?;
         serde_json::to_writer_pretty(
             std::fs::File::create(output.join("scene.frac.json"))?,
@@ -211,7 +220,15 @@ fn animated_fixtures(
                 "Fixture accumulation did not complete"
             );
             target
-                .save_png(&output.join(format!("frame.{frame:06}.png")), crate::render_service::PngEncoding::displayed(target.hdr), 1000.0, true)
+                .save_png(
+                    &output.join(format!(
+                        "frame.{frame:06}.{}",
+                        crate::render_service::PngEncoding::displayed(target.hdr).suffix()
+                    )),
+                    crate::render_service::PngEncoding::displayed(target.hdr),
+                    crate::render_service::HDR_PEAK_NITS,
+                    true,
+                )
                 .map_err(anyhow::Error::msg)?;
             println!(
                 "{} frame {}: {:.3}s",

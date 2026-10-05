@@ -16,6 +16,8 @@ use std::{
 };
 
 const HIGH_QUALITY_QP: u8 = 18;
+/// The label column of the Render / Encode grids.
+const GRID_LABEL_WIDTH: f32 = 110.0;
 const HIGH_QUALITY_PRESET: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,7 +120,7 @@ impl Default for ExportSettings {
             overwrite: false,
             denoise_at_completion: false,
             png: PngEncoding::Sdr8,
-            png_peak_nits: 1000.0,
+            png_peak_nits: crate::render_service::HDR_PEAK_NITS,
             output_display: String::new(),
             output_view: String::new(),
             transform: None,
@@ -206,9 +208,17 @@ impl ExportSettings {
         }
     }
 
-    /// Target `dir/<name>.<ext>` for the current format.
+    /// The suffix after the file stem: a PNG names its transfer (`PngEncoding::suffix`), so an
+    /// HDR PNG is not taken for an SDR one.
+    fn suffix(&self) -> &'static str {
+        match self.format {
+            ExportFormat::Png => self.png.suffix(),
+            format => format.extension(),
+        }
+    }
+    /// Target `dir/<name>.<suffix>` for the current format.
     pub fn resolve(&mut self, dir: &Path) {
-        self.output = dir.join(format!("{}.{}", self.name.trim(), self.format.extension())).display().to_string();
+        self.output = dir.join(format!("{}.{}", self.name.trim(), self.suffix())).display().to_string();
     }
     pub fn validate(&self) -> Result<(), String> {
         let name = self.name.trim();
@@ -444,10 +454,11 @@ impl ExportController {
             ui.horizontal(|ui| {
                 ui.label("Name");
                 ui.text_edit_singleline(&mut self.settings.name);
-                ui.label(format!(".{}", self.settings.format.extension()));
+                ui.label(format!(".{}", self.settings.suffix()));
             });
             ui.weak(format!("Written to {}", self.out_root.join("<date_time>").display()));
-            egui::Grid::new("render_encode_shared").num_columns(2).show(ui, |ui| {
+            // Both grids share the label column width, so values line up above and below the tabs.
+            egui::Grid::new("render_encode_shared").num_columns(2).min_col_width(GRID_LABEL_WIDTH).show(ui, |ui| {
                 ui.label("Resolution"); ui.horizontal(|ui| { ui.add(egui::DragValue::new(&mut self.settings.width).range(1..=16384)); ui.label("×"); ui.add(egui::DragValue::new(&mut self.settings.height).range(1..=16384)); }); ui.end_row();
                 ui.label("Samples / frame"); ui.add(egui::DragValue::new(&mut self.settings.samples).range(1..=1_000_000)); ui.end_row();
                 ui.label("Denoise"); ui.checkbox(&mut self.settings.denoise_at_completion, "Once at completion").on_hover_text("Run OIDN once after all samples of each exported frame; override World Settings cadence."); ui.end_row();
@@ -472,7 +483,7 @@ impl ExportController {
                     ui.selectable_value(&mut self.settings.format, format, format.label());
                 }
             });
-            egui::Grid::new("render_encode_format").num_columns(2).show(ui, |ui| {
+            egui::Grid::new("render_encode_format").num_columns(2).min_col_width(GRID_LABEL_WIDTH).show(ui, |ui| {
                 if let (Some(kind), Some(ocio)) = (self.settings.output_kind(), ocio) {
                     self.output_transform_ui(ui, ocio, current, kind);
                 }

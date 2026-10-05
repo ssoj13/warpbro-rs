@@ -18,6 +18,8 @@ pub struct CameraSlots {
 pub enum SlotAction {
     Stored(usize),
     Restored(usize),
+    /// A recall on a slot that holds no camera yet.
+    Empty(usize),
 }
 
 impl CameraSlots {
@@ -68,7 +70,11 @@ impl CameraSlots {
                     c.distance,
                     c.fov_y_degrees
                 ),
-                None => format!("CamClip {} (empty)\n{mapping}", index + 1),
+                None => format!(
+                    "CamClip {} (empty)\n{}",
+                    index + 1,
+                    slot_hint(swap, "copy the current camera", "nothing to paste yet")
+                ),
             };
             let response = ui
                 .add(egui::Button::new((index + 1).to_string()).selected(stored.is_some()))
@@ -78,10 +84,14 @@ impl CameraSlots {
                     self.store(index, camera);
                     action = Some(SlotAction::Stored(index));
                 }
-                Some(SlotClick::Recall) if self.restore(index, camera) => {
-                    action = Some(SlotAction::Restored(index));
+                Some(SlotClick::Recall) => {
+                    action = Some(if self.restore(index, camera) {
+                        SlotAction::Restored(index)
+                    } else {
+                        SlotAction::Empty(index)
+                    });
                 }
-                _ => {}
+                None => {}
             }
         }
         if right_to_left {
@@ -94,6 +104,64 @@ impl CameraSlots {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_clicks_follow_the_shared_mapping_in_both_layouts() {
+        use egui::PointerButton::{Primary, Secondary};
+        for swap in [false, true] {
+            let (store, recall) = if swap { (Primary, Secondary) } else { (Secondary, Primary) };
+            let ctx = egui::Context::default();
+            let mut slots = CameraSlots::default();
+            let mut camera = crate::scene::Scene::preset(crate::params::FAMILY_BULB).camera;
+            let frame = |slots: &mut CameraSlots, camera: &mut Camera, events: Vec<egui::Event>| {
+                let mut action = None;
+                let output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 100.0))),
+                        events,
+                        ..Default::default()
+                    },
+                    |root| {
+                        egui::CentralPanel::default().show(root, |ui| {
+                            ui.horizontal(|ui| action = slots.ui(ui, camera, swap));
+                        });
+                    },
+                );
+                (action, output)
+            };
+            let click = |pos: egui::Pos2, button| {
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton { pos, button, pressed: true, modifiers: Default::default() },
+                    egui::Event::PointerButton { pos, button, pressed: false, modifiers: Default::default() },
+                ]
+            };
+            frame(&mut slots, &mut camera, vec![]);
+            let (_, output) = frame(&mut slots, &mut camera, vec![]);
+            let pos = output
+                .shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::epaint::Shape::Text(t) if t.galley.text() == "2" => {
+                        Some(t.pos + t.galley.rect.center().to_vec2())
+                    }
+                    _ => None,
+                })
+                .expect("slot 2");
+            // Recalling an empty slot reports it and leaves the camera.
+            let before = camera;
+            let (action, _) = frame(&mut slots, &mut camera, click(pos, recall));
+            assert_eq!(action, Some(SlotAction::Empty(1)), "swap={swap}");
+            assert_eq!(camera, before);
+            let (action, _) = frame(&mut slots, &mut camera, click(pos, store));
+            assert_eq!(action, Some(SlotAction::Stored(1)), "swap={swap}");
+            let stored = camera;
+            camera.yaw_degrees += 30.0;
+            let (action, _) = frame(&mut slots, &mut camera, click(pos, recall));
+            assert_eq!(action, Some(SlotAction::Restored(1)), "swap={swap}");
+            assert_eq!(camera, stored);
+        }
+    }
 
     #[test]
     fn slots_copy_and_paste_the_whole_camera_and_survive_serialization() {

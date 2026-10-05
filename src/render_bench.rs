@@ -207,7 +207,15 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         }
         raw.flush()?;
         target
-            .save_png(&base.join(format!("{stem}.png")), crate::render_service::PngEncoding::displayed(target.hdr), 1000.0, true)
+            .save_png(
+                &base.join(format!(
+                    "{stem}.{}",
+                    crate::render_service::PngEncoding::displayed(target.hdr).suffix()
+                )),
+                crate::render_service::PngEncoding::displayed(target.hdr),
+                crate::render_service::HDR_PEAK_NITS,
+                true,
+            )
             .map_err(anyhow::Error::msg)?;
         let metadata = json!({
             "schema": 1,

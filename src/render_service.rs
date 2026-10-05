@@ -54,15 +54,30 @@ impl PngEncoding {
     pub fn hdr(self) -> bool {
         self != Self::Sdr8
     }
-    /// What the selected monitor rendering shows: HDR10 for an HDR view, else SDR.
+    /// What a monitor shows: HDR10 for an HDR output, else SDR. PQ, not HLG: the monitor shows
+    /// absolute display light, which PQ encodes as it is.
     pub fn displayed(hdr: bool) -> Self {
         if hdr { Self::Hdr10 } else { Self::Sdr8 }
     }
+    /// The file suffix after the stem, for every PNG writer (snapshot, export, CLI): HDR PNGs
+    /// name their transfer so they are not taken for SDR (an HDR10 PNG in a viewer that
+    /// ignores `cICP` looks washed out).
+    pub fn suffix(self) -> &'static str {
+        match self {
+            Self::Sdr8 => "png",
+            Self::Hdr10 => "pq.png",
+            Self::Hlg => "hlg.png",
+        }
+    }
 }
 
-/// The file a viewport snapshot is saved as. All of them encode the frame's display light, so
-/// they show what the viewport shows: an SDR PNG of an HDR view is not offered (its SDR codes
-/// would need another render through an SDR view), an HDR10 PNG of an SDR view holds SDR light.
+/// Mastering display peak of an HDR PNG (`mDCV`, HLG system gamma) when nothing names one: the
+/// export default and the fallback of a snapshot whose view names no luminance.
+pub const HDR_PEAK_NITS: f32 = 1000.0;
+
+/// The file a viewport snapshot (or a PNG export) is saved as. An SDR PNG holds the SDR
+/// rendering (an HDR view is rendered for SDR too, `Frame::sdr_bytes`); an HDR PNG and the
+/// display EXR hold the display light an HDR monitor shows, unclipped above SDR white.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameFile {
     Png(PngEncoding),
@@ -70,13 +85,10 @@ pub enum FrameFile {
     DisplayExr,
 }
 impl FrameFile {
-    /// The suffix after the file stem; HDR PNGs name their transfer so they are not mistaken
-    /// for SDR (an HDR10 PNG in a viewer that ignores `cICP` looks washed out).
+    /// The suffix after the file stem (`PngEncoding::suffix` for PNGs).
     pub fn suffix(self) -> &'static str {
         match self {
-            Self::Png(PngEncoding::Sdr8) => "png",
-            Self::Png(PngEncoding::Hdr10) => "pq.png",
-            Self::Png(PngEncoding::Hlg) => "hlg.png",
+            Self::Png(encoding) => encoding.suffix(),
             Self::DisplayExr => "display.exr",
         }
     }
@@ -247,17 +259,15 @@ impl Frame {
         }
         crate::exr_io::write_rgb(path, self.width, self.height, &self.light, &crate::color::DISPLAY_PRIMS, Some(100.0), true)
     }
-    /// Save this frame as `file` (viewport snapshots: File menu and the viewport toolbar).
-    pub fn save(&self, path: &Path, file: FrameFile) -> Result<(), String> {
+    /// Save this frame as `file` (viewport snapshots: File menu and the viewport toolbar);
+    /// `peak_nits` is the mastering peak of an HDR PNG.
+    pub fn save(&self, path: &Path, file: FrameFile, peak_nits: f32) -> Result<(), String> {
         match file {
-            FrameFile::Png(encoding) => self.save_png(path, encoding, SNAPSHOT_PEAK_NITS, true),
+            FrameFile::Png(encoding) => self.save_png(path, encoding, peak_nits, true),
             FrameFile::DisplayExr => self.save_display_exr(path),
         }
     }
 }
-
-/// Mastering peak recorded in a viewport snapshot's HDR PNG (`mDCV`, HLG system gamma).
-const SNAPSHOT_PEAK_NITS: f32 = 1000.0;
 
 pub enum Command {
     Thumbnail {
@@ -1956,16 +1966,19 @@ mod tests {
             let bytes = std::fs::read(path).unwrap();
             bytes.windows(8).find(|w| &w[..4] == b"cICP").map(|w| w[4..8].to_vec())
         };
+        let srgb = |path: &std::path::Path| std::fs::read(path).unwrap().windows(4).any(|w| w == b"sRGB");
         for (file, expected) in [
             (FrameFile::Png(PngEncoding::Sdr8), None),
             (FrameFile::Png(PngEncoding::Hdr10), Some(vec![9, 16, 0, 1])),
         ] {
             let path = dir.join(format!("shot.{}", file.suffix()));
-            frame.save(&path, file).unwrap();
+            frame.save(&path, file, HDR_PEAK_NITS).unwrap();
             assert_eq!(cicp(&path), expected, "{file:?}");
+            // SDR says so with the sRGB chunk (egui-display's contract), HDR with cICP.
+            assert_eq!(srgb(&path), expected.is_none(), "{file:?}");
         }
         let exr = dir.join(format!("shot.{}", FrameFile::DisplayExr.suffix()));
-        frame.save(&exr, FrameFile::DisplayExr).unwrap();
+        frame.save(&exr, FrameFile::DisplayExr, HDR_PEAK_NITS).unwrap();
         assert!(exr.is_file());
         assert_eq!(FrameFile::Png(PngEncoding::Hdr10).suffix(), "pq.png");
         std::fs::remove_dir_all(&dir).unwrap();

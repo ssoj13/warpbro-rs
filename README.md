@@ -266,9 +266,12 @@ The final release test logs are [the regular suite](target/verification/ssh-fina
 and [the explicitly enabled GPU suite](target/verification/ssh-final-gpu-tests.out).
 
 All output goes to `~/.warpbro/out/<local date_time>/`, one new folder per export or screenshot.
-**File → Save image** writes the viewport as shown: 8-bit sRGB PNG, or HDR10 BT.2020/PQ 16-bit PNG
-with `cICP`, `mDCV` and measured `cLLI` for an HDR view. **Display EXR** saves unquantized linear Rec.709 display light with chromaticities and
-`whiteLuminance = 100`; this is display-referred light, not a scene-linear master.
+**Snapshots** (the camera button of the viewport toolbar, or File): a click saves the viewport as
+the monitor shows it - 8-bit sRGB PNG on an SDR monitor, HDR10 BT.2020/PQ 16-bit PNG with `cICP`,
+`mDCV` (the view's peak) and measured `cLLI` on an HDR one. Right click (or File) also offers the SDR
+PNG and the HDR10 PNG explicitly, and **Display EXR**: unquantized linear Rec.709 display light with
+chromaticities and `whiteLuminance = 100` (display-referred, not a scene-linear master). HDR PNGs are
+named `*.pq.png` / `*.hlg.png`: in a viewer that ignores `cICP` they look washed out.
 
 ```sh
 ./target/release/WarpBro --gallery out 1920 1080 256 --hdr --display-exr
@@ -307,9 +310,11 @@ writes into its own new folder, and finished outputs are published atomically.
 `~/.warpbro/templates` with the same name overrides a built-in, any other file is added. The
 binary needs no external files.
 
-**Camera slots:** the five buttons at the right of the viewport toolbar store the viewport
-camera on left click and restore it on right click (like copy / paste); the slots are kept with
-the application settings, and a restore is authored like any viewport navigation (Auto Key, undo).
+**Camera slots:** the five buttons at the right of the viewport toolbar restore a camera on
+left click and store the viewport camera on right click (paste / copy); the colour presets work the
+same way, and Settings → Controls → *Swap copy/paste mouse buttons* exchanges the buttons for both.
+The slots are kept with the application settings, and a restore is authored like any viewport
+navigation (Auto Key, undo).
 
 For compatibility, the local checkout folder, profile and data locations retain the legacy
 `frac-rs` name during the WarpBro rename.

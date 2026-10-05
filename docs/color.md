@@ -190,7 +190,7 @@ sensitive to steps in the dark.
                   ▼                          ▼                            ▼                        ▼
           SDR monitor / PNG 8-bit    HDR monitor / PNG HDR10        PNG HLG                  HEVC video
           sRGB curve, BT.709         BT.709 -> BT.2020 matrix,      BT.2020, HLG curve       8-bit sRGB /
-          (cICP 1/13)                x100 nits, PQ (cICP 9/16,      for the chosen peak      BT.709
+          (sRGB chunk)               x100 nits, PQ (cICP 9/16,      for the chosen peak      BT.709
                                      mDCV, cLLI)                    (cICP 9/18, mDCV)
           Display EXR: linear BT.709 display light, `whiteLuminance` 100
 ```
@@ -202,7 +202,8 @@ Rules this keeps:
   downstream converts primaries again.
 - **Authoring stays BT.709**, so existing scenes, presets and pickers keep their meaning. The one library
   value authored in ACEScg (the emissive preset) is stored as its BT.709 equivalent.
-- **Files say what they are:** scene-linear EXR is tagged AP1, display EXR BT.709, PNG carries `cICP`.
+- **Files say what they are:** scene-linear EXR is tagged AP1, display EXR BT.709, an HDR PNG carries
+  `cICP` (and is named `.pq.png` / `.hlg.png`), an SDR PNG the `sRGB` chunk.
 
 ## 6. Before and after the switch to ACEScg
 

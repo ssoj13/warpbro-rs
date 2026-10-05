@@ -920,7 +920,7 @@ impl App {
         let template_directory = crate::templates::directory();
         let mut dialog = egui_file_dialog::FileDialog::new()
             .add_file_filter_extensions("Fractal scene", vec!["json"])
-            .default_file_name(&format!("{}.frac.json", crate::slug(&self.scene.name)));
+            .default_file_name(&format!("{}.frac.json", crate::file_stem(&self.scene.name)));
         dialog = self.world_ui.file_dialogs.prepare(
             dialog,
             action.history_key(),
@@ -1569,7 +1569,7 @@ impl App {
         let path = dir.join(format!(
             "{}-{}.json",
             now_stamp(),
-            crate::slug(&self.scene.name)
+            crate::file_stem(&self.scene.name)
         ));
         match serde_json::to_string_pretty(&self.world.document)
             .map_err(|e| e.to_string())
@@ -1592,24 +1592,34 @@ impl App {
         }
     }
 
+    /// Whether the monitor shows the viewport in HDR (the staged canvas), the "as displayed"
+    /// snapshot's encoding.
+    fn monitor_hdr(&self) -> bool {
+        self.staged_output.is_some_and(|(hdr, _)| hdr)
+    }
+
     /// The snapshot choices, shared by the File menu and the viewport toolbar.
     pub(super) fn snapshot_menu(&mut self, ui: &mut egui::Ui) {
         use crate::render_service::{FrameFile, PngEncoding};
-        let hdr = self.frame.as_ref().is_some_and(|frame| frame.hdr);
-        let displayed = if hdr {
-            "HDR10 PQ PNG of the HDR view (needs an HDR-aware viewer)"
+        let displayed = if self.monitor_hdr() {
+            "HDR10 PQ PNG: the monitor shows HDR"
         } else {
-            "8-bit sRGB PNG"
+            "8-bit sRGB PNG: the monitor shows SDR"
         };
-        let mut items = vec![("Save image (as displayed)", displayed, None)];
-        if !hdr {
-            items.push((
+        let items = [
+            ("Save image (as displayed)", displayed, None),
+            (
+                "Save SDR PNG",
+                "8-bit sRGB / BT.709: the SDR rendering (an HDR view's SDR preview)",
+                Some(FrameFile::Png(PngEncoding::Sdr8)),
+            ),
+            (
                 "Save HDR10 PQ PNG",
-                "16-bit PQ / BT.2020 with cICP: the SDR view's light in an HDR container",
+                "16-bit PQ / BT.2020 with cICP: what an HDR monitor shows for this view, highlights above SDR white kept (needs an HDR-aware viewer)",
                 Some(FrameFile::Png(PngEncoding::Hdr10)),
-            ));
-        }
-        items.push(("Save display EXR", "Linear display light, float, display primaries", Some(FrameFile::DisplayExr)));
+            ),
+            ("Save display EXR", "Linear display light, float, display primaries", Some(FrameFile::DisplayExr)),
+        ];
         for (label, hint, file) in items {
             if ui.button(label).on_hover_text(hint).clicked() {
                 self.save_frame(file);
@@ -1618,15 +1628,15 @@ impl App {
         }
     }
 
-    /// Save the viewport's current frame. `None` saves it as displayed: an HDR10 PNG for an HDR
-    /// view, an SDR PNG otherwise. One path for the File menu and the viewport toolbar.
+    /// Save the viewport's current frame. `None` saves it as displayed: an HDR10 PNG when the
+    /// monitor shows HDR, an SDR PNG otherwise. One path for the File menu and the toolbar.
     pub(super) fn save_frame(&mut self, file: Option<crate::render_service::FrameFile>) {
         use crate::render_service::{FrameFile, PngEncoding};
         let Some(frame) = self.frame.clone() else {
             self.status = "Nothing rendered yet".into();
             return;
         };
-        let file = file.unwrap_or(FrameFile::Png(PngEncoding::displayed(frame.hdr)));
+        let file = file.unwrap_or(FrameFile::Png(PngEncoding::displayed(self.monitor_hdr())));
         let dir = match crate::new_out_dir(&crate::out_root()) {
             Ok(dir) => dir,
             Err(error) => {
@@ -1634,10 +1644,13 @@ impl App {
                 return;
             }
         };
-        let path = dir.join(format!("{}.{}", crate::slug(&self.scene.name), file.suffix()));
+        let path = dir.join(format!("{}.{}", crate::file_stem(&self.scene.name), file.suffix()));
+        // The HDR view's own peak ("... HDR 4000 nits ...") is the file's mastering display.
+        let peak_nits =
+            crate::ocio::view_nits(&self.colour.sel.view).unwrap_or(crate::render_service::HDR_PEAK_NITS);
         self.status = match self
             .io
-            .send(crate::io_service::Command::SaveFrame { frame, path, file })
+            .send(crate::io_service::Command::SaveFrame { frame, path, file, peak_nits })
         {
             Ok(()) => "Saving image…".into(),
             Err(e) => e,

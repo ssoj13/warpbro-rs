@@ -34,8 +34,8 @@ CHANGELOG.md, add new requests as they come. Reusable UI goes into egui-widgets-
 - [x] RMB > Show in timeline: expand the layer and scroll to the attribute
 
 ## Render / Encode panel
-- [ ] Deduplicate the three format tabs (shared settings once; per-format codec options);
-      the egui-encode-dialog schema half-duplicates the hand-written UI (SSOT)
+- [x] Deduplicate the three format tabs: shared settings once above, format options in the tabs;
+      the egui-encode-dialog schema (labels / hints only) removed, ExportSettings is the one source
 - [ ] Unify colour output options across EXR / PNG / MP4 (EXR: ACEScg / ACES2065-1 /
       linear Rec.709 primaries; PNG: SDR / HDR10 / HLG; MP4: SDR [+ HDR10 if the encoders do 10-bit])
       — plan for operator approval first
@@ -61,6 +61,8 @@ CHANGELOG.md, add new requests as they come. Reusable UI goes into egui-widgets-
 - [x] Adaptive sampling: with 1 sample per frame it renders that sample and stops
 - [ ] Playa: `playa-engine/tests/ofx_builtin.rs` (feature ofx) expects 8 built-in plug-ins, ofx-effects
       links 29 now (fails on fce3d93 too, before the per-channel work) — update the test to the set
+- [ ] io_service: `let _ = done.send(..)` (4 places) drops a result when the app has gone; make the
+      writer report it (log) instead of discarding (project rule: no silent `let _` on fallible calls)
 - [ ] HEVC export tests flaky under the full parallel suite (Vulkan Video `Posix(38)`);
       pass alone
 
