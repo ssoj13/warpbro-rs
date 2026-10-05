@@ -876,6 +876,9 @@ impl Scene {
         };
         put3(&mut p, P_CLIP_CENTER, self.object.offset);
         p[P_MAX_STEPS] = r.max_steps as f32;
+        // DIAG (branch only): step-cap divisor and diagnostic set, from the environment.
+        p[P_DIAG_CAP_STEPS] = std::env::var("WARPBRO_DIAG_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(r.max_steps as f32);
+        p[P_DIAG_SET] = std::env::var("WARPBRO_DIAG_SET").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0);
         let pixel = 2.0 * half_h / h as f32;
         let hit_epsilon = r.hit_epsilon;
         p[P_FOOTPRINT] = pixel * hit_epsilon / HIT_EPSILON_PER_PIXEL;

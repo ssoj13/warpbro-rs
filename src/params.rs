@@ -27,7 +27,7 @@ slots! {
     P_CAM_ORIGIN = 3, P_CAM_FORWARD = 3, P_CAM_RIGHT = 3, P_CAM_UP = 3,
     P_HALF_W = 1, P_HALF_H = 1, P_APERTURE = 1, P_FOCUS_DISTANCE = 1,
     // march
-    P_MAX_STEPS = 1, P_MAX_DISTANCE = 1, P_FOOTPRINT = 1, P_SAMPLE_CONE = 1, P_STEP_FACTOR = 1, P_SECONDARY_STEPS = 1, P_SECONDARY_EPS = 1,
+    P_MAX_STEPS = 1, P_MAX_DISTANCE = 1, P_FOOTPRINT = 1, P_SAMPLE_CONE = 1, P_STEP_FACTOR = 1, P_SECONDARY_STEPS = 1, P_SECONDARY_EPS = 1, P_DIAG_CAP_STEPS = 1, P_DIAG_SET = 1,
     // bounding sphere of the set in scene space (centre, radius): rays only march inside it
     P_CLIP_CENTER = 3, P_CLIP_RADIUS = 1,
     // integrator

@@ -851,6 +851,23 @@ pub mod kernels {
         base: f32,
         slope: f32,
     ) -> Hit {
+        march_diag::<F>(ctx, origin, dir, kind, base, slope).0
+    }
+
+    // DIAG: [mode * 8192 + steps, t, ratio] (set 0) or [capped steps, min-clamped steps, ratio] (set 1).
+    // mode: 0 clip miss, 1 threshold hit, 2 refined hit, 3 cone accept, 4 exhausted miss, 5 left interval.
+    #[inline(always)]
+    fn march_diag<const F: u32>(
+        ctx: Context<'_>,
+        origin: V3,
+        dir: V3,
+        kind: u32,
+        base: f32,
+        slope: f32,
+    ) -> (Hit, [f32; 3]) {
+        let set1 = pr(ctx, P_DIAG_SET) != 0.0;
+        let mut capped = 0.0f32;
+        let mut clamped = 0.0f32;
         let miss = Hit {
             hit: false,
             point: origin,
@@ -881,12 +898,12 @@ pub mod kernels {
             let b = dot(oc, dir);
             let disc = b * b - (dot(oc, oc) - radius * radius);
             if disc <= 0.0 {
-                return miss;
+                return (miss, [0.0; 3]);
             }
             let root = disc.sqrt();
             let t_exit = -b + root;
             if t_exit <= 0.0 {
-                return miss;
+                return (miss, [0.0; 3]);
             }
             t_enter = (-b - root).max(0.0);
             max_distance = t_exit.min(pr(ctx, P_MAX_DISTANCE));
@@ -898,13 +915,14 @@ pub mod kernels {
         } else {
             pr(ctx, P_COLOR_MODE) as u32
         };
-        let step_cap = 2.0 * (max_distance - t_enter) / max_steps as f32;
+        let step_cap = 2.0 * (max_distance - t_enter) / pr(ctx, P_DIAG_CAP_STEPS);
         let step_factor = pr(ctx, P_STEP_FACTOR);
         let mut t = t_enter;
         let mut outside = miss;
         let mut outside_t = 0.0f32;
         let mut closest = miss;
         let mut closest_ratio = 0.0f32;
+        let mut closest_t = 0.0f32;
         let mut i = 0u32;
         while i < max_steps {
             if t > max_distance {
@@ -918,15 +936,25 @@ pub mod kernels {
             } else {
                 d < eps
             };
+            let code = |mode: f32, tt: f32, ratio: f32| {
+                if set1 {
+                    [capped, clamped, ratio]
+                } else {
+                    [mode * 8192.0 + i as f32, tt, ratio]
+                }
+            };
             if hit {
                 if !(outside.hit && d <= 0.0 && kind != RAY_VISIBILITY) {
-                    return Hit {
-                        hit: true,
-                        point,
-                        trap,
-                        eps,
-                        object,
-                    };
+                    return (
+                        Hit {
+                            hit: true,
+                            point,
+                            trap,
+                            eps,
+                            object,
+                        },
+                        code(1.0, t, d / eps),
+                    );
                 }
                 let mut lo = outside_t;
                 let mut hi = t;
@@ -953,7 +981,7 @@ pub mod kernels {
                     }
                     k += 1;
                 }
-                return best;
+                return (best, code(2.0, lo, 0.0));
             }
             let ratio = d / eps;
             if !closest.hit || ratio < closest_ratio {
@@ -965,6 +993,7 @@ pub mod kernels {
                     object,
                 };
                 closest_ratio = ratio;
+                closest_t = t;
             }
             outside = Hit {
                 hit: true,
@@ -974,16 +1003,29 @@ pub mod kernels {
                 object,
             };
             outside_t = t;
-            t += (step_factor * d).max(eps * 0.5).min(step_cap);
+            let step = (step_factor * d).max(eps * 0.5).min(step_cap);
+            if step == step_cap {
+                capped += 1.0;
+            } else if step == eps * 0.5 {
+                clamped += 1.0;
+            }
+            t += step;
             i += 1;
         }
+        let code = |mode: f32| {
+            if set1 {
+                [capped, clamped, closest_ratio]
+            } else {
+                [mode * 8192.0 + i as f32, closest_t, closest_ratio]
+            }
+        };
         if t > max_distance || !closest.hit {
-            return miss;
+            return (miss, code(5.0));
         }
         if kind == RAY_VISIBILITY || closest_ratio <= pr(ctx, P_SAMPLE_CONE) {
-            return closest;
+            return (closest, code(3.0));
         }
-        miss
+        (miss, code(4.0))
     }
 
     /// Trace the exit of the occupied dielectric using its own field, not the union.
@@ -1651,6 +1693,7 @@ pub mod kernels {
         let mut mis_env = false;
         let mut primary_hit = false;
         let mut primary_albedo = [0.0; 3];
+        let mut primary_diag = [0.0f32; 3];
         let mut primary_normal = [0.0; 3];
         let mut bounce = 0u32;
         let mut medium = AIR;
@@ -1672,7 +1715,11 @@ pub mod kernels {
                 };
                 march_exit::<F>(occupied, ro, rd, medium_eps)
             } else {
-                march::<F>(ctx, ro, rd, kind, base, slope)
+                let (m, diag) = march_diag::<F>(ctx, ro, rd, kind, base, slope);
+                if bounce == 0 {
+                    primary_diag = diag;
+                }
+                m
             };
             if inside && !m.hit {
                 break;
@@ -1876,7 +1923,8 @@ pub mod kernels {
             rd = wi;
             bounce += 1;
         }
-        (radiance, primary_hit, primary_albedo, primary_normal)
+        let _ = primary_albedo;
+        (radiance, primary_hit, primary_diag, primary_normal)
     }
 
     /// Linear thread index -> pixel, in 8x4 tiles so a warp traces a compact patch.

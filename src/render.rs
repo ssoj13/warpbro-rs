@@ -2145,6 +2145,60 @@ mod tests {
         }
     }
 
+    /// DIAG (branch only): BUG1 frame 27, one primary sample per pixel; writes the march
+    /// diagnostics (albedo guide) and the normals to WARPBRO_DIAG_OUT as raw f32.
+    #[test]
+    #[ignore]
+    fn cuda_diag_march_dump() {
+        let mut scene = Scene::preset(crate::params::FAMILY_HYBRID);
+        if let crate::scene::Formula::Hybrid(h) = &mut scene.formula {
+            h.bailout = 2.0;
+            h.bulb.power = 1.829205;
+            h.bulb.angle_scale = [2.43, 0.49];
+            h.bulb.angle_phase_degrees = [-7.74, 0.0];
+            h.kifs.kind = crate::scene::KifsKind::Octahedron;
+            h.steps = [
+                crate::scene::HybridStep::Mandelbulb,
+                crate::scene::HybridStep::KifsFold,
+                crate::scene::HybridStep::Off,
+                crate::scene::HybridStep::Off,
+            ];
+        }
+        scene.camera.target = [-0.3617138, 0.04296637, -0.083121695];
+        scene.camera.yaw_degrees = 63.69792;
+        scene.camera.pitch_degrees = -0.55681777;
+        scene.camera.roll_degrees = 0.00025211525;
+        scene.camera.distance = 2.017553;
+        scene.camera.fov_y_degrees = 38.0;
+        scene.camera.aperture = 0.0;
+        scene.camera_reference = Some(2.0);
+        scene.render.iterations = 12;
+        scene.render.max_steps = std::env::var("WARPBRO_DIAG_STEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(256);
+        scene.render.step_factor = 0.85;
+        scene.render.hit_epsilon = 0.001;
+        scene.render.max_bounces = 0;
+        scene.render.adaptive.enabled = false;
+        scene.render.denoise.enabled = false;
+        scene.environment.enabled = false;
+        scene.colour.on = false;
+        let mut gpu = Gpu::new().unwrap();
+        scene.world_render = true;
+        scene.objects = vec![scene.clone()];
+        let mut target = gpu.target(384, 384);
+        let t0 = std::time::Instant::now();
+        gpu.step(&mut target, &scene, 1, 19, None, false);
+        let diag = gpu.guide_sums(&target, &target.albedo);
+        let normals = gpu.guide_sums(&target, &target.normal);
+        println!("DIAG ms {}", t0.elapsed().as_secs_f32() * 1000.0);
+        let mut bytes = Vec::new();
+        for (d, n) in diag.iter().zip(&normals) {
+            for v in [d[0], d[1], d[2], n[0], n[1], n[2]] {
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+        std::fs::write(std::env::var("WARPBRO_DIAG_OUT").unwrap(), bytes).unwrap();
+    }
+
     #[test]
     fn cuda_tiny_hybrid_gradients_keep_surface_normal_direction() {
         let mut gpu = Gpu::new().unwrap();
