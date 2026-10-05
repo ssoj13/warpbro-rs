@@ -2080,6 +2080,72 @@ mod tests {
 
 
     #[test]
+    fn cuda_curved_hybrid_normals_match_converged_field_gradient() {
+        let mut scene = Scene::preset(crate::params::FAMILY_HYBRID);
+        if let crate::scene::Formula::Hybrid(h) = &mut scene.formula {
+            h.bailout = 2.0;
+            h.bulb.power = 1.829205;
+            h.bulb.angle_scale = [2.43, 0.49];
+            h.bulb.angle_phase_degrees = [-7.74, 0.0];
+            h.kifs.kind = crate::scene::KifsKind::Octahedron;
+            h.steps = [
+                crate::scene::HybridStep::Mandelbulb,
+                crate::scene::HybridStep::KifsFold,
+                crate::scene::HybridStep::Off,
+                crate::scene::HybridStep::Off,
+            ];
+        }
+        scene.camera.target = [-0.3617138, 0.04296637, -0.083121695];
+        scene.camera.yaw_degrees = 63.69792;
+        scene.camera.pitch_degrees = -0.55681777;
+        scene.camera.roll_degrees = 0.00025211525;
+        scene.camera.distance = 2.017553;
+        scene.camera.fov_y_degrees = 38.0;
+        scene.camera.aperture = 0.0;
+        scene.camera_reference = Some(2.0);
+        scene.render.iterations = 12;
+        scene.render.max_steps = 256;
+        scene.render.step_factor = 0.85;
+        scene.render.hit_epsilon = 0.001;
+        scene.render.max_bounces = 0;
+        scene.render.adaptive.enabled = false;
+        scene.render.denoise.enabled = false;
+        scene.environment.enabled = false;
+        scene.colour.on = false;
+
+        // Independent f64 field gradients, converged by halving the central
+        // difference step from eps/2 to eps/64. These neighborhoods keep the
+        // same escape iteration count; the old tetrahedral stencil errs 16..104
+        // degrees here despite otherwise correct, nonzero DE gradients.
+        let references = [
+            (173, 3, [0.12245205, 0.74259165, 0.6584551]),
+            (166, 88, [-0.4087267, -0.6319115, 0.6585061]),
+            (59, 162, [0.13481379, -0.16930011, 0.97630054]),
+            (113, 198, [-0.9120146, 0.047216956, -0.40743083]),
+            (185, 245, [-0.47552705, 0.6795356, -0.5586639]),
+            (92, 290, [0.09999163, 0.77675647, -0.6218127]),
+            (109, 312, [0.71204185, 0.23208085, -0.6626725]),
+            (111, 338, [-0.119305834, -0.71527463, -0.6885843]),
+        ];
+        let mut gpu = Gpu::new().unwrap();
+        scene.world_render = true;
+        scene.objects = vec![scene.clone()];
+        let mut target = gpu.target(384, 384);
+        gpu.step(&mut target, &scene, 1, 19, None, false);
+        let normals = gpu.guide_sums(&target, &target.normal);
+        for (x, y, expected) in references {
+            let actual = glam::Vec3::from_slice(&normals[y * 384 + x]);
+            let expected = glam::Vec3::from_array(expected);
+            assert!(actual.is_finite() && (actual.length() - 1.0).abs() < 1e-4);
+            // Guides orient the normal toward the incoming ray.
+            let cosine = actual.dot(expected).abs().clamp(0.0, 1.0);
+            let degrees = cosine.acos().to_degrees();
+            println!("({x},{y}): {degrees} degrees");
+            assert!(degrees < 1.0, "({x},{y}): {actual:?} vs {expected:?}");
+        }
+    }
+
+    #[test]
     fn cuda_tiny_hybrid_gradients_keep_surface_normal_direction() {
         let mut gpu = Gpu::new().unwrap();
         let mut authored = Scene::preset(crate::params::FAMILY_HYBRID);

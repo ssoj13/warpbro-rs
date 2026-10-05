@@ -1048,8 +1048,7 @@ pub mod kernels {
     }
 
     // =========================================================================
-    // normals: tetrahedral stencil (4 estimates instead of 6), with the exterior
-    // step halving of fractal3d.wgsl stencil_normal
+    // normals: central differences, with exterior step halving
     // =========================================================================
 
     const NORMAL_STEP_HALVINGS: u32 = 3;
@@ -1064,15 +1063,20 @@ pub mod kernels {
         } else {
             sub(point, mul(dir, eps))
         };
-        let mut h = 0.5 * eps;
+        // Opposite axis samples cancel the mixed-derivative bias of a tetrahedral
+        // stencil. Keep the probes within a quarter of the hit footprint to resolve
+        // curved DE fields without sampling distant folds.
+        let mut h = 0.25 * eps;
         let mut k = 0u32;
         while k <= NORMAL_STEP_HALVINGS {
-            let a = scene_signed_distance::<F>(ctx, add(center, [h, -h, -h]));
-            let b = scene_signed_distance::<F>(ctx, add(center, [-h, -h, h]));
-            let c = scene_signed_distance::<F>(ctx, add(center, [-h, h, -h]));
-            let d = scene_signed_distance::<F>(ctx, add(center, [h, h, h]));
-            if signed || (a > 0.0 && b > 0.0 && c > 0.0 && d > 0.0) {
-                let g = [a - b - c + d, -a - b + c + d, -a + b - c + d];
+            let xp = scene_signed_distance::<F>(ctx, add(center, [h, 0.0, 0.0]));
+            let xm = scene_signed_distance::<F>(ctx, sub(center, [h, 0.0, 0.0]));
+            let yp = scene_signed_distance::<F>(ctx, add(center, [0.0, h, 0.0]));
+            let ym = scene_signed_distance::<F>(ctx, sub(center, [0.0, h, 0.0]));
+            let zp = scene_signed_distance::<F>(ctx, add(center, [0.0, 0.0, h]));
+            let zm = scene_signed_distance::<F>(ctx, sub(center, [0.0, 0.0, h]));
+            if signed || (xp > 0.0 && xm > 0.0 && yp > 0.0 && ym > 0.0 && zp > 0.0 && zm > 0.0) {
+                let g = [xp - xm, yp - ym, zp - zm];
                 // Normalize by the largest component first: tiny but nonzero
                 // DE gradients retain their direction without an absolute cutoff.
                 let scale = g[0].abs().max(g[1].abs()).max(g[2].abs());
