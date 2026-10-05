@@ -49,3 +49,4 @@ CHANGELOG.md, add new requests as they come. Reusable UI goes into egui-widgets-
 - [x] Camera: horizon lock, inertia everywhere, finite braking, Space up, Shift fast / Alt slow
 - [x] Orbit on the shared Houdini rig; orbit coast frame-rate independent
 - [x] PreviewCache frees discarded rasters off-thread (dead `invalidate` warning)
+
