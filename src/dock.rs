@@ -47,23 +47,20 @@ impl Panel {
 
 pub(super) fn default_layout() -> DockState<Panel> {
     let mut state = DockState::new(vec![Panel::Viewport]);
-    let [workspace, _] =
-        state
-            .main_surface_mut()
-            .split_below(NodeIndex::root(), 0.64, vec![Panel::Timeline]);
-    let [workspace, _] = state.main_surface_mut().split_left(
-        workspace,
-        0.18,
-        vec![
-            Panel::Outliner,
-            Panel::Gallery,
-            Panel::Bookmarks,
-            Panel::Materials,
-        ],
+    let [workspace, left] = state.main_surface_mut().split_left(
+        NodeIndex::root(), 0.25, vec![Panel::Outliner],
     );
-    state
-        .main_surface_mut()
-        .split_right(workspace, 0.64, vec![Panel::Inspector]);
+    let [_, materials] = state.main_surface_mut().split_below(
+        left, 0.30960023, vec![Panel::Materials],
+    );
+    state.main_surface_mut().split_below(materials, 0.5, vec![Panel::Timeline]);
+    let [_, right] = state.main_surface_mut().split_right(
+        workspace, 0.7039749, vec![Panel::Inspector, Panel::Gallery],
+    );
+    let [_, settings] = state.main_surface_mut().split_below(
+        right, 0.50315166, vec![Panel::Settings],
+    );
+    state.main_surface_mut().split_below(settings, 0.39916557, vec![Panel::Export]);
     state
 }
 
@@ -715,7 +712,7 @@ mod tests {
                 );
             }
         }
-        let mut state = default_layout();
+        let mut state = DockState::new(vec![Panel::Viewport]);
         open_panel(&mut state, Panel::Settings);
         let surface = state.find_tab(&Panel::Settings).unwrap().surface;
         state
@@ -742,8 +739,11 @@ mod tests {
     #[test]
     fn named_layout_preserves_floating_export_and_legacy_workspaces() {
         let ctx = egui::Context::default();
-        let legacy = layout_blob(&default_layout(), &ctx).unwrap();
-        let mut state = default_layout();
+        let legacy = layout_blob(&DockState::new(vec![
+            Panel::Viewport, Panel::Timeline, Panel::Outliner, Panel::Gallery,
+            Panel::Bookmarks, Panel::Materials, Panel::Inspector,
+        ]), &ctx).unwrap();
+        let mut state = DockState::new(vec![Panel::Viewport]);
         open_panel(&mut state, Panel::Settings);
         open_panel(&mut state, Panel::Export);
         let surface = state.find_tab(&Panel::Export).unwrap().surface;
@@ -758,7 +758,7 @@ mod tests {
         let mut restored_store: LayoutStore = serde_json::from_str(&json).unwrap();
         let mut restored =
             restore_layout(&restored_store.select("Export workspace").unwrap()).unwrap();
-        assert_eq!(restored.iter_all_tabs().count(), 9);
+        assert_eq!(restored.iter_all_tabs().count(), 3);
         assert!(restored.find_tab(&Panel::Export).is_some());
         let window = restored.get_window_state_mut(surface).unwrap();
         let geometry = serde_json::to_value(window).unwrap();

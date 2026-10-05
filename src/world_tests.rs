@@ -1746,6 +1746,44 @@ fn clipboard_copy_paste_and_duplicate_remap_ids_in_one_undo_step() {
 }
 
 #[test]
+fn fractal_slider_endpoints_pack_finite_and_hybrid_spans_match_standalone() {
+    for family in 0..8 {
+        let scene = crate::scene::Scene::preset(family);
+        let document = WorldDocument::from_scene(&scene);
+        let id = document.nodes().into_iter().find(|n| n.kind == WorldKind::Fractal).unwrap().id;
+        for attr in document.attributes(id, 0.0).unwrap() {
+            if attr.component.is_some() || !(attr.path.starts_with("/formula/") || attr.path == "/julia" || attr.path == "/render/iterations") {
+                continue;
+            }
+            let Some(slider) = attr.slider else { continue };
+            for endpoint in [slider.min, slider.max] {
+                let value = if attr.value.is_u64() {
+                    json!(endpoint as u64)
+                } else if let Some(values) = attr.value.as_array() {
+                    json!(vec![endpoint; values.len()])
+                } else if attr.value.is_number() {
+                    json!(endpoint)
+                } else {
+                    continue;
+                };
+                let mut e = WorldEditor::new(document.clone());
+                set(&mut e, id, &attr.path, value, 0.0);
+                let evaluated = e.document.node_scene(id, 0.0).unwrap();
+                assert!(evaluated.pack(128, 128).iter().all(|v| v.is_finite()), "family {family}: {} = {endpoint}", attr.path);
+            }
+        }
+    }
+    for (nested, standalone) in [("bulb", "Mandelbulb"), ("mandelbox", "Mandelbox"), ("kifs", "Kifs")] {
+        let prefix = format!("/formula/Hybrid/{nested}/");
+        for param in ["power", "scale", "bailout", "offset", "rotation_degrees"] {
+            let a = attribute_slider(&format!("{prefix}{param}"));
+            let b = attribute_slider(&format!("/formula/{standalone}/{param}"));
+            assert_eq!(a.map(|s| (s.min, s.max, s.log)), b.map(|s| (s.min, s.max, s.log)));
+        }
+    }
+}
+
+#[test]
 fn every_numeric_parameter_has_a_slider_and_hard_limits_hold_in_the_document() {
     let mut colors = std::collections::BTreeSet::new();
     for family in 0..8 {
