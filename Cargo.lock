@@ -1575,7 +1575,7 @@ dependencies = [
 [[package]]
 name = "cam-controls"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/gitnexus-rs.git?branch=main#ed9135e51f39a26424d3229e61ae3d2eb97d3bb1"
+source = "git+ssh://git@github.com/ssoj13/gitnexus-rs.git?branch=main#62a4ec0b582f5cb49df58c32421083f8e5172844"
 dependencies = [
  "cam-viewport",
  "glam",
@@ -1585,7 +1585,7 @@ dependencies = [
 [[package]]
 name = "cam-controls-egui"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/gitnexus-rs.git?branch=main#ed9135e51f39a26424d3229e61ae3d2eb97d3bb1"
+source = "git+ssh://git@github.com/ssoj13/gitnexus-rs.git?branch=main#62a4ec0b582f5cb49df58c32421083f8e5172844"
 dependencies = [
  "cam-controls",
  "cam-viewport",
@@ -1595,7 +1595,7 @@ dependencies = [
 [[package]]
 name = "cam-viewport"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/gitnexus-rs.git?branch=main#ed9135e51f39a26424d3229e61ae3d2eb97d3bb1"
+source = "git+ssh://git@github.com/ssoj13/gitnexus-rs.git?branch=main#62a4ec0b582f5cb49df58c32421083f8e5172844"
 dependencies = [
  "glam",
 ]

@@ -44,7 +44,7 @@ Current usage and verification: [documentation index](docs/README.md), [workspac
   - Path-traced glass uses Fresnel reflection, refraction, and depth-dependent absorption.
     Bottle-green glass and green water are available as presets. See [glass controls and geometry limits](docs/glass.md).
 - **Unreal-style flight:** hold the right mouse button in the viewport to fly.
-  - The mouse looks around; WASD moves; R/C moves up/down; Q/E rolls; Alt flies x4, Shift x0.1;
+  - The mouse looks around; WASD moves; R or Space moves up, C down; Q/E rolls; Shift flies x4, Alt x0.1;
     the wheel sets the speed. Translation, look and roll all carry inertia and ease out
     (Settings > Camera controls: translate / rotate decay, inertial look, flip angle, multipliers).
   - The toolbar airplane switches free 6-DoF flight and horizon lock. Locked, the horizon stays
@@ -142,7 +142,7 @@ python bootstrap.py r                                  # build, warm the CUDA ca
 | left drag         | orbit (coasts on release)                                                                                  |
 | middle drag       | pan (coasts on release)                                                                                    |
 | wheel             | zoom                                                                                                       |
-| hold right button | fly: mouse looks, WASD moves, R/C up/down, Q/E rolls (tilts under the lock), Alt x4, Shift x0.1, wheel speed |
+| hold right button | fly: mouse looks, WASD moves, R/Space up, C down, Q/E rolls (tilts under the lock), Shift x4, Alt x0.1, wheel speed |
 | double-click      | recentre                                                                                                   |
 | `Tab`             | hide the panels                                                                                            |
 | `Space`           | pause                                                                                                      |

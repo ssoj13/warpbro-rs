@@ -594,10 +594,13 @@ impl PreviewCache {
         frame.last_spp = meta.last_spp;
         Some(())
     }
-    pub fn invalidate(&self) {
-        self.manager.invalidate_all();
-        // Playa's epoch guard rejects stale insertions; removing existing rasters
-        // is a separate cache operation. The cache reaper frees them off-thread.
+}
+
+/// A discarded preview cache (content change, draft/final switch) hands its rasters to
+/// Playa's reaper thread. Dropping `GlobalFrameCache` itself would free them inline on the
+/// render worker, which stalls it (Playa measured ~400 ms for 4 GB of frames).
+impl Drop for PreviewCache {
+    fn drop(&mut self) {
         self.cache.clear_all();
     }
 }
@@ -838,8 +841,6 @@ mod tests {
         );
         cache.manager.increment_generation();
         assert!(cache.contains(10), "seek is not a content invalidation");
-        cache.invalidate();
-        assert!(cache.get_into(10, &mut out).is_none());
     }
     #[test]
     fn range_at_u32_max_and_preflight_reject_invalid_or_unbudgeted_work() {

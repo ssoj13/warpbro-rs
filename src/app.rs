@@ -166,7 +166,7 @@ pub(crate) struct App {
     /// Flight via cam-controls' inertial `SpaceFlight`, alive while RMB is held and
     /// while its momentum coasts after release.
     fly: Option<cam_controls::SpaceFlight>,
-    /// Last speed scale sent to the flight rig (Alt / Shift latch, 1.0 = normal).
+    /// Last speed scale sent to the flight rig (Shift / Alt latch, 1.0 = normal).
     fly_speed_scale: f32,
     /// Houdini orbit rig (LMB tumble, MMB pan, wheel zoom). The scene camera stays the
     /// source of truth: the rig is re-seeded from it every frame and only carries the coast.
@@ -265,7 +265,7 @@ struct Controls {
     inertial_look: bool,
     /// Horizon lock: roll angle (degrees) past which the lock flips to the next plane.
     flip_degrees: f32,
-    /// Thrust multipliers while Alt (fast) / Shift (slow) are held.
+    /// Thrust multipliers while Shift (fast) / Alt (slow) are held.
     fast_multiplier: f32,
     slow_multiplier: f32,
 }
@@ -290,8 +290,11 @@ impl Controls {
         cam_controls::InertiaSettings {
             // Relative mouse look (pointer motion), not cursor-deflection steering.
             mouse_steer: cam_controls::MouseSteer::Relative,
-            look_sensitivity: 0.001 * self.look_sensitivity,
-            thrust_sensitivity: 6.0 * radius * self.fly_speed,
+            // Base rates: look 1/3 mrad per pixel, roll 2 rad/s², thrust 2 radii/s² (cruise
+            // 2 radii x translate decay per second).
+            look_sensitivity: 0.001 / 3.0 * self.look_sensitivity,
+            roll_sensitivity: 2.0,
+            thrust_sensitivity: 2.0 * radius * self.fly_speed,
             linear_damping: 1.0 / self.translate_decay.max(0.02),
             angular_damping: 1.0 / self.rotate_decay.max(0.02),
             inertial_look: self.inertial_look,
@@ -608,8 +611,8 @@ impl App {
                             t.row("Rotate decay, s").default(0.25).slider(&mut self.controls.rotate_decay, 0.02..=5.0);
                             t.row("Inertial look").default(true).checkbox(&mut self.controls.inertial_look);
                             t.row("Horizon flip, °").default(60.0).slider(&mut self.controls.flip_degrees, 20.0..=85.0);
-                            t.row("Alt fast ×").default(4.0).slider(&mut self.controls.fast_multiplier, 1.0..=20.0);
-                            t.row("Shift slow ×").default(0.1).slider(&mut self.controls.slow_multiplier, 0.01..=1.0);
+                            t.row("Shift fast ×").default(4.0).slider(&mut self.controls.fast_multiplier, 1.0..=20.0);
+                            t.row("Alt slow ×").default(0.1).slider(&mut self.controls.slow_multiplier, 0.01..=1.0);
                         });
                         egui_prefs2::section_header(ui, "Attribute controls");
                         let defaults = crate::ui_style::AttributeMetrics::default();
@@ -1772,8 +1775,8 @@ impl App {
         });
     }
 
-    /// Unreal-style flight: hold RMB in the viewport, mouse looks, WASD moves, R/C up/down, Q/E rolls,
-    /// Shift boosts, the wheel scales the speed. Integrated by cam-controls `SpaceFlight` (thrust,
+    /// Unreal-style flight: hold RMB in the viewport, mouse looks, WASD moves, R/Space up, C down,
+    /// Q/E roll, Shift fast, Alt slow, the wheel scales the speed. Integrated by cam-controls `SpaceFlight` (thrust,
     /// inertia, damping); on release the orbit pivot is placed in front of the camera at the
     /// current orbit distance, so orbiting continues from where you flew.
     fn fly_camera(&mut self, ui: &egui::Ui, resp: &egui::Response) {
@@ -1835,11 +1838,13 @@ impl App {
                     (self.controls.fly_speed * (scroll * 0.003).exp()).clamp(0.02, 50.0);
                 self.status = format!("Flight speed ×{:.2}", self.controls.fly_speed);
             }
-            // WASD / R-C thrust, Q/E roll, Alt / Shift speed, mouse look: the shared bindings.
+            // WASD / R-Space-C thrust, Q/E roll, Shift / Alt speed, mouse look: the shared bindings.
             let intents = cam_controls_egui::gather_fly_intents(
                 ui,
                 &fly.inertia,
                 &mut self.fly_speed_scale,
+                true,
+                // Space is free in flight: Play only takes it while RMB is up.
                 true,
                 resp.rect,
                 resp.rect.center(),
@@ -2013,9 +2018,9 @@ impl App {
         }
         let cam = &self.scene.camera;
         self.status = if cam.free_flight {
-            "Flight: free 6-DoF · Q/E roll · R/C up/down · Alt fast · Shift slow"
+            "Flight: free 6-DoF · Q/E roll · R/Space up, C down · Shift fast · Alt slow"
         } else {
-            "Flight: horizon lock · Q/E tilt, hold to flip the plane · R/C up/down · Alt fast · Shift slow"
+            "Flight: horizon lock · Q/E tilt, hold to flip the plane · R/Space up, C down · Shift fast · Alt slow"
         }
         .into();
     }
@@ -3999,10 +4004,27 @@ mod tests {
             app.fly.as_ref().unwrap().eye.y < raised.y,
             "C must strafe downward"
         );
+        let lowered = app.fly.as_ref().unwrap().eye;
+        let playing = app.world_ui.playing;
         frame(
             &mut app,
             vec![
                 flight_key(egui::Key::C, false),
+                flight_key(egui::Key::Space, true),
+            ],
+        );
+        for _ in 0..90 {
+            frame(&mut app, vec![]);
+        }
+        assert!(
+            app.fly.as_ref().unwrap().eye.y > lowered.y,
+            "Space must strafe upward like R"
+        );
+        assert_eq!(app.world_ui.playing, playing, "Space in flight is not Play");
+        frame(
+            &mut app,
+            vec![
+                flight_key(egui::Key::Space, false),
                 flight_key(egui::Key::Q, true),
             ],
         );
