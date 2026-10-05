@@ -2,6 +2,28 @@
 
 ## Unreleased — 2026-10-04
 
+### Sphere tracing: out of steps is a miss (BUG1)
+
+- A path-traced camera or bounce ray that runs out of march steps is a miss, as in Mandelbulber and
+  Fragmentarium. It used to take its closest sample within a pixel (Keinert et al. 2014, Enhanced
+  Sphere Tracing 3.2, a real-time technique): on BUG1 frame 27, 37% of the primary hits were such
+  samples - 52% of them rays passing the surface, 48% lying 0.3 scene units before the real hit,
+  normals ~48 degrees off. WarpBro's opt-in `ofx-direct` kernels keep Keinert's rule at his half
+  pixel. The OFX plug-in builds from its own copy (`ofx-fractal/kernels/source`), not changed here.
+- The longest step is a fixed share of the ray's interval (`STEP_CAP_STEPS = 256`, the former
+  default exactly) instead of `2 span / max_steps`, so the step budget no longer shortens steps.
+- Every preset's step budget is `DEFAULT_MAX_STEPS = 4096` (was 256, KIFS 128). Only rays that
+  need the steps pay for them: on frame 27 primary rays alone take 47.4 ms against 37.1 ms at 256,
+  the full render with 6 bounces 958 ms against 978 ms (no phantom paths to shade). The March steps
+  slider goes to 16384. The status bar reports the share of samples out of steps (`Target::limited`,
+  per-tile `tally` kernel); the per-pixel `moment` buffer became `stats` [luma², out-of-steps].
+- The interior exit probe of unsigned fields (`exit_distance`) uses `EXIT_PROBES = 256` instead of
+  the step budget, so the larger budget does not make refraction exits 16x more expensive.
+- The out-of-steps share is reduced on the GPU to 4096 f64 partial sums (64 KiB readback per batch
+  at any resolution).
+- Saved scenes keep their budget and now show misses where they showed phantoms (the status bar
+  warns). The local user templates in `~/.warpbro/templates` were raised from 256 to 4096 by hand.
+
 ### Rendering in ACEScg
 
 - The tracer works in linear ACEScg (AP1, ACES white) instead of linear Rec.709. Authored colours

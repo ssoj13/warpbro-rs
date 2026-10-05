@@ -240,6 +240,26 @@ fn pending_thumbnail_entry(entries: &[Entry], scene: &Scene) -> Option<usize> {
     })
 }
 
+/// The status warning for samples whose march ran out of steps: those rays are misses, so a
+/// nonzero share means holes the step budget (Render > March steps) is too small to close.
+fn march_limit_label(ui: &mut egui::Ui, limited: f32) {
+    if limited > 0.0 {
+        let percent = 100.0 * limited;
+        let text = if percent < 0.01 {
+            "<0.01% out of steps".to_owned()
+        } else {
+            format!("{percent:.2}% out of steps")
+        };
+        ui.label(
+            RichText::new(text)
+                .color(Color32::from_rgb(230, 180, 60)),
+        )
+        .on_hover_text(
+            "Rays that ran out of march steps count as misses. Raise Render > March steps.",
+        );
+    }
+}
+
 fn to_image(t: &Frame) -> ColorImage {
     ColorImage::new(
         [t.width, t.height],
@@ -2417,7 +2437,8 @@ impl App {
     fn resizable_status_bar(&mut self, ui: &mut egui::Ui) {
         // Fixed section identity/count: transient frame and OIDN states never
         // move widths onto another indicator. Rendering uses only mailbox data.
-        const WIDTHS: [f32; 9] = [200.0, 95.0, 95.0, 220.0, 130.0, 100.0, 170.0, 80.0, 0.0];
+        const WIDTHS: [f32; 10] =
+            [200.0, 95.0, 95.0, 220.0, 130.0, 100.0, 170.0, 80.0, 150.0, 0.0];
         let frame = self.frame.as_deref();
         let preview = self.showing_preview;
         let target_spp = self.target_spp;
@@ -2483,6 +2504,11 @@ impl App {
                     7 => {
                         ui.label(format!("UI {:.0} fps", 1000.0 / self.frame_ms.max(0.1)));
                     }
+                    8 => {
+                        if let Some(frame) = frame {
+                            march_limit_label(ui, frame.limited);
+                        }
+                    }
                     _ => {
                         ui.label(RichText::new(&self.status).weak())
                             .on_hover_text(&self.status);
@@ -2533,6 +2559,12 @@ impl App {
             }
             ui.separator();
             ui.label(format!("UI {:.0} fps", 1000.0 / self.frame_ms.max(0.1)));
+            if let Some(t) = self.current()
+                && t.limited > 0.0
+            {
+                ui.separator();
+                march_limit_label(ui, t.limited);
+            }
             if !self.status.is_empty() {
                 ui.separator();
                 ui.label(RichText::new(&self.status).weak())
@@ -3355,6 +3387,7 @@ mod tests {
                 converged: false,
                 last_ms: 0.0,
                 last_spp: 1,
+                limited: 0.0,
                 sdr_bytes: Arc::new(vec![]),
                 hdr_bytes: Arc::new(vec![]),
             })

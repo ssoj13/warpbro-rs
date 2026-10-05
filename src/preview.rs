@@ -387,6 +387,7 @@ struct FrameMetadata {
     converged: bool,
     last_ms: f32,
     last_spp: u32,
+    limited: f32,
     denoised_samples: u32,
     denoise_ms: f32,
     denoise_error: Option<String>,
@@ -488,6 +489,7 @@ impl PreviewCache {
             converged: frame.converged,
             last_ms: frame.last_ms,
             last_spp: frame.last_spp,
+            limited: frame.limited,
             denoised_samples: frame.denoised_samples,
             denoise_ms: frame.denoise_ms,
             denoise_error: frame.denoise_error.clone(),
@@ -592,6 +594,7 @@ impl PreviewCache {
         frame.converged = meta.converged;
         frame.last_ms = meta.last_ms;
         frame.last_spp = meta.last_spp;
+        frame.limited = meta.limited;
         Some(())
     }
 }
@@ -643,6 +646,7 @@ mod tests {
             converged: false,
             last_ms: 3.0,
             last_spp: 2,
+            limited: 0.0,
             sdr_bytes: Arc::new(vec![]),
             hdr_bytes: Arc::new(vec![]),
         }

@@ -14,6 +14,9 @@ use crate::scene::MaterialModel;
 use crate::scene::Scene;
 
 const BLOCK: u32 = 128;
+/// Threads of the `tally` reduction (a multiple of `BLOCK`): the out-of-steps readback is this
+/// many `[f64; 2]` partial sums, 64 KiB at any resolution.
+const TALLY_THREADS: usize = 4096;
 
 /// Slots that only the tonemap reads: changing them re-tonemaps without restarting the samples.
 const TONEMAP_ONLY: [usize; 3] = [P_EXPOSURE, P_SATURATION, P_TONEMAP];
@@ -426,7 +429,14 @@ pub struct Target {
     albedo: DeviceBuffer<[f32; 4]>,
     normal: DeviceBuffer<[f32; 4]>,
     /// Per pixel: sum of squared sample luminance (adaptive sampling variance).
-    moment: DeviceBuffer<f32>,
+    /// Per pixel: [sum of squared sample luminance, samples whose march ran out of steps].
+    stats: DeviceBuffer<[f32; 2]>,
+    /// [out-of-steps samples, samples] partial sums (the `tally` kernel) and its host copy.
+    tally: DeviceBuffer<[f64; 2]>,
+    tally_host: Vec<[f64; 2]>,
+    /// Share of the accumulated samples whose camera or bounce march ran out of steps before
+    /// converging; those rays count as misses, so a visible share means "raise max steps".
+    pub limited: f32,
     /// Per 8x4 tile: 1 = keep sampling, 0 = converged (written by the `adapt` kernel).
     active: DeviceBuffer<u32>,
     active_host: Vec<u32>,
@@ -479,6 +489,24 @@ impl Gpu {
         target.converged = false;
     }
 
+    /// The share of accumulated samples that ran out of march steps ([`Target::limited`]).
+    fn tally(&self, target: &mut Target) {
+        let cfg = LaunchConfig1D::new(TALLY_THREADS as u32 / BLOCK, BLOCK, 0);
+        let prepared = self.module.prepare_tally(cfg).expect("prepare tally");
+        self.module
+            .tally(&self.stream, &prepared, &target.accum, &target.stats, &mut target.tally)
+            .expect("tally");
+        target
+            .tally
+            .copy_to_host(&self.stream, &mut target.tally_host)
+            .expect("tally readback");
+        let (limited, samples) = target
+            .tally_host
+            .iter()
+            .fold((0.0f64, 0.0f64), |(l, s), t| (l + t[0], s + t[1]));
+        target.limited = if samples > 0.0 { (limited / samples) as f32 } else { 0.0 };
+    }
+
     /// Adaptive sampling after a traced batch: the `adapt` kernel decides per tile, the host reads
     /// the flags back for the scheduler (`converged`) and the status line (`active_tiles`).
     fn adapt(&self, target: &mut Target, scene: &Scene) {
@@ -496,7 +524,7 @@ impl Gpu {
         let cfg = LaunchConfig1D::new(tiles.div_ceil(BLOCK), BLOCK, 0);
         let prepared = self.module.prepare_adapt(cfg).expect("prepare adapt");
         self.module
-            .adapt(&self.stream, &prepared, &target.accum, &target.moment, &mut target.active)
+            .adapt(&self.stream, &prepared, &target.accum, &target.stats, &mut target.active)
             .expect("adapt");
         target
             .active
@@ -566,7 +594,10 @@ impl Gpu {
             accum: DeviceBuffer::zeroed(&self.stream, padded).expect("accumulator"),
             albedo: DeviceBuffer::zeroed(&self.stream, padded).expect("albedo guides"),
             normal: DeviceBuffer::zeroed(&self.stream, padded).expect("normal guides"),
-            moment: DeviceBuffer::zeroed(&self.stream, padded).expect("sample moments"),
+            stats: DeviceBuffer::zeroed(&self.stream, padded).expect("sample statistics"),
+            tally: DeviceBuffer::zeroed(&self.stream, TALLY_THREADS).expect("tally sums"),
+            tally_host: vec![[0.0; 2]; TALLY_THREADS],
+            limited: 0.0,
             active: {
                 let mut active = DeviceBuffer::zeroed(&self.stream, padded / 32).expect("tile flags");
                 active.copy_from_host(&self.stream, &vec![1u32; padded / 32]).expect("activate tiles");
@@ -674,9 +705,10 @@ impl Gpu {
             .zero_async(&self.stream)
             .expect("clear normal guides");
         target
-            .moment
+            .stats
             .zero_async(&self.stream)
-            .expect("clear sample moments");
+            .expect("clear sample statistics");
+        target.limited = 0.0;
         self.activate_all(target);
         target.denoise.reset();
         target.denoise_selected = false;
@@ -870,7 +902,7 @@ impl Gpu {
                         &mut target.albedo,
                         &mut target.normal,
                         &target.active,
-                        &mut target.moment,
+                        &mut target.stats,
                     )
                     .expect(stringify!($run));
                 }};
@@ -916,6 +948,7 @@ impl Gpu {
                 }
             }
             target.samples += spp;
+            self.tally(target);
             self.adapt(target, scene);
         }
         // Converging early ends the render: run the final-pass work (OIDN at completion) now.
@@ -2079,8 +2112,9 @@ mod tests {
     }
 
 
-    #[test]
-    fn cuda_curved_hybrid_normals_match_converged_field_gradient() {
+    /// BUG1 frame 27 (copper turbine: Hybrid Mandelbulb + octahedral KIFS), self-contained:
+    /// grazing rays that need hundreds of march steps, primary rays only.
+    fn bug1_frame27() -> Scene {
         let mut scene = Scene::preset(crate::params::FAMILY_HYBRID);
         if let crate::scene::Formula::Hybrid(h) = &mut scene.formula {
             h.bailout = 2.0;
@@ -2104,7 +2138,6 @@ mod tests {
         scene.camera.aperture = 0.0;
         scene.camera_reference = Some(2.0);
         scene.render.iterations = 12;
-        scene.render.max_steps = 256;
         scene.render.step_factor = 0.85;
         scene.render.hit_epsilon = 0.001;
         scene.render.max_bounces = 0;
@@ -2112,24 +2145,74 @@ mod tests {
         scene.render.denoise.enabled = false;
         scene.environment.enabled = false;
         scene.colour.on = false;
-
-        // Independent f64 field gradients, converged by halving the central
-        // difference step from eps/2 to eps/64. These neighborhoods keep the
-        // same escape iteration count; the old tetrahedral stencil errs 16..104
-        // degrees here despite otherwise correct, nonzero DE gradients.
-        let references = [
-            (173, 3, [0.12245205, 0.74259165, 0.6584551]),
-            (166, 88, [-0.4087267, -0.6319115, 0.6585061]),
-            (59, 162, [0.13481379, -0.16930011, 0.97630054]),
-            (113, 198, [-0.9120146, 0.047216956, -0.40743083]),
-            (185, 245, [-0.47552705, 0.6795356, -0.5586639]),
-            (92, 290, [0.09999163, 0.77675647, -0.6218127]),
-            (109, 312, [0.71204185, 0.23208085, -0.6626725]),
-            (111, 338, [-0.119305834, -0.71527463, -0.6885843]),
-        ];
-        let mut gpu = Gpu::new().unwrap();
         scene.world_render = true;
         scene.objects = vec![scene.clone()];
+        scene
+    }
+
+    /// Primary albedo and normal guides of one sample per pixel at `max_steps`, with the share
+    /// of samples that ran out of steps.
+    fn frame27_guides(gpu: &mut Gpu, max_steps: u32) -> (Vec<[f32; 4]>, Vec<[f32; 4]>, f32) {
+        let mut scene = bug1_frame27();
+        scene.render.max_steps = max_steps;
+        scene.objects[0].render.max_steps = max_steps;
+        let mut target = gpu.target(384, 384);
+        gpu.step(&mut target, &scene, 1, 19, None, false);
+        (
+            gpu.guide_sums(&target, &target.albedo),
+            gpu.guide_sums(&target, &target.normal),
+            target.limited,
+        )
+    }
+
+    /// A march that runs out of steps is a miss, not the closest sample (BUG1): at the default
+    /// budget no ray of frame 27 runs out and the hits equal a 4x budget's bit for bit; at 256
+    /// steps the shortfall is reported and every remaining hit is a converged one.
+    #[test]
+    fn cuda_march_out_of_steps_is_a_reported_miss_not_a_phantom_hit() {
+        let mut gpu = Gpu::new().unwrap();
+        let budget = crate::scene::DEFAULT_MAX_STEPS;
+        let (albedo, normal, limited) = frame27_guides(&mut gpu, budget);
+        let (ref_albedo, ref_normal, _) = frame27_guides(&mut gpu, 4 * budget);
+        assert_eq!(limited, 0.0, "the default budget converges every ray");
+        assert!(albedo == ref_albedo && normal == ref_normal);
+        let hits = normal.iter().filter(|n| n[..3] != [0.0; 3]).count();
+        assert!(hits > 60_000, "{hits} primary hits");
+
+        let (short_albedo, short_normal, short) = frame27_guides(&mut gpu, 256);
+        assert!(short > 0.1, "frame 27 at 256 steps leaves many rays out of steps: {short}");
+        let mut kept = 0;
+        for k in 0..normal.len() {
+            if short_normal[k][..3] != [0.0; 3] {
+                assert_eq!(
+                    (short_albedo[k], short_normal[k]),
+                    (ref_albedo[k], ref_normal[k]),
+                    "pixel {k}: a hit at 256 steps must be the converged hit"
+                );
+                kept += 1;
+            }
+        }
+        assert!(kept > 0 && kept < hits);
+    }
+
+    #[test]
+    fn cuda_curved_hybrid_normals_match_converged_field_gradient() {
+        let scene = bug1_frame27();
+        // Independent f64 field gradients, converged by halving the central difference step
+        // from eps/2 to eps/64, at converged hits (4096 march steps) whose neighborhoods keep
+        // the same escape iteration count. The old tetrahedral stencil errs 15..40 degrees here.
+        // (The former points were closest samples of rays out of steps, not surface points.)
+        let references = [
+            (316, 125, [-0.08490141, 0.18438966, -0.97917935]),
+            (140, 189, [0.83308777, 0.40453982, 0.37724303]),
+            (215, 198, [0.21227319, 0.17521111, 0.96137462]),
+            (155, 208, [0.67414312, -0.60654477, -0.42146708]),
+            (259, 232, [0.81196077, 0.44119635, 0.38218516]),
+            (280, 246, [0.85079439, -0.52109719, -0.067872074]),
+            (366, 263, [0.028329306, -0.4778096, 0.87800651]),
+            (180, 268, [0.75667956, -0.027518156, -0.65320655]),
+        ];
+        let mut gpu = Gpu::new().unwrap();
         let mut target = gpu.target(384, 384);
         gpu.step(&mut target, &scene, 1, 19, None, false);
         let normals = gpu.guide_sums(&target, &target.normal);

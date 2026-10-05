@@ -1293,6 +1293,7 @@ mod tests {
             converged: false,
             last_ms: 1.,
             last_spp: 4,
+            limited: 0.0,
             sdr_bytes: Arc::new(Vec::new()),
             hdr_bytes: Arc::new(Vec::new()),
         }

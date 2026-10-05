@@ -133,6 +133,8 @@ pub struct Frame {
     pub converged: bool,
     pub last_ms: f32,
     pub last_spp: u32,
+    /// Share of the accumulated samples whose march ran out of steps ([`crate::render::Target::limited`]).
+    pub limited: f32,
     pub sdr_bytes: Arc<Vec<u8>>,
     /// Extended-sRGB encoded RGBA32F, prepared with the requested output reference white.
     pub hdr_bytes: Arc<Vec<u8>>,
@@ -194,6 +196,7 @@ impl Frame {
             converged: target.converged,
             last_ms: target.last_ms,
             last_spp: target.last_spp,
+            limited: target.limited,
             sdr_bytes,
             hdr_bytes,
         }
@@ -836,6 +839,7 @@ fn empty_presentation() -> Frame {
         converged: false,
         last_ms: 0.0,
         last_spp: 0,
+        limited: 0.0,
         sdr_bytes: Arc::new(Vec::new()),
         hdr_bytes: Arc::new(Vec::new()),
     }
@@ -1902,6 +1906,7 @@ mod tests {
             converged: false,
             last_ms: 1.0,
             last_spp: 1,
+            limited: 0.0,
             sdr_bytes: Arc::new(vec![0; 4]),
             hdr_bytes: Arc::new(Vec::new()),
         })

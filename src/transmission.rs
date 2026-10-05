@@ -4,7 +4,7 @@
 //! immediately hits the entrance again; an absolute-distance step also cannot advance.
 //! Probe a bounded interval instead, then refine the first inside-to-outside bracket.
 //! Unsigned fields use the entrance pixel tolerance as their resolved solid boundary.
-//! Probe spacing is limited by the configured march budget: sub-probe cavities are not
+//! Probe spacing is the caller's probe count over the interval: sub-probe cavities are not
 //! guaranteed to be found. This models one connected medium at a time, not nested dielectrics.
 
 pub const AIR: u32 = u32::MAX;

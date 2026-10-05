@@ -1176,7 +1176,7 @@ fn attribute_slider(path: &str) -> Option<Slider> {
         "/render/hit_epsilon" => log(0.00001, 0.01),
         "/render/iterations" => lin(1.0, 256.0),
         "/render/max_bounces" => lin(0.0, 16.0),
-        "/render/max_steps" => log(16.0, 2048.0),
+        "/render/max_steps" => log(16.0, 16384.0),
         "/render/saturation" => lin(0.0, 2.0),
         "/render/step_factor" => lin(0.1, 1.0),
         "/start" | "/end" => lin(0.0, 500.0),

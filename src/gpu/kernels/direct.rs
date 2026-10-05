@@ -120,10 +120,16 @@ pub(super) fn trace_direct<const F: u32>(
     lut: &[[f32; 4]],
     origin: V3,
     dir: V3,
-) -> (V3, bool, V3, V3) {
-    let m = march::<F>(ctx, origin, dir, RAY_PRIMARY, 0.0, global(P_FOOTPRINT));
+) -> PathSample {
+    let m = march::<F>(ctx, origin, dir, RAY_DIRECT, 0.0, global(P_FOOTPRINT));
     if !m.hit {
-        return (sky_radiance(ctx, dir), false, [0.0; 3], [0.0; 3]);
+        return PathSample {
+            radiance: sky_radiance(ctx, dir),
+            hit: false,
+            albedo: [0.0; 3],
+            normal: [0.0; 3],
+            limited: m.limited,
+        };
     }
     let center = if family_signed::<F>(ctx) {
         m.point
@@ -195,5 +201,11 @@ pub(super) fn trace_direct<const F: u32>(
         had(pv3(ctx, P_LIGHT_COLOR), sun),
         global(P_LIGHT_INTENSITY) * visibility,
     );
-    (add(add(key, reflected), emitted), true, color, n)
+    PathSample {
+        radiance: add(add(key, reflected), emitted),
+        hit: true,
+        albedo: color,
+        normal: n,
+        limited: m.limited,
+    }
 }

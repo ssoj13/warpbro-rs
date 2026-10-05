@@ -46,7 +46,7 @@ Read this first after a context reset. Chat in Russian; code, comments, files in
    4) tests: furnace >= 0.99 rough, exactly 1 smooth; update GOLDEN_MATERIALX with explanation;
    5) bump WarpBro lock, render a frosted-glass scene before/after.
    Operator was asked: start with this or BUG1 march items first.
-2. **BUG1 open items** (BUG1.md "Что ещё требует проверки"): march `step_cap = 2*(max_distance - t_enter)/max_steps` couples step length with attempts; cone-accepted hits (P_SAMPLE_CONE) when steps run out (37% of hits in turbine frame; measured difference, not proven bug); Hybrid DE discontinuities at fold/escape transitions; 6-probe normals cost (no isolated benchmark yet). Measure first.
+2. **BUG1 open items**: march step cap and out-of-steps phantoms are fixed (BUG1.md "Марш: фантомные попадания"). Open: Hybrid DE discontinuities and the 6-probe normal p99 11 deg (re-measure on converged hits), 6-probe normal cost, porting the march fix to ofx-fractal's kernel copy.
 3. **Render/Encode panel**: dedup the three format tabs via a public inline panel in egui-encode-dialog (SSOT); unified colour output (EXR: ACEScg / AP0 / linear 709 / 2020 + display-referred; PNG; MP4 SDR). Approved: linear primaries + display-referred EXR; HDR10 MP4 is a later separate stage.
 4. Playa todo.md: multi-layer AE merges base values (`attrs.get`) but edits key at the playhead -> evaluate each layer at its key_frame_for time before merging; stale `tests/ofx_builtin.rs` (expects 8 built-ins, 29 linked, pre-existing failure) -> derive from registered list.
 5. Flaky HEVC export tests under the full parallel suite (Vulkan Video Posix(38)); pass alone.

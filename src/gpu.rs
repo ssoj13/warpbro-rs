@@ -799,6 +799,17 @@ pub mod kernels {
     const RAY_PRIMARY: u32 = 0;
     const RAY_BOUNCE: u32 = 1;
     const RAY_VISIBILITY: u32 = 2;
+    /// The OFX Direct preview's camera ray: a primary ray with Keinert's out-of-steps rule.
+    const RAY_DIRECT: u32 = 3;
+    /// The longest sphere-tracing step is `2 (t_exit - t_enter) / STEP_CAP_STEPS`, a fixed share
+    /// of the ray's interval. It used to divide by `max_steps`, so raising the step budget also
+    /// shortened every step (BUG1: the two could not be compared apart); 256 keeps the former
+    /// default exactly. Mandelbulber's step limits do not depend on its step budget either.
+    const STEP_CAP_STEPS: f32 = 256.0;
+    /// Probes of an unsigned field's interior exit march (`exit_distance`): a sampling
+    /// resolution, not a step budget. It used to be the march budget, so raising that to 4096
+    /// made every refraction exit up to 16x more estimates; 256 keeps the former default.
+    const EXIT_PROBES: u32 = 256;
     const HIT_REFINEMENTS: u32 = 16;
     const FOOTPRINT_RELATIVE_FLOOR: f32 = 0.000_001_907_348_6;
 
@@ -810,6 +821,19 @@ pub mod kernels {
         eps: f32,
         // Each evaluated object owns one packed material, so this is also its material index.
         object: usize,
+        /// The march ran out of steps inside the ray's interval: the result is not converged.
+        limited: bool,
+    }
+
+    /// One camera sample: its radiance, whether the camera ray hit, the primary guides
+    /// (albedo, normal) and whether a camera or bounce march ran out of steps.
+    #[derive(Clone, Copy)]
+    pub struct PathSample {
+        radiance: V3,
+        hit: bool,
+        albedo: V3,
+        normal: V3,
+        limited: bool,
     }
 
     #[inline(always)]
@@ -857,14 +881,16 @@ pub mod kernels {
             trap: TRAP_START,
             eps: 0.0,
             object: 0,
+            limited: false,
         };
-        let max_steps = if kind == RAY_PRIMARY {
+        let primary = kind == RAY_PRIMARY || kind == RAY_DIRECT;
+        let max_steps = if primary {
             pr(ctx, P_MAX_STEPS)
         } else {
             pr(ctx, P_SECONDARY_STEPS)
         } as u32;
         // Secondary rays resolve a coarser surface (their footprint times P_SECONDARY_EPS).
-        let eps_scale = if kind == RAY_PRIMARY {
+        let eps_scale = if primary {
             1.0
         } else {
             pr(ctx, P_SECONDARY_EPS)
@@ -898,7 +924,7 @@ pub mod kernels {
         } else {
             pr(ctx, P_COLOR_MODE) as u32
         };
-        let step_cap = 2.0 * (max_distance - t_enter) / max_steps as f32;
+        let step_cap = 2.0 * (max_distance - t_enter) / STEP_CAP_STEPS;
         let step_factor = pr(ctx, P_STEP_FACTOR);
         let mut t = t_enter;
         let mut outside = miss;
@@ -913,7 +939,7 @@ pub mod kernels {
             let point = add(origin, mul(dir, t));
             let (d, trap, object) = march_sample::<F>(ctx, point, trap_mode);
             let eps = footprint(base, slope, t, point);
-            let hit = if kind == RAY_PRIMARY {
+            let hit = if primary {
                 d <= eps
             } else {
                 d < eps
@@ -926,6 +952,7 @@ pub mod kernels {
                         trap,
                         eps,
                         object,
+                        limited: false,
                     };
                 }
                 let mut lo = outside_t;
@@ -947,6 +974,7 @@ pub mod kernels {
                             trap: rt,
                             eps: footprint(base, slope, mid, inner),
                             object,
+                            limited: false,
                         };
                     } else {
                         hi = mid;
@@ -963,6 +991,7 @@ pub mod kernels {
                     trap,
                     eps,
                     object,
+                    limited: false,
                 };
                 closest_ratio = ratio;
             }
@@ -972,6 +1001,7 @@ pub mod kernels {
                 trap,
                 eps,
                 object,
+                limited: false,
             };
             outside_t = t;
             t += (step_factor * d).max(eps * 0.5).min(step_cap);
@@ -980,10 +1010,25 @@ pub mod kernels {
         if t > max_distance || !closest.hit {
             return miss;
         }
-        if kind == RAY_VISIBILITY || closest_ratio <= pr(ctx, P_SAMPLE_CONE) {
-            return closest;
+        // Out of steps inside the interval: the march did not converge. A visibility ray counts
+        // as blocked (conservative). The Direct preview keeps Keinert et al. 2014 (Enhanced
+        // Sphere Tracing, 3.2): one ray per pixel, so the closest sample within half a pixel
+        // (`P_SAMPLE_CONE` footprints is a pixel; at least one footprint when the footprint
+        // exceeds a pixel) stands in for the surface, shaded at pixel scale. A path-traced ray misses, as in Mandelbulber and Fragmentarium: measured on
+        // BUG1 frame 27, 52% of such closest samples were rays that pass the surface and 48%
+        // lay 0.3 scene units before the real hit - phantom shells with normals ~48 deg off.
+        if kind == RAY_VISIBILITY
+            || (kind == RAY_DIRECT && closest_ratio <= 0.5 * pr(ctx, P_SAMPLE_CONE))
+        {
+            return Hit {
+                limited: true,
+                ..closest
+            };
         }
-        miss
+        Hit {
+            limited: true,
+            ..miss
+        }
     }
 
     /// Trace the exit of the occupied dielectric using its own field, not the union.
@@ -1018,7 +1063,7 @@ pub mod kernels {
             },
             extent,
             eps,
-            pr(ctx, P_SECONDARY_STEPS) as u32,
+            EXIT_PROBES,
             pr(ctx, P_STEP_FACTOR),
             family_signed::<F>(ctx),
         );
@@ -1029,6 +1074,7 @@ pub mod kernels {
                 trap: TRAP_START,
                 eps,
                 object: ctx.object,
+                limited: false,
             };
         };
         let point = add(origin, mul(dir, t));
@@ -1044,6 +1090,7 @@ pub mod kernels {
             trap,
             eps,
             object: ctx.object,
+            limited: false,
         }
     }
 
@@ -1638,7 +1685,7 @@ pub mod kernels {
         origin: V3,
         dir0: V3,
         r: &mut Rng,
-    ) -> (V3, bool, V3, V3) {
+    ) -> PathSample {
         let cam = pv3(ctx, P_CAM_ORIGIN);
         let slope = pr(ctx, P_FOOTPRINT);
         let max_bounces = pr(ctx, P_MAX_BOUNCES) as u32;
@@ -1650,6 +1697,7 @@ pub mod kernels {
         let mut mis_bsdf_pdf = 0.0f32;
         let mut mis_env = false;
         let mut primary_hit = false;
+        let mut limited = false;
         let mut primary_albedo = [0.0; 3];
         let mut primary_normal = [0.0; 3];
         let mut bounce = 0u32;
@@ -1674,6 +1722,7 @@ pub mod kernels {
             } else {
                 march::<F>(ctx, ro, rd, kind, base, slope)
             };
+            limited |= m.limited;
             if inside && !m.hit {
                 break;
             }
@@ -1876,7 +1925,13 @@ pub mod kernels {
             rd = wi;
             bounce += 1;
         }
-        (radiance, primary_hit, primary_albedo, primary_normal)
+        PathSample {
+            radiance,
+            hit: primary_hit,
+            albedo: primary_albedo,
+            normal: primary_normal,
+            limited,
+        }
     }
 
     /// Linear thread index -> pixel, in 8x4 tiles so a warp traces a compact patch.
@@ -1900,7 +1955,7 @@ pub mod kernels {
         albedo: &mut [f32; 4],
         normal: &mut [f32; 4],
         active: &[u32],
-        moment: &mut f32,
+        stats: &mut [f32; 2],
     ) {
         // Adaptive sampling: a converged 8x4 tile (one warp) is skipped as a whole.
         if active.get((i / 32) as usize).is_some_and(|&a| a == 0) {
@@ -1947,6 +2002,8 @@ pub mod kernels {
         let mut primary_hits = 0.0;
         // Sum of squared sample luminance: with `acc` it gives the pixel's sample variance.
         let mut luma2 = 0.0f32;
+        // Samples whose camera or bounce march ran out of steps (reported, see `march`).
+        let mut limited = 0.0f32;
         let mut s = 0u32;
         while s < spp {
             let mut r = Rng {
@@ -1988,13 +2045,23 @@ pub mod kernels {
                 dir = normalize(sub(focus, ro));
             }
             #[cfg(feature = "ofx-direct")]
-            let (l, hit, a, n) = if DIRECT {
+            let sample = if DIRECT {
                 direct::trace_direct::<F>(ctx, lut, ro, dir)
             } else {
                 trace_path::<FULL, F, MIXED>(ctx, lut, ro, dir, &mut r)
             };
             #[cfg(not(feature = "ofx-direct"))]
-            let (l, hit, a, n) = trace_path::<FULL, F, MIXED>(ctx, lut, ro, dir, &mut r);
+            let sample = trace_path::<FULL, F, MIXED>(ctx, lut, ro, dir, &mut r);
+            let PathSample {
+                radiance: l,
+                hit,
+                albedo: a,
+                normal: n,
+                ..
+            } = sample;
+            if sample.limited {
+                limited += 1.0;
+            }
             primary_hits += if hit {
                 1.0
             } else {
@@ -2019,7 +2086,7 @@ pub mod kernels {
             s += 1;
         }
         *acc = [sum[0], sum[1], sum[2], acc[3] + spp as f32];
-        *moment += luma2;
+        *stats = [stats[0] + luma2, stats[1] + limited];
         *albedo = [
             albedo_sum[0],
             albedo_sum[1],
@@ -2049,15 +2116,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<false, FAMILY_BULB, false, false>(
                 Context {
@@ -2072,7 +2139,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -2088,15 +2155,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<false, FAMILY_BOX, false, false>(
                 Context {
@@ -2111,7 +2178,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -2127,15 +2194,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<false, FAMILY_QUAT, false, false>(
                 Context {
@@ -2150,7 +2217,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -2166,15 +2233,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<false, FAMILY_KIFS, false, false>(
                 Context {
@@ -2189,7 +2256,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -2205,15 +2272,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<false, FAMILY_KLEINIAN, false, false>(
                 Context {
@@ -2228,7 +2295,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -2244,15 +2311,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<false, FAMILY_PSEUDO_KLEINIAN, false, false>(
                 Context {
@@ -2267,7 +2334,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -2283,15 +2350,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<false, FAMILY_APOLLONIAN, false, false>(
                 Context {
@@ -2306,7 +2373,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -2322,15 +2389,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<false, FAMILY_HYBRID, false, false>(
                 Context {
@@ -2345,7 +2412,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -2361,15 +2428,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<true, FAMILY_BULB, false, false>(
                 Context {
@@ -2384,7 +2451,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -2400,15 +2467,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<true, FAMILY_BOX, false, false>(
                 Context {
@@ -2423,7 +2490,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -2439,15 +2506,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<true, FAMILY_QUAT, false, false>(
                 Context {
@@ -2462,7 +2529,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -2478,15 +2545,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<true, FAMILY_KIFS, false, false>(
                 Context {
@@ -2501,7 +2568,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -2517,15 +2584,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<true, FAMILY_KLEINIAN, false, false>(
                 Context {
@@ -2540,7 +2607,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -2556,15 +2623,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<true, FAMILY_PSEUDO_KLEINIAN, false, false>(
                 Context {
@@ -2579,7 +2646,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -2595,15 +2662,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<true, FAMILY_APOLLONIAN, false, false>(
                 Context {
@@ -2618,7 +2685,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -2634,15 +2701,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<true, FAMILY_HYBRID, false, false>(
                 Context {
@@ -2657,7 +2724,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -2673,15 +2740,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<false, FAMILY_WORLD, true, false>(
                 Context {
@@ -2696,7 +2763,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -2714,15 +2781,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<false, FAMILY_WORLD, false, false>(
                 Context {
@@ -2737,7 +2804,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -2756,15 +2823,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<false, FAMILY_BULB, false, false>(
                 Context {
@@ -2779,7 +2846,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -2796,15 +2863,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<true, FAMILY_BULB, false, true>(
                 Context {
@@ -2819,7 +2886,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -2836,15 +2903,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<true, FAMILY_BOX, false, true>(
                 Context {
@@ -2859,7 +2926,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -2876,15 +2943,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<true, FAMILY_QUAT, false, true>(
                 Context {
@@ -2899,7 +2966,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -2916,15 +2983,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<true, FAMILY_KIFS, false, true>(
                 Context {
@@ -2939,7 +3006,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -2956,15 +3023,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<true, FAMILY_KLEINIAN, false, true>(
                 Context {
@@ -2979,7 +3046,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -2996,15 +3063,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<true, FAMILY_PSEUDO_KLEINIAN, false, true>(
                 Context {
@@ -3019,7 +3086,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -3036,15 +3103,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<true, FAMILY_APOLLONIAN, false, true>(
                 Context {
@@ -3059,7 +3126,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -3076,15 +3143,15 @@ pub mod kernels {
         mut albedo: DisjointSlice<[f32; 4]>,
         mut normal: DisjointSlice<[f32; 4]>,
         active: &[u32],
-        mut moment: DisjointSlice<f32>,
+        mut stats: DisjointSlice<[f32; 2]>,
     ) {
         let idx = thread::index_1d();
         let i = idx.get() as u32;
-        if let (Some(acc), Some(albedo), Some(normal), Some(moment)) = (
+        if let (Some(acc), Some(albedo), Some(normal), Some(stats)) = (
             accum.get_mut(idx),
             albedo.get_mut(thread::index_1d()),
             normal.get_mut(thread::index_1d()),
-            moment.get_mut(thread::index_1d()),
+            stats.get_mut(thread::index_1d()),
         ) {
             trace_pixel::<true, FAMILY_HYBRID, false, true>(
                 Context {
@@ -3099,7 +3166,7 @@ pub mod kernels {
                 albedo,
                 normal,
                 active,
-                moment,
+                stats,
             );
         }
     }
@@ -3113,7 +3180,7 @@ pub mod kernels {
     #[kernel]
     #[launch_bounds(128)]
     #[launch_contract(domain = 1, block = (128, 1, 1))]
-    pub fn adapt(accum: &[[f32; 4]], moment: &[f32], mut active: DisjointSlice<u32>) {
+    pub fn adapt(accum: &[[f32; 4]], stats: &[[f32; 2]], mut active: DisjointSlice<u32>) {
         let idx = thread::index_1d();
         let t = idx.get() as u32;
         if let Some(flag) = active.get_mut(idx) {
@@ -3135,7 +3202,7 @@ pub mod kernels {
                         done = false;
                     } else {
                         let mean = luminance([a[0], a[1], a[2]]) / n;
-                        let var = (moment[k] / n - mean * mean).max(0.0);
+                        let var = (stats[k][0] / n - mean * mean).max(0.0);
                         let error = (var / n).sqrt() / (mean.max(0.0) + 1.0e-4).sqrt();
                         if error > threshold {
                             done = false;
@@ -3145,6 +3212,28 @@ pub mod kernels {
                 p += 1;
             }
             *flag = if done { 0 } else { 1 };
+        }
+    }
+
+    /// Partial sums of [samples whose camera or bounce march ran out of steps, samples taken]:
+    /// thread `i` of `sums.len()` adds pixels `i, i + len, ..` (coalesced), so the host reads a
+    /// fixed small buffer whatever the resolution. Samples come from `accum`: adaptive sampling
+    /// stops converged tiles, so pixels differ in sample count. f64 keeps the counts exact.
+    #[kernel]
+    #[launch_bounds(128)]
+    #[launch_contract(domain = 1, block = (128, 1, 1))]
+    pub fn tally(accum: &[[f32; 4]], stats: &[[f32; 2]], mut sums: DisjointSlice<[f64; 2]>) {
+        let idx = thread::index_1d();
+        let stride = sums.len();
+        let mut k = idx.get();
+        if let Some(sum) = sums.get_mut(idx) {
+            let (mut limited, mut samples) = (0.0f64, 0.0f64);
+            while let (Some(s), Some(a)) = (stats.get(k), accum.get(k)) {
+                limited += f64::from(s[1]);
+                samples += f64::from(a[3]);
+                k += stride;
+            }
+            *sum = [limited, samples];
         }
     }
 

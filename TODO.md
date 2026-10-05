@@ -44,8 +44,18 @@ CHANGELOG.md, add new requests as they come. Reusable UI goes into egui-widgets-
 - [x] Clear glass lost energy at grazing angles (BUG1.md; render-rs 207473e, exact smooth interfaces)
 - [ ] Rough dielectric transmission: no multiple-scattering compensation (furnace 0.81-0.93 inside
       at roughness 0.5) — compensation table for dielectrics
-- [ ] BUG1 open items: march step cap tied to max_steps; cone-accepted hits when steps run out
-      (37% of hits in the turbine frame); Hybrid DE discontinuities at fold / escape transitions
+- [x] BUG1 march: out of steps is a miss (was 37% phantom hits in frame 27), step cap decoupled
+      from the budget, presets 4096 steps, status reports the out-of-steps share
+- [ ] BUG1 open: Hybrid DE discontinuities at fold / escape transitions (re-measure on converged
+      hits: the old statistics mixed in the phantoms); 6-probe normal cost (isolated benchmark)
+- [ ] Port the march fix to the OFX plug-in's kernel copy (`ofx-rs/crates/ofx-fractal/kernels/source/src/gpu.rs`
+      still has the full-pixel closest-sample rule and `2 span / max_steps`), then check silhouettes
+- [ ] Per-object "March steps" does nothing in world renders: `P_MAX_STEPS` / `P_SECONDARY_STEPS`
+      are read globally (pre-existing) - make it a render (global) setting or honour it per object
+- [ ] Over-relaxation sphere tracing (Keinert 3.1) for grazing rays: only with a safety check,
+      Hybrid DEs are not Lipschitz bounds
+- [ ] `cuda_specialized_world_materials_preserve_radiance_and_affine_guides` (ignored test) fails on
+      b5d562a too: Fast objects=1 radiance max_absolute 5.92e-5 > 3e-5 tolerance - investigate
 - [x] Adaptive sampling: with 1 sample per frame it renders that sample and stops
 - [ ] Playa: `playa-engine/tests/ofx_builtin.rs` (feature ofx) expects 8 built-in plug-ins, ofx-effects
       links 29 now (fails on fce3d93 too, before the per-channel work) — update the test to the set

@@ -207,6 +207,12 @@ impl Hybrid {
 
 const BOUND_FRAMING: f32 = 1.2;
 const REACH_MARGIN_FRAMES: f32 = 2.5;
+/// The march step budget of every preset. A budget, not a quality knob: a ray that runs out of
+/// steps is a miss (`gpu.rs` `march`), and only rays that need the steps pay for them. Measured
+/// on BUG1 frame 27: grazing rays need up to 889 steps; 256 left 37% of the hits as phantoms;
+/// primary rays cost 28% more at 4096, the full 6-bounce render the same.
+pub const DEFAULT_MAX_STEPS: u32 = 4096;
+
 /// fractal3d.rs HIT_EPSILON_PER_PIXEL: a footprint is hit_epsilon / this of a pixel.
 const HIT_EPSILON_PER_PIXEL: f32 = 0.008;
 
@@ -656,7 +662,6 @@ impl Scene {
         formula: Formula,
         fov: f32,
         iterations: u32,
-        max_steps: u32,
         hit_epsilon: f32,
         palette: PaletteScheme,
     ) -> Self {
@@ -688,7 +693,7 @@ impl Scene {
             trap_scale: 1.5,
             render: Render {
                 iterations,
-                max_steps,
+                max_steps: DEFAULT_MAX_STEPS,
                 hit_epsilon,
                 step_factor: 0.85,
                 max_bounces: 6,
@@ -707,14 +712,14 @@ impl Scene {
         let f = Formula::preset(code);
         let name = f.name();
         let mut s = match code {
-            FAMILY_BULB => Self::base(name, f, 38.0, 20, 256, 0.001, P::Classic),
-            FAMILY_BOX => Self::base(name, f, 35.0, 12, 256, 0.003, P::Ice),
-            FAMILY_QUAT => Self::base(name, f, 38.0, 16, 256, 0.001, P::Amethyst),
-            FAMILY_KIFS => Self::base(name, f, 38.0, 12, 128, 0.0005, P::Copper),
-            FAMILY_KLEINIAN => Self::base(name, f, 38.0, 16, 256, 0.001, P::Ocean),
-            FAMILY_PSEUDO_KLEINIAN => Self::base(name, f, 38.0, 6, 256, 0.001, P::Ember),
-            FAMILY_APOLLONIAN => Self::base(name, f, 38.0, 8, 256, 0.001, P::Twilight),
-            _ => Self::base(name, f, 38.0, 12, 256, 0.001, P::Aurora),
+            FAMILY_BULB => Self::base(name, f, 38.0, 20, 0.001, P::Classic),
+            FAMILY_BOX => Self::base(name, f, 35.0, 12, 0.003, P::Ice),
+            FAMILY_QUAT => Self::base(name, f, 38.0, 16, 0.001, P::Amethyst),
+            FAMILY_KIFS => Self::base(name, f, 38.0, 12, 0.0005, P::Copper),
+            FAMILY_KLEINIAN => Self::base(name, f, 38.0, 16, 0.001, P::Ocean),
+            FAMILY_PSEUDO_KLEINIAN => Self::base(name, f, 38.0, 6, 0.001, P::Ember),
+            FAMILY_APOLLONIAN => Self::base(name, f, 38.0, 8, 0.001, P::Twilight),
+            _ => Self::base(name, f, 38.0, 12, 0.001, P::Aurora),
         };
         // A three-quarter view a little further out than ofx-fractal's neutral default reads
         // better in the gallery.
