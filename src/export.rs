@@ -16,8 +16,6 @@ use std::{
 };
 
 const HIGH_QUALITY_QP: u8 = 18;
-/// The label column of the Render / Encode grids.
-const GRID_LABEL_WIDTH: f32 = 110.0;
 const HIGH_QUALITY_PRESET: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -450,15 +448,15 @@ impl ExportController {
         let running = self.is_running();
         let kind_before = self.settings.output_kind();
         ui.add_enabled_ui(!running, |ui| {
-            // Shared by every format: drawn once, above the format tabs.
-            ui.horizontal(|ui| {
-                ui.label("Name");
-                ui.text_edit_singleline(&mut self.settings.name);
-                ui.label(format!(".{}", self.settings.suffix()));
-            });
             ui.weak(format!("Written to {}", self.out_root.join("<date_time>").display()));
-            // Both grids share the label column width, so values line up above and below the tabs.
-            egui::Grid::new("render_encode_shared").num_columns(2).min_col_width(GRID_LABEL_WIDTH).show(ui, |ui| {
+            ui.weak("Animation is sampled at each frame. The scene and keys are frozen when export starts.");
+            // One grid, so every value column lines up: the settings every format shares, drawn
+            // once, then the format row (the tabs) and only that format's options under it.
+            egui::Grid::new("render_encode").num_columns(2).show(ui, |ui| {
+                ui.label("Name"); ui.horizontal(|ui| {
+                    ui.text_edit_singleline(&mut self.settings.name);
+                    ui.label(format!(".{}", self.settings.suffix()));
+                }); ui.end_row();
                 ui.label("Resolution"); ui.horizontal(|ui| { ui.add(egui::DragValue::new(&mut self.settings.width).range(1..=16384)); ui.label("×"); ui.add(egui::DragValue::new(&mut self.settings.height).range(1..=16384)); }); ui.end_row();
                 ui.label("Samples / frame"); ui.add(egui::DragValue::new(&mut self.settings.samples).range(1..=1_000_000)); ui.end_row();
                 ui.label("Denoise"); ui.checkbox(&mut self.settings.denoise_at_completion, "Once at completion").on_hover_text("Run OIDN once after all samples of each exported frame; override World Settings cadence."); ui.end_row();
@@ -474,16 +472,11 @@ impl ExportController {
                         self.settings.set_fps(timeline.2);
                     }
                 }); ui.end_row();
-            });
-            ui.weak("Animation is sampled at each frame. The scene and keys are frozen when export starts.");
-            ui.separator();
-            // Format tabs: only what differs between formats.
-            ui.horizontal(|ui| {
-                for format in ExportFormat::ALL {
-                    ui.selectable_value(&mut self.settings.format, format, format.label());
-                }
-            });
-            egui::Grid::new("render_encode_format").num_columns(2).min_col_width(GRID_LABEL_WIDTH).show(ui, |ui| {
+                ui.label("Format"); ui.horizontal(|ui| {
+                    for format in ExportFormat::ALL {
+                        ui.selectable_value(&mut self.settings.format, format, format.label());
+                    }
+                }); ui.end_row();
                 if let (Some(kind), Some(ocio)) = (self.settings.output_kind(), ocio) {
                     self.output_transform_ui(ui, ocio, current, kind);
                 }

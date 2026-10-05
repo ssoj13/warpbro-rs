@@ -83,27 +83,36 @@ pub fn new_out_dir(root: &std::path::Path) -> Result<std::path::PathBuf, String>
     Err(format!("{}: no free folder name for {stamp}", root.display()))
 }
 
-/// A file stem for `name`: its slug, or "untitled" when nothing of the name survives (an
-/// all-Cyrillic or empty name would otherwise write hidden `.png` files). `slug` stays the
-/// comparison key (templates), so it must not invent a name.
+/// A file stem for `name`: its slug, which keeps letters of any script ("Медная турбина" ->
+/// "медная-турбина"; NTFS and every target filesystem store Unicode names). Windows device
+/// names (`con`, `nul`, `com1`, ...) get a `_`, since a file named so cannot be created there;
+/// "untitled" only when the name has no letter or digit at all.
 pub fn file_stem(name: &str) -> String {
+    const DEVICES: [&str; 22] = [
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7",
+        "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    ];
     let stem = slug(name);
-    if stem.is_empty() { "untitled".into() } else { stem }
+    if stem.is_empty() {
+        "untitled".into()
+    } else if DEVICES.contains(&stem.as_str()) {
+        format!("{stem}_")
+    } else {
+        stem
+    }
 }
 
+/// The comparison key of a name (templates) and the base of file stems: lowercase letters and
+/// digits of any script, every other run of characters one `-`. Everything a filesystem
+/// forbids (`<>:"/\|?*`, control characters) is not alphanumeric, so it never survives.
 pub fn slug(name: &str) -> String {
-    let mut s: String = name
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    while s.contains("--") {
-        s = s.replace("--", "-");
+    let mut s = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c.is_alphanumeric() {
+            s.extend(c.to_lowercase());
+        } else if !s.ends_with('-') {
+            s.push('-');
+        }
     }
     s.trim_matches('-').to_string()
 }
@@ -289,5 +298,20 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         _ => app::run(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Names keep their script; only what a filesystem forbids or a device name blocks changes.
+    #[test]
+    fn file_stems_keep_unicode_and_avoid_device_names() {
+        assert_eq!(super::slug("Медная  Турбина №2"), "медная-турбина-2");
+        assert_eq!(super::slug(r#"A<b>:c/d\e|f?g*h"i"#), "a-b-c-d-e-f-g-h-i");
+        assert_eq!(super::file_stem("Медная турбина"), "медная-турбина");
+        assert_eq!(super::file_stem("日本語 シーン"), "日本語-シーン");
+        assert_eq!(super::file_stem("CON"), "con_");
+        assert_eq!(super::file_stem("  ** "), "untitled");
+        assert_eq!(super::file_stem("Copper Turbine (KIFS)"), "copper-turbine-kifs");
     }
 }
