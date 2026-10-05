@@ -2077,6 +2077,79 @@ mod tests {
         scene.render.max_steps = 256;
         scene
     }
+
+
+    #[test]
+    fn cuda_tiny_hybrid_gradients_keep_surface_normal_direction() {
+        let mut gpu = Gpu::new().unwrap();
+        let mut authored = Scene::preset(crate::params::FAMILY_HYBRID);
+        if let crate::scene::Formula::Hybrid(h) = &mut authored.formula {
+            h.bailout = 2.0;
+            h.bulb.power = 1.0;
+            h.bulb.angle_scale = [2.43, 0.49];
+            h.bulb.angle_phase_degrees = [-7.74, 0.0];
+            h.kifs.kind = crate::scene::KifsKind::Octahedron;
+            h.steps = [
+                crate::scene::HybridStep::Mandelbulb,
+                crate::scene::HybridStep::KifsFold,
+                crate::scene::HybridStep::Off,
+                crate::scene::HybridStep::Off,
+            ];
+        }
+        authored.camera.target = [-0.3617138, 0.04296637, -0.083121695];
+        authored.camera.yaw_degrees = 63.69792;
+        authored.camera.pitch_degrees = -0.55681777;
+        authored.camera.distance = 2.017553;
+        authored.camera.fov_y_degrees = 38.0;
+        authored.camera.aperture = 0.0;
+        authored.render.iterations = 64;
+        authored.render.hit_epsilon = 0.001;
+        authored.render.denoise.enabled = false;
+        authored.render.adaptive.enabled = false;
+        authored.render.max_bounces = 0;
+        authored.colour.on = false;
+        authored.environment.enabled = false;
+        for world in [false, true] {
+            let scene = if world {
+                crate::world::WorldDocument::from_scene(&authored)
+                    .snapshot(0.0)
+                    .unwrap()
+            } else {
+                authored.clone()
+            };
+            let (w, h) = (128usize, 128usize);
+            let mut target = gpu.target(w, h);
+            gpu.step(&mut target, &scene, 1, 19, None, false);
+            let normals = gpu.guide_sums(&target, &target.normal);
+            let p = scene.pack(w as u32, h as u32);
+            let v = |i| glam::Vec3::from_slice(&p[i..i + 3]);
+            let (forward, right, up) = (v(P_CAM_FORWARD), v(P_CAM_RIGHT), v(P_CAM_UP));
+            let mut hits = 0;
+            let mut fallback = 0;
+            for (i, n) in normals.iter().enumerate() {
+                let n = glam::Vec3::from_slice(n);
+                assert!(n.is_finite());
+                if n.length_squared() < 0.1 {
+                    continue;
+                }
+                assert!((n.length() - 1.0).abs() < 1e-4);
+                hits += 1;
+                let (x, y) = ((i % w) as u32, (i / w) as u32);
+                let nx = 2.0 * (x as f32 + crate::sampler::sample(x ^ 19, y, 0, 0)) / w as f32 - 1.0;
+                let ny = 1.0 - 2.0 * (y as f32 + crate::sampler::sample(x ^ 19, y, 0, 1)) / h as f32;
+                let ray = (forward + right * nx * p[P_HALF_W] + up * ny * p[P_HALF_H]).normalize();
+                if n.dot(-ray) > 0.999999 {
+                    fallback += 1;
+                }
+            }
+            println!("world={world}, hits={hits}, view-facing normals={fallback}");
+            assert!(hits > 100);
+            // These tiny DE gradients used to trip the absolute 1e-7 cutoff,
+            // replacing thousands of genuine normals with the view direction.
+            assert!(fallback * 100 < hits, "world={world}: {fallback}/{hits}");
+        }
+    }
+
     #[test]
     fn cuda_primary_guides_capture_material_world_normal_and_miss_counts() {
         let mut gpu = Gpu::new().unwrap();

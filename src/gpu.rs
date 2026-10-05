@@ -1073,10 +1073,12 @@ pub mod kernels {
             let d = scene_signed_distance::<F>(ctx, add(center, [h, h, h]));
             if signed || (a > 0.0 && b > 0.0 && c > 0.0 && d > 0.0) {
                 let g = [a - b - c + d, -a - b + c + d, -a + b - c + d];
-                if length(g) < 1.0e-7 {
-                    return neg(dir);
+                // Normalize by the largest component first: tiny but nonzero
+                // DE gradients retain their direction without an absolute cutoff.
+                let scale = g[0].abs().max(g[1].abs()).max(g[2].abs());
+                if scale > 0.0 && scale.is_finite() {
+                    return normalize([g[0] / scale, g[1] / scale, g[2] / scale]);
                 }
-                return normalize(g);
             }
             h *= 0.5;
             k += 1;
