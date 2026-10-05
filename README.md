@@ -152,7 +152,9 @@ The interface uses `egui-dock`: drag tabs to rearrange, split or float panels, i
 The top bar uses **File**, **Edit**, **View**, **Render** and **Window** menus, following Playa.
 Open Settings through **Edit → Settings…**; use **Window** to reopen panels or **Reset layout**
 to restore their arrangement. The floating toolbar sits against the viewport's top edge, with
-direct exposure (EV), colour view, proxy resolution, target samples, pause and free-flight controls.
+direct exposure (EV, with a reset to 0), colour view (the gear opens Settings → Color), proxy
+resolution, target samples, pause, the denoise switch (off shows the raw samples at once) and
+free-flight controls.
 The top-right layout manager uses Playa's shared `egui-layout-manager`: save, select, rename
 or delete named workspaces; **Layout → Update selected** replaces the selected preset and
 **Layout → Reset to default** restores the default arrangement. Panel layout, named workspaces

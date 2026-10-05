@@ -249,6 +249,34 @@ fn to_image(t: &Frame) -> ColorImage {
     )
 }
 
+/// Settings panel pages in tab order: the one name of a page wherever it is opened (menu,
+/// toolbar gear, cross-page links, `FRAC_SETTINGS`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SettingsPage {
+    Display,
+    Color,
+    Controls,
+    Fonts,
+}
+impl SettingsPage {
+    const ALL: [Self; 4] = [Self::Display, Self::Color, Self::Controls, Self::Fonts];
+    fn category(self) -> egui_prefs2::Category<'static> {
+        use egui_phosphor::regular as ph;
+        match self {
+            Self::Display => egui_prefs2::Category::new(ph::MONITOR, "Display"),
+            Self::Color => egui_prefs2::Category::new(ph::MONITOR, "Color"),
+            Self::Controls => egui_prefs2::Category::new(ph::MONITOR, "Controls"),
+            Self::Fonts => egui_prefs2::Category::new(ph::TEXT_T, "Fonts"),
+        }
+    }
+    /// The page named `name` (case-insensitive tab label).
+    fn named(name: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|page| page.category().label.eq_ignore_ascii_case(name))
+    }
+}
+
 /// Viewport flight preferences (Settings > Camera controls). `inertia` turns them into the
 /// shared `cam_controls` flight settings: the one place WarpBro configures the flight rig.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -537,13 +565,7 @@ impl App {
                 } else {
                     dock::Panel::Settings
                 });
-            self.prefs.selected = if category.eq_ignore_ascii_case("fonts") {
-                3
-            } else if category.eq_ignore_ascii_case("controls") {
-                2
-            } else {
-                usize::from(category.eq_ignore_ascii_case("color"))
-            };
+            self.prefs.selected = SettingsPage::named(&category).unwrap_or(SettingsPage::Display) as usize;
         }
         if let Ok(before) = self
             .world
@@ -558,6 +580,12 @@ impl App {
             );
         }
         self
+    }
+
+    /// Open the Settings panel on `page`.
+    pub(crate) fn open_settings(&mut self, page: SettingsPage) {
+        self.prefs.selected = page as usize;
+        self.panels_to_open.push(dock::Panel::Settings);
     }
 
     /// Settings layout and category bodies adapted directly from exr-view::ui_settings.
@@ -580,29 +608,29 @@ impl App {
         let mut destination = None;
         let mut prefs = std::mem::take(&mut self.prefs);
         ui.push_id("settings", |ui| {
-            let categories = [egui_prefs2::Category::new(egui_phosphor::regular::MONITOR, "Display"), egui_prefs2::Category::new(egui_phosphor::regular::MONITOR, "Color"), egui_prefs2::Category::new(egui_phosphor::regular::MONITOR, "Controls"), egui_prefs2::Category::new(egui_phosphor::regular::TEXT_T, "Fonts")];
+            let categories = SettingsPage::ALL.map(SettingsPage::category);
             egui_prefs2::draw(ui, &mut prefs, &categories, |ui, idx| {
                 category = idx;
-                match idx {
-                    0 => {
+                match SettingsPage::ALL.get(idx).copied().unwrap_or(SettingsPage::Display) {
+                    SettingsPage::Display => {
                         egui_display::settings_ui(ui, &mut self.display, state.as_ref());
                         if state.as_ref().is_some_and(|s| !s.available.iter().any(|o| o.is_hdr())) {
                             ui.label("This window surface offers SDR only. PQ/HDR targets in Color still render and export HDR; the screen uses an SDR preview.");
                         }
                         ui.add(egui::DragValue::new(&mut self.gui_fps).range(15..=240).suffix(" GUI FPS"));
                         ui.add_space(8.0);
-                        if ui.button("Colour management & monitor presets…").clicked() { destination = Some(1); }
+                        if ui.button("Colour management & monitor presets…").clicked() { destination = Some(SettingsPage::Color); }
                     }
-                    1 => {
+                    SettingsPage::Color => {
                         egui_prefs2::section_header(ui, "Colour management");
                         if let Some(state) = &state { ui.label(format!("Window output: {}.", state.output.label())); }
                         ui.label("Monitor presets choose rendering and export. PQ/HDR remains available on SDR screens using an SDR preview. HDR 1000 nits is the rendering peak; SDR reference white controls UI brightness.");
-                        if ui.button("Display output & reference white…").clicked() { destination = Some(0); }
+                        if ui.button("Display output & reference white…").clicked() { destination = Some(SettingsPage::Display); }
                         ui.add_space(8.0);
                         changed = self.colour.ui(ui, &mut browse);
                     }
-                    3 => self.fonts_ui(ui),
-                    _ => {
+                    SettingsPage::Fonts => self.fonts_ui(ui),
+                    SettingsPage::Controls => {
                         egui_prefs2::section_header(ui, "Camera controls");
                         egui_attr_table::attr_table(ui, |t| {
                             t.row("Mouse sensitivity").default(1.0).slider(&mut self.controls.look_sensitivity, 0.1..=5.0);
@@ -647,8 +675,8 @@ impl App {
                 self.world_ui.attribute_metrics = Default::default();
             }
         }
-        if let Some(idx) = destination {
-            self.prefs.selected = idx;
+        if let Some(page) = destination {
+            self.prefs.selected = page as usize;
         }
         if browse {
             self.config_picker = self.world_ui.file_dialogs.prepare(
@@ -3616,6 +3644,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn settings_pages_are_one_list_in_tab_order() {
+        for (index, page) in SettingsPage::ALL.into_iter().enumerate() {
+            assert_eq!(page as usize, index, "the tab index is the discriminant");
+            assert_eq!(SettingsPage::named(page.category().label), Some(page));
+        }
+        assert_eq!(SettingsPage::named("COLOR"), Some(SettingsPage::Color));
+        assert_eq!(SettingsPage::named("nope"), None);
+    }
     #[test]
     fn orbit_tumbles_coasts_to_rest_and_pans_with_the_cursor_under_roll() {
         let mut app = App::new();

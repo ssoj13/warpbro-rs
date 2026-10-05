@@ -162,11 +162,8 @@ fn matches(binding: &Binding, key: Key, physical_key: Option<Key>, mut modifiers
     binding.key == key && modifiers.matches_exact(binding.modifiers)
 }
 /// Global-first lookup is shared by every consumer, independent of panel draw order.
-pub fn resolve(scope: Scope, key: Key, modifiers: Modifiers) -> Option<(Scope, Command)> {
-    resolve_key(scope, key, None, modifiers)
-}
-/// [`resolve`] for a key event that also reports its physical key.
-fn resolve_key(
+/// `physical_key` is the key position an event reports (see [`Binding::physical`]).
+fn resolve(
     scope: Scope,
     key: Key,
     physical_key: Option<Key>,
@@ -216,7 +213,7 @@ pub fn consume(ctx: &Context, scope: Scope, command: Command) -> bool {
                 pressed: true,
                 repeat: false,
                 modifiers,
-            } if resolve_key(scope, *key, *physical_key, *modifiers) == Some((scope, command)))
+            } if resolve(scope, *key, *physical_key, *modifiers) == Some((scope, command)))
         });
         index.map(|i| input.events.remove(i)).is_some()
     })
@@ -315,41 +312,37 @@ mod tests {
     fn chords_match_exactly_and_digits_by_key_position() {
         let t = Scope::Timeline;
         // A Shift binding never fires without Shift, a plain one never with it.
-        assert_eq!(resolve(t, Key::Insert, Modifiers::NONE), Some((t, Command::Preview)));
-        assert_eq!(resolve(t, Key::Insert, Modifiers::SHIFT), Some((t, Command::CachePreview)));
-        assert_eq!(resolve_key(t, Key::Num3, Some(Key::Num3), Modifiers::NONE), Some((t, Command::Mark(3))));
+        assert_eq!(resolve(t, Key::Insert, None, Modifiers::NONE), Some((t, Command::Preview)));
+        assert_eq!(resolve(t, Key::Insert, None, Modifiers::SHIFT), Some((t, Command::CachePreview)));
+        assert_eq!(resolve(t, Key::Num3, Some(Key::Num3), Modifiers::NONE), Some((t, Command::Mark(3))));
         // Shift + 3 types "!" (US) or "№" (no egui key) but is the physical 3.
-        let shifted = resolve_key(t, Key::Exclamationmark, Some(Key::Num3), Modifiers::SHIFT);
+        let shifted = resolve(t, Key::Exclamationmark, Some(Key::Num3), Modifiers::SHIFT);
         assert_eq!(shifted, Some((t, Command::SetMark(3))));
         // Property filters keep their additive Shift.
-        assert_eq!(resolve(t, Key::U, Modifiers::SHIFT), Some((t, Command::Keyed)));
+        assert_eq!(resolve(t, Key::U, None, Modifiers::SHIFT), Some((t, Command::Keyed)));
     }
     #[test]
     fn global_commands_reserve_chords_and_panel_tables_are_distinct() {
         assert_eq!(
-            resolve(Scope::Timeline, Key::Z, Modifiers::COMMAND),
+            resolve(Scope::Timeline, Key::Z, None, Modifiers::COMMAND),
             Some((Scope::Global, Command::Undo))
         );
         assert_eq!(
-            resolve(
-                Scope::Viewport,
-                Key::Z,
-                Modifiers::COMMAND.plus(Modifiers::SHIFT)
-            ),
+            resolve(Scope::Viewport, Key::Z, None, Modifiers::COMMAND.plus(Modifiers::SHIFT)),
             Some((Scope::Global, Command::Redo))
         );
         assert_eq!(
-            resolve(Scope::Timeline, Key::F, Modifiers::NONE),
+            resolve(Scope::Timeline, Key::F, None, Modifiers::NONE),
             Some((Scope::Timeline, Command::Fit))
         );
         assert_eq!(
-            resolve(Scope::Viewport, Key::F, Modifiers::NONE),
+            resolve(Scope::Viewport, Key::F, None, Modifiers::NONE),
             Some((Scope::Viewport, Command::Fit))
         );
-        assert_eq!(resolve(Scope::Export, Key::F, Modifiers::NONE), None);
-        assert_eq!(resolve(Scope::Timeline, Key::F, Modifiers::COMMAND), None);
+        assert_eq!(resolve(Scope::Export, Key::F, None, Modifiers::NONE), None);
+        assert_eq!(resolve(Scope::Timeline, Key::F, None, Modifiers::COMMAND), None);
         assert_eq!(
-            resolve(Scope::Timeline, Key::Insert, Modifiers::SHIFT),
+            resolve(Scope::Timeline, Key::Insert, None, Modifiers::SHIFT),
             Some((Scope::Timeline, Command::CachePreview))
         );
     }

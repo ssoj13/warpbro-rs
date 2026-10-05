@@ -15,9 +15,9 @@ CHANGELOG.md, add new requests as they come. Reusable UI goes into egui-widgets-
 
 ## Viewport / camera
 - [x] Shift + LMB orbit snaps the view parallel to the nearest world axis (X/Y/Z)
-- [ ] Toolbar: gear right of the view transform ("ACES") opens Settings > Colour
-- [ ] Toolbar: EV reset-to-0 button left of EV
-- [ ] Toolbar: denoiser quick toggle (off = raw radiance, on = current denoised result)
+- [x] Toolbar: gear right of the view transform ("ACES") opens Settings > Colour
+- [x] Toolbar: EV reset-to-0 button left of EV
+- [x] Toolbar: denoiser quick toggle (off = raw radiance, on = current denoised result)
 
 ## Attribute Editor (shared widgets in egui-widgets-rs)
 - [ ] Grey out parameters inactive for the current fractal type (e.g. Mandelbox)

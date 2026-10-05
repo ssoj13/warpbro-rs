@@ -425,6 +425,15 @@ impl App {
             ..Default::default()
         }
         .show(ui, rect, &mut state, |ui| {
+            use egui_phosphor::regular as ph;
+            let exposure = &mut self.scene.render.exposure_stops;
+            if ui
+                .add_enabled(*exposure != 0.0, egui::Button::new(ph::ARROW_COUNTER_CLOCKWISE).small())
+                .on_hover_text("Reset exposure to 0 EV")
+                .clicked()
+            {
+                *exposure = 0.0;
+            }
             ui.add(
                 egui::DragValue::new(&mut self.scene.render.exposure_stops)
                     .speed(0.05)
@@ -437,6 +446,13 @@ impl App {
             self.colour.set_hdr(true);
             let changed = self.colour.quick_view_ui(ui);
             self.apply_colour_change(changed);
+            if ui
+                .button(ph::GEAR_SIX)
+                .on_hover_text("Colour management settings")
+                .clicked()
+            {
+                self.open_settings(super::SettingsPage::Color);
+            }
             ui.separator();
             ui.label("Proxy:");
             egui::ComboBox::from_id_salt("viewport_proxy")
@@ -460,14 +476,15 @@ impl App {
             )
             .on_hover_text("Samples to converge");
             ui.separator();
-            ui.toggle_value(&mut self.paused, egui_phosphor::regular::PAUSE)
+            ui.toggle_value(&mut self.paused, ph::PAUSE)
                 .on_hover_text("Pause rendering");
+            // The scene's own denoise switch (World Settings): off shows the raw samples at once,
+            // on denoises the current samples again; the accumulation is untouched either way.
+            ui.toggle_value(&mut self.scene.render.denoise.enabled, ph::SPARKLE)
+                .on_hover_text("Denoise (OIDN): off shows the raw samples");
             if ui
-                .selectable_label(
-                    self.scene.camera.free_flight,
-                    egui_phosphor::regular::AIRPLANE,
-                )
-                .on_hover_text("Free flight / horizon lock · RMB + WASD, R/C, Q/E")
+                .selectable_label(self.scene.camera.free_flight, ph::AIRPLANE)
+                .on_hover_text("Free flight / horizon lock · RMB + WASD, R / Space up, C down, Q/E")
                 .clicked()
             {
                 self.toggle_flight_mode();
