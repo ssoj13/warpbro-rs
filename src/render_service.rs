@@ -2037,6 +2037,62 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// An HDR10 PNG of a P3-limited HDR view (ACES 2.0, 500 nits) is what the view rendered:
+    /// `mDCV` records the measured 500-nit peak, `cICP` says PQ / BT.2020, and colour outside
+    /// BT.709 (negative linear Rec.709 light) reaches the BT.2020 codes unclipped.
+    #[test]
+    fn hdr10_png_of_a_p3_view_keeps_its_peak_and_gamut() {
+        use crate::color::DisplayLight;
+        let ocio = crate::ocio::Ocio::load("ocio://studio-config-latest").unwrap();
+        let sel = crate::ocio::Sel {
+            display: "Rec.2100-PQ - Display".into(),
+            view: "ACES 2.0 - HDR 500 nits (P3 D65)".into(),
+            ..crate::color::default_selection()
+        };
+        let transform = ocio.transform(&ocio.resolve(&sel, true).unwrap(), true).unwrap();
+        let kind = transform.light().unwrap();
+        let DisplayLight::Absolute { peak_nits } = kind else { panic!("{kind:?}") };
+        assert!((peak_nits - 500.0).abs() < 5.0, "{peak_nits}");
+
+        // Saturated ACEScg green, and a highlight far above the view's range.
+        let mut light = [[0.0, 20.0, 0.0, 1.0], [1.0e3, 1.0e3, 1.0e3, 1.0]];
+        transform.processor().apply_rgba(&mut light);
+        assert!(light[0][..3].iter().any(|&v| v < -1.0e-3), "P3 green lies outside BT.709: {:?}", light[0]);
+
+        let mut frame = Arc::try_unwrap(completed_frame(1, false)).ok().unwrap();
+        frame.width = 2;
+        frame.light = light.to_vec();
+        frame.light_kind = kind;
+        let dir = std::env::temp_dir().join(format!("frac-hdr-p3-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("p3.pq.png");
+        frame.save(&path, FrameFile::Png(PngEncoding::Hdr10), 203.0).unwrap();
+
+        let bytes = std::fs::read(&path).unwrap();
+        let cicp = bytes.windows(8).find(|w| &w[..4] == b"cICP").map(|w| w[4..8].to_vec());
+        assert_eq!(cicp, Some(vec![9, 16, 0, 1]));
+        let decoder = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap()));
+        let mut reader = decoder.read_info().unwrap();
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut buf).unwrap();
+        let mdcv = reader.info().mastering_display_color_volume.expect("mDCV");
+        assert_eq!(mdcv.max_luminance, (peak_nits * 10_000.0).round() as u32, "the view's measured peak");
+
+        let codes = |nits: [f32; 3]| nits.map(|v| (egui_display::pq(v.clamp(0.0, 10_000.0)) * 65535.0 + 0.5) as u16);
+        let written: Vec<u16> = buf[..6].chunks(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+        let exact = codes(egui_display::rec2020_nits([light[0][0], light[0][1], light[0][2]], 100.0));
+        let clipped = codes(egui_display::rec2020_nits(light[0][..3].iter().map(|v| v.max(0.0)).collect::<Vec<_>>().try_into().unwrap(), 100.0));
+        for c in 0..3 {
+            assert!(written[c].abs_diff(exact[c]) <= 1, "channel {c}: {written:?} vs {exact:?}");
+        }
+        assert_ne!(exact, clipped, "the test colour must tell a gamut clip apart");
+        // The highlight lands at the view's peak, not at SDR white.
+        let highlight = u16::from_be_bytes([buf[10], buf[11]]);
+        let peak_code = (egui_display::pq(peak_nits) * 65535.0 + 0.5) as u16;
+        assert!(highlight.abs_diff(peak_code) <= 70, "{highlight} vs PQ({peak_nits}) {peak_code}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// Every snapshot file goes through `Frame::save`: an SDR frame saved as HDR10 is a PQ /
     /// BT.2020 PNG (cICP 9/16/0/1), the as-displayed SDR PNG carries no cICP, and the file
     /// names tell the transfers apart.
