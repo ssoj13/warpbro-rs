@@ -1818,3 +1818,20 @@ fn inactive_parameters_follow_what_the_kernel_reads() {
     let idle = doc(json!({"Hybrid": {"steps": ["Off", "Off", "Off", "Off"]}}), "Radius");
     assert!(idle("/formula/Hybrid/bulb/power").is_none(), "no step on runs a Mandelbulb step");
 }
+
+#[test]
+fn hybrid_marks_unpacked_sub_formula_parameters_and_limits_keep_their_floor() {
+    use serde_json::json;
+    let formula = json!({"Hybrid": {"steps": ["Mandelbox", "KifsFold", "Mandelbulb", "Off"]}});
+    let value = |p: &str| (p == "/formula").then_some(&formula);
+    for path in [
+        "/formula/Hybrid/mandelbox/rotation_degrees/1",
+        "/formula/Hybrid/kifs/rotation_degrees",
+        "/formula/Hybrid/bulb/bailout",
+    ] {
+        assert!(inactive_reason(path, value).is_some(), "{path} is never packed");
+    }
+    assert!(inactive_reason("/formula/Hybrid/mandelbox/scale", value).is_none());
+    assert_eq!(numeric_like(&json!(0), 0.0005), json!(0.0005), "a float floor never rounds away");
+    assert_eq!(numeric_like(&json!(9), 2.0), json!(2));
+}

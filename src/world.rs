@@ -1186,7 +1186,11 @@ fn attribute_slider(path: &str) -> Option<Slider> {
 /// what `Scene::pack` and the kernels read: Julia only for Mandelbulb / Mandelbox, the trap
 /// parameters per colouring mode, a Hybrid's sub-formulas only when one of its steps runs them.
 pub(crate) fn inactive_reason<'a>(path: &str, value: impl Fn(&str) -> Option<&'a Value>) -> Option<String> {
-    let under = |prefix: &str| path == prefix || path.starts_with(&format!("{prefix}/"));
+    // `path` is `prefix` or one of its components; no allocation (runs per row per frame).
+    let under = |prefix: &str| {
+        path.strip_prefix(prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    };
     if under("/julia") || under("/trap_point") || under("/trap_axis") || under("/trap_scale") {
         if under("/julia") {
             let family = value("/formula")?.as_object()?.keys().next()?.clone();
@@ -1205,9 +1209,18 @@ pub(crate) fn inactive_reason<'a>(path: &str, value: impl Fn(&str) -> Option<&'a
         return (!used).then(|| format!("Not used by the {coloring} colouring"));
     }
     let rest = path.strip_prefix("/formula/Hybrid/")?;
+    // A hybrid packs only the sub-formulas' shape parameters: one rotation for the whole hybrid
+    // (the bulb's) and its own bailout (`Scene::pack`, Formula::Hybrid).
+    let hybrid_own = |p: &str| rest.strip_prefix(p).is_some_and(|r| r.is_empty() || r.starts_with('/'));
+    if hybrid_own("mandelbox/rotation_degrees") || hybrid_own("kifs/rotation_degrees") {
+        return Some("A hybrid turns by the Mandelbulb rotation".into());
+    }
+    if hybrid_own("bulb/bailout") {
+        return Some("A hybrid uses its own bailout".into());
+    }
     let step = match rest.split('/').next()? {
         // The bulb's rotation turns the whole hybrid (`Scene::pack`: set_rotation).
-        "bulb" if rest.starts_with("bulb/rotation_degrees") => return None,
+        "bulb" if hybrid_own("bulb/rotation_degrees") => return None,
         "bulb" => "Mandelbulb",
         "mandelbox" => "Mandelbox",
         "kifs" => "KifsFold",
@@ -1247,14 +1260,13 @@ fn clamp_to_range(path: &str, value: Value) -> Value {
     }
 }
 
-/// `v` with the number kind (integer or float) of `template`.
+/// `v` as an integer when `template` is one and `v` is whole, else as a float: a limit never
+/// rounds away (0 clamped to a 0.0005 floor stays 0.0005).
 fn numeric_like(template: &Value, v: f64) -> Value {
-    if template.is_u64() {
-        json!(v.round().max(0.0) as u64)
-    } else if template.is_i64() {
-        json!(v.round() as i64)
-    } else {
-        json!(v)
+    match (template.is_u64() || template.is_i64(), v.fract() == 0.0) {
+        (true, true) if v >= 0.0 => json!(v as u64),
+        (true, true) => json!(v as i64),
+        _ => json!(v),
     }
 }
 
@@ -1967,7 +1979,7 @@ impl WorldDocument {
         if !frame.is_finite() {
             return Err("Invalid key time".into());
         }
-        // Hard limits hold for every editor (AE, timeline, paste, scripts), not per widget.
+        // Hard limits hold for every attribute edit (AE, timeline, commands), not per widget.
         let value = clamp_to_range(path, value);
         let value = self.without_navigation_offset(id, path, value)?;
         if let Some((parent, component)) = self.component_path(id, path)? {

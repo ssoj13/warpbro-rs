@@ -457,6 +457,10 @@ pub struct Target {
 }
 
 impl Target {
+    /// The image shows the denoised result (not the raw samples).
+    pub fn denoise_shown(&self) -> bool {
+        self.denoise_selected
+    }
     /// Finished for a target of `spp`: all samples taken, or adaptive sampling converged.
     pub fn complete(&self, spp: u32) -> bool {
         self.samples >= spp || self.converged

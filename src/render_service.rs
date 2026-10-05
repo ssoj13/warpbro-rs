@@ -182,7 +182,8 @@ impl Frame {
             radiance: Vec::new(),
             hdr: target.hdr,
             colour_error: target.colour_error.clone(),
-            denoised_samples: if target.denoise.output.is_some() {
+            // What the image shows: a raw viewport A/B reports no denoise.
+            denoised_samples: if target.denoise_shown() {
                 target.denoise.last_samples
             } else {
                 0
