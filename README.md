@@ -163,6 +163,10 @@ Fonts…**) selects the built-in font family, body/control, small, heading and m
 and UI scale.
 
 One universal **Attribute Editor** edits the selected node of any supported type, including materials.
+Every number has a slider over its useful span (type past it; hard limits hold in the document),
+colours use the HDR picker, vectors expand into per-channel sliders, parameters the current
+formula or colouring does not use are greyed with the reason, sections are tinted by kind, and
+right-click > **Show in timeline** expands and scrolls the timeline to the property.
 It follows Playa's original composition: `egui-attr-grid` inside
 `egui-titlebar::CollapsingSection`, with typed property controls from `egui-widgets-rs`.
 Short labels keep rows compact; tooltips retain full property paths. Shared attribute metrics

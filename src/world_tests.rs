@@ -1744,3 +1744,77 @@ fn clipboard_copy_paste_and_duplicate_remap_ids_in_one_undo_step() {
     assert!(e.execute(WorldCommand::Paste("{\"nodes\":{}}".into())).is_err());
     assert_eq!(e.document.nodes().len(), before);
 }
+
+#[test]
+fn every_numeric_parameter_has_a_slider_and_hard_limits_hold_in_the_document() {
+    let mut colors = std::collections::BTreeSet::new();
+    for family in 0..8 {
+        let doc = WorldDocument::from_scene(&crate::scene::Scene::preset(family));
+        for node in doc.nodes() {
+            for a in doc.attributes(node.id, 0.0).unwrap() {
+                let numeric = a.value.is_number()
+                    || a.value.as_array().is_some_and(|v| v.iter().all(|x| x.is_number()));
+                if numeric && a.choices.is_empty() {
+                    assert!(a.slider.is_some(), "{} has no slider span", a.path);
+                    if let (Some(s), Some((min, max))) = (a.slider, a.range) {
+                        assert!(min <= s.min && s.max <= max, "{}: slider outside its hard limits", a.path);
+                    }
+                }
+                if a.color && a.component.is_none() {
+                    colors.insert(a.path.clone());
+                }
+            }
+        }
+    }
+    // Every RGB slot `Scene::pack` writes with put_rgb that the presets expose.
+    assert!(colors.contains("/lighting/sky_horizon") && colors.contains("/material/base_tint"));
+    assert!(colors.len() >= 10, "{colors:?}");
+
+    let mut e = WorldEditor::new(WorldDocument::from_scene(&crate::scene::Scene::preset(0)));
+    let material = e
+        .document
+        .nodes()
+        .into_iter()
+        .find(|n| n.kind == WorldKind::Material)
+        .unwrap()
+        .id;
+    e.execute(WorldCommand::SetAttribute {
+        id: material,
+        path: "/material/transmission".into(),
+        value: serde_json::json!(2.5),
+        frame: 0.0,
+    })
+    .unwrap();
+    let value = e.document.attribute_value(material, "/material/transmission", 0.0).unwrap();
+    assert_eq!(value.as_f64(), Some(1.0), "hard limit [0, 1] clamps any editor's value");
+}
+
+#[test]
+fn inactive_parameters_follow_what_the_kernel_reads() {
+    use serde_json::json;
+    let doc = |formula: Value, coloring: &str| {
+        let values = [("/formula".to_owned(), formula), ("/coloring".to_owned(), json!(coloring))];
+        move |path: &str| inactive_reason(path, |p| values.iter().find(|(k, _)| k == p).map(|(_, v)| v))
+    };
+    let bulb = doc(json!({"Mandelbulb": {}}), "Radius");
+    assert!(bulb("/julia").is_none());
+    assert!(bulb("/trap_scale").is_some() && bulb("/trap_point/1").is_some(), "Radius reads no trap");
+    let kifs = doc(json!({"Kifs": {}}), "TrapPoint");
+    assert_eq!(kifs("/julia").as_deref(), Some("The Kifs formula has no Julia mode"));
+    assert!(kifs("/trap_point").is_none() && kifs("/trap_scale").is_none());
+    assert!(kifs("/trap_axis").is_some(), "a point trap has no axis");
+    let origin = doc(json!({"Kifs": {}}), "TrapOrigin");
+    assert!(origin("/trap_scale").is_none() && origin("/trap_point").is_some());
+    let plane = doc(json!({"Kifs": {}}), "TrapPlane");
+    assert!(plane("/trap_axis").is_none() && plane("/trap_point/0").is_none());
+
+    let hybrid = doc(json!({"Hybrid": {"steps": ["Mandelbox", "Off", "Off", "Off"]}}), "Radius");
+    assert!(hybrid("/formula/Hybrid/mandelbox/scale").is_none());
+    assert!(hybrid("/formula/Hybrid/kifs/scale").is_some());
+    assert!(hybrid("/formula/Hybrid/bulb/power").is_some());
+    assert!(hybrid("/formula/Hybrid/bulb/rotation_degrees/2").is_none(), "turns the whole hybrid");
+    assert!(hybrid("/formula/Hybrid/apollonian_scale").is_some());
+    assert!(hybrid("/formula/Hybrid/bailout").is_none());
+    let idle = doc(json!({"Hybrid": {"steps": ["Off", "Off", "Off", "Off"]}}), "Radius");
+    assert!(idle("/formula/Hybrid/bulb/power").is_none(), "no step on runs a Mandelbulb step");
+}

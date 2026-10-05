@@ -436,6 +436,8 @@ pub struct Target {
     pub converged: bool,
     pub denoise: crate::denoise::State,
     denoise_selected: bool,
+    /// The viewport shows the raw samples; denoising still runs, so switching back is instant.
+    pub raw_view: bool,
     out: DeviceBuffer<[f32; 4]>,
     /// SDR monitor codes (R in the low byte), row major, after the last `step`.
     pub pixels: Vec<u32>,
@@ -571,6 +573,7 @@ impl Gpu {
             converged: false,
             denoise: Default::default(),
             denoise_selected: false,
+            raw_view: false,
             out: DeviceBuffer::zeroed(&self.stream, width * height).expect("output"),
             pixels: vec![0; width * height],
             light: vec![[0.0; 4]; width * height],
@@ -1056,7 +1059,8 @@ impl Gpu {
             };
             target.denoise.complete(target.samples, result);
         }
-        target.denoise_selected = settings.enabled && target.denoise.output.is_some();
+        target.denoise_selected =
+            settings.enabled && target.denoise.output.is_some() && !target.raw_view;
         due || previous != target.denoise_selected
     }
 }

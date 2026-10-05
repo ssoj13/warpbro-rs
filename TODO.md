@@ -19,13 +19,19 @@ CHANGELOG.md, add new requests as they come. Reusable UI goes into egui-widgets-
 - [x] Toolbar: EV reset-to-0 button left of EV
 - [x] Toolbar: denoiser quick toggle (off = raw radiance, on = current denoised result)
 
+## Decisions (operator, 2026-10-04)
+- Order: Attribute Editor first, then Render / Encode.
+- Soft slider ranges: an explicit table for every numeric parameter; doubtful ones listed here.
+- EXR colour: linear ACEScg / ACES2065-1 / Rec.709 / Rec.2020 and a display-referred variant.
+- HDR10 MP4 (Main10, PQ, BT.2020): a separate stage after the panel unification.
+
 ## Attribute Editor (shared widgets in egui-widgets-rs)
-- [ ] Grey out parameters inactive for the current fractal type (e.g. Mandelbox)
-- [ ] Section colour coding: tint title bars (render, material, custom, transform, fractal)
-- [ ] Colour picker: the newer egui-widgets-rs picker (delayed hide)
-- [ ] Vec3 colour everywhere a parameter is a colour
-- [ ] Every numeric parameter: label | slider | value | swatch | expand toggle (design first)
-- [ ] RMB > Show in timeline: expand the layer and scroll to the attribute
+- [x] Grey out parameters inactive for the current fractal type (e.g. Mandelbox)
+- [x] Section colour coding: tint title bars (render, material, custom, transform, fractal)
+- [x] Colour picker: the newer egui-widgets-rs picker (delayed hide)
+- [x] Vec3 colour everywhere a parameter is a colour
+- [x] Every numeric parameter: label | slider | value | swatch | expand toggle (design first)
+- [x] RMB > Show in timeline: expand the layer and scroll to the attribute
 
 ## Render / Encode panel
 - [ ] Deduplicate the three format tabs (shared settings once; per-format codec options);

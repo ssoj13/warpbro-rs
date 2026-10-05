@@ -21,6 +21,9 @@ pub struct ViewportRequest {
     pub height: usize,
     pub target_spp: u32,
     pub paused: bool,
+    /// Show the raw samples instead of the denoised image (viewport A/B; the scene's denoise
+    /// settings, and exports, are untouched).
+    pub raw: bool,
     pub active: bool,
     pub interactive: bool,
     pub seed: u32,
@@ -1513,6 +1516,7 @@ fn step_viewport(gpu: &mut Gpu, active: &mut Viewport, shared: &Shared) -> bool 
     if active.dirty || fresh || active.last_preview != preview {
         gpu.prepare_target(target, &request.scene, preview.then_some(2));
     }
+    target.raw_view = request.raw;
     let goal = if preview {
         request.target_spp.min(64)
     } else {
@@ -1871,6 +1875,7 @@ mod tests {
             height: 24,
             target_spp: 8,
             paused: false,
+            raw: false,
             active: true,
             interactive: false,
             seed: 0,
@@ -2037,6 +2042,7 @@ mod tests {
         changed.scene.render.denoise.quality = crate::denoise::Quality::High;
         changed.scene.render.denoise.mode = crate::denoise::Mode::Color;
         changed.paused = true;
+        changed.raw = true;
         changed.output_hdr = true;
         changed.white_nits = 200.0;
         assert_eq!(trace_key(&original), trace_key(&changed));

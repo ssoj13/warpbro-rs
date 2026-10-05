@@ -203,6 +203,10 @@ pub struct WorldUi {
     component_open: HashMap<NodeId, HashSet<String>>,
     component_closed: HashMap<NodeId, HashSet<String>>,
     section_closed: HashMap<NodeId, HashSet<&'static str>>,
+    /// Attribute lane the timeline scrolls to on its next draw (Attribute Editor > Show in
+    /// timeline), and whether the Timeline panel must be opened for it.
+    reveal: Option<(NodeId, String)>,
+    reveal_panel: bool,
     keys: HashSet<KeyIdentity>,
     snap: bool,
     error: Option<String>,
@@ -246,6 +250,8 @@ impl Default for WorldUi {
             component_open: HashMap::new(),
             component_closed: HashMap::new(),
             section_closed: HashMap::new(),
+            reveal: None,
+            reveal_panel: false,
             keys: HashSet::new(),
             snap: true,
             error: None,
@@ -299,6 +305,22 @@ fn kind_color(k: WorldKind) -> Color32 {
         WorldKind::Environment => Color32::from_rgb(95, 169, 150),
         WorldKind::Group => Color32::from_rgb(142, 149, 163),
         WorldKind::Material => Color32::from_rgb(190, 132, 155),
+    }
+}
+/// Title tint of an Attribute Editor section: the node-kind colour where the section is that
+/// kind's own (Fractal, Camera, Light, Environment, Material), its own colour otherwise. One
+/// palette for every node, so a section reads the same wherever it appears.
+pub(crate) fn section_color(group: &str) -> Color32 {
+    match group {
+        "Fractal" => kind_color(WorldKind::Fractal),
+        "Camera" => kind_color(WorldKind::Camera),
+        "Light" => kind_color(WorldKind::DirectionalLight),
+        "Environment" => kind_color(WorldKind::Environment),
+        "Material" => kind_color(WorldKind::Material),
+        "Transform" => Color32::from_rgb(214, 140, 80),
+        "Render" => Color32::from_rgb(196, 96, 96),
+        "Color" => Color32::from_rgb(100, 180, 210),
+        _ => Color32::from_rgb(150, 150, 150),
     }
 }
 fn category(path: &str) -> &'static str {
@@ -960,7 +982,9 @@ impl WorldUi {
             for (order, &index) in section.indices.iter().enumerate() {
                 let attr = &attrs[index];
                 section.fields.push(
-                    AttrField::new(&attr.path, grid_value(&attr.value)).with_order(order as f32),
+                    AttrField::new(&attr.path, grid_value(&attr.value))
+                        .with_order(order as f32)
+                        .with_ui_options(grid_hints(attr)),
                 );
                 section.labels.push(
                     attr.component
@@ -1002,6 +1026,28 @@ impl WorldUi {
                             .is_some_and(|(parent, _)| parent == path)
                         && !a.frames.is_empty()
                 }))
+    }
+    /// Show `attr` of node `id` in the timeline: expand the layer (no property filter), its
+    /// attribute group and, for a vector component, the component channels; the next timeline
+    /// draw scrolls the lane into view.
+    fn reveal_in_timeline(&mut self, id: NodeId, attr: &WorldAttribute) {
+        let parent = match attr.component {
+            Some(_) => attr.path.rsplit_once('/').map_or(attr.path.as_str(), |(p, _)| p),
+            None => attr.path.as_str(),
+        };
+        self.expanded.insert(id);
+        self.property_filters.remove(&id);
+        self.groups.insert((id, format!("@{}", category(parent))));
+        if attr.component.is_some() {
+            // `toggle_components(.., open = false)` opens them.
+            self.toggle_components(id, parent, false);
+        }
+        self.reveal = Some((id, attr.path.clone()));
+        self.reveal_panel = true;
+    }
+    /// The Timeline panel must be shown for a pending reveal (taken once by the app).
+    pub(crate) fn take_timeline_request(&mut self) -> bool {
+        std::mem::take(&mut self.reveal_panel)
     }
     fn toggle_components(&mut self, id: NodeId, path: &str, open: bool) {
         if let Some(paths) = self.component_open.get_mut(&id) {
@@ -1333,6 +1379,12 @@ impl WorldUi {
                                 ),
                                 Vec2::new(left_w, resp.lane_height),
                             );
+                            if self.reveal.as_ref().is_some_and(|(id, path)| {
+                                *id == n.id && l.path.as_deref() == Some(path.as_str())
+                            }) {
+                                ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                                self.reveal = None;
+                            }
                             self.lane_row(
                                 ui,
                                 e,
@@ -1710,16 +1762,17 @@ impl WorldUi {
                         },
                     );
                 }
-            } else if is_color(path, &lane.value) {
-                let mut rgb = std::array::from_fn::<_, 3, _>(|i| {
-                    lane.value[i].as_f64().unwrap_or_default() as f32
+            } else if lane.attr.as_ref().is_some_and(|a| a.color && a.component.is_none()) {
+                let mut rgba = std::array::from_fn::<_, 4, _>(|i| {
+                    lane.value.get(i).and_then(Value::as_f64).unwrap_or(1.0) as f32
                 });
                 if cell_ui(ui, left, "color", |ui| {
                     ui.spacing_mut().interact_size = Vec2::splat(self.attribute_metrics.icon_side);
-                    ui.color_edit_button_rgb(&mut rgb).changed()
+                    egui_colorpicker::color_button(ui, &mut rgba).changed()
                 })
                 .inner
                 {
+                    let rgb = [rgba[0], rgba[1], rgba[2]];
                     self.value_command(
                         ui,
                         e,
@@ -2273,7 +2326,7 @@ impl WorldUi {
                     let response = egui_titlebar::CollapsingSection::new(group)
                         .id_salt((wid(id), group))
                         .open(open)
-                        .tint(kind_color(node.kind), 0.16)
+                        .tint(section_color(group), 0.16)
                         .show(ui, |ui| {
                             let config = self.attribute_metrics.grid_config();
                             section.state.table.widths.resize(1, 0.0);
@@ -2423,6 +2476,26 @@ impl AttrGridHooks for WorldGridHooks<'_> {
             }
         }
     }
+    fn disabled(&self, field: &AttrField) -> Option<String> {
+        let attr = &self.attrs[self.indices[self.index(field)?]];
+        crate::world::inactive_reason(&attr.path, |path| {
+            self.attrs.iter().find(|a| a.path == path).map(|a| &a.value)
+        })
+    }
+    fn context_menu(&mut self, ui: &mut egui::Ui, field: &AttrField) {
+        let Some(index) = self.index(field) else {
+            return;
+        };
+        let attr = &self.attrs[self.indices[index]];
+        if ui
+            .add_enabled(attr.keyable, egui::Button::new("Show in timeline"))
+            .on_disabled_hover_text("Not an animatable property")
+            .clicked()
+        {
+            self.ui_state.reveal_in_timeline(self.id, attr);
+            ui.close();
+        }
+    }
     fn actions(&mut self, ui: &mut egui::Ui, field: &AttrField) {
         let Some(index) = self.index(field) else {
             return;
@@ -2448,24 +2521,6 @@ impl AttrGridHooks for WorldGridHooks<'_> {
                     } else {
                         json!([0.0, 0.0, 0.0])
                     },
-                    frame: self.frame,
-                });
-            }
-        } else if is_color(&attr.path, &self.values[index]) {
-            let mut rgb = std::array::from_fn::<_, 3, _>(|i| {
-                self.values[index][i].as_f64().unwrap_or_default() as f32
-            });
-            let changed = cell_ui(ui, left, (&field.key, "color"), |ui| {
-                ui.spacing_mut().interact_size =
-                    Vec2::splat(self.ui_state.attribute_metrics.icon_side);
-                ui.color_edit_button_rgb(&mut rgb).changed()
-            })
-            .inner;
-            if changed {
-                self.value_commands.push(WorldCommand::SetAttribute {
-                    id: self.id,
-                    path: attr.path.clone(),
-                    value: json!(rgb),
                     frame: self.frame,
                 });
             }
@@ -2506,7 +2561,6 @@ impl AttrGridHooks for WorldGridHooks<'_> {
             || attr.path == "/material_id"
             || attr.path == "/environment/path"
             || attr.path.starts_with("/custom/")
-            || attr.range.is_some()
             || matches!(field.value, GridValue::Label(_))
         {
             let changed = self.ui_state.edit_attribute(
@@ -2553,9 +2607,27 @@ fn same_value_shape(before: &Value, after: &Value) -> bool {
         _ => false,
     }
 }
-fn is_color(path: &str, value: &Value) -> bool {
-    value.as_array().is_some_and(|v| v.len() == 3)
-        && (path.contains("color") || path.contains("colour"))
+/// The grid hints of an attribute (see egui-attr-grid): the colour editor for an RGB colour,
+/// else for a number (a scalar or a vector component) its slider span, `soft` unless that span
+/// is the hard limit (typing past it is fine, the document clamps to the hard one).
+fn grid_hints(attr: &WorldAttribute) -> Vec<String> {
+    if attr.color && attr.component.is_none() {
+        return vec!["color".into()];
+    }
+    let Some(slider) = attr.slider.filter(|_| attr.value.is_number()) else {
+        return Vec::new();
+    };
+    let mut hints = vec![slider.min.to_string(), slider.max.to_string()];
+    if attr.value.is_u64() || attr.value.is_i64() {
+        hints.push("1".into());
+    }
+    if slider.log {
+        hints.push("log".into());
+    }
+    if attr.range != Some((slider.min, slider.max)) {
+        hints.push("soft".into());
+    }
+    hints
 }
 fn grid_value(value: &Value) -> GridValue {
     match value {
@@ -3133,6 +3205,24 @@ mod tests {
         assert_eq!(serde_json::to_string(&e.document).unwrap(), before);
     }
 
+    #[test]
+    fn show_in_timeline_expands_the_layer_group_and_components() {
+        let e = editor();
+        let object = e.selection.unwrap();
+        let attrs = e.document.attributes(object, 0.0).unwrap();
+        let channel = attrs.iter().find(|a| a.path == "/transform/position/1").unwrap();
+        let mut state = WorldUi::default();
+        state.property_filters.insert(object, PropertyFilter(PropertyFilter::KEYED));
+        state.reveal_in_timeline(object, channel);
+        assert!(state.expanded.contains(&object));
+        assert!(!state.property_filters.contains_key(&object), "no filter hides it");
+        assert!(state.groups.contains(&(object, "@Transform".to_owned())));
+        assert!(state.components_open(object, "/transform/position", &attrs));
+        let lanes = state.lanes(object, &attrs);
+        assert!(lanes.iter().any(|l| l.path.as_deref() == Some("/transform/position/1")));
+        assert!(state.take_timeline_request() && !state.take_timeline_request());
+        assert_eq!(state.reveal, Some((object, "/transform/position/1".to_owned())));
+    }
     #[test]
     fn time_cursor_work_area_and_marks_follow_after_effects_keys() {
         let mut e = editor();

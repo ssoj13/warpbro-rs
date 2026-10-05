@@ -406,6 +406,10 @@ impl App {
             .id(egui::Id::new("frac-workspace"))
             .style(egui_dock::Style::from_egui(ui.style().as_ref()))
             .show_inside(ui, &mut Viewer { app: self });
+        // Attribute Editor > Show in timeline brings the Timeline forward.
+        if self.world_ui.take_timeline_request() {
+            self.panels_to_open.push(Panel::Timeline);
+        }
         for panel in self.panels_to_open.drain(..) {
             open_panel(&mut state, panel);
         }
@@ -426,22 +430,12 @@ impl App {
         }
         .show(ui, rect, &mut state, |ui| {
             use egui_phosphor::regular as ph;
-            let exposure = &mut self.scene.render.exposure_stops;
-            if ui
-                .add_enabled(*exposure != 0.0, egui::Button::new(ph::ARROW_COUNTER_CLOCKWISE).small())
-                .on_hover_text("Reset exposure to 0 EV")
-                .clicked()
-            {
-                *exposure = 0.0;
-            }
-            ui.add(
-                egui::DragValue::new(&mut self.scene.render.exposure_stops)
-                    .speed(0.05)
-                    .range(-10.0..=10.0)
-                    .fixed_decimals(2)
-                    .suffix(" EV"),
-            )
-            .on_hover_text("Exposure");
+            egui_viewport_toolbar::exposure_control(
+                ui,
+                &mut self.scene.render.exposure_stops,
+                &mut self.exposure_hold,
+                -10.0..=10.0,
+            );
             ui.separator();
             self.colour.set_hdr(true);
             let changed = self.colour.quick_view_ui(ui);
@@ -478,10 +472,19 @@ impl App {
             ui.separator();
             ui.toggle_value(&mut self.paused, ph::PAUSE)
                 .on_hover_text("Pause rendering");
-            // The scene's own denoise switch (World Settings): off shows the raw samples at once,
-            // on denoises the current samples again; the accumulation is untouched either way.
-            ui.toggle_value(&mut self.scene.render.denoise.enabled, ph::SPARKLE)
-                .on_hover_text("Denoise (OIDN): off shows the raw samples");
+            // A/B of the viewport only: the scene's denoise settings (World Settings) and exports
+            // stay as authored, and denoising keeps running so switching back is instant.
+            let denoising = self.scene.render.denoise.enabled;
+            let mut shown = denoising && !self.raw_view;
+            if ui
+                .add_enabled(denoising, egui::Button::selectable(shown, ph::SPARKLE))
+                .on_hover_text("Viewport: denoised / raw samples")
+                .on_disabled_hover_text("Denoising is off in World Settings")
+                .clicked()
+            {
+                shown = !shown;
+                self.raw_view = !shown;
+            }
             if ui
                 .selectable_label(self.scene.camera.free_flight, ph::AIRPLANE)
                 .on_hover_text("Free flight / horizon lock · RMB + WASD, R / Space up, C down, Q/E")

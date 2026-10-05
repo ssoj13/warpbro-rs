@@ -77,7 +77,22 @@ pub struct WorldAttribute {
     pub keyable: bool,
     pub component: Option<usize>,
     pub choices: Vec<Value>,
+    /// Hard limits; the document clamps to them (`attribute_range`).
     pub range: Option<(f64, f64)>,
+    /// The slider span (`attribute_slider`); components inherit their vector's.
+    pub slider: Option<Slider>,
+    /// An RGB colour (`is_color_attribute`).
+    pub color: bool,
+}
+
+/// The span a parameter's slider covers: its useful range. Typing may go past it, up to the
+/// hard limit (`WorldAttribute::range`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Slider {
+    pub min: f64,
+    pub max: f64,
+    /// Logarithmic for values spanning orders of magnitude.
+    pub log: bool,
 }
 #[derive(Clone, Debug)]
 pub enum WorldCommand {
@@ -1059,6 +1074,8 @@ fn attribute_choices(path: &str) -> Vec<Value> {
 fn attribute_range(path: &str) -> Option<(f64, f64)> {
     match path {
         "/camera/fov_y_degrees" => Some((1.0, 179.0)),
+        // Axis index of the trap plane (X, Y, Z); the kernel reads min(2).
+        "/trap_axis" => Some((0.0, 2.0)),
         "/render/denoise/interval" => Some((0.0, u32::MAX as f64)),
         "/render/adaptive/noise_threshold" => Some((0.0005, 1.0)),
         "/render/adaptive/min_samples" => Some((crate::scene::Adaptive::MIN_SAMPLES_FLOOR as f64, 65536.0)),
@@ -1070,6 +1087,177 @@ fn attribute_range(path: &str) -> Option<(f64, f64)> {
         _ => None,
     }
 }
+/// Slider spans of every numeric parameter, one table (the operator chose explicit spans over
+/// guesses from the current value). Fractal parameters match per family, a Hybrid's sub-formula
+/// like its standalone family. A parameter missing here edits as a plain number.
+fn attribute_slider(path: &str) -> Option<Slider> {
+    let lin = |min: f64, max: f64| Some(Slider { min, max, log: false });
+    let log = |min: f64, max: f64| Some(Slider { min, max, log: true });
+    // RGB channels (their component rows): 0..1 on the rail, HDR values typed past it.
+    if is_color_attribute(path) {
+        return lin(0.0, 1.0);
+    }
+    if let Some(rest) = path.strip_prefix("/formula/") {
+        let (family, param) = rest.split_once('/')?;
+        let (family, param) = match (family, param.split_once('/')) {
+            ("Hybrid", Some(("bulb", p))) => ("Mandelbulb", p),
+            ("Hybrid", Some(("mandelbox", p))) => ("Mandelbox", p),
+            ("Hybrid", Some(("kifs", p))) => ("Kifs", p),
+            _ => (family, param),
+        };
+        return match (family, param) {
+            (_, "rotation_degrees" | "angle_phase_degrees") => lin(-180.0, 180.0),
+            ("Mandelbulb", "power") => lin(1.0, 16.0),
+            ("Mandelbulb", "bailout") => lin(1.0, 8.0),
+            ("Mandelbulb", "angle_scale") => lin(0.0, 4.0),
+            ("Mandelbox", "scale") => lin(-4.0, 4.0),
+            ("Mandelbox", "fixed_radius" | "fold_limit") => lin(0.1, 3.0),
+            ("Mandelbox", "min_radius_ratio") => lin(0.0, 1.0),
+            ("Kifs", "scale") => lin(1.0, 4.0),
+            ("Kifs", "offset") => lin(-2.0, 2.0),
+            ("Apollonian", "scale") | ("Hybrid", "apollonian_scale") => lin(1.0, 2.0),
+            ("Apollonian" | "Kleinian" | "PseudoKleinian", "bound_radius") => lin(0.0, 4.0),
+            ("Kleinian", "a") => lin(1.0, 3.0),
+            ("Kleinian", "b") => lin(-1.0, 1.0),
+            ("PseudoKleinian", "box_size") => lin(0.0, 2.0),
+            ("PseudoKleinian", "c") => lin(-1.0, 1.0),
+            ("PseudoKleinian", "offset") => lin(-2.0, 2.0),
+            ("PseudoKleinian", "size") => lin(0.1, 3.0),
+            ("PseudoKleinian", "thickness") => log(0.0001, 0.1),
+            ("QuaternionJulia", "constant") => lin(-1.0, 1.0),
+            ("QuaternionJulia", "slice_w") => lin(-1.0, 1.0),
+            ("QuaternionJulia" | "Hybrid", "bailout") => lin(2.0, 16.0),
+            _ => None,
+        };
+    }
+    match path {
+        "/julia" => lin(-1.0, 1.0),
+        "/trap_point" => lin(-2.0, 2.0),
+        "/trap_scale" => lin(0.1, 5.0),
+        "/trap_axis" => lin(0.0, 2.0),
+        "/transform/position" | "/transform/pivot" => lin(-10.0, 10.0),
+        "/transform/rotation_degrees" => lin(-180.0, 180.0),
+        "/transform/scale" => log(0.01, 10.0),
+        "/camera/target" => lin(-5.0, 5.0),
+        // In framing radii; 1 = 0.05 radius of lens (`Scene::pack`).
+        "/camera/aperture" => lin(0.0, 10.0),
+        "/camera/distance" => log(0.1, 20.0),
+        "/camera/focus_distance" => lin(0.0, 10.0),
+        "/camera/fov_y_degrees" => lin(5.0, 120.0),
+        "/camera/pitch_degrees" => lin(-89.0, 89.0),
+        "/camera/yaw_degrees" | "/camera/roll_degrees" | "/camera/orbit_phase_degrees" => {
+            lin(-180.0, 180.0)
+        }
+        "/camera/orbit_speed_degrees" => lin(-90.0, 90.0),
+        "/environment/intensity" => lin(0.0, 10.0),
+        "/environment/rotation_degrees" => lin(-180.0, 180.0),
+        "/lighting/sky_intensity" | "/lighting/sun_intensity" => lin(0.0, 20.0),
+        // Angular diameter in degrees (the sun is ~0.53).
+        "/lighting/sun_angle" => lin(0.0, 10.0),
+        "/lighting/sun_azimuth" => lin(0.0, 360.0),
+        "/lighting/sun_elevation" => lin(-90.0, 90.0),
+        "/material/coat_ior" | "/material/specular_ior" | "/material/thin_film_ior" => {
+            lin(1.0, 3.0)
+        }
+        "/material/emission" => lin(0.0, 10.0),
+        // Nanometres (the iridescent preset uses 450).
+        "/material/thin_film_thickness" => lin(0.0, 1500.0),
+        "/material/transmission_depth" => lin(0.0, 10.0),
+        // Fresnel-like falloff power of the facing blend (presets use ~2.3).
+        "/material/facing/exponent" => lin(0.5, 8.0),
+        p if p.starts_with("/material/") => lin(0.0, 1.0),
+        "/render/adaptive/min_samples" => log(4.0, 256.0),
+        "/render/adaptive/noise_threshold" => log(0.001, 0.1),
+        "/render/denoise/interval" => lin(0.0, 1024.0),
+        "/render/exposure_stops" => lin(-10.0, 10.0),
+        "/render/hit_epsilon" => log(0.00001, 0.01),
+        "/render/iterations" => lin(1.0, 64.0),
+        "/render/max_bounces" => lin(0.0, 16.0),
+        "/render/max_steps" => log(16.0, 2048.0),
+        "/render/saturation" => lin(0.0, 2.0),
+        "/render/step_factor" => lin(0.1, 1.0),
+        "/start" | "/end" => lin(0.0, 500.0),
+        _ => None,
+    }
+}
+
+/// Why a node's parameter does nothing in its current mode (shown greyed in the Attribute
+/// Editor), or None when it is in use. `value` reads the node's other attributes. The rules follow
+/// what `Scene::pack` and the kernels read: Julia only for Mandelbulb / Mandelbox, the trap
+/// parameters per colouring mode, a Hybrid's sub-formulas only when one of its steps runs them.
+pub(crate) fn inactive_reason<'a>(path: &str, value: impl Fn(&str) -> Option<&'a Value>) -> Option<String> {
+    let under = |prefix: &str| path == prefix || path.starts_with(&format!("{prefix}/"));
+    if under("/julia") || under("/trap_point") || under("/trap_axis") || under("/trap_scale") {
+        if under("/julia") {
+            let family = value("/formula")?.as_object()?.keys().next()?.clone();
+            return (!matches!(family.as_str(), "Mandelbulb" | "Mandelbox"))
+                .then(|| format!("The {family} formula has no Julia mode"));
+        }
+        let coloring = value("/coloring")?.as_str()?;
+        // gpu.rs trap3 / hit_palette: Radius reads none, TrapOrigin only the scale, TrapPlane
+        // all three, TrapPoint the point and the scale.
+        let used = match coloring {
+            "Radius" => false,
+            "TrapOrigin" => under("/trap_scale"),
+            "TrapPoint" => !under("/trap_axis"),
+            _ => true,
+        };
+        return (!used).then(|| format!("Not used by the {coloring} colouring"));
+    }
+    let rest = path.strip_prefix("/formula/Hybrid/")?;
+    let step = match rest.split('/').next()? {
+        // The bulb's rotation turns the whole hybrid (`Scene::pack`: set_rotation).
+        "bulb" if rest.starts_with("bulb/rotation_degrees") => return None,
+        "bulb" => "Mandelbulb",
+        "mandelbox" => "Mandelbox",
+        "kifs" => "KifsFold",
+        "apollonian_scale" => "Inversion",
+        _ => return None,
+    };
+    let steps = value("/formula")?.get("Hybrid")?.get("steps")?.as_array()?;
+    let runs = steps.iter().any(|s| s.as_str() == Some(step))
+        // No step on: the kernel runs a Mandelbulb step.
+        || (step == "Mandelbulb" && steps.iter().all(|s| s.as_str() == Some("Off")));
+    (!runs).then(|| format!("No hybrid step is {step}"))
+}
+
+/// RGB colours: exactly the attributes `Scene::pack` writes with `put_rgb`.
+fn is_color_attribute(path: &str) -> bool {
+    matches!(
+        path,
+        "/lighting/sun_color"
+            | "/lighting/sky_horizon"
+            | "/lighting/sky_zenith"
+            | "/material/base_color"
+            | "/material/base_tint"
+            | "/material/specular_color"
+            | "/material/transmission_color"
+            | "/material/sheen_color"
+            | "/material/coat_color"
+            | "/material/emission_color"
+            | "/material/facing/color"
+    )
+}
+
+/// A number clamped to the attribute's hard limits; other values pass through.
+fn clamp_to_range(path: &str, value: Value) -> Value {
+    match (attribute_range(path), value.as_f64()) {
+        (Some((min, max)), Some(v)) if v < min || v > max => numeric_like(&value, v.clamp(min, max)),
+        _ => value,
+    }
+}
+
+/// `v` with the number kind (integer or float) of `template`.
+fn numeric_like(template: &Value, v: f64) -> Value {
+    if template.is_u64() {
+        json!(v.round().max(0.0) as u64)
+    } else if template.is_i64() {
+        json!(v.round() as i64)
+    } else {
+        json!(v)
+    }
+}
+
 fn scene_json(scene: &Scene) -> Result<Value, String> {
     let mut v = serde_json::to_value(scene).map_err(|e| e.to_string())?;
     if let Some(o) = v.as_object_mut() {
@@ -1607,6 +1795,8 @@ impl WorldDocument {
                 component: None,
                 choices: attribute_choices(path),
                 range: attribute_range(path),
+                slider: attribute_slider(path),
+                color: is_color_attribute(path),
             });
         }
         if self.supports_material(id) {
@@ -1624,6 +1814,8 @@ impl WorldDocument {
                     .map(|n| json!(n.id))
                     .collect(),
                 range: None,
+                slider: None,
+                color: false,
             });
         }
         let parents = out.clone();
@@ -1775,6 +1967,8 @@ impl WorldDocument {
         if !frame.is_finite() {
             return Err("Invalid key time".into());
         }
+        // Hard limits hold for every editor (AE, timeline, paste, scripts), not per widget.
+        let value = clamp_to_range(path, value);
         let value = self.without_navigation_offset(id, path, value)?;
         if let Some((parent, component)) = self.component_path(id, path)? {
             let mut a = self.attrs(id)?;

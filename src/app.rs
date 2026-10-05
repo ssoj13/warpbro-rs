@@ -156,6 +156,10 @@ pub(crate) struct App {
     last_scene: Scene,
     resolution: f32,
     paused: bool,
+    /// Viewport A/B: raw samples instead of the denoised image (view state, not the scene).
+    raw_view: bool,
+    /// Exposure parked by the toolbar's EV bypass (`exposure_control`).
+    exposure_hold: f32,
     show_ui: bool,
     status: String,
     frame_ms: f32,
@@ -499,6 +503,8 @@ impl App {
             last_change: Instant::now(),
             resolution: 1.0,
             paused: false,
+            raw_view: false,
+            exposure_hold: 0.0,
             show_ui: true,
             status: String::new(),
             frame_ms: 16.0,
@@ -1598,6 +1604,7 @@ impl App {
                 || r.width != w
                 || r.height != h
                 || r.seed != self.seed
+                || r.raw != self.raw_view
                 || r.target_spp != self.target_spp
                 || r.output_hdr != output_hdr
                 || r.white_nits != white_nits
@@ -1612,6 +1619,7 @@ impl App {
             height: h,
             target_spp: self.target_spp,
             paused: self.paused,
+            raw: self.raw_view,
             interactive: self.world_ui.playing
                 || self.last_change.elapsed().as_secs_f32() < PREVIEW_HOLD_S,
             seed: self.seed,
@@ -2334,7 +2342,7 @@ impl App {
         let response = egui_titlebar::CollapsingSection::new("Render settings")
             .id_salt("render_settings")
             .open(open)
-            .tint(Color32::from_rgb(70, 130, 200), 0.28)
+            .tint(crate::world_ui::section_color("Render"), 0.28)
             .show(ui, |ui| {
                 crate::inspector::render(
                     ui,
