@@ -3208,18 +3208,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "egui-encode-dialog"
-version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#aa80bbdf90dc657d658e8944c3394775db3bbba7"
-dependencies = [
- "egui",
- "egui-file-field",
- "egui-slider",
- "egui-widgets-config",
- "serde",
-]
-
-[[package]]
 name = "egui-file-dialog"
 version = "0.15.0"
 source = "git+ssh://git@github.com/ssoj13/egui-file-dialog.git?branch=main#865964380b02525bcf4c7d145e37f820b72486fc"
@@ -9461,7 +9449,6 @@ dependencies = [
  "egui-colorpicker",
  "egui-display",
  "egui-dock-layout",
- "egui-encode-dialog",
  "egui-file-dialog",
  "egui-file-field",
  "egui-hdr-view",

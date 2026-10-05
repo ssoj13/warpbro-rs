@@ -3,7 +3,6 @@ use crate::{
     render_service::{Command, Frame, PngEncoding, RenderEvent, RenderPort, RenderService},
     scene::Scene,
 };
-use egui_encode_dialog::{Codec, EncodeOption, EncodeSchema, Format};
 use serde::{Deserialize, Serialize};
 use std::{
     fs::File,
@@ -26,23 +25,29 @@ pub enum ExportFormat {
     Png,
 }
 impl ExportFormat {
-    /// Schema order: the format tabs of the panel.
+    /// The format tabs of the panel, in order.
     pub const ALL: [Self; 3] = [Self::Exr, Self::Png, Self::Hevc];
+    fn label(self) -> &'static str {
+        match self {
+            Self::Exr => "EXR sequence",
+            Self::Png => "PNG",
+            Self::Hevc => "Video",
+        }
+    }
+    /// What a file of this format holds, under its options.
+    fn hint(self) -> &'static str {
+        match self {
+            Self::Exr => "Scene-linear ACEScg (AP1-tagged); no display transform or exposure baked in.",
+            Self::Png => "The monitor rendering baked in: SDR 8-bit sRGB / BT.709, or HDR10 / HLG 16-bit BT.2020 with cICP. HDR keeps SDR white at 100 nits; pick an HDR view for HDR highlights.",
+            Self::Hevc => "HEVC 8-bit sRGB / Rec.709 SDR; display transform baked in. Cancel saves completed frames.",
+        }
+    }
     pub fn extension(self) -> &'static str {
         match self {
             Self::Exr => "exr",
             Self::Png => "png",
             Self::Hevc => "mp4",
         }
-    }
-    /// The schema entry of this format (labels and hints come from there).
-    fn schema(self) -> &'static Format {
-        let id = match self {
-            Self::Exr => "exr",
-            Self::Png => "png",
-            Self::Hevc => "mp4",
-        };
-        schema().formats.iter().find(|f| f.id == id).expect("every export format is in the schema")
     }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -277,57 +282,6 @@ impl ExportSettings {
     }
 }
 
-/// Same schema used by Playa's reusable encoder widget; only supported sinks are advertised.
-pub fn schema() -> &'static EncodeSchema {
-    static SCHEMA: std::sync::OnceLock<EncodeSchema> = std::sync::OnceLock::new();
-    SCHEMA.get_or_init(|| {
-        EncodeSchema::new([
-            Format::new(
-                "exr",
-                "EXR sequence",
-                "exr",
-                [Codec::new(
-                    "exr",
-                    "Linear float RGB",
-                    [EncodeOption::int(
-                        "samples",
-                        "Samples / frame",
-                        256,
-                        1,
-                        1_000_000,
-                    )],
-                )
-                .hint("Scene-linear ACEScg (AP1-tagged); no display transform or exposure baked in.")],
-            ),
-            Format::new(
-                "png",
-                "PNG",
-                "png",
-                [Codec::new(
-                    "png",
-                    "Display-referred PNG",
-                    [EncodeOption::int("samples", "Samples / frame", 256, 1, 1_000_000)],
-                )
-                .hint("The monitor rendering baked in: SDR 8-bit sRGB / BT.709, or HDR10 / HLG 16-bit BT.2020 with cICP. HDR keeps SDR white at 100 nits; pick an HDR view for HDR highlights.")],
-            ),
-            Format::new(
-                "mp4",
-                "Video",
-                "mp4",
-                [Codec::new(
-                    "hevc",
-                    "HEVC / ffmpeg-rs",
-                    [
-                        EncodeOption::int("qp", "QP", i64::from(HIGH_QUALITY_QP), 0, 51),
-                        EncodeOption::choice("encoder", "Encoder", ["GPU · Vulkan Video", "CPU · Kvazaar (I-frames)"], 0),
-                    ],
-                )
-                .hint("8-bit sRGB / Rec.709 SDR; display transform baked in. Cancel saves completed frames.")],
-            ),
-        ])
-    })
-}
-
 pub struct ExportController {
     pub settings: ExportSettings,
     pub status: String,
@@ -486,19 +440,14 @@ impl ExportController {
         let running = self.is_running();
         let kind_before = self.settings.output_kind();
         ui.add_enabled_ui(!running, |ui| {
-            ui.horizontal(|ui| {
-                for format in ExportFormat::ALL {
-                    ui.selectable_value(&mut self.settings.format, format, &format.schema().label);
-                }
-            });
+            // Shared by every format: drawn once, above the format tabs.
             ui.horizontal(|ui| {
                 ui.label("Name");
                 ui.text_edit_singleline(&mut self.settings.name);
                 ui.label(format!(".{}", self.settings.format.extension()));
             });
             ui.weak(format!("Written to {}", self.out_root.join("<date_time>").display()));
-            ui.separator();
-            egui::Grid::new("render_encode_options").num_columns(2).show(ui, |ui| {
+            egui::Grid::new("render_encode_shared").num_columns(2).show(ui, |ui| {
                 ui.label("Resolution"); ui.horizontal(|ui| { ui.add(egui::DragValue::new(&mut self.settings.width).range(1..=16384)); ui.label("×"); ui.add(egui::DragValue::new(&mut self.settings.height).range(1..=16384)); }); ui.end_row();
                 ui.label("Samples / frame"); ui.add(egui::DragValue::new(&mut self.settings.samples).range(1..=1_000_000)); ui.end_row();
                 ui.label("Denoise"); ui.checkbox(&mut self.settings.denoise_at_completion, "Once at completion").on_hover_text("Run OIDN once after all samples of each exported frame; override World Settings cadence."); ui.end_row();
@@ -508,7 +457,22 @@ impl ExportController {
                         self.settings.first = timeline.3;
                         self.settings.last = timeline.3;
                     }
+                    if ui.button("Timeline").on_hover_text("The timeline's range, and its FPS for video.").clicked() {
+                        self.settings.first = timeline.0;
+                        self.settings.last = timeline.1;
+                        self.settings.set_fps(timeline.2);
+                    }
                 }); ui.end_row();
+            });
+            ui.weak("Animation is sampled at each frame. The scene and keys are frozen when export starts.");
+            ui.separator();
+            // Format tabs: only what differs between formats.
+            ui.horizontal(|ui| {
+                for format in ExportFormat::ALL {
+                    ui.selectable_value(&mut self.settings.format, format, format.label());
+                }
+            });
+            egui::Grid::new("render_encode_format").num_columns(2).show(ui, |ui| {
                 if let (Some(kind), Some(ocio)) = (self.settings.output_kind(), ocio) {
                     self.output_transform_ui(ui, ocio, current, kind);
                 }
@@ -559,18 +523,12 @@ impl ExportController {
                     }
                 }
             });
-            if ui.button("Use timeline range and FPS").clicked() {
-                self.settings.first = timeline.0;
-                self.settings.last = timeline.1;
-                self.settings.set_fps(timeline.2);
-            }
-            ui.label("Animation is sampled at each frame. The scene and keys are frozen when export starts.");
             // An override names a display of one kind (SDR / PQ / HLG): a new kind starts automatic.
             if self.settings.output_kind() != kind_before {
                 self.settings.output_display.clear();
                 self.settings.output_view.clear();
             }
-            ui.small(self.settings.format.schema().codecs[0].hint.as_deref().unwrap_or(""));
+            ui.small(self.settings.format.hint());
             let validation = {
                 let mut preview = self.settings.clone();
                 preview.resolve(&self.out_root);

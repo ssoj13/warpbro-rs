@@ -49,7 +49,6 @@ gpu-info = { package = "gpu-info-rs", git = "ssh://git@github.com/ssoj13/gpu-inf
 # OpenEXR = our own 1:1 port (exr-rs), never crates.io `exr`; same source as vfx-io so it unifies.
 exr-core = { git = "ssh://git@github.com/ssoj13/exr-rs.git", branch = "main" }
 imath-rs = { git = "ssh://git@github.com/ssoj13/exr-rs.git", branch = "main" }
-egui-encode-dialog = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
 egui-layout-manager = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
 av-codec = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main", default-features = false, features = ["enc-hevc", "hwaccel-vulkan"] }
 av-hwaccel-vulkan = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main", features = ["vulkan"] }
