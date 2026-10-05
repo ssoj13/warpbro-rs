@@ -54,12 +54,17 @@
   "last_failure": null,
   "session": {
     "id": "3473b2bc-e01c-4760-80ab-c58e476664ca",
-    "tools": 1140,
-    "agents": 7,
+    "tools": 1142,
+    "agents": 8,
     "skills": 1,
     "last_skill": "sysgo",
     "continuations": 0,
-    "prompt_at": 1791170375,
-    "running": []
+    "prompt_at": 1791171025,
+    "running": [
+      {
+        "id": "a208085ae0e3d0c5a",
+        "kind": "Explore"
+      }
+    ]
   }
 }
