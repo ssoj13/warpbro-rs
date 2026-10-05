@@ -362,6 +362,7 @@ impl Controls {
 struct Settings {
     display: egui_display::DisplayPrefs,
     colour: crate::ocio::Sel,
+    colour_presets: crate::ocio::ColourPresets,
     panel: egui_prefs2::PrefsPanelState,
     controls: Controls,
     fonts: dock::Fonts,
@@ -387,6 +388,7 @@ impl Default for Settings {
         Self {
             display: Default::default(),
             colour: crate::color::default_selection(),
+            colour_presets: Default::default(),
             panel: Default::default(),
             controls: Default::default(),
             fonts: Default::default(),
@@ -561,6 +563,7 @@ impl App {
                 dock::add_outliner(&mut self.dock);
             }
             self.colour = crate::ocio::State::new(settings.colour.clone());
+            self.colour.presets = settings.colour_presets;
             self.scene.colour = settings.colour;
             self.origin.colour = self.scene.colour.clone();
         }
@@ -743,6 +746,7 @@ impl App {
         let previous = &saved.export;
         saved.display == self.display
             && saved.colour == self.scene.colour
+            && saved.colour_presets == self.colour.presets
             && saved.panel == self.prefs
             && saved.controls == self.controls
             && saved.toolbar == self.toolbar
@@ -789,6 +793,7 @@ impl App {
         let settings = Settings {
             display: self.display,
             colour: self.scene.colour.clone(),
+            colour_presets: self.colour.presets.clone(),
             panel: self.prefs.clone(),
             controls: self.controls,
             layout,
@@ -1955,7 +1960,7 @@ impl App {
             // RMB belongs to flight.
             dolly: None,
             wheel: !over_toolbar,
-            // Shift + tumble: views parallel to the world axes.
+            // Shift + tumble: nearest world plane; Ctrl + Shift: nearest axis view.
             shift_snap: true,
             ..cam_controls_egui::OrbitButtons::HOUDINI
         };
@@ -3553,6 +3558,15 @@ mod tests {
         assert_eq!(saved.export.name, "new");
         assert_eq!(saved.export.qp, 19);
         assert!(app.changed_settings_json(&ctx).unwrap().is_none());
+        let current = app.colour.sel.clone();
+        assert!(app.colour.presets.store(1, "Custom colour", &current));
+        let json = app.changed_settings_json(&ctx).unwrap().unwrap();
+        let saved: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(saved.colour_presets, app.colour.presets);
+        assert_eq!(saved.colour_presets.slots[1].name, "Custom colour");
+        assert!(app.changed_settings_json(&ctx).unwrap().is_none());
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.colour_presets, crate::ocio::ColourPresets::default());
         app.layouts.store.save(
             "Edited workspace",
             app.layouts.cache.blob.as_ref().unwrap().clone(),
@@ -3734,13 +3748,30 @@ mod tests {
         );
         assert_eq!(app.scene.camera.roll_degrees, 90.0);
 
-        // Shift + LMB: the view snaps parallel to the nearest world axis; dragging up far
+        // Shift + LMB keeps the nearest world plane while allowing continuous yaw.
+        app.scene.camera.roll_degrees = 0.0;
+        app.scene.camera.yaw_degrees = 20.0;
+        app.scene.camera.pitch_degrees = 10.0;
+        frame(&mut app, vec![egui::Event::ModifiersChanged(egui::Modifiers::SHIFT),
+            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary,
+                pressed: true, modifiers: egui::Modifiers::SHIFT }]);
+        for _ in 0..4 {
+            pos.x += 2.0;
+            frame(&mut app, vec![egui::Event::PointerMoved(pos)]);
+        }
+        assert!(app.scene.camera.pitch_degrees.abs() < 1e-3);
+        assert!(app.scene.camera.yaw_degrees.abs() > 1.0, "plane orbit must not snap yaw to an axis");
+        frame(&mut app, vec![button(egui::PointerButton::Primary, false, pos),
+            egui::Event::ModifiersChanged(egui::Modifiers::NONE)]);
+        assert!(!app.orbit.rig.has_inertia());
+
+        // Ctrl + Shift + LMB: the view snaps parallel to the nearest world axis; dragging up far
         // enough gives the top view, square to the world, which a plain orbit then continues
         // from without losing its heading.
         app.scene.camera.roll_degrees = 0.0;
         app.scene.camera.yaw_degrees = 20.0;
         app.scene.camera.pitch_degrees = 10.0;
-        let shift = egui::Modifiers::SHIFT;
+        let shift = egui::Modifiers::CTRL.plus(egui::Modifiers::SHIFT);
         let shifted = |button, pressed, pos| egui::Event::PointerButton { pos, button, pressed, modifiers: shift };
         frame(&mut app, vec![egui::Event::ModifiersChanged(shift), shifted(egui::PointerButton::Primary, true, pos)]);
         for _ in 0..4 {
@@ -3769,6 +3800,42 @@ mod tests {
             top.yaw_degrees,
             app.scene.camera.yaw_degrees
         );
+    }
+
+    #[test]
+    fn camclip_toolbar_has_a_label_and_keeps_the_last_button_inset() {
+        let mut app = App::new();
+        let ctx = egui::Context::default();
+        for width in [1000.0, 800.0] {
+            for _ in 0..3 {
+                let mut toolbar_rect = egui::Rect::NOTHING;
+                let mut gap = 0.0;
+                let mut output = ctx.run_ui(egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 400.0))),
+                    ..Default::default()
+                }, |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        gap = ui.spacing().item_spacing.x;
+                        toolbar_rect = app.viewport_toolbar(ui, ui.max_rect()).rect;
+                    });
+                });
+                let text_rect = |wanted: &str| output.shapes.iter().find_map(|shape| {
+                    if let egui::epaint::Shape::Text(text) = &shape.shape {
+                        (text.galley.job.text == wanted).then(|| text.galley.rect.translate(text.pos.to_vec2()))
+                    } else { None }
+                });
+                if let (Some(label), Some(first), Some(last)) = (text_rect("CamClip:"), text_rect("1"), text_rect("5")) {
+                    assert!(label.right() < first.left(), "label must precede the camera slots");
+                    assert!(first.left() < last.left(), "slot order must remain 1 through 5");
+                    assert!(last.right() <= toolbar_rect.right() - gap, "last slot must stay inset from the toolbar end");
+                } else {
+                    assert!(!output.shapes.is_empty());
+                    // The Area needs its sizing pass before content shapes are emitted.
+                    if ctx.cumulative_frame_nr() > 1 { panic!("CamClip label or buttons are missing"); }
+                }
+                output.textures_delta.clear();
+            }
+        }
     }
 
     #[test]

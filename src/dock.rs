@@ -493,6 +493,7 @@ impl App {
                 self.toggle_flight_mode();
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.add_space(ui.spacing().item_spacing.x);
                 match self.camera_slots.ui(ui, &mut self.scene.camera) {
                     Some(crate::camera_slots::SlotAction::Stored(i)) => {
                         self.status = format!("Camera {} stored", i + 1);

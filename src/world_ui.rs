@@ -194,8 +194,6 @@ pub struct WorldUi {
     pub cached_frames: std::sync::Arc<[u32]>,
     pub cache_draft: bool,
     property_filters: HashMap<NodeId, PropertyFilter>,
-    timeline_focus: Option<egui::Id>,
-    timeline_rect: Option<Rect>,
     fraction: f64,
     view: TimelineView,
     expanded: HashSet<NodeId>,
@@ -241,8 +239,6 @@ impl Default for WorldUi {
             cached_frames: Default::default(),
             cache_draft: false,
             property_filters: HashMap::new(),
-            timeline_focus: None,
-            timeline_rect: None,
             fraction: 0.0,
             view: TimelineView::default(),
             expanded: HashSet::new(),
@@ -388,46 +384,17 @@ impl WorldUi {
             // activation must allow registered Ctrl/Shift chords as well.
             && !ctx.input(|input| input.pointer.secondary_down())
             && crate::hotkeys::active(ctx) == Some(crate::hotkeys::Scope::Timeline)
-            && (self
-                .timeline_rect
-                .is_some_and(|rect| ctx.pointer_hover_pos().is_some_and(|p| rect.contains(p)))
-                || self
-                    .timeline_focus
-                    .is_some_and(|id| ctx.memory(|memory| memory.focused()) == Some(id)))
     }
     fn timeline_shortcuts(&mut self, ui: &egui::Ui, e: &mut WorldEditor, nodes: &[WorldNodeInfo]) {
         use crate::hotkeys::{self, Command as Hotkey, Scope};
         hotkeys::register(ui, Scope::Timeline, ui.max_rect());
-        let focus = ui.id().with("world-timeline-keyboard");
-        // Registration can surrender focus on a release outside the row. A press inside
-        // owns panel focus until another press or a child editor explicitly takes it.
-        let had_focus = ui.ctx().memory(|memory| memory.focused()) == Some(focus);
-        ui.interact(ui.max_rect(), focus, Sense::focusable_noninteractive());
-        if had_focus
-            && !ui.input(|input| input.pointer.primary_pressed())
-            && ui.ctx().memory(|memory| memory.focused()).is_none()
-            && !ui.ctx().text_edit_focused()
-        {
-            ui.ctx().memory_mut(|memory| memory.request_focus(focus));
-        }
-        self.timeline_focus = Some(focus);
-        self.timeline_rect = Some(ui.max_rect());
-        if ui.input(|input| input.pointer.primary_pressed()) {
-            if ui.rect_contains_pointer(ui.max_rect()) {
-                if !ui.ctx().text_edit_focused() {
-                    ui.ctx().memory_mut(|memory| memory.request_focus(focus));
-                }
-            } else {
-                ui.ctx().memory_mut(|memory| memory.surrender_focus(focus));
-            }
-        }
         if !self.shortcuts_active(ui.ctx()) {
             return;
         }
         let modifiers = ui.input(|input| input.modifiers);
         let pressed = |command| hotkeys::consume(ui.ctx(), Scope::Timeline, command);
         if pressed(Hotkey::Fit) {
-            self.fit_timeline(ui.available_width(), nodes, e);
+            self.fit_timeline(ui.available_width(), e);
         }
         for (command, bit) in [
             (Hotkey::Translate, PropertyFilter::POSITION),
@@ -515,24 +482,16 @@ impl WorldUi {
             }
         }
     }
-    /// Fit authored layer bounds into the actual canvas beside the outline.
+    /// Fit the working range into the actual canvas beside the outline.
     /// This changes only presentation state; animation and the work area stay intact.
-    fn fit_timeline(&mut self, width: f32, nodes: &[WorldNodeInfo], e: &WorldEditor) {
+    fn fit_timeline(&mut self, width: f32, e: &WorldEditor) {
         let max_outline = (width - 140.0).max(width * 0.5).max(1.0);
         let outline = self
             .timeline_outline_width
             .clamp(140.0_f32.min(max_outline), max_outline);
         let canvas = (width - outline).max(1.0);
-        let (first, last) = nodes
-            .iter()
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), n| {
-                (a.min(n.start), b.max(n.end))
-            });
-        let (first, last) = if first.is_finite() && last.is_finite() {
-            (first, last + 1.0)
-        } else {
-            (e.document.first as f64, e.document.last as f64 + 1.0)
-        };
+        let first = e.document.first as f64;
+        let last = e.document.last.max(e.document.first) as f64 + 1.0;
         let margin = 8.0_f32.min(canvas * 0.1);
         let ppf = ((canvas - 2.0 * margin) / (last - first).max(1.0) as f32).max(0.00001);
         self.view.zoom = ppf / TimelineConfig::default().pixels_per_frame;
@@ -1322,13 +1281,21 @@ impl WorldUi {
                         painter.rect_filled(Rect::from_min_size(Pos2::new(x, resp.ruler_rect.bottom() - 3.0), Vec2::new(width, 3.0)), 0.0, color);
                     }
                 }
-                // The widget draws the mark glyphs; their slot numbers go beside them.
+                // The widget draws the glyph; coincident slots share one readable label.
                 let mark_x = |frame: u32| self.view.frame_to_x(frame as f32, resp.ruler_rect.left(), &cfg);
+                let mut mark_labels = std::collections::BTreeMap::<u32, String>::new();
                 for (&slot, &frame) in &e.document.marks {
+                    let label = mark_labels.entry(frame).or_default();
+                    if !label.is_empty() {
+                        label.push_str(", ");
+                    }
+                    label.push_str(&slot.to_string());
+                }
+                for (frame, label) in mark_labels {
                     painter.text(
                         Pos2::new(mark_x(frame) + 4.0, resp.ruler_rect.top()),
                         egui::Align2::LEFT_TOP,
-                        slot.to_string(),
+                        label,
                         egui::FontId::monospace(10.0),
                         canvas.visuals().selection.stroke.color,
                     );
@@ -2062,11 +2029,9 @@ impl WorldUi {
             ui.checkbox(&mut self.auto_key, "Auto Key")
                 .on_hover_text("Key camera navigation only when Auto Key is enabled; otherwise preserve existing animation keys.");
             ui.checkbox(&mut self.snap, "Snap");
-            if ui.small_button("Fit").on_hover_text("Fit all layer bars · F").clicked() {
+            if ui.small_button("Fit").on_hover_text("Fit working range · F").clicked() {
                 let width = ui.max_rect().width();
-                let cache = self.take_cache(e);
-                self.fit_timeline(width, &cache.nodes, e);
-                self.cache = cache;
+                self.fit_timeline(width, e);
             }
             ui.scope(|ui| {
                 ui.spacing_mut().slider_width *= 2.0;
@@ -3189,16 +3154,14 @@ mod tests {
 
     #[test]
     fn timeline_fit_uses_bar_bounds_and_actual_splitter_width() {
-        let e = editor();
-        let mut nodes = e.document.nodes();
-        for node in &mut nodes {
-            node.start = 100.0;
-            node.end = 399.0;
-        }
+        let mut e = editor();
+        e.document.first = 100;
+        e.document.last = 399;
+        // Layer bars retain their original bounds, outside the working range.
         let mut state = WorldUi::default();
         state.timeline_outline_width = 400.0;
         let before = serde_json::to_string(&e.document).unwrap();
-        state.fit_timeline(1000.0, &nodes, &e);
+        state.fit_timeline(1000.0, &e);
         let ppf = state.view.zoom * TimelineConfig::default().pixels_per_frame;
         assert!(((100.0 - state.view.pan_offset as f64) * ppf as f64 - 8.0).abs() < 0.001);
         assert!(((400.0 - state.view.pan_offset as f64) * ppf as f64 - 592.0).abs() < 0.001);
@@ -3278,6 +3241,35 @@ mod tests {
         assert!(e.document.marks.is_empty(), "setting a mark is one undo step");
     }
     #[test]
+    fn all_digit_slots_can_share_a_frame_and_jump_independently() {
+        let mut e = editor();
+        let ctx = egui::Context::default();
+        let mut state = WorldUi::default();
+        let keys = [egui::Key::Num0, egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4,
+            egui::Key::Num5, egui::Key::Num6, egui::Key::Num7, egui::Key::Num8, egui::Key::Num9];
+        let inside = Pos2::new(80.0, 80.0);
+        shortcut_frame(&ctx, &mut state, &mut e, vec![egui::Event::PointerMoved(inside)]);
+        for (slot, key) in keys.iter().copied().enumerate() {
+            state.seek(42);
+            let event = egui::Event::Key { key: egui::Key::Exclamationmark, physical_key: Some(key),
+                pressed: true, repeat: false, modifiers: egui::Modifiers::SHIFT };
+            let mut release = event.clone();
+            if let egui::Event::Key { pressed, .. } = &mut release { *pressed = false; }
+            shortcut_frame(&ctx, &mut state, &mut e, vec![event, release]);
+            assert_eq!(e.document.marks.len(), slot + 1);
+        }
+        for key in keys {
+            state.seek(0);
+            let event = shortcut_key(key, false);
+            let mut release = event.clone();
+            if let egui::Event::Key { pressed, .. } = &mut release { *pressed = false; }
+            shortcut_frame(&ctx, &mut state, &mut e, vec![event, release]);
+            assert_eq!(state.playhead, 42);
+        }
+        assert_eq!(e.document.marks.len(), 10);
+    }
+
+    #[test]
     fn keyed_filter_without_keys_or_toggled_off_leaves_the_layer_collapsed() {
         let mut e = editor();
         let object = e.selection.unwrap();
@@ -3346,10 +3338,10 @@ mod tests {
                 egui::Event::PointerMoved(outside),
             ],
         );
-        assert_eq!(ctx.memory(|memory| memory.focused()), state.timeline_focus);
+        assert_eq!(crate::hotkeys::active(&ctx), Some(crate::hotkeys::Scope::Timeline));
         for _ in 0..3 {
             shortcut_frame(&ctx, &mut state, &mut e, vec![]);
-            assert_eq!(ctx.memory(|memory| memory.focused()), state.timeline_focus);
+            assert_eq!(crate::hotkeys::active(&ctx), Some(crate::hotkeys::Scope::Timeline));
         }
         shortcut_frame(
             &ctx,

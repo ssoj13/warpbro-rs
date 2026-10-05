@@ -40,8 +40,12 @@ impl CameraSlots {
     /// The strip of slot buttons: LMB stores `camera`, RMB restores into it.
     pub fn ui(&mut self, ui: &mut egui::Ui, camera: &mut Camera) -> Option<SlotAction> {
         let mut action = None;
+        let right_to_left = ui.layout().prefer_right_to_left();
+        if !right_to_left {
+            ui.label("CamClip:");
+        }
         // Keep 1..5 left to right inside a right-aligned (right-to-left) toolbar block.
-        let order: Vec<usize> = if ui.layout().prefer_right_to_left() {
+        let order: Vec<usize> = if right_to_left {
             (0..COUNT).rev().collect()
         } else {
             (0..COUNT).collect()
@@ -50,7 +54,7 @@ impl CameraSlots {
             let stored = self.slots[index];
             let hint = match stored {
                 Some(c) => format!(
-                    "Camera {}\nLMB: store the current camera · RMB: restore\n\nTarget {:.3} {:.3} {:.3}\nYaw {:.1}° Pitch {:.1}° Roll {:.1}°\nDistance {:.3} · FOV {:.1}°",
+                    "CamClip {}\nLeft click: copy the current camera · Right click: paste this camera\n\nTarget {:.3} {:.3} {:.3}\nYaw {:.1}° Pitch {:.1}° Roll {:.1}°\nDistance {:.3} · FOV {:.1}°",
                     index + 1,
                     c.target[0],
                     c.target[1],
@@ -61,7 +65,7 @@ impl CameraSlots {
                     c.distance,
                     c.fov_y_degrees
                 ),
-                None => format!("Camera {} (empty)\nLMB: store the current camera", index + 1),
+                None => format!("CamClip {} (empty)\nLeft click: copy the current camera · Right click: paste after copying", index + 1),
             };
             let response = ui
                 .add(egui::Button::new((index + 1).to_string()).selected(stored.is_some()))
@@ -72,6 +76,9 @@ impl CameraSlots {
             } else if response.secondary_clicked() && self.restore(index, camera) {
                 action = Some(SlotAction::Restored(index));
             }
+        }
+        if right_to_left {
+            ui.label("CamClip:");
         }
         action
     }

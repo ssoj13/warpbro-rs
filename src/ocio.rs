@@ -661,6 +661,8 @@ impl Drop for ColourWorker {
 /// on its worker; the UI consumes only ready metadata and transforms.
 pub struct State {
     pub sel: Sel,
+    pub presets: ColourPresets,
+    preset_edit: Option<PresetEdit>,
     filterable: bool,
     hdr: bool,
     cfg: Option<(String, LoadedConfig)>,
@@ -683,6 +685,8 @@ impl State {
         };
         let mut state = Self {
             sel,
+            presets: Default::default(),
+            preset_edit: None,
             filterable: true,
             hdr: false,
             cfg: None,
@@ -846,6 +850,8 @@ impl State {
         self.poll();
         let before = self.sel.clone();
         let mut reload = false;
+        self.presets.ui(ui, &mut self.sel, &mut self.preset_edit);
+        ui.add_space(4.0);
         ui.checkbox(&mut self.sel.on, "OCIO display transform")
             .on_hover_text("Show the colour image through the OCIO display / view (isolated channels stay raw).\nOff: the built-in sRGB display with the tone operator.");
         ui.add_space(4.0);
@@ -881,36 +887,8 @@ impl State {
             let input_warning = resolved
                 .as_ref()
                 .and_then(|n| (ocio.is_working(&n.input) == Some(false)).then(|| n.input.clone()));
-            let presets: Vec<_> = PRESETS
-                .iter()
-                .filter(|p| hdr || !p.hdr)
-                .map(|p| {
-                    let ok = displays.iter().any(|d| d == p.display) && ocio.views(p.display, hdr).contains(&p.view);
-                    let shown = resolved.as_ref().is_some_and(|n| n.display == p.display && n.view == p.view);
-                    (p, ok, shown)
-                })
-                .collect();
             let dflt = |f: fn(&Names) -> &str| resolved.as_ref().map_or(String::new(), |n| f(n).to_owned());
 
-            // Keep the quick choices above the advanced controls, including in a
-            // short Settings dock. Both entry points use this same preset table.
-            ui.label("Monitor preset").on_hover_text("Choose the image rendering; this does not change UI reference white.");
-            ui.horizontal_wrapped(|ui| {
-                for (p, ok, shown) in presets {
-                    let tip = if ok {
-                        p.hint.to_owned()
-                    } else {
-                        format!("{}\n\nUnavailable: this config has no \"{}\" / \"{}\".", p.hint, p.display, p.view)
-                    };
-                    let button = egui::Button::new(p.label).selected(self.sel.on && shown);
-                    if ui.add_enabled(ok, button).on_hover_text(tip).clicked() {
-                        self.sel.on = true;
-                        self.sel.display = p.display.to_owned();
-                        self.sel.view = p.view.to_owned();
-                    }
-                }
-            });
-            ui.end_row();
             ui.label("Input").on_hover_text(
                 "This config's linear AP1 (ACEScg) colour space: the tracer renders in ACEScg. Default: found by its transform to the aces_interchange role (else by the ACES names).",
             );
@@ -964,48 +942,117 @@ impl State {
     }
 }
 
-/// A display + view pairing worth one click (checked against the config before use).
-struct Preset {
-    label: &'static str,
-    display: &'static str,
-    view: &'static str,
-    /// Offered only on an HDR output.
-    hdr: bool,
-    hint: &'static str,
+/// Named application colour slots, persisted with preferences rather than scenes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ColourPreset {
+    pub name: String,
+    pub selection: Sel,
 }
 
-/// The pairings of the ACES 2.0 configs (vfx-view's monitor presets; the HDR one
-/// only on an HDR output).
-const PRESETS: &[Preset] = &[
-    Preset {
-        label: "SDR · sRGB",
-        display: "sRGB - Display",
-        view: "ACES 2.0 - SDR 100 nits (Rec.709)",
-        hdr: false,
-        hint: "A monitor clamped to sRGB (an sRGB picture mode, or Windows colour management).",
-    },
-    Preset {
-        label: "SDR · P3",
-        display: "Display P3 - Display",
-        view: "ACES 2.0 - SDR 100 nits (P3 D65)",
-        hdr: false,
-        hint: "A wide-gamut monitor in its native mode: the same rendering, encoded for P3 primaries.",
-    },
-    Preset {
-        label: "sRGB, no rendering",
-        display: "sRGB - Display",
-        view: "Un-tone-mapped",
-        hdr: false,
-        hint: "Encode straight to sRGB without a view transform (0.18 stays 0.461).",
-    },
-    Preset {
-        label: "HDR · 1000 nits",
-        display: "Rec.2100-PQ - Display",
-        view: "ACES 2.0 - HDR 1000 nits (P3 D65)",
-        hdr: true,
-        hint: "ACES 2.0 1000-nit HDR rendering and PQ export. Settings > Display selects HDR presentation; SDR screens use an SDR preview.",
-    },
-];
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ColourPresets {
+    pub slots: [ColourPreset; 4],
+}
+
+impl Default for ColourPresets {
+    fn default() -> Self {
+        let choices = [
+            ("SDR · sRGB", "sRGB - Display", "ACES 2.0 - SDR 100 nits (Rec.709)", ""),
+            ("SDR · P3", "Display P3 - Display", "ACES 2.0 - SDR 100 nits (P3 D65)", ""),
+            ("sRGB, no rendering", "sRGB - Display", "Un-tone-mapped", ""),
+            ("HDR · 1000 nits", "Display P3 HDR - Display", "ACES 2.0 - HDR 1000 nits (P3 D65)", "ACES 1.3 Reference Gamut Compression"),
+        ];
+        Self {
+            slots: choices.map(|(name, display, view, look)| ColourPreset {
+                name: name.into(),
+                selection: Sel {
+                    on: true,
+                    config: "ocio://studio-config-latest".into(),
+                    display: display.into(),
+                    view: view.into(),
+                    look: look.into(),
+                    ..Sel::default()
+                },
+            }),
+        }
+    }
+}
+
+struct PresetEdit {
+    index: usize,
+    name: String,
+    selection: Sel,
+    focus: bool,
+}
+
+impl ColourPresets {
+    pub fn store(&mut self, index: usize, name: &str, selection: &Sel) -> bool {
+        let Some(slot) = self.slots.get_mut(index) else { return false };
+        let name = name.trim();
+        if name.is_empty() { return false; }
+        *slot = ColourPreset { name: name.into(), selection: selection.clone() };
+        true
+    }
+
+    pub fn restore(&self, index: usize, selection: &mut Sel) -> bool {
+        let Some(slot) = self.slots.get(index) else { return false };
+        *selection = slot.selection.clone();
+        true
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, selection: &mut Sel, edit: &mut Option<PresetEdit>) {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Color presets");
+            for (index, slot) in self.slots.iter().enumerate() {
+                let s = &slot.selection;
+                let hint = format!(
+                    "Left click: name and save current colour settings\nRight click: restore this preset\n\nConfig: {}\nInput: {}\nDisplay: {}\nView: {}\nLook: {}\nOCIO: {}",
+                    source(&s.config),
+                    if s.working_input.is_empty() { "auto ACEScg" } else { &s.working_input },
+                    s.display, s.view,
+                    if s.look.is_empty() { "the view's looks" } else { &s.look },
+                    if s.on { "on" } else { "off" },
+                );
+                let response = ui.add(egui::Button::new(&slot.name).selected(s == selection)).on_hover_text(hint);
+                if response.clicked() {
+                    *edit = Some(PresetEdit { index, name: slot.name.clone(), selection: selection.clone(), focus: true });
+                } else if response.secondary_clicked() {
+                    *selection = slot.selection.clone();
+                }
+            }
+        });
+        let mut save = false;
+        let mut cancel = false;
+        let mut open = true;
+        if let Some(draft) = edit.as_mut() {
+            egui::Window::new("Save color preset")
+                .id(egui::Id::new("ocio.preset_name"))
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .show(ui.ctx(), |ui| {
+                    ui.label(format!("Preset {}", draft.index + 1));
+                    let response = ui.add(egui::TextEdit::singleline(&mut draft.name).hint_text("Preset name"));
+                    if draft.focus { response.request_focus(); draft.focus = false; }
+                    let valid = !draft.name.trim().is_empty();
+                    save = valid && response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
+                    ui.horizontal(|ui| {
+                        save |= ui.add_enabled(valid, egui::Button::new("Save")).clicked();
+                        cancel |= ui.button("Cancel").clicked();
+                    });
+                });
+        }
+        if save {
+            if let Some(draft) = edit.take() {
+                self.store(draft.index, &draft.name, &draft.selection);
+            }
+        } else if cancel || !open {
+            *edit = None;
+        }
+    }
+}
 
 /// The config combo: automatic ($OCIO or the default built-in), OCIO's built-in
 /// configs, or the file in use.
@@ -1053,6 +1100,114 @@ pub(crate) fn combo(ui: &mut egui::Ui, id: &str, cur: &mut String, items: &[Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn colour_slot_clicks_prompt_save_cancel_and_restore() {
+        fn frame(ctx: &egui::Context, presets: &mut ColourPresets, sel: &mut Sel, edit: &mut Option<PresetEdit>, events: Vec<egui::Event>) -> egui::FullOutput {
+            ctx.run_ui(egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0))),
+                events,
+                ..Default::default()
+            }, |root| {
+                egui::CentralPanel::default().show(root, |ui| presets.ui(ui, sel, edit));
+            })
+        }
+        fn mouse(pos: egui::Pos2, button: egui::PointerButton, pressed: bool) -> Vec<egui::Event> {
+            vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton { pos, button, pressed, modifiers: Default::default() }]
+        }
+        fn key(key: egui::Key) -> Vec<egui::Event> {
+            vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]
+        }
+        let ctx = egui::Context::default();
+        let mut presets = ColourPresets::default();
+        let original = presets.clone();
+        let mut sel = presets.slots[3].selection.clone();
+        let expected = sel.clone();
+        let mut edit = None;
+        frame(&ctx, &mut presets, &mut sel, &mut edit, vec![]);
+        let output = frame(&ctx, &mut presets, &mut sel, &mut edit, vec![]);
+        let pos = output.shapes.iter().find_map(|s| match &s.shape {
+            egui::epaint::Shape::Text(t) if t.galley.text() == "SDR · sRGB" => Some(t.pos + t.galley.rect.center().to_vec2()),
+            _ => None,
+        }).unwrap();
+        frame(&ctx, &mut presets, &mut sel, &mut edit, mouse(pos, egui::PointerButton::Primary, true));
+        frame(&ctx, &mut presets, &mut sel, &mut edit, mouse(pos, egui::PointerButton::Primary, false));
+        assert!(edit.is_some());
+        assert_eq!(presets, original, "opening the prompt does not overwrite");
+        frame(&ctx, &mut presets, &mut sel, &mut edit, vec![]);
+        edit.as_mut().unwrap().name = "My HDR".into();
+        frame(&ctx, &mut presets, &mut sel, &mut edit, key(egui::Key::Enter));
+        assert!(edit.is_none());
+        assert_eq!(presets.slots[0].name, "My HDR");
+        assert_eq!(presets.slots[0].selection, expected);
+        let saved = presets.clone();
+        edit = Some(PresetEdit { index: 0, name: "Cancelled".into(), selection: Sel::default(), focus: true });
+        frame(&ctx, &mut presets, &mut sel, &mut edit, vec![]);
+        frame(&ctx, &mut presets, &mut sel, &mut edit, key(egui::Key::Escape));
+        assert!(edit.is_none());
+        assert_eq!(presets, saved);
+        sel = Sel::default();
+        frame(&ctx, &mut presets, &mut sel, &mut edit, vec![]);
+        frame(&ctx, &mut presets, &mut sel, &mut edit, vec![]);
+        frame(&ctx, &mut presets, &mut sel, &mut edit, mouse(pos, egui::PointerButton::Secondary, true));
+        frame(&ctx, &mut presets, &mut sel, &mut edit, mouse(pos, egui::PointerButton::Secondary, false));
+        assert_eq!(sel, expected);
+        assert!(edit.is_none());
+    }
+
+    #[test]
+    fn colour_slots_store_whole_selection_and_defaults_resolve() {
+        let mut presets = ColourPresets::default();
+        for slot in &presets.slots {
+            let o = Ocio::load(&slot.selection.config).unwrap();
+            let n = o.resolve(&slot.selection, true).unwrap();
+            assert!(o.transform(&n, true).is_ok());
+        }
+        let custom = Sel {
+            on: false,
+            config: "custom.ocio".into(),
+            display: "custom display".into(),
+            view: "custom view".into(),
+            look: "custom look".into(),
+            working_input: "custom input".into(),
+        };
+        let before = presets.clone();
+        assert!(!presets.store(0, "  ", &custom));
+        assert!(!presets.store(4, "invalid slot", &custom));
+        assert_eq!(presets, before);
+        assert!(presets.store(2, "  My colour  ", &custom));
+        let json = serde_json::to_string(&presets).unwrap();
+        let restored: ColourPresets = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, presets);
+        assert_eq!(restored.slots[2].name, "My colour");
+        let mut selection = crate::color::default_selection();
+        assert!(restored.restore(2, &mut selection));
+        assert_eq!(selection, custom);
+        assert!(!restored.restore(4, &mut selection));
+        assert_eq!(selection, custom);
+    }
+
+    #[test]
+    fn hdr_preset_reproduces_studio_p3_setup() {
+        let presets = ColourPresets::default();
+        let mut sel = Sel {
+            config: "other.ocio".into(),
+            working_input: "Linear Rec.709".into(),
+            look: "other look".into(),
+            ..Sel::default()
+        };
+        assert!(presets.restore(3, &mut sel));
+        assert!(sel.on);
+        assert_eq!(sel.config, "ocio://studio-config-latest");
+        assert!(sel.working_input.is_empty());
+        let o = Ocio::load(&sel.config).unwrap();
+        let n = o.resolve(&sel, true).unwrap();
+        assert_eq!(n.input, "ACEScg");
+        assert_eq!(n.display, "Display P3 HDR - Display");
+        assert_eq!(n.view, "ACES 2.0 - HDR 1000 nits (P3 D65)");
+        assert_eq!(n.look, "ACES 1.3 Reference Gamut Compression");
+        assert!(o.transform(&n, true).unwrap().linear());
+    }
 
     fn cg() -> Ocio {
         Ocio::load("ocio://default").expect("the default built-in config")

@@ -1,6 +1,6 @@
 //! Shared DCC command routing. Global bindings reserve a chord before any panel
-//! sees it. Panel focus survives pointer exit; a press in another panel changes
-//! the owner. Text editors keep their keys. Static tables avoid per-frame maps.
+//! sees it. The visible panel under the pointer owns panel commands; keyboard
+//! focus survives pointer exit. Text editors keep their keys.
 use egui::{Context, Id, Key, Modifiers, Rect, Ui};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,11 +151,20 @@ pub fn bindings(scope: Scope) -> &'static [Binding] {
         _ => &[],
     }
 }
-fn matches(binding: &Binding, key: Key, physical_key: Option<Key>, mut modifiers: Modifiers) -> bool {
+fn matches(
+    binding: &Binding,
+    key: Key,
+    physical_key: Option<Key>,
+    mut modifiers: Modifiers,
+) -> bool {
     if binding.additive {
         modifiers.shift = false;
     }
-    let key = if binding.physical { physical_key.unwrap_or(key) } else { key };
+    let key = if binding.physical {
+        physical_key.unwrap_or(key)
+    } else {
+        key
+    };
     // Exact chords (Ctrl / Cmd equivalent): the pressed modifiers are `self`, the binding the
     // pattern. The reversed `matches_logically` let a Shift binding fire without Shift, so
     // plain 3 hit "set mark 3" and table order alone kept Insert apart from Shift + Insert.
@@ -183,19 +192,81 @@ fn resolve(
 fn owner_id() -> Id {
     Id::new("dcc-hotkey-owner")
 }
+#[derive(Clone)]
+struct PanelRegion {
+    id: Id,
+    scope: Scope,
+    rect: Rect,
+    layer: egui::LayerId,
+    viewport: egui::ViewportId,
+    frame: u64,
+}
+fn regions_id() -> Id {
+    Id::new("dcc-hotkey-regions")
+}
 pub fn active(ctx: &Context) -> Option<Scope> {
-    ctx.data(|data| data.get_temp(owner_id()))
+    let regions = ctx
+        .data(|data| data.get_temp::<Vec<PanelRegion>>(regions_id()))
+        .unwrap_or_default();
+    let frame = ctx.cumulative_frame_nr();
+    let viewport = ctx.viewport_id();
+    // Previous-frame geometry is available before any panel draws. Resolve using
+    // this frame's pointer and egui's layer hit test, independent of draw order.
+    let hovered = regions.iter().rev().find(|region| {
+        region.viewport == viewport
+            && region.frame.saturating_add(1) >= frame
+            && ctx.rect_contains_pointer(region.layer, region.rect)
+    });
+    hovered.map(|region| region.scope).or_else(|| {
+        // A click outside every panel clears retained keyboard focus immediately.
+        let obscured = ctx.pointer_hover_pos().is_some_and(|pointer| {
+            regions.iter().any(|region| {
+                region.viewport == viewport
+                    && region.frame.saturating_add(1) >= frame
+                    && ctx.layer_transform_to_global(region.layer)
+                        .map_or(region.rect, |transform| transform * region.rect)
+                        .contains(pointer)
+            })
+        });
+        if obscured || ctx.input(|input| input.pointer.any_pressed()) {
+            None
+        } else {
+            ctx.data(|data| data.get_temp(owner_id()))
+        }
+    })
 }
 /// Call for every panel, including panels with empty command tables. Clip and
 /// layer checks prevent an obscured panel from acquiring ownership.
 pub fn register(ui: &Ui, scope: Scope, rect: Rect) {
+    let frame = ui.ctx().cumulative_frame_nr();
+    let viewport = ui.ctx().viewport_id();
+    let region = PanelRegion {
+        id: ui.id(),
+        scope,
+        rect: rect.intersect(ui.clip_rect()),
+        layer: ui.layer_id(),
+        viewport,
+        frame,
+    };
+    ui.ctx().data_mut(|data| {
+        let regions = data.get_temp_mut_or_default::<Vec<PanelRegion>>(regions_id());
+        regions.retain(|r| r.viewport != viewport || r.frame.saturating_add(1) >= frame);
+        if let Some(previous) = regions
+            .iter_mut()
+            .find(|r| r.id == region.id && r.scope == scope && r.viewport == viewport)
+        {
+            *previous = region;
+        } else {
+            regions.push(region);
+        }
+    });
     let inside = ui.rect_contains_pointer(rect);
     let pressed = ui.input(|input| input.pointer.any_pressed());
-    let owner = active(ui.ctx());
-    if inside && (pressed || owner.is_none()) {
+    let owner = ui.ctx().data(|data| data.get_temp::<Scope>(owner_id()));
+    if inside && pressed {
         ui.ctx()
             .data_mut(|data| data.insert_temp(owner_id(), scope));
-    } else if pressed && !inside && owner == Some(scope) {
+    } else if pressed && !inside && owner == Some(scope) && active(ui.ctx()).is_none() {
         ui.ctx().data_mut(|data| data.remove::<Scope>(owner_id()));
     }
 }
@@ -227,7 +298,9 @@ pub fn take_copy(ctx: &Context, wanted: bool) -> bool {
     }
     ctx.input_mut(|input| {
         let before = input.events.len();
-        input.events.retain(|event| !matches!(event, egui::Event::Copy));
+        input
+            .events
+            .retain(|event| !matches!(event, egui::Event::Copy));
         input.events.len() != before
     })
 }
@@ -251,6 +324,108 @@ pub fn take_paste(ctx: &Context, accept: impl Fn(&str) -> bool) -> Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pointer_routes_commands_before_the_hovered_panel_draws() {
+        for order in [
+            [Scope::Viewport, Scope::Timeline],
+            [Scope::Timeline, Scope::Viewport],
+        ] {
+            let ctx = Context::default();
+            let viewport = Rect::from_min_max(egui::pos2(20.0, 20.0), egui::pos2(300.0, 200.0));
+            let timeline = Rect::from_min_max(egui::pos2(20.0, 220.0), egui::pos2(600.0, 400.0));
+            let draw = |pointer, key, expected| {
+                let mut events = vec![egui::Event::PointerMoved(pointer)];
+                if key {
+                    events.push(egui::Event::Key {
+                        key: Key::F,
+                        physical_key: None,
+                        pressed: true,
+                        repeat: false,
+                        modifiers: Modifiers::NONE,
+                    });
+                } else {
+                    events.push(egui::Event::Key {
+                        key: Key::F,
+                        physical_key: None,
+                        pressed: false,
+                        repeat: false,
+                        modifiers: Modifiers::NONE,
+                    });
+                }
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(800.0, 600.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |root| {
+                        egui::CentralPanel::default().show(root, |ui| {
+                            for scope in order {
+                                let rect = if scope == Scope::Viewport {
+                                    viewport
+                                } else {
+                                    timeline
+                                };
+                                register(ui, scope, rect);
+                                assert_eq!(
+                                    consume(ui.ctx(), scope, Command::Fit),
+                                    key && scope == expected
+                                );
+                            }
+                        });
+                    },
+                );
+                output.textures_delta.clear();
+            };
+            draw(viewport.center(), false, Scope::Viewport);
+            // Move and press in one frame, without clicking to switch ownership.
+            draw(timeline.center(), true, Scope::Timeline);
+            draw(timeline.center(), false, Scope::Timeline);
+            draw(viewport.center(), true, Scope::Viewport);
+        }
+    }
+    #[test]
+    fn overlays_and_panels_without_bindings_block_the_previous_owner() {
+        for registered in [false, true] {
+            let ctx = Context::default();
+            let draw = |events: Vec<egui::Event>, covered: bool| {
+                let mut fired = false;
+                let mut output = ctx.run_ui(egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+                    events, ..Default::default()
+                }, |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        register(ui, Scope::Viewport, ui.max_rect());
+                        fired = consume(ui.ctx(), Scope::Viewport, Command::Fit);
+                    });
+                    if covered {
+                        egui::Area::new(Id::new("hotkey-overlay"))
+                            .order(egui::Order::Foreground)
+                            .fixed_pos(egui::pos2(40.0, 40.0))
+                            .show(&ctx, |ui| {
+                                let (rect, _) = ui.allocate_exact_size(egui::vec2(200.0, 200.0), egui::Sense::hover());
+                                if registered { register(ui, Scope::Settings, rect); }
+                            });
+                    }
+                });
+                output.textures_delta.clear();
+                fired
+            };
+            let point = egui::pos2(80.0, 80.0);
+            draw(vec![egui::Event::PointerMoved(point)], false);
+            draw(vec![egui::Event::PointerButton { pos: point, button: egui::PointerButton::Primary,
+                pressed: true, modifiers: Modifiers::NONE }], false);
+            draw(vec![egui::Event::PointerButton { pos: point, button: egui::PointerButton::Primary,
+                pressed: false, modifiers: Modifiers::NONE }], true);
+            draw(vec![], true);
+            assert!(!draw(vec![egui::Event::Key { key: Key::F, physical_key: None,
+                pressed: true, repeat: false, modifiers: Modifiers::NONE }], true));
+            assert_eq!(active(&ctx), if registered { Some(Scope::Settings) } else { None });
+        }
+    }
     #[test]
     fn one_press_routes_only_to_the_active_panel_and_is_consumed_once() {
         let ctx = Context::default();
@@ -281,7 +456,7 @@ mod tests {
                     });
                 },
             );
-            output.textures_delta = Default::default();
+            output.textures_delta.clear();
             assert_eq!(count, usize::from(expected != Scope::Export));
         };
         draw(vec![key.clone()], Scope::Timeline, Scope::Timeline);
@@ -296,7 +471,7 @@ mod tests {
             },
             |_| {},
         );
-        output.textures_delta = Default::default();
+        output.textures_delta.clear();
         draw(vec![key.clone()], Scope::Viewport, Scope::Viewport);
         let mut output = ctx.run_ui(
             egui::RawInput {
@@ -305,21 +480,33 @@ mod tests {
             },
             |_| {},
         );
-        output.textures_delta = Default::default();
+        output.textures_delta.clear();
         draw(vec![key], Scope::Export, Scope::Export);
     }
     #[test]
     fn chords_match_exactly_and_digits_by_key_position() {
         let t = Scope::Timeline;
         // A Shift binding never fires without Shift, a plain one never with it.
-        assert_eq!(resolve(t, Key::Insert, None, Modifiers::NONE), Some((t, Command::Preview)));
-        assert_eq!(resolve(t, Key::Insert, None, Modifiers::SHIFT), Some((t, Command::CachePreview)));
-        assert_eq!(resolve(t, Key::Num3, Some(Key::Num3), Modifiers::NONE), Some((t, Command::Mark(3))));
+        assert_eq!(
+            resolve(t, Key::Insert, None, Modifiers::NONE),
+            Some((t, Command::Preview))
+        );
+        assert_eq!(
+            resolve(t, Key::Insert, None, Modifiers::SHIFT),
+            Some((t, Command::CachePreview))
+        );
+        assert_eq!(
+            resolve(t, Key::Num3, Some(Key::Num3), Modifiers::NONE),
+            Some((t, Command::Mark(3)))
+        );
         // Shift + 3 types "!" (US) or "№" (no egui key) but is the physical 3.
         let shifted = resolve(t, Key::Exclamationmark, Some(Key::Num3), Modifiers::SHIFT);
         assert_eq!(shifted, Some((t, Command::SetMark(3))));
         // Property filters keep their additive Shift.
-        assert_eq!(resolve(t, Key::U, None, Modifiers::SHIFT), Some((t, Command::Keyed)));
+        assert_eq!(
+            resolve(t, Key::U, None, Modifiers::SHIFT),
+            Some((t, Command::Keyed))
+        );
     }
     #[test]
     fn global_commands_reserve_chords_and_panel_tables_are_distinct() {
@@ -328,7 +515,12 @@ mod tests {
             Some((Scope::Global, Command::Undo))
         );
         assert_eq!(
-            resolve(Scope::Viewport, Key::Z, None, Modifiers::COMMAND.plus(Modifiers::SHIFT)),
+            resolve(
+                Scope::Viewport,
+                Key::Z,
+                None,
+                Modifiers::COMMAND.plus(Modifiers::SHIFT)
+            ),
             Some((Scope::Global, Command::Redo))
         );
         assert_eq!(
@@ -340,7 +532,10 @@ mod tests {
             Some((Scope::Viewport, Command::Fit))
         );
         assert_eq!(resolve(Scope::Export, Key::F, None, Modifiers::NONE), None);
-        assert_eq!(resolve(Scope::Timeline, Key::F, None, Modifiers::COMMAND), None);
+        assert_eq!(
+            resolve(Scope::Timeline, Key::F, None, Modifiers::COMMAND),
+            None
+        );
         assert_eq!(
             resolve(Scope::Timeline, Key::Insert, None, Modifiers::SHIFT),
             Some((Scope::Timeline, Command::CachePreview))
