@@ -4219,7 +4219,7 @@ mod tests {
     }
 
     #[test]
-    fn numeric_cells_keep_compact_and_large_hit_rectangles_with_long_negative_values() {
+    fn spread_cells_fill_the_row_and_keep_large_hit_rectangles_with_long_negative_values() {
         for metrics in [
             AttrMetrics::default(),
             AttrMetrics {
@@ -4263,13 +4263,16 @@ mod tests {
             NUMERIC_RECT_TRACES.with(|trace| {
                 let trace = trace.borrow();
                 assert_eq!(trace.len(), 3);
+                assert!((trace[2].2.right() - 430.0).abs() < 0.6, "{:?}", trace[2].2);
                 for (response, interaction, cell) in trace.iter() {
                     assert!(
                         response.height() <= metrics.field_height + 0.6,
                         "{metrics:?}: {response:?}"
                     );
+                    // The cells share the whole row (the grid's own geometry): at least the
+                    // compact width, never past the cell.
                     assert!(
-                        interaction.width() <= metrics.numeric_width + 0.1,
+                        interaction.width() >= metrics.numeric_width,
                         "{metrics:?}: {interaction:?}"
                     );
                     assert!(
