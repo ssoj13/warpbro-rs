@@ -228,6 +228,8 @@ impl Track {
             interpolation,
         });
     }
+    /// Moves keys by re-upserting them (not `curves::Track::shift`): `comps` is a cache rebuilt on
+    /// every edit, so the key list is the single source of truth.
     #[cfg(test)]
     pub fn move_keys(&mut self, frames: &[f64], delta: f64) {
         if !delta.is_finite() || frames.iter().any(|f| !(f + delta).is_finite()) {
