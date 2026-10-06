@@ -493,7 +493,14 @@ fn prefs_grid(
     struct Plain;
     impl AttrGridHooks for Plain {}
     let metrics = metrics.normalized();
-    let config = crate::world_ui::grid_config(metrics);
+    // Preferences are scalar rows with no animation controls: the editor needs one field, not the
+    // attribute grid's three, and the label column keeps the room (a label never collapses to "...").
+    let config = egui_attr_grid::AttrGridConfig {
+        prefix_width: 0.0,
+        action_width: 0.0,
+        min_editor_width: metrics.numeric_width + metrics.component_gap + metrics.field_height,
+        ..crate::world_ui::grid_config(metrics)
+    };
     ui.scope(|ui| {
         metrics.apply(ui);
         // The label column starts at the old table's width, scaled with the body font.

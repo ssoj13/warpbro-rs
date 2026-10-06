@@ -13,6 +13,7 @@ use playa_graph::{Graph, Node, RustBox};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::LazyLock;
 
 /// Marker of WarpBro nodes on the system clipboard, so foreign text is never pasted as nodes.
 const CLIPBOARD_KEY: &str = "warpbro_nodes";
@@ -30,7 +31,7 @@ pub fn parse_clipboard(text: &str) -> Option<HashMap<String, Value>> {
 pub(crate) const CAMERA_ORBIT_SPEED: &str = "/camera/orbit_speed_degrees";
 pub(crate) const CAMERA_ORBIT_PHASE: &str = "/camera/orbit_phase_degrees";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WorldKind {
     Fractal,
     Camera,
@@ -83,6 +84,9 @@ pub struct WorldAttribute {
     pub slider: Option<Slider>,
     /// An RGB colour (`is_color_attribute`).
     pub color: bool,
+    /// What "Reset" restores: the attribute's value in a fresh world ([`attribute_default`]).
+    /// None: the attribute has no counterpart there (another formula family's parameter).
+    pub default: Option<Value>,
 }
 
 /// The span a parameter's slider covers: its useful range. Typing may go past it, up to the
@@ -1085,6 +1089,27 @@ pub(crate) fn attribute_range(path: &str) -> Option<(f64, f64)> {
         _ => None,
     }
 }
+/// The reset value of attribute `path` of a node of `kind`: its value at frame 0 in a FRESH world,
+/// the scene the app starts with. ONE source for every reset button; a path the fresh world's node
+/// does not have (another formula family's parameter) has none.
+pub(crate) fn attribute_default(kind: WorldKind, path: &str) -> Option<Value> {
+    static FRESH: LazyLock<HashMap<(WorldKind, String), Value>> = LazyLock::new(|| {
+        let world = WorldDocument::from_scene(&Scene::preset(crate::params::FAMILY_BULB));
+        let mut defaults = HashMap::new();
+        for node in world.nodes() {
+            let Ok(attrs) = world.attrs(node.id) else { continue };
+            for (path, _) in attrs.iter() {
+                if let Ok(value) = world.attribute_value(node.id, path, 0.0) {
+                    // The first node of a kind defines it (one camera, one sun, ...).
+                    defaults.entry((node.kind, path.clone())).or_insert(value);
+                }
+            }
+        }
+        defaults
+    });
+    FRESH.get(&(kind, path.to_owned())).cloned()
+}
+
 /// The attribute grid's options of a numeric attribute: its slider span, a step of 1 for an
 /// integer, "log" for a logarithmic span and "soft" when the hard limits reach past it. One
 /// rule for the Attribute Editor (from `WorldAttribute::slider` / `range`, which components
@@ -1913,17 +1938,19 @@ impl WorldDocument {
             {
                 continue;
             }
+            let keyable = !matches!(path.as_str(), "/locked" | "/solo" | "/start" | "/end");
             out.push(WorldAttribute {
                 path: path.clone(),
                 label: crate::animation::label(path),
                 value: self.attribute_value(id, path, frame)?,
                 frames: attrs.key_frames(path),
-                keyable: !matches!(path.as_str(), "/locked" | "/solo" | "/start" | "/end"),
+                keyable,
                 component: None,
                 choices: attribute_choices(path),
                 range: attribute_range(path),
                 slider: attribute_slider(path),
                 color: is_color_attribute(path),
+                default: keyable.then(|| attribute_default(kind, path)).flatten(),
             });
         }
         if self.supports_material(id) {
@@ -1943,6 +1970,7 @@ impl WorldDocument {
                 range: None,
                 slider: None,
                 color: false,
+                default: None,
             });
         }
         let parents = out.clone();
@@ -1955,6 +1983,7 @@ impl WorldDocument {
                 for (component, value) in values.iter().enumerate() {
                     let mut attr = parent.clone();
                     attr.path = format!("{}/{}", parent.path, component);
+                    attr.default = parent.default.as_ref().and_then(|d| d.get(component)).cloned();
                     attr.label = format!(
                         "{} / {}",
                         parent.label,

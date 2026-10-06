@@ -908,7 +908,14 @@ impl WorldUi {
         frame: u64,
     ) {
         let field = |attr: &WorldAttribute| {
-            let field = AttrField::new(&attr.path, grid_value(&attr.value)).with_ui_options(grid_hints(attr));
+            let value = grid_value(&attr.value);
+            let mut field = AttrField::new(&attr.path, value.clone()).with_ui_options(grid_hints(attr));
+            // Reset restores the fresh-world value (the grid refuses a default of another type).
+            if let Some(default) = attr.default.as_ref().map(grid_value)
+                && std::mem::discriminant(&default) == std::mem::discriminant(&value)
+            {
+                field = field.with_default(default);
+            }
             match crate::world::attribute_hint(&attr.path) {
                 Some(hint) => field.with_hint(hint),
                 None => field,

@@ -56,6 +56,10 @@ pub fn warpbro_dir() -> std::path::PathBuf {
     if let Some(root) = std::env::var_os("WARPBRO_HOME") {
         return std::path::PathBuf::from(root);
     }
+    // Tests never touch the operator's real profile: each test process gets its own empty one.
+    #[cfg(test)]
+    return std::env::temp_dir().join(format!("warpbro-test-{}", std::process::id()));
+    #[cfg(not(test))]
     dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".warpbro")

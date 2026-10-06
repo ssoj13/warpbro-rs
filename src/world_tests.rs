@@ -1852,3 +1852,27 @@ fn every_attribute_has_a_hover_hint() {
         attribute_hint("/formula/Mandelbox/scale")
     );
 }
+#[test]
+fn attributes_carry_the_fresh_world_value_as_their_reset_default() {
+    let mut e = editor();
+    let camera = find(&e, WorldKind::Camera);
+    let pick = |e: &WorldEditor, path: &str| {
+        e.document
+            .attributes(camera, 0.0)
+            .unwrap()
+            .into_iter()
+            .find(|a| a.path == path)
+            .unwrap()
+    };
+    let fresh = pick(&e, "/camera/distance").value;
+    let target = pick(&e, "/camera/target").value;
+    set(&mut e, camera, "/camera/distance", json!(7.5), 0.0);
+    set(&mut e, camera, "/camera/target/0", json!(99.0), 0.0);
+    let distance = pick(&e, "/camera/distance");
+    assert_eq!(distance.value, json!(7.5));
+    assert_eq!(distance.default, Some(fresh));
+    // A component's default is its element of the vector's default.
+    assert_eq!(pick(&e, "/camera/target/0").default, Some(target[0].clone()));
+    // Locks and time range are not resettable parameters.
+    assert_eq!(pick(&e, "/locked").default, None);
+}
