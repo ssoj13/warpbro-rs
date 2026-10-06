@@ -189,9 +189,9 @@ sensitive to steps in the dark.
                                                                     │ SDR view: relative, 1.0 = SDR white
                   ┌──────────────────────────┬──────────────────────┴─────┬────────────────────────┐
                   ▼                          ▼                            ▼                        ▼
-          SDR monitor / PNG 8-bit    HDR monitor / PNG HDR10        PNG HLG                  HEVC video
-          sRGB curve, BT.709         BT.709 -> BT.2020 matrix,      BT.2020, HLG curve       8-bit sRGB /
-          (sRGB chunk)               x nits per 1.0 (HDR view 100,  for the view's peak     BT.709
+          SDR monitor / PNG 8-bit    HDR monitor / PNG HDR10        PNG HLG                  SDR video
+          sRGB curve, BT.709         BT.709 -> BT.2020 matrix,      BT.2020, HLG curve       BT.1886 code
+          (sRGB chunk)               x nits per 1.0 (HDR view 100,  for the view's peak     L^(1/2.4), BT.709
                                      SDR view: monitor white or     (relative light: the
                                      BT.2408 203), PQ (cICP 9/16,   BT.2100 1000-nit
                                      mDCV = measured peak, cLLI)    reference; cICP 9/18)

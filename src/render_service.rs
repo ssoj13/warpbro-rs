@@ -129,9 +129,34 @@ impl FrameFile {
     }
 }
 
+/// The light an HDR PNG records (`mDCV`, `cLLI`): what a video made of the sequence carries
+/// as its HDR metadata (`export::ExportSettings::ffmpeg_args`), aggregated over the frames
+/// (`Self::merge`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HdrLevels {
+    /// The mastering display's peak (`HdrScale::peak_nits`).
+    pub peak_nits: f32,
+    /// Measured content light level; PQ only (HLG is relative to its display).
+    pub content: Option<egui_display::screenshot::ContentLight>,
+}
+impl HdrLevels {
+    /// The levels of a clip: the brightest mastering peak, MaxCLL and MaxFALL of all frames.
+    pub fn merge(self, other: Self) -> Self {
+        let content = match (self.content, other.content) {
+            (Some(a), Some(b)) => Some(egui_display::screenshot::ContentLight {
+                max_cll: a.max_cll.max(b.max_cll),
+                max_fall: a.max_fall.max(b.max_fall),
+            }),
+            (a, b) => a.or(b),
+        };
+        Self { peak_nits: self.peak_nits.max(other.peak_nits), content }
+    }
+}
+
 /// Write display light as a PNG: the one encoder behind the viewport, export and CLI writers.
 /// `light` is linear Rec.709 display light, `scale` says how it becomes nits (`hdr_scale`);
-/// `sdr` yields the 8-bit sRGB codes, read only for SDR.
+/// `sdr` yields the 8-bit sRGB codes, read only for SDR. Returns what an HDR file records
+/// (None for SDR).
 #[allow(clippy::too_many_arguments)]
 pub fn write_png(
     path: &Path,
@@ -142,7 +167,7 @@ pub fn write_png(
     encoding: PngEncoding,
     scale: HdrScale,
     overwrite: bool,
-) -> Result<(), String> {
+) -> Result<Option<HdrLevels>, String> {
     let peak_nits = scale.peak_nits;
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -181,7 +206,8 @@ pub fn write_png(
         peak_nits: if encoding.hdr() { peak_nits } else { scale.unit_nits },
         pixels,
     };
-    capture.save(path).map(|_| ()).map_err(|e| e.to_string())
+    let (_, content) = capture.save_measured(path).map_err(|e| e.to_string())?;
+    Ok(encoding.hdr().then_some(HdrLevels { peak_nits, content }))
 }
 
 /// CPU data only. The GPU context, buffers and progressive targets never leave the worker.
@@ -286,7 +312,8 @@ impl Frame {
             / 1.0e6
     }
     /// `sdr_white_nits`: the nits of relative light's 1.0 in an HDR file (`hdr_scale`).
-    pub fn save_png(&self, path: &Path, encoding: PngEncoding, sdr_white_nits: f32, overwrite: bool) -> Result<(), String> {
+    /// Returns what an HDR file records (`write_png`).
+    pub fn save_png(&self, path: &Path, encoding: PngEncoding, sdr_white_nits: f32, overwrite: bool) -> Result<Option<HdrLevels>, String> {
         if let Some(e) = &self.colour_error {
             return Err(format!("Colour transform failed: {e}"));
         }
@@ -303,7 +330,7 @@ impl Frame {
     /// `sdr_white_nits` as in [`Self::save_png`].
     pub fn save(&self, path: &Path, file: FrameFile, sdr_white_nits: f32) -> Result<(), String> {
         match file {
-            FrameFile::Png(encoding) => self.save_png(path, encoding, sdr_white_nits, true),
+            FrameFile::Png(encoding) => self.save_png(path, encoding, sdr_white_nits, true).map(|_| ()),
             FrameFile::DisplayExr => self.save_display_exr(path),
         }
     }
@@ -2054,8 +2081,9 @@ mod tests {
         let DisplayLight::Absolute { peak_nits } = kind else { panic!("{kind:?}") };
         assert!((peak_nits - 500.0).abs() < 5.0, "{peak_nits}");
 
-        // Saturated ACEScg green, and a highlight far above the view's range.
-        let mut light = [[0.0, 20.0, 0.0, 1.0], [1.0e3, 1.0e3, 1.0e3, 1.0]];
+        // Saturated ACEScg green (a brighter one is tone-mapped toward white, inside BT.709),
+        // and a highlight far above the view's range.
+        let mut light = [[0.0, 1.0, 0.0, 1.0], [1.0e3, 1.0e3, 1.0e3, 1.0]];
         transform.processor().apply_rgba(&mut light);
         assert!(light[0][..3].iter().any(|&v| v < -1.0e-3), "P3 green lies outside BT.709: {:?}", light[0]);
 

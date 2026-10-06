@@ -12,6 +12,9 @@ const DEVICE_DIGITS: &str = "0123456789¹²³";
 /// The suffix of a scene (and template) file.
 pub const SCENE_SUFFIX: &str = "frac.json";
 
+/// The digits of a sequence frame number (`stem.000042.suffix`).
+const FRAME_DIGITS: usize = 6;
+
 /// The longest stem in UTF-16 units: NTFS allows 255 per name, which leaves room for a
 /// sequence number (`.000000`) and the longest suffix (`.display.exr`).
 const MAX_STEM_UNITS: usize = 200;
@@ -70,9 +73,16 @@ pub fn check(name: &str) -> Result<(), String> {
 /// frame `number` of a sequence as `stem.000042.suffix` - for every sequence writer.
 pub fn frame_file(stem: &str, number: Option<u32>, suffix: &str) -> String {
     match number {
-        Some(n) => format!("{stem}.{n:06}.{suffix}"),
+        Some(n) => format!("{stem}.{n:0FRAME_DIGITS$}.{suffix}"),
         None => format!("{stem}.{suffix}"),
     }
+}
+
+/// The ffmpeg image-sequence pattern of `frame_file`'s numbering (`dir/stem.%06d.suffix`) for
+/// the frames of `stem` in `dir`, every literal `%` of the path escaped.
+pub fn sequence_pattern(dir: &std::path::Path, stem: &str, suffix: &str) -> String {
+    let base = dir.join(stem).display().to_string().replace('%', "%%");
+    format!("{base}.%0{FRAME_DIGITS}d.{}", suffix.replace('%', "%%"))
 }
 
 /// A device name, also with an extension (`con`, `CON.txt`, `com1`, `lpt¹`).
@@ -135,5 +145,9 @@ mod tests {
         assert_eq!(frame_file("shot", None, "pq.png"), "shot.pq.png");
         assert_eq!(frame_file("shot", Some(42), "pq.png"), "shot.000042.pq.png");
         assert_eq!(frame_file("shot", Some(7), "display.exr"), "shot.000007.display.exr");
+        // Both the folder's and the name's `%` are literal; only the frame number is a field.
+        let pattern = sequence_pattern(std::path::Path::new("50%"), "50% grey", "pq.png");
+        assert_eq!(pattern.matches("%%").count(), 2, "{pattern}");
+        assert!(pattern.ends_with("50%% grey.%06d.pq.png"), "{pattern}");
     }
 }

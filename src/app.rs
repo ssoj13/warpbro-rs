@@ -814,20 +814,8 @@ impl App {
             && saved.auto_key == self.world_ui.auto_key
             && saved.file_dialogs == self.world_ui.file_dialogs
             && saved.timeline_outline_width == self.world_ui.timeline_outline_width
-            && export.format == previous.format
-            && export.encoder == previous.encoder
-            && export.dir == previous.dir
-            && export.width == previous.width
-            && export.height == previous.height
-            && export.samples == previous.samples
-            && export.first == previous.first
-            && export.last == previous.last
-            && export.fps_num == previous.fps_num
-            && export.fps_den == previous.fps_den
-            && export.qp == previous.qp
-            && export.preset == previous.preset
-            && export.overwrite == previous.overwrite
-            && export.denoise_at_completion == previous.denoise_at_completion
+            // Every field, so a new setting is saved without being listed here.
+            && export == previous
     }
 
     fn changed_settings_json(&mut self, ctx: &egui::Context) -> Result<Option<String>, String> {

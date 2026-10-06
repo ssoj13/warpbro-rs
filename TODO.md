@@ -24,6 +24,16 @@ CHANGELOG.md, add new requests as they come. Reusable UI goes into egui-widgets-
 - Soft slider ranges: an explicit table for every numeric parameter; doubtful ones listed here.
 - EXR colour: linear ACEScg / ACES2065-1 / Rec.709 / Rec.2020 and a display-referred variant.
 - HDR10 MP4 (Main10, PQ, BT.2020): a separate stage after the panel unification.
+- [x] Stopgap (2026-10-05): the PNG export's **Video** encodes the sequence with an external
+      ffmpeg (ProRes 4444 XQ / HEVC 10-bit, PNG tags, HDR10 mastering + MaxCLL / MaxFALL).
+- [ ] In-process HDR video through ffmpeg-rs (Main10, VUI / SEI, ProRes encoder, `colr` / `mdcv` /
+      `clli`), requirements in `ffmpeg-rs/BUG3.md`; then HDR10 / ProRes become Video formats and
+      `PngVideo` + `encode_video` (export.rs) are deleted.
+- [ ] Test isolation: `cancel_controller_publishes_completed_movie_without_gui_waiting` (and other
+      Vulkan Video tests) fail with "Vulkan Video unavailable: Posix(38)" when export tests run
+      in parallel with the render_service / color GPU tests (measured 2026-10-05: 6 of 6 runs on
+      clean HEAD a4e85ec+WIP). `vulkan_video()` serializes Vulkan Video tests only within
+      export.rs; find which concurrent GPU use breaks session creation and serialize or fix it.
 
 ## Attribute Editor (shared widgets in egui-widgets-rs)
 - [x] Grey out parameters inactive for the current fractal type (e.g. Mandelbox)

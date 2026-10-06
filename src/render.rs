@@ -1322,7 +1322,7 @@ impl Target {
         }
         let sdr = || self.pixels.iter().flat_map(|p| p.to_le_bytes()).collect();
         let scale = crate::render_service::hdr_scale(self.light_kind, &self.light, sdr_white_nits, encoding);
-        crate::render_service::write_png(path, self.width, self.height, &self.light, sdr, encoding, scale, overwrite)
+        crate::render_service::write_png(path, self.width, self.height, &self.light, sdr, encoding, scale, overwrite).map(|_| ())
     }
 
     /// Display light, linear Rec.709, normalized to 100 nits (matching exr-view).

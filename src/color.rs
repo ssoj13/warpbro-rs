@@ -165,6 +165,17 @@ impl ColorPipeline {
     }
 }
 
+/// The SDR video code of relative display light (1.0 = SDR white): BT.1886's inverse EOTF
+/// with black at 0, `L^(1/2.4)`. A BT.709-tagged video is shown through BT.1886, so this code
+/// puts on a video display the light the viewport shows on an sRGB one (an ACES SDR view's
+/// sRGB and Rec.1886 displays differ in exactly this encoding). Every SDR video writer uses it.
+pub fn bt1886_code(light: f32) -> f32 {
+    light.clamp(0.0, 1.0).powf(1.0 / BT1886_GAMMA)
+}
+
+/// The BT.1886 display gamma (black at 0).
+pub const BT1886_GAMMA: f32 = 2.4;
+
 /// Extended sRGB canvas encoding; preserves negative values and values above 1.
 pub fn oetf(v: f32) -> f32 {
     let a = v.abs();

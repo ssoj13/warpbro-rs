@@ -2,6 +2,24 @@
 
 ## Unreleased — 2026-10-04
 
+### PNG export video (ffmpeg stopgap)
+
+- The PNG export's **Video** option encodes the finished sequence with the `ffmpeg` on PATH:
+  ProRes 4444 XQ `.mov` (10-bit, the most `prores_ks` takes) or HEVC 10-bit `.mp4`, tagged
+  like the PNGs. An HDR10 HEVC carries the
+  mastering display and the clip's MaxCLL / MaxFALL, aggregated from what the PNGs measured
+  (`render_service::HdrLevels`, `egui_display::screenshot::Capture::content_light`). Written
+  through `AtomicOut` (temp sibling, published when ffmpeg succeeds).
+- Saved settings compare the whole `ExportSettings`: a change of any export field is saved. Until ffmpeg-rs carries HDR (`ffmpeg-rs/BUG3.md`).
+- FPS and Quality are one grid row each for the Video format and the PNG's video.
+- SDR video (the built-in HEVC and the PNG export's video) is encoded for BT.1886 and tagged
+  BT.709 (1/1/1): `color::bt1886_code` (`L^(1/2.4)` of relative display light) replaces the sRGB
+  codes the HEVC carried under an sRGB tag (13), which QuickTime and ProRes headers do not know.
+  A video display now shows the light the viewport shows; QuickTime shows BT.709 at about
+  gamma 1.96 (lighter).
+- Test: an HDR10 PNG of the ACES 2.0 500-nit P3 view records the measured peak in `mDCV` and keeps
+  colour outside BT.709.
+
 ### Snapshots, slot buttons, Render / Encode panel
 
 - Viewport snapshot: a camera button on the toolbar (click: as the monitor shows it; right click and

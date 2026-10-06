@@ -292,6 +292,14 @@ playhead). A one-frame range writes `name.<suffix>`; a longer range writes
   BT.2020** (`cICP`, `mDCV`, `cLLI`) or **HLG · 16-bit BT.2020** (`cICP`, `mDCV`). An HDR output
   renders through the scene's view when it is an HDR view of that kind, else through the HDR view
   whose measured peak is nearest the HDR peak setting; `mDCV` records that view's measured peak.
+  **Video** also encodes the finished sequence with the `ffmpeg` on PATH: **ProRes 4444 XQ**
+  (10-bit 4:4:4 `.mov`, a grading master) or **HEVC 10-bit** (libx265 `.mp4`, Quality = CRF), as
+  `name.pq.mov` / `name.pq.mp4`, tagged like the PNGs (PQ: BT.2020 / SMPTE 2084 / BT.2020 NCL); an
+  SDR video is BT.709, re-encoded from the PNGs' sRGB codes for a BT.1886 display (see Video). An
+  HDR10 HEVC also carries the mastering display (the view's measured peak) and the clip's
+  MaxCLL / MaxFALL. The video is written to a temporary sibling and renamed when complete; Cancel
+  or a failure keeps the PNGs and publishes no video. This stopgap goes once the built-in encoder
+  carries HDR (`ffmpeg-rs/BUG3.md`).
 
 Every output renders through its **own output transform** from ACEScg, independent of the viewport:
 EXR stays scene-linear; SDR PNG and video use the scene's SDR view (or the config's first SDR
@@ -299,8 +307,11 @@ display); HDR10 PNG uses a PQ display and the HDR view nearest the chosen peak; 
 display. The panel shows the choice under **Output transform** and lets you override display / view.
 - **EXR sequence:** float RGB scene-linear ACEScg tagged with AP1 chromaticities; exposure and the
   display transform are excluded.
-- **HEVC / ffmpeg-rs:** hardware **GPU · Vulkan Video** encoding to MP4 or MOV by default, with rational FPS and QP 0–51. **CPU · Kvazaar (I-frames)** is an explicit software alternative using independent frames to avoid reproduced corruption in the pinned inter-prediction path; hardware initialization failures are reported instead of silently switching encoders. Output is SDR 8-bit YUV 4:2:0 with Rec.709 primaries and sRGB transfer;
-  the display transform is baked in. Width and height must be even. HDR video is unavailable.
+- **HEVC / ffmpeg-rs:** hardware **GPU · Vulkan Video** encoding to MP4 or MOV by default, with rational FPS and QP 0–51. **CPU · Kvazaar (I-frames)** is an explicit software alternative using independent frames to avoid reproduced corruption in the pinned inter-prediction path; hardware initialization failures are reported instead of silently switching encoders. Output is SDR 8-bit YUV 4:2:0, BT.709 primaries / transfer / matrix,
+  encoded for a BT.1886 (gamma 2.4) video display (`color::bt1886_code`): a video display shows the
+  light the viewport shows on an sRGB monitor. QuickTime / ColorSync show BT.709 video at about
+  gamma 1.96, so there it looks lighter and flatter; judge SDR video in Resolve, mpv or on a TV.
+  The display transform is baked in. Width and height must be even. HDR video is unavailable.
 
 Each frame receives the requested sample count. The World document is frozen at export start;
 each frame evaluates its Playa animation at that frame's time, including transforms, lights,
