@@ -2416,6 +2416,19 @@ impl AttrGridHooks for WorldGridHooks<'_> {
             self.ui_state.reveal_in_timeline(self.id, attr);
             ui.close();
         }
+        // The grid resets only the rows it edits itself; a row this host edits resets here.
+        if owns_editor(attr, &field.value)
+            && let Some(default) = attr.default.as_ref().filter(|d| **d != self.values[index])
+            && ui.button("Reset to default").clicked()
+        {
+            self.commands.push(WorldCommand::SetAttribute {
+                id: self.id,
+                path: attr.path.clone(),
+                value: default.clone(),
+                frame: self.frame,
+            });
+            ui.close();
+        }
     }
     fn actions(&mut self, ui: &mut egui::Ui, field: &AttrField) {
         let Some(index) = self.index(field) else {
@@ -2454,12 +2467,7 @@ impl AttrGridHooks for WorldGridHooks<'_> {
         record_grid_rect(&field.key, ui.max_rect());
         let index = self.index(field)?;
         let attr = &self.attrs[self.indices[index]];
-        if !attr.choices.is_empty()
-            || attr.path == "/material_id"
-            || attr.path == "/environment/path"
-            || attr.path.starts_with("/custom/")
-            || matches!(field.value, GridValue::Label(_))
-        {
+        if owns_editor(attr, &field.value) {
             let changed = self.ui_state.edit_attribute(
                 ui,
                 self.id,
@@ -2486,6 +2494,15 @@ impl AttrGridHooks for WorldGridHooks<'_> {
         }
         None
     }
+}
+/// Rows whose editor the host draws (choices, pickers, custom and label-shaped values): the grid
+/// offers only Copy on them, so their Reset lives in the host's context menu.
+fn owns_editor(attr: &WorldAttribute, value: &GridValue) -> bool {
+    !attr.choices.is_empty()
+        || attr.path == "/material_id"
+        || attr.path == "/environment/path"
+        || attr.path.starts_with("/custom/")
+        || matches!(value, GridValue::Label(_))
 }
 fn same_value_shape(before: &Value, after: &Value) -> bool {
     match (before, after) {
