@@ -537,10 +537,11 @@ mod tests {
         let v = at(12.5);
         assert!((v[0].as_f64().unwrap() - (10.0 + 10.0 * s)).abs() < 1e-9);
         assert!((v[1].as_f64().unwrap() - (20.0 + 20.0 * s)).abs() < 1e-9);
-        // Step holds the LEFT value and jumps at the next key; the segment after it is untouched.
-        assert_eq!(at(19.999), serde_json::json!([20.0, 40.0]));
+        // The smooth segment arrives at the Step key's value; Step holds the LEFT value until the next key.
+        assert!((at(19.999)[0].as_f64().unwrap() - 20.0).abs() < 1e-5);
         assert_eq!(at(20.0), serde_json::json!([20.0, 40.0]));
-        close(at(25.0), [25.0, 45.0]);
+        assert_eq!(at(29.999), serde_json::json!([20.0, 40.0]));
+        assert_eq!(at(30.0), serde_json::json!([30.0, 50.0]));
         // Constant extrapolation on both ends.
         assert_eq!(at(-5.0), serde_json::json!([0.0, 10.0]));
         assert_eq!(at(99.0), serde_json::json!([30.0, 50.0]));

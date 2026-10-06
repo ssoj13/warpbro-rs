@@ -833,19 +833,13 @@ impl WorldEditor {
                         if component.as_ref().is_some_and(|(_, i)| *i != index) {
                             continue;
                         }
-                        let moved: Vec<_> = ch
+                        let moves: Vec<_> = ch
                             .keys()
                             .iter()
-                            .filter(|k| frames.contains(&k.frame))
-                            .copied()
+                            .filter(|k| frames.contains(&k.t()))
+                            .map(|k| (k.t(), k.t() + delta))
                             .collect();
-                        for key in &moved {
-                            ch.remove_key(key.frame);
-                        }
-                        for mut key in moved {
-                            key.frame += delta;
-                            ch.upsert_key(key);
-                        }
+                        ch.move_keys(&moves);
                     }
                 }
                 self.document.store_attrs(id, &attrs)?;
@@ -870,15 +864,14 @@ impl WorldEditor {
                         if component.as_ref().is_some_and(|(_, i)| *i != index) {
                             continue;
                         }
-                        let keys: Vec<_> = ch
+                        let times: Vec<_> = ch
                             .keys()
                             .iter()
-                            .filter(|k| frames.contains(&k.frame))
-                            .copied()
+                            .map(|k| k.t())
+                            .filter(|t| frames.contains(t))
                             .collect();
-                        for mut key in keys {
-                            key.interp = if discrete { Tan::Constant } else { kind };
-                            ch.upsert_key(key);
+                        for t in times {
+                            ch.set_tan(t, if discrete { Tan::Constant } else { kind });
                         }
                     }
                 }
@@ -1434,6 +1427,12 @@ fn is_color_attribute(path: &str) -> bool {
 }
 
 /// A number clamped to the attribute's hard limits; other values pass through.
+/// Tangent for a value written at `frame`: a key that already exists keeps its out kind (editing a
+/// value must not reset its interpolation), a new key takes `new` (Settings > Animation).
+fn key_tan(ch: &Channel, frame: f64, new: Tan) -> Tan {
+    ch.keys().iter().find(|k| k.t() == frame).map_or(new, |k| k.out.kind)
+}
+
 fn clamp_to_range(path: &str, value: Value) -> Value {
     match (attribute_range(path), value.as_f64()) {
         (Some((min, max)), Some(v)) if v < min || v > max => numeric_like(&value, v.clamp(min, max)),
@@ -2035,7 +2034,7 @@ impl WorldDocument {
                     attr.frames = attrs
                         .anim(&parent.path)
                         .and_then(|anim| anim.channels.get(component))
-                        .map(|ch| ch.keys().iter().map(|k| k.frame).collect())
+                        .map(|ch| ch.keys().iter().map(|k| k.t()).collect())
                         .unwrap_or_default();
                     out.push(attr);
                 }
@@ -2185,7 +2184,7 @@ impl WorldDocument {
                     .anim_mut(&parent)
                     .and_then(|anim| anim.channels.get_mut(component))
                 {
-                    ch.upsert_key(Keyframe::with_interp(frame, scalar, kind));
+                    ch.upsert_key(Keyframe::with_tan(frame, scalar, key_tan(ch, frame, kind)));
                 }
             } else {
                 a.set(&parent, to_attr(&vector));
@@ -2240,13 +2239,15 @@ impl WorldDocument {
             } else {
                 to_attr(&value)
             };
+            let tans: Vec<Tan> = a
+                .anim(path)
+                .map(|anim| anim.channels.iter().map(|c| key_tan(c, frame, kind)).collect())
+                .unwrap_or_default();
             a.add_key(path, frame, &attr);
             if let Some(anim) = a.anim_mut(path) {
-                for channel in &mut anim.channels {
-                    if let Some(mut k) = channel.keys().iter().find(|k| k.frame == frame).copied() {
-                        k.interp = if discrete { Tan::Constant } else { kind };
-                        channel.upsert_key(k);
-                    }
+                for (i, channel) in anim.channels.iter_mut().enumerate() {
+                    let tan = if discrete { Tan::Constant } else { tans.get(i).copied().unwrap_or(kind) };
+                    channel.set_tan(frame, tan);
                 }
             }
         } else {
@@ -2565,15 +2566,12 @@ impl WorldDocument {
                 if attrs.anim(path).is_none() {
                     attrs.set_anim(path, Some(Animation::with_arity(arity)));
                 }
-                attrs
+                let ch = attrs
                     .anim_mut(path)
                     .and_then(|a| a.channels.get_mut(component))
-                    .ok_or("Invalid camera animation arity")?
-                    .upsert_key(Keyframe::with_interp(
-                        frame,
-                        (wanted - added) as f32,
-                        kind,
-                    ));
+                    .ok_or("Invalid camera animation arity")?;
+                let tan = key_tan(ch, frame, kind);
+                ch.upsert_key(Keyframe::with_tan(frame, (wanted - added) as f32, tan));
             } else if animated {
                 if arity == 1 {
                     offset = json!(wanted - raw);

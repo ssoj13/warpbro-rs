@@ -563,7 +563,7 @@ fn camera_navigation_auto_key_compensates_existing_offsets_and_keys_changed_comp
         animation.channels[0]
             .keys()
             .iter()
-            .map(|k| k.frame)
+            .map(|k| k.t())
             .collect::<Vec<_>>(),
         vec![0.0, 10.0]
     );
