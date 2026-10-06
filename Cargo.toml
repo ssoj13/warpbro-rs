@@ -18,14 +18,14 @@ members = ["crates/fractal-materials"]
 
 [dependencies]
 fractal-materials = { path = "crates/fractal-materials" }
-playa-player = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "feat/render-settings", default-features = false }
+playa-player = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "main", default-features = false }
 # OIDN for ACEScg input (AP1 autoexposure + firefly clamp).
 pt-denoise-oidn = { git = "ssh://git@github.com/ssoj13/render-rs.git", branch = "main" }
-playa-graph = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "feat/render-settings" }
-playa-engine = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "feat/render-settings", default-features = false }
-playa-time = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "feat/render-settings" }
-playa-coord = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "feat/render-settings" }
-playa-events = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "feat/render-settings" }
+playa-graph = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "main" }
+playa-engine = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "main", default-features = false }
+playa-time = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "main" }
+playa-coord = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "main" }
+playa-events = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "main" }
 egui-outliner = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
 # Our Windows fork includes the Rust 1.99 backend fixes.
 cuda-device = { git = "ssh://git@github.com/ssoj13/cuda-oxide-windows.git", branch = "main" }

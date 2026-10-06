@@ -24,6 +24,25 @@ Russian; code, comments and files in English. Reusable UI goes into egui-widgets
 | ofx-rs | bce0b90 | - |
 | render-rs | 207473e | - |
 
+## After the 2026-10-06 merge of feat/keys-track (verify first)
+
+Merged with a stopped agent's WIP and WITHOUT a full build (usage limit): first job is
+`FRAC_ALLOW_PLAIN_CARGO=1 cargo check --all-targets` + targeted `cargo oxide test` and fixing.
+- [ ] Build check on main: Playa now main 149e03c (tier cache API), av-player pinned to Playa's
+  rev 97ddb21 (ffmpeg-rs main dropped the `simd` feature Playa's playa-io asks for - tell the
+  ffmpeg-rs owner or drop the feature request in Playa), exr-core 6856661 aligned with oiio-rs.
+- [ ] egui-widgets main 4139221: `grid_config` is a free fn; `AttrMetrics` / `segmented` live in
+  egui-widgets-config; pass `AttrGridConfig::value_box_width` across the AE sections.
+- [ ] WIP last commit: attribute labels without the redundant family prefix (test: every label fits
+  the default 180 px column), removal of the remaining old-data compat (`upgrade_material_schema`,
+  orbit controls added to old documents, dock.rs layout upgrades, export.rs settings kept for old
+  files, `legacy_*` names, thumbnail_snapshot no-document path).
+- [ ] Context-menu "Reset to default" (fe032fa) has no test.
+- [ ] Flaky `export::tests::cuda_export_coordinator_samples_animation_and_writes_each_frame_once`
+  ("autonomous export timed out"): isolate GPU tests (see open work).
+- [ ] Camera recorder (own egui-prefs2 panel: TRS / Focus / Zoom / f-number; keep speed or fit to
+  work area; overrides existing keys; fitter simplification).
+
 ## Open work (priority order)
 1. **Attribute Editor parity** (in progress). The old attr-table rows (fill-width sliders, aligned
    value boxes, reset / copy / paste / random, segmented strips) were lost in 13b1caa / 9416673 /
