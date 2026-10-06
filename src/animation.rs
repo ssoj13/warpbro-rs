@@ -3,7 +3,6 @@
 use crate::scene::Scene;
 use box_rs::{BoxValue, RustBox};
 use curves::Tan;
-use curves::legacy::CurveKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -40,38 +39,14 @@ pub fn set_parameter(scene: &mut Scene, path: &str, value: Value) -> Result<(), 
     Ok(())
 }
 
-/// One scene key. `interpolation` shapes the segment that STARTS at this key (the same meaning the
-/// old per-key `CurveKind` had); the arriving side of the next key follows it, see [`Track::rebuild`].
-#[derive(Clone, Debug, PartialEq, Serialize)]
+/// One scene key. `interpolation` shapes the segment that STARTS at this key; the arriving side of
+/// the next key follows it, see [`Track::rebuild`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Key {
     pub frame: f64,
     pub value: Value,
     #[serde(rename = "tan")]
     pub interpolation: Tan,
-}
-
-/// On-disk key: current scenes store `tan`; scenes saved before the curves `Track` model store the
-/// old `interpolation` kind, which is mapped by [`legacy_tan`].
-#[derive(Deserialize)]
-struct StoredKey {
-    frame: f64,
-    value: Value,
-    tan: Option<Tan>,
-    interpolation: Option<CurveKind>,
-}
-
-/// The `Tan` that evaluates like an old key kind. Exact for Linear / Smooth (smoothstep = zero-slope
-/// Hermite) / Step (hold-left); Hermite is exact because old keys carried no handles (zero slope);
-/// Bezier with its zero default handles becomes the same flat Hermite; CatmullRom / Monotone become
-/// the auto kinds (curves KEYS.md section 5, "semantic only").
-fn legacy_tan(kind: CurveKind) -> Tan {
-    match kind {
-        CurveKind::Linear => Tan::Linear,
-        CurveKind::Smooth | CurveKind::Hermite | CurveKind::Bezier => Tan::Flat,
-        CurveKind::Step => Tan::Constant,
-        CurveKind::CatmullRom => Tan::CatmullRom,
-        CurveKind::Monotone => Tan::Smooth,
-    }
 }
 
 /// Keys sorted by frame plus one `curves::Track<f64>` per numeric leaf of the value (derived from
@@ -95,19 +70,10 @@ impl<'de> Deserialize<'de> for Track {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
         struct Stored {
-            keys: Vec<StoredKey>,
+            keys: Vec<Key>,
         }
         let mut track = Self::default();
-        for k in Stored::deserialize(d)?.keys {
-            let interpolation = k
-                .tan
-                .or(k.interpolation.map(legacy_tan))
-                .ok_or_else(|| serde::de::Error::custom("Animation key without interpolation"))?;
-            let key = Key {
-                frame: k.frame,
-                value: k.value,
-                interpolation,
-            };
+        for key in Stored::deserialize(d)?.keys {
             if !track.upsert(key) {
                 return Err(serde::de::Error::custom("Invalid animation key"));
             }
@@ -517,72 +483,34 @@ mod tests {
         assert_eq!(s.animation.tracks["/camera/distance"].keys().len(), 2);
     }
     #[test]
-    fn pre_migration_scene_keys_evaluate_as_before() {
-        // Saved before the curves Track model: one `interpolation` kind per key, values as in the file.
-        let old: Track = serde_json::from_value(serde_json::json!({ "keys": [
-            { "frame": 0.0,  "value": [0.0, 10.0], "interpolation": "Linear" },
-            { "frame": 10.0, "value": [10.0, 20.0], "interpolation": "Smooth" },
-            { "frame": 20.0, "value": [20.0, 40.0], "interpolation": "Step" },
-            { "frame": 30.0, "value": [30.0, 50.0], "interpolation": "Linear" },
+    fn tan_kinds_evaluate_and_round_trip() {
+        let t: Track = serde_json::from_value(serde_json::json!({ "keys": [
+            { "frame": 0.0,  "value": [0.0, 10.0], "tan": "linear" },
+            { "frame": 10.0, "value": [10.0, 20.0], "tan": "flat" },
+            { "frame": 20.0, "value": [20.0, 40.0], "tan": "constant" },
+            { "frame": 30.0, "value": [30.0, 50.0], "tan": "linear" },
         ]}))
         .unwrap();
-        let at = |f| old.sample(f).unwrap();
+        let at = |f| t.sample(f).unwrap();
         let close = |v: Value, want: [f64; 2]| {
             (0..2).for_each(|i| assert!((v[i].as_f64().unwrap() - want[i]).abs() < 1e-9, "{v} vs {want:?}"));
         };
         // Linear segment: straight line.
         close(at(5.0), [5.0, 15.0]);
-        // Smooth segment: smoothstep 3t^2 - 2t^3 on the segment, the legacy `Smooth`.
+        // Flat segment: smoothstep 3t^2 - 2t^3.
         let s = 0.25_f64 * 0.25 * (3.0 - 2.0 * 0.25);
-        let v = at(12.5);
-        assert!((v[0].as_f64().unwrap() - (10.0 + 10.0 * s)).abs() < 1e-9);
-        assert!((v[1].as_f64().unwrap() - (20.0 + 20.0 * s)).abs() < 1e-9);
-        // The smooth segment arrives at the Step key's value; Step holds the LEFT value until the next key.
+        close(at(12.5), [10.0 + 10.0 * s, 20.0 + 20.0 * s]);
+        // The flat segment arrives at the Constant key's value; Constant holds the LEFT value
+        // until the next key.
         assert!((at(19.999)[0].as_f64().unwrap() - 20.0).abs() < 1e-5);
-        assert_eq!(at(20.0), serde_json::json!([20.0, 40.0]));
-        assert_eq!(at(29.999), serde_json::json!([20.0, 40.0]));
+        assert_eq!(at(25.0), serde_json::json!([20.0, 40.0]));
         assert_eq!(at(30.0), serde_json::json!([30.0, 50.0]));
         // Constant extrapolation on both ends.
         assert_eq!(at(-5.0), serde_json::json!([0.0, 10.0]));
         assert_eq!(at(99.0), serde_json::json!([30.0, 50.0]));
-        assert_eq!(
-            old.keys().iter().map(|k| k.interpolation).collect::<Vec<_>>(),
-            [Tan::Linear, Tan::Flat, Tan::Constant, Tan::Linear]
-        );
-        // Re-saved scenes use the new `tan` field and read back identically.
-        let saved = serde_json::to_string(&old).unwrap();
-        assert!(saved.contains("\"tan\"") && !saved.contains("interpolation"));
-        assert_eq!(serde_json::from_str::<Track>(&saved).unwrap(), old);
-    }
-    #[test]
-    fn legacy_keys_match_the_curves_legacy_loader() {
-        use curves::legacy::LegacyKey;
-        let kinds = [CurveKind::Linear, CurveKind::Smooth, CurveKind::Step, CurveKind::Linear];
-        let vals = [0.0, 10.0, 25.0, 4.0];
-        let json: Vec<_> = kinds
-            .iter()
-            .zip(vals)
-            .enumerate()
-            .map(|(i, (k, v))| {
-                serde_json::json!({ "frame": i as f64 * 7.0, "value": v, "interpolation": k })
-            })
-            .collect();
-        let ours: Track = serde_json::from_value(serde_json::json!({ "keys": json })).unwrap();
-        let reference = curves::Track::from_legacy(kinds.iter().zip(vals).enumerate().map(
-            |(i, (&interp, v))| LegacyKey {
-                t: i as f64 * 7.0,
-                v,
-                interp,
-                tan_in: Default::default(),
-                tan_out: Default::default(),
-            },
-        ))
-        .unwrap();
-        for i in 0..=210 {
-            let f = -3.0 + f64::from(i) * 0.1;
-            let got = ours.sample(f).unwrap().as_f64().unwrap();
-            assert!((got - reference.eval(f)).abs() < 1e-12, "frame {f}");
-        }
+        let saved = serde_json::to_string(&t).unwrap();
+        assert_eq!(serde_json::from_str::<Track>(&saved).unwrap(), t);
+        assert!(serde_json::from_str::<Track>(r#"{"keys":[{"frame":0.0,"value":1.0,"interpolation":"Linear"}]}"#).is_err());
     }
     #[test]
     fn non_numeric_parts_hold_the_left_key_and_ints_stay_ints() {
