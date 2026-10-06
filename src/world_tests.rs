@@ -27,7 +27,7 @@ fn glass_node_transmission_is_keyable_shared_and_roundtrips() {
             json!(0.5),
             0.0,
             true,
-            CurveKind::Linear,
+            Tan::Linear,
         )
         .unwrap();
     e.document
@@ -37,7 +37,7 @@ fn glass_node_transmission_is_keyable_shared_and_roundtrips() {
             json!(1.5),
             20.0,
             true,
-            CurveKind::Linear,
+            Tan::Linear,
         )
         .unwrap();
     let attrs = e.document.attributes(material, 10.0).unwrap();
@@ -91,7 +91,7 @@ fn old_material_schema_gains_glass_controls_without_losing_existing_keys() {
             json!(0.2),
             0.0,
             true,
-            CurveKind::Linear,
+            Tan::Linear,
         )
         .unwrap();
     e.document
@@ -101,7 +101,7 @@ fn old_material_schema_gains_glass_controls_without_losing_existing_keys() {
             json!(0.8),
             20.0,
             true,
-            CurveKind::Linear,
+            Tan::Linear,
         )
         .unwrap();
     let expected = e.document.material(id, 10.0).unwrap();

@@ -2,7 +2,8 @@
 //! formula variants and vector components; rendering still receives a typed Scene.
 use crate::scene::Scene;
 use box_rs::{BoxValue, RustBox};
-use curves::{CurveKind, Knot, eval_segment};
+use curves::Tan;
+use curves::legacy::CurveKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -39,26 +40,74 @@ pub fn set_parameter(scene: &mut Scene, path: &str, value: Value) -> Result<(), 
     Ok(())
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// One scene key. `interpolation` shapes the segment that STARTS at this key (the same meaning the
+/// old per-key `CurveKind` had); the arriving side of the next key follows it, see [`Track::rebuild`].
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct Key {
     pub frame: f64,
     pub value: Value,
-    pub interpolation: CurveKind,
+    #[serde(rename = "tan")]
+    pub interpolation: Tan,
 }
 
-#[derive(Clone, Debug, PartialEq, Default, Serialize)]
+/// On-disk key: current scenes store `tan`; scenes saved before the curves `Track` model store the
+/// old `interpolation` kind, which is mapped by [`legacy_tan`].
+#[derive(Deserialize)]
+struct StoredKey {
+    frame: f64,
+    value: Value,
+    tan: Option<Tan>,
+    interpolation: Option<CurveKind>,
+}
+
+/// The `Tan` that evaluates like an old key kind. Exact for Linear / Smooth (smoothstep = zero-slope
+/// Hermite) / Step (hold-left); Hermite is exact because old keys carried no handles (zero slope);
+/// Bezier with its zero default handles becomes the same flat Hermite; CatmullRom / Monotone become
+/// the auto kinds (curves KEYS.md section 5, "semantic only").
+fn legacy_tan(kind: CurveKind) -> Tan {
+    match kind {
+        CurveKind::Linear => Tan::Linear,
+        CurveKind::Smooth | CurveKind::Hermite | CurveKind::Bezier => Tan::Flat,
+        CurveKind::Step => Tan::Constant,
+        CurveKind::CatmullRom => Tan::CatmullRom,
+        CurveKind::Monotone => Tan::Smooth,
+    }
+}
+
+/// Keys sorted by frame plus one `curves::Track<f64>` per numeric leaf of the value (derived from
+/// `keys`, rebuilt on every edit). Non-numeric parts of a value (strings, bools, objects, enums)
+/// hold the LEFT key's value; a track whose keys disagree on the numeric leaf count is entirely
+/// hold-left.
+#[derive(Clone, Debug, Default, Serialize)]
 pub struct Track {
     keys: Vec<Key>,
+    #[serde(skip)]
+    comps: Vec<curves::Track<f64>>,
+}
+
+impl PartialEq for Track {
+    fn eq(&self, other: &Self) -> bool {
+        self.keys == other.keys
+    }
 }
 
 impl<'de> Deserialize<'de> for Track {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
         struct Stored {
-            keys: Vec<Key>,
+            keys: Vec<StoredKey>,
         }
         let mut track = Self::default();
-        for key in Stored::deserialize(d)?.keys {
+        for k in Stored::deserialize(d)?.keys {
+            let interpolation = k
+                .tan
+                .or(k.interpolation.map(legacy_tan))
+                .ok_or_else(|| serde::de::Error::custom("Animation key without interpolation"))?;
+            let key = Key {
+                frame: k.frame,
+                value: k.value,
+                interpolation,
+            };
             if !track.upsert(key) {
                 return Err(serde::de::Error::custom("Invalid animation key"));
             }
@@ -67,10 +116,80 @@ impl<'de> Deserialize<'de> for Track {
     }
 }
 
+/// Numeric leaves of a value in depth-first order (numbers inside arrays only: objects hold).
+fn leaves(v: &Value, out: &mut Vec<f64>) {
+    match v {
+        Value::Number(n) => out.push(n.as_f64().unwrap_or(0.0)),
+        Value::Array(a) => a.iter().for_each(|v| leaves(v, out)),
+        _ => {}
+    }
+}
+
+/// `like` with its numeric leaves replaced by `vals` (same order as [`leaves`]); integer leaves
+/// stay integers (rounded, unsigned ones clamped to `u32`).
+fn fill(like: &Value, vals: &mut impl Iterator<Item = f64>) -> Value {
+    match like {
+        Value::Number(n) => {
+            let v = vals.next().unwrap_or(0.0);
+            if n.is_u64() {
+                Value::from(v.round().clamp(0.0, u32::MAX as f64) as u64)
+            } else if n.is_i64() {
+                Value::from(v.round() as i64)
+            } else {
+                Value::from(v)
+            }
+        }
+        Value::Array(a) => Value::Array(a.iter().map(|v| fill(v, vals)).collect()),
+        other => other.clone(),
+    }
+}
+
 impl Track {
     pub fn keys(&self) -> &[Key] {
         &self.keys
     }
+
+    /// Rebuilds the per-leaf tracks. Segment `i` takes its kind from key `i` on both its ends
+    /// (`set_seg`); a Constant (hold) kind only sets the out side, so the segment arriving at the
+    /// next key is never turned into a reverse step (KEYS.md 3.3).
+    fn rebuild(&mut self) {
+        self.comps.clear();
+        let cols: Vec<Vec<f64>> = self
+            .keys
+            .iter()
+            .map(|k| {
+                let mut col = Vec::new();
+                leaves(&k.value, &mut col);
+                col
+            })
+            .collect();
+        let n = cols.first().map_or(0, Vec::len);
+        if cols.iter().any(|c| c.len() != n) {
+            return;
+        }
+        let segs = self.keys.len().saturating_sub(1);
+        for leaf in 0..n {
+            let mut t = curves::Track::new();
+            let built = self
+                .keys
+                .iter()
+                .zip(&cols)
+                .try_for_each(|(k, c)| t.add(k.frame, c[leaf], k.interpolation).map(drop))
+                .and_then(|()| {
+                    (0..segs)
+                        .filter(|&i| self.keys[i].interpolation != Tan::Constant)
+                        .try_for_each(|i| t.set_seg(i, self.keys[i].interpolation))
+                });
+            // Keys are validated finite and strictly increasing on entry; only an overflowing
+            // derived value can fail here, and then the whole track holds its left values.
+            if built.is_err() {
+                self.comps.clear();
+                return;
+            }
+            self.comps.push(t);
+        }
+    }
+
     pub fn upsert(&mut self, mut key: Key) -> bool {
         if !key.frame.is_finite() || !key_value(&key.value) {
             return false;
@@ -92,15 +211,17 @@ impl Track {
             Ok(i) => self.keys[i] = key,
             Err(i) => self.keys.insert(i, key),
         }
+        self.rebuild();
         true
     }
+    /// Auto-key: an existing key keeps its interpolation, a new one is linear.
     #[cfg(test)]
     pub fn set(&mut self, frame: f64, value: Value) {
         let interpolation = self
             .keys
             .iter()
             .find(|k| k.frame == frame)
-            .map_or(CurveKind::Linear, |k| k.interpolation);
+            .map_or(Tan::Linear, |k| k.interpolation);
         self.upsert(Key {
             frame,
             value,
@@ -133,21 +254,11 @@ impl Track {
             return None;
         }
         let i = self.keys.partition_point(|k| k.frame <= frame);
-        if i == 0 {
-            return Some(first.value.clone());
+        let left = if i == 0 { first } else { &self.keys[i - 1] };
+        if self.comps.is_empty() {
+            return Some(left.value.clone());
         }
-        let a = &self.keys[i - 1];
-        let Some(b) = self.keys.get(i) else {
-            return Some(a.value.clone());
-        };
-        Some(interpolate(
-            &a.value,
-            &b.value,
-            frame,
-            a.frame,
-            b.frame,
-            a.interpolation,
-        ))
+        Some(fill(&left.value, &mut self.comps.iter().map(|c| c.eval(frame))))
     }
 }
 
@@ -179,37 +290,6 @@ fn parameter_value(v: &Value) -> bool {
         _ => false,
     }
 }
-fn interpolate(a: &Value, b: &Value, frame: f64, start: f64, end: f64, kind: CurveKind) -> Value {
-    match (a, b) {
-        (Value::Number(a), Value::Number(b)) => {
-            let av = a.as_f64().unwrap_or(0.0);
-            let bv = b.as_f64().unwrap_or(av);
-            let value = eval_segment(
-                kind,
-                Knot::new(start, av),
-                Knot::new(end, bv),
-                av,
-                bv,
-                frame,
-            );
-            if a.is_u64() {
-                Value::from(value.round().clamp(0.0, u32::MAX as f64) as u64)
-            } else if a.is_i64() {
-                Value::from(value.round() as i64)
-            } else {
-                Value::from(value)
-            }
-        }
-        (Value::Array(a), Value::Array(b)) if a.len() == b.len() => Value::Array(
-            a.iter()
-                .zip(b)
-                .map(|(a, b)| interpolate(a, b, frame, start, end, kind))
-                .collect(),
-        ),
-        _ => a.clone(), // switches and enums hold the left key
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Animation {
@@ -433,5 +513,88 @@ mod tests {
         s.record_edits(&before, 12.0);
         assert_eq!(s.evaluated(12.0).unwrap().camera.distance, 4.0);
         assert_eq!(s.animation.tracks["/camera/distance"].keys().len(), 2);
+    }
+    #[test]
+    fn pre_migration_scene_keys_evaluate_as_before() {
+        // Saved before the curves Track model: one `interpolation` kind per key, values as in the file.
+        let old: Track = serde_json::from_value(serde_json::json!({ "keys": [
+            { "frame": 0.0,  "value": [0.0, 10.0], "interpolation": "Linear" },
+            { "frame": 10.0, "value": [10.0, 20.0], "interpolation": "Smooth" },
+            { "frame": 20.0, "value": [20.0, 40.0], "interpolation": "Step" },
+            { "frame": 30.0, "value": [30.0, 50.0], "interpolation": "Linear" },
+        ]}))
+        .unwrap();
+        let at = |f| old.sample(f).unwrap();
+        let close = |v: Value, want: [f64; 2]| {
+            (0..2).for_each(|i| assert!((v[i].as_f64().unwrap() - want[i]).abs() < 1e-9, "{v} vs {want:?}"));
+        };
+        // Linear segment: straight line.
+        close(at(5.0), [5.0, 15.0]);
+        // Smooth segment: smoothstep 3t^2 - 2t^3 on the segment, the legacy `Smooth`.
+        let s = 0.25_f64 * 0.25 * (3.0 - 2.0 * 0.25);
+        let v = at(12.5);
+        assert!((v[0].as_f64().unwrap() - (10.0 + 10.0 * s)).abs() < 1e-9);
+        assert!((v[1].as_f64().unwrap() - (20.0 + 20.0 * s)).abs() < 1e-9);
+        // Step holds the LEFT value and jumps at the next key; the segment after it is untouched.
+        assert_eq!(at(19.999), serde_json::json!([20.0, 40.0]));
+        assert_eq!(at(20.0), serde_json::json!([20.0, 40.0]));
+        close(at(25.0), [25.0, 45.0]);
+        // Constant extrapolation on both ends.
+        assert_eq!(at(-5.0), serde_json::json!([0.0, 10.0]));
+        assert_eq!(at(99.0), serde_json::json!([30.0, 50.0]));
+        assert_eq!(
+            old.keys().iter().map(|k| k.interpolation).collect::<Vec<_>>(),
+            [Tan::Linear, Tan::Flat, Tan::Constant, Tan::Linear]
+        );
+        // Re-saved scenes use the new `tan` field and read back identically.
+        let saved = serde_json::to_string(&old).unwrap();
+        assert!(saved.contains("\"tan\"") && !saved.contains("interpolation"));
+        assert_eq!(serde_json::from_str::<Track>(&saved).unwrap(), old);
+    }
+    #[test]
+    fn legacy_keys_match_the_curves_legacy_loader() {
+        use curves::legacy::LegacyKey;
+        let kinds = [CurveKind::Linear, CurveKind::Smooth, CurveKind::Step, CurveKind::Linear];
+        let vals = [0.0, 10.0, 25.0, 4.0];
+        let json: Vec<_> = kinds
+            .iter()
+            .zip(vals)
+            .enumerate()
+            .map(|(i, (k, v))| {
+                serde_json::json!({ "frame": i as f64 * 7.0, "value": v, "interpolation": k })
+            })
+            .collect();
+        let ours: Track = serde_json::from_value(serde_json::json!({ "keys": json })).unwrap();
+        let reference = curves::Track::from_legacy(kinds.iter().zip(vals).enumerate().map(
+            |(i, (&interp, v))| LegacyKey {
+                t: i as f64 * 7.0,
+                v,
+                interp,
+                tan_in: Default::default(),
+                tan_out: Default::default(),
+            },
+        ))
+        .unwrap();
+        for i in 0..=210 {
+            let f = -3.0 + f64::from(i) * 0.1;
+            let got = ours.sample(f).unwrap().as_f64().unwrap();
+            assert!((got - reference.eval(f)).abs() < 1e-12, "frame {f}");
+        }
+    }
+    #[test]
+    fn non_numeric_parts_hold_the_left_key_and_ints_stay_ints() {
+        let mut t = Track::default();
+        let key = |frame, value| Key { frame, value, interpolation: Tan::Linear };
+        assert!(t.upsert(key(0.0, serde_json::json!({ "n": 0, "mode": "a" }))));
+        assert!(t.upsert(key(10.0, serde_json::json!({ "n": 10, "mode": "b" }))));
+        // Objects hold the left key whole.
+        assert_eq!(t.sample(9.0).unwrap()["mode"], "a");
+        let mut t = Track::default();
+        assert!(t.upsert(key(0.0, serde_json::json!([1, "a", 0.0]))));
+        assert!(t.upsert(key(10.0, serde_json::json!([5, "b", 10.0]))));
+        let mid = t.sample(5.0).unwrap();
+        assert_eq!((&mid[0], &mid[1]), (&serde_json::json!(3), &serde_json::json!("a")));
+        assert!((mid[2].as_f64().unwrap() - 5.0).abs() < 1e-9);
+        assert_eq!(t.sample(10.0).unwrap(), serde_json::json!([5, "b", 10.0]));
     }
 }

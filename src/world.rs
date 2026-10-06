@@ -3,7 +3,7 @@
 #[path = "world_tests.rs"]
 mod tests;
 use crate::scene::Scene;
-use curves::CurveKind;
+use curves::Tan;
 use playa_engine::entities::anim::{Animation, Channel, Keyframe};
 use playa_engine::entities::{AttrValue, Attrs};
 pub use playa_graph::NodeId;
@@ -140,7 +140,7 @@ pub enum WorldCommand {
         id: NodeId,
         path: String,
         frames: Vec<f64>,
-        kind: CurveKind,
+        kind: Tan,
     },
     SetMetadata {
         id: NodeId,
@@ -230,6 +230,8 @@ pub struct WorldEditor {
     redo: Vec<WorldEditSnapshot>,
     pending_edit: Option<PendingWorldEdit>,
     revision: u64,
+    /// Interpolation of every key this editor creates (Settings > Animation > New key type).
+    pub new_key: Tan,
 }
 impl WorldEditor {
     pub fn new(mut document: WorldDocument) -> Self {
@@ -249,6 +251,7 @@ impl WorldEditor {
             redo: vec![],
             revision: 0,
             pending_edit: None,
+            new_key: Tan::Smooth,
         }
     }
     /// Cache invalidation token, combined with the document UUID by consumers.
@@ -497,7 +500,7 @@ impl WorldEditor {
                         held,
                         frame,
                         false,
-                        CurveKind::Linear,
+                        self.new_key,
                     )?;
                 }
             }
@@ -683,7 +686,7 @@ impl WorldEditor {
                                 attr_json(value.clone()),
                                 frame,
                                 false,
-                                CurveKind::Linear,
+                                self.new_key,
                             )?;
                         }
                     }
@@ -759,13 +762,13 @@ impl WorldEditor {
                     self.document.assert_unlocked(id)?;
                 }
                 self.document
-                    .set_attribute(id, &path, value, frame, false, CurveKind::Linear)?;
+                    .set_attribute(id, &path, value, frame, false, self.new_key)?;
             }
             WorldCommand::Key { id, path, frame } => {
                 self.document.assert_unlocked(id)?;
                 let value = self.document.attribute_value(id, &path, frame)?;
                 self.document
-                    .set_attribute(id, &path, value, frame, true, CurveKind::Linear)?;
+                    .set_attribute(id, &path, value, frame, true, self.new_key)?;
             }
             WorldCommand::RemoveKey { id, path, frame } => {
                 self.document.assert_unlocked(id)?;
@@ -808,7 +811,7 @@ impl WorldEditor {
                         held,
                         frame,
                         false,
-                        CurveKind::Linear,
+                        self.new_key,
                     )?;
                 }
             }
@@ -874,7 +877,7 @@ impl WorldEditor {
                             .copied()
                             .collect();
                         for mut key in keys {
-                            key.interp = if discrete { CurveKind::Step } else { kind };
+                            key.interp = if discrete { Tan::Constant } else { kind };
                             ch.upsert_key(key);
                         }
                     }
@@ -902,7 +905,7 @@ impl WorldEditor {
             for (path, value) in writes {
                 changed |= editor
                     .document
-                    .write_navigation_value(id, &mut attrs, path, value, frame, auto_key)?;
+                    .write_navigation_value(id, &mut attrs, path, value, frame, auto_key, editor.new_key)?;
             }
             // Navigation mode is a static preference on the camera, never a generated key.
             if attrs.is_animated("/camera/free_flight")
@@ -2152,7 +2155,7 @@ impl WorldDocument {
         value: Value,
         frame: f64,
         key: bool,
-        kind: CurveKind,
+        kind: Tan,
     ) -> Result<(), String> {
         if !frame.is_finite() {
             return Err("Invalid key time".into());
@@ -2241,7 +2244,7 @@ impl WorldDocument {
             if let Some(anim) = a.anim_mut(path) {
                 for channel in &mut anim.channels {
                     if let Some(mut k) = channel.keys().iter().find(|k| k.frame == frame).copied() {
-                        k.interp = if discrete { CurveKind::Step } else { kind };
+                        k.interp = if discrete { Tan::Constant } else { kind };
                         channel.upsert_key(k);
                     }
                 }
@@ -2511,6 +2514,7 @@ impl WorldDocument {
         desired: Value,
         frame: f64,
         auto_key: bool,
+        kind: Tan,
     ) -> Result<bool, String> {
         let sampled = self.resolve_attribute(id, path, frame, &mut HashSet::new())?;
         let mut base = attrs
@@ -2568,7 +2572,7 @@ impl WorldDocument {
                     .upsert_key(Keyframe::with_interp(
                         frame,
                         (wanted - added) as f32,
-                        CurveKind::Linear,
+                        kind,
                     ));
             } else if animated {
                 if arity == 1 {

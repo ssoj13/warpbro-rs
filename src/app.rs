@@ -302,9 +302,16 @@ pub(crate) enum SettingsPage {
     Color,
     Controls,
     Fonts,
+    Animation,
 }
 impl SettingsPage {
-    const ALL: [Self; 4] = [Self::Display, Self::Color, Self::Controls, Self::Fonts];
+    const ALL: [Self; 5] = [
+        Self::Display,
+        Self::Color,
+        Self::Controls,
+        Self::Fonts,
+        Self::Animation,
+    ];
     fn category(self) -> egui_prefs2::Category<'static> {
         use egui_phosphor::regular as ph;
         match self {
@@ -312,6 +319,7 @@ impl SettingsPage {
             Self::Color => egui_prefs2::Category::new(ph::MONITOR, "Color"),
             Self::Controls => egui_prefs2::Category::new(ph::MONITOR, "Controls"),
             Self::Fonts => egui_prefs2::Category::new(ph::TEXT_T, "Fonts"),
+            Self::Animation => egui_prefs2::Category::new(ph::MONITOR, "Animation"),
         }
     }
     /// The page named `name` (case-insensitive tab label).
@@ -422,6 +430,7 @@ struct Settings {
     status_resizable: bool,
     attribute_metrics: egui_attr_grid::AttrMetrics,
     auto_key: bool,
+    new_key: curves::Tan,
     timeline_outline_width: f32,
     file_dialogs: crate::file_dialogs::History,
     #[serde(default)]
@@ -448,6 +457,7 @@ impl Default for Settings {
             status_resizable: true,
             attribute_metrics: Default::default(),
             auto_key: false,
+            new_key: curves::Tan::Smooth,
             timeline_outline_width: 340.0,
             file_dialogs: Default::default(),
             timeline_initialized: true,
@@ -591,6 +601,7 @@ impl App {
             self.status_resizable = settings.status_resizable;
             self.world_ui.attribute_metrics = settings.attribute_metrics.normalized();
             self.world_ui.auto_key = settings.auto_key;
+            self.world_ui.new_key = settings.new_key;
             self.world_ui.file_dialogs = settings.file_dialogs;
             if settings.timeline_outline_width.is_finite() {
                 self.world_ui.timeline_outline_width = settings.timeline_outline_width.max(80.0);
@@ -685,6 +696,16 @@ impl App {
                         changed = self.colour.ui(ui, &mut browse, self.controls.swap_slot_buttons);
                     }
                     SettingsPage::Fonts => self.fonts_ui(ui),
+                    SettingsPage::Animation => {
+                        egui_prefs2::section_header(ui, "Keys");
+                        ui.horizontal(|ui| {
+                            ui.label("New key type")
+                                .on_hover_text("Interpolation of every key created by Key, Auto Key and edits of animated values.");
+                            for tan in [curves::Tan::Linear, curves::Tan::Smooth] {
+                                ui.selectable_value(&mut self.world_ui.new_key, tan, tan.label());
+                            }
+                        });
+                    }
                     SettingsPage::Controls => {
                         egui_prefs2::section_header(ui, "Camera controls");
                         egui_attr_table::attr_table(ui, |t| {
@@ -733,6 +754,8 @@ impl App {
                 changed = true;
             } else if category == 3 {
                 self.fonts = Default::default();
+            } else if category == SettingsPage::Animation as usize {
+                self.world_ui.new_key = curves::Tan::Smooth;
             } else {
                 self.controls = Default::default();
                 self.world_ui.attribute_metrics = Default::default();
@@ -812,6 +835,7 @@ impl App {
             && saved.status_resizable == self.status_resizable
             && saved.attribute_metrics == self.world_ui.attribute_metrics
             && saved.auto_key == self.world_ui.auto_key
+            && saved.new_key == self.world_ui.new_key
             && saved.file_dialogs == self.world_ui.file_dialogs
             && saved.timeline_outline_width == self.world_ui.timeline_outline_width
             // Every field, so a new setting is saved without being listed here.
@@ -849,6 +873,7 @@ impl App {
             status_resizable: self.status_resizable,
             attribute_metrics: self.world_ui.attribute_metrics,
             auto_key: self.world_ui.auto_key,
+            new_key: self.world_ui.new_key,
             file_dialogs: self.world_ui.file_dialogs.clone(),
             timeline_outline_width: self.world_ui.timeline_outline_width,
             timeline_initialized: true,
@@ -2971,6 +2996,7 @@ impl App {
         self.apply_fonts(&ctx);
         self.update_scene_picker(&ctx);
         self.colour.poll();
+        self.world.new_key = self.world_ui.new_key;
         let dt = ctx.input(|i| i.stable_dt).max(1.0e-4);
         self.frame_ms = self.frame_ms * 0.9 + dt * 1000.0 * 0.1;
         self.sync_preview(dt, &ctx);

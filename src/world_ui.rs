@@ -1,7 +1,7 @@
 //! Object panels. Widgets report intents; WorldEditor owns all document changes.
 use egui_attr_grid::{AnimIntent, AnimState, AttrMetrics, ChannelExpansion};
 use crate::world::{NodeId, WorldAttribute, WorldCommand, WorldEditor, WorldKind, WorldNodeInfo};
-use curves::CurveKind;
+use curves::Tan;
 use egui::{Color32, Pos2, Rect, Sense, Vec2};
 use egui_attr_grid::{AttrField, AttrGridHooks, AttrValue as GridValue, render_grid_with_config};
 use egui_outliner::{ContextItem, OutlinerAction, OutlinerConfig, OutlinerModel, TreeNode};
@@ -171,6 +171,8 @@ pub struct WorldUi {
     pub playhead: u32,
     pub playing: bool,
     pub auto_key: bool,
+    /// Settings > Animation > New key type; the app hands it to the editor every frame.
+    pub new_key: Tan,
     pub looping: bool,
     pub attribute_label_width: f32,
     /// Authored outline/canvas split; narrow panels only clamp its drawn width.
@@ -217,6 +219,7 @@ impl Default for WorldUi {
             playhead: 0,
             playing: false,
             auto_key: false,
+            new_key: Tan::Smooth,
             looping: true,
             attribute_label_width: 180.0,
             timeline_outline_width: 340.0,
@@ -493,6 +496,7 @@ impl WorldUi {
         let attribute_label_width = self.attribute_label_width;
         let timeline_outline_width = self.timeline_outline_width;
         let auto_key = self.auto_key;
+        let new_key = self.new_key;
         let file_dialogs = std::mem::take(&mut self.file_dialogs);
         *self = Self::default();
         self.file_dialogs = file_dialogs;
@@ -500,6 +504,7 @@ impl WorldUi {
         self.attribute_label_width = attribute_label_width;
         self.timeline_outline_width = timeline_outline_width;
         self.auto_key = auto_key;
+        self.new_key = new_key;
     }
     pub fn advance(&mut self, dt: f32, editor: &WorldEditor) -> bool {
         if !self.playing {
@@ -1978,7 +1983,7 @@ impl WorldUi {
                 );
             });
             ui.menu_button("Interpolation", |ui| {
-                for kind in CurveKind::all() {
+                for kind in Tan::ALL {
                     if ui
                         .add_enabled(!self.keys.is_empty(), egui::Button::new(kind.label()))
                         .clicked()
