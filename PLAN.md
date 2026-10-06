@@ -52,6 +52,30 @@ Russian; code, comments and files in English. Reusable UI goes into egui-widgets
    sun angle, hit epsilon) - operator to check.
 10. Dead per-object `render` fields on fractal nodes (only `/render/iterations` is per object) -
     drop when the object model is split (low).
+11. **Convergence**, each step measured with `--world-bench` + `tools/convergence.py`: firefly clamp of
+    indirect contributions by AP1 luminance (off by default, labelled biased, report the energy
+    loss); Russian roulette from AP1 luminance with a minimum survival probability and start depth
+    2-3 (gpu.rs still uses `max3(throughput)` from bounce 1); then profile secondary-ray marching
+    before any path guiding / light cache.
+12. Viewport status bar: adaptive sampling progress (active tiles / converged %).
+13. ACEScg golden check: a fixed grey scene under a white sky before (b4fd7a5^) and after must match
+    within noise; record the numbers in CHANGELOG.
+14. CHANGELOG catch-up: PNG export, ~/.warpbro profile, built-in templates, camera slots, material
+    assign menus (2480a63, a871707, 96d17b7), Owen-Sobol sampler (e0aa6bb), adaptive sampling
+    (51b1d1b), Kvazaar I-frames, Material Library, Timeline divider.
+15. **Native verification pass** (never done; tests cover logic only): narrow widths and 100/150%
+    scale, layer drag/drop and RMB menus, Material Library layout, cached HDR playback, keyed and
+    unkeyed camera flight, File Open/Save during rendering, HDR environment comparison, UI latency /
+    frame-time variation under heavy render + OIDN. Screenshots to ~/.warpbro/diagnostics.
+16. Reusable workspace extraction (after item 1): Outliner and Timeline adapters, adaptive Gallery,
+    Material Library browser + publish fractal-materials, shared hotkey dispatch / file-dialog
+    history / compact metrics, Curve Editor on the shared keys. Specify the host contracts (stable
+    ids, select vs assign intents, one transaction per gesture) first; pilot in Playa.
+17. ofx-rs fractal kernel copy still uses pcg4d white noise and no adaptive sampling: resync with the
+    Owen-Sobol sampler and `active` / `moment` buffers, or record that ofx-rs keeps its own (low).
+18. Kvazaar inter-prediction corruption (repro: export.rs `hevc_motion_fixture_encodes_every_source_frame`)
+    is mitigated by I-frames only; file it in ffmpeg-rs (low).
+19. Deferred: HDR environment blending, area lights (operator decision; low).
 
 ## Gotchas
 - egui: nested `ui.input` inside `hotkeys::active` deadlocks; read `active` first.

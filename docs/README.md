@@ -1,15 +1,12 @@
 # WarpBro documentation
 
-The guides below describe the current implementation. Dated plans preserve the decisions and verification history of earlier revisions.
+The guides below describe the current implementation; open work is in [PLAN.md](../PLAN.md).
 
 - [Colour](color.md): BT.709 / BT.2020 / ACES gamuts, sRGB / PQ / HLG curves, and the ACEScg render pipeline.
 - [Workspace, materials, and cached playback](workspace.md): node selection, assignment, gesture Undo, panel shortcuts, and final/draft preview caches.
 - [Transparent and absorbing glass](glass.md): transmission, green glass/water, depth controls, legacy scenes, and geometry limits.
 - [CUDA startup investigation](cuda-startup.md): measured context/module timings, system-load caveats, reproduction, and pending work.
 - [Changelog](../CHANGELOG.md): published behavior and the current update.
-- [Render throughput and convergence](../plans/plan7.md): production-world measurements and Nsight evidence.
-- [Export and video quality](../plans/plan6.md): Vulkan HEVC, software mitigation, and graceful cancellation.
-- [Reusable workspace roadmap](../plans/8-reusable-workspace.md): completed primitives and remaining panel extraction.
 
 ## Validation limits
 
