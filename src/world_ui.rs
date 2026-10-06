@@ -167,6 +167,17 @@ struct GridSectionCache {
     frame: u64,
 }
 
+/// The ONE grid configuration of every attribute row in the app (Attribute Editor, Render
+/// Settings, Preferences) and of the timeline rows aligned with them: the metrics' geometry plus
+/// the value actions WarpBro offers (reset, copy, paste). The timeline projects its rows from the
+/// same config, so the action buttons cannot shift its columns.
+pub(crate) fn grid_config(metrics: egui_attr_grid::AttrMetrics) -> egui_attr_grid::AttrGridConfig {
+    egui_attr_grid::AttrGridConfig {
+        actions: egui_attr_grid::ValueActions::BASIC,
+        ..metrics.grid_config()
+    }
+}
+
 pub struct WorldUi {
     pub playhead: u32,
     pub playing: bool,
@@ -1623,7 +1634,7 @@ impl WorldUi {
             if let Some(intent) = anim_state(attr, frame).and_then(|anim| {
                 egui_attr_grid::animation_controls(
                     ui,
-                    &self.attribute_metrics.grid_config(),
+                    &grid_config(self.attribute_metrics),
                     cells.prefix,
                     anim,
                 )
@@ -1660,7 +1671,7 @@ impl WorldUi {
                 }
             }
             // The row icons sit in the grid's slots: own toggles left, the channel caret right.
-            let config = self.attribute_metrics.grid_config();
+            let config = grid_config(self.attribute_metrics);
             let (left, _) = config.icon_slots(ui, cells.actions);
             if path == "/julia" {
                 let enabled = !lane.value.is_null();
@@ -2233,7 +2244,7 @@ impl WorldUi {
                         .open(open)
                         .tint(section_color(group), 0.16)
                         .show(ui, |ui| {
-                            let config = self.attribute_metrics.grid_config();
+                            let config = grid_config(self.attribute_metrics);
                             section.state.table.widths.resize(1, 0.0);
                             section.state.table.widths[0] = self.attribute_label_width;
                             let mut commands = Vec::new();
@@ -2404,7 +2415,7 @@ impl AttrGridHooks for WorldGridHooks<'_> {
             return;
         };
         let attr = &self.attrs[self.indices[index]];
-        let config = self.ui_state.attribute_metrics.grid_config();
+        let config = grid_config(self.ui_state.attribute_metrics);
         let (left, _) = config.icon_slots(ui, ui.max_rect());
         if attr.path == "/julia" {
             let enabled = !self.values[index].is_null();
@@ -2431,6 +2442,7 @@ impl AttrGridHooks for WorldGridHooks<'_> {
         field: &mut AttrField,
         _mixed: bool,
         _layout: &ValueEditorLayout,
+        _extra: &egui_attr_grid::EditorCtx,
     ) -> Option<bool> {
         record_grid_rect(&field.key, ui.max_rect());
         let index = self.index(field)?;
@@ -2495,7 +2507,7 @@ fn grid_hints(attr: &WorldAttribute) -> Vec<String> {
     if !attr.value.is_number() {
         return Vec::new();
     }
-    crate::world::slider_options(&attr.path, attr.value.is_u64() || attr.value.is_i64())
+    crate::world::slider_options(attr.slider, attr.range, attr.value.is_u64() || attr.value.is_i64())
 }
 fn grid_value(value: &Value) -> GridValue {
     match value {
@@ -2558,7 +2570,7 @@ fn property_rects(
     label_width: f32,
     metrics: AttrMetrics,
 ) -> egui_widgets_config::attr_layout::AttrRowRects {
-    metrics.grid_config().row_rects(row, label_width)
+    grid_config(metrics).row_rects(row, label_width)
 }
 fn transport_icon(
     ui: &mut egui::Ui,
@@ -2715,7 +2727,7 @@ fn schema_editor(
             ui.cursor().min,
             Vec2::new(ui.available_width(), ui.spacing().interact_size.y),
         );
-        if let Some(rect) = layout.numeric_cells_iter(area, 1).next() {
+        if let Some(rect) = layout.spread_cells(area, 1).next() {
             return numeric_editor(ui, value, &attr.path, rect, None, Some(range));
         }
         return false;
@@ -2738,7 +2750,7 @@ fn value_editor(
     );
     match value {
         Value::Bool(v) => {
-            let Some(rect) = layout.numeric_cells_iter(area, 1).next() else {
+            let Some(rect) = layout.spread_cells(area, 1).next() else {
                 return false;
             };
             cell_ui(ui, rect, (path, "bool"), |ui| {
@@ -2749,7 +2761,7 @@ fn value_editor(
             .inner
         }
         Value::Number(_) => {
-            let Some(rect) = layout.numeric_cells_iter(area, 1).next() else {
+            let Some(rect) = layout.spread_cells(area, 1).next() else {
                 return false;
             };
             numeric_editor(ui, value, path, rect, None, None)
@@ -2771,7 +2783,7 @@ fn value_editor(
             let count = a.len();
             for (i, (value, rect)) in a
                 .iter_mut()
-                .zip(layout.numeric_cells_iter(area, count))
+                .zip(layout.spread_cells(area, count))
                 .enumerate()
             {
                 changed |= numeric_editor(ui, value, path, rect, Some(i), None);
@@ -4230,7 +4242,7 @@ mod tests {
                         Vec2::new(400.0, metrics.row_height()),
                     );
                     let layout = metrics.value_layout();
-                    let cells = layout.numeric_cells_iter(row, 3);
+                    let cells = layout.spread_cells(row, 3);
                     for (index, rect) in cells.enumerate() {
                         numeric_editor(
                             ui,
@@ -4391,7 +4403,7 @@ mod tests {
         let at = state
             .attribute_metrics
             .value_layout()
-            .numeric_cells_iter(cell, 3)
+            .spread_cells(cell, 3)
             .next()
             .unwrap()
             .center();
@@ -4593,7 +4605,7 @@ mod tests {
                             Rect::from_min_size(Pos2::new(20.0, 50.0), Vec2::new(width, 200.0)),
                         ));
                     state.attribute_metrics.apply(&mut grid_ui);
-                    let config = state.attribute_metrics.grid_config();
+                    let config = grid_config(state.attribute_metrics);
                     let mut commands = Vec::new();
                     let mut value_commands = Vec::new();
                     let mut hooks = WorldGridHooks {

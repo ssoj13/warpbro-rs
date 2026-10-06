@@ -1,6 +1,6 @@
 //! Global render controls using the same Playa attribute grid as world objects. Every row is
 //! one `Row`: its label, the world attribute it mirrors (hint, slider span and hard limits come
-//! from the world's tables, `world::attribute_hint` / `world::slider_options` /
+//! from the world's tables, `world::attribute_hint` / `world::path_slider_options` /
 //! `world::attribute_range`), and how it reads and writes the settings.
 use crate::scene::Render;
 use egui::Ui;
@@ -108,7 +108,7 @@ impl Row {
         match (self, self.path()) {
             (Row::ViewportScale, _) => vec!["0.25".into(), "2.0".into()],
             (Row::DenoiseMode | Row::DenoiseQuality, _) => Vec::new(),
-            (_, Some(path)) => crate::world::slider_options(path, self.integer()),
+            (_, Some(path)) => crate::world::path_slider_options(path, self.integer()),
             (_, None) => Vec::new(),
         }
     }
@@ -208,6 +208,11 @@ impl Default for RenderEditor {
                 .with_order(index as f32)
                 .with_ui_options(row.ui_options());
             field.hint = row.hint().map(str::to_owned);
+            // Render rows reset to what a new scene starts with; the viewport's own rows have no
+            // canonical default.
+            if row.path().is_some() {
+                field = field.with_default(row.get_default());
+            }
             field
         });
         Self {
@@ -229,6 +234,7 @@ impl AttrGridHooks for RenderHooks {
         field: &mut AttrField,
         _: bool,
         _: &ValueEditorLayout,
+        _: &egui_attr_grid::EditorCtx,
     ) -> Option<bool> {
         let row = Row::of(field)?;
         let choice: &[&str] = match row {
@@ -285,7 +291,7 @@ pub fn render(
     for (field, row) in editor.fields.iter_mut().zip(Row::ALL) {
         field.value = row.get(&settings);
     }
-    let config = metrics.grid_config();
+    let config = crate::world_ui::grid_config(metrics);
     let mut hooks = RenderHooks {
         denoise: settings.render.denoise.enabled,
     };

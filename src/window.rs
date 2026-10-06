@@ -89,7 +89,6 @@ impl Native {
         // Solid scroll bars reserve their width: egui's default floating bars paint over the
         // right edge of every scroll area (e.g. the Attribute Editor's per-row expand buttons).
         ctx.all_styles_mut(|style| style.spacing.scroll = egui::style::ScrollStyle::solid());
-        egui_attr_table::set_label_width(&ctx, 130.0);
         let input = egui_winit::State::new(
             ctx.clone(),
             egui::ViewportId::ROOT,

@@ -1087,9 +1087,14 @@ pub(crate) fn attribute_range(path: &str) -> Option<(f64, f64)> {
 }
 /// The attribute grid's options of a numeric attribute: its slider span, a step of 1 for an
 /// integer, "log" for a logarithmic span and "soft" when the hard limits reach past it. One
-/// rule for the Attribute Editor and Render settings.
-pub(crate) fn slider_options(path: &str, integer: bool) -> Vec<String> {
-    let Some(slider) = attribute_slider(path) else {
+/// rule for the Attribute Editor (from `WorldAttribute::slider` / `range`, which components
+/// inherit from their vector) and Render settings (from the path's tables).
+pub(crate) fn slider_options(
+    slider: Option<Slider>,
+    range: Option<(f64, f64)>,
+    integer: bool,
+) -> Vec<String> {
+    let Some(slider) = slider else {
         return Vec::new();
     };
     let mut options = vec![slider.min.to_string(), slider.max.to_string()];
@@ -1099,10 +1104,15 @@ pub(crate) fn slider_options(path: &str, integer: bool) -> Vec<String> {
     if slider.log {
         options.push("log".into());
     }
-    if attribute_range(path) != Some((slider.min, slider.max)) {
+    if range != Some((slider.min, slider.max)) {
         options.push("soft".into());
     }
     options
+}
+
+/// [`slider_options`] of the attribute at `path`.
+pub(crate) fn path_slider_options(path: &str, integer: bool) -> Vec<String> {
+    slider_options(attribute_slider(path), attribute_range(path), integer)
 }
 
 /// Slider spans of every numeric parameter, one table (the operator chose explicit spans over

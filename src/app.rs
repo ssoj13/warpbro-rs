@@ -11,6 +11,10 @@ use crate::render_service::{Command, Frame, RenderEvent, RenderService, Viewport
 use crate::scene::*;
 use crate::world::WorldDocument;
 use std::sync::Arc;
+use std::collections::HashSet;
+use egui_attr_grid::{
+    AttrField, AttrGridHooks, AttrGridState, AttrMetrics, AttrValue, render_grid_with_config,
+};
 
 #[path = "dock.rs"]
 mod dock;
@@ -118,6 +122,8 @@ pub(crate) struct App {
     pub display: egui_display::DisplayPrefs,
     colour: crate::ocio::State,
     prefs: egui_prefs2::PrefsPanelState,
+    /// Splitter state of the three Settings > Controls grids.
+    prefs_grids: [AttrGridState; 3],
     dock: egui_dock::DockState<dock::Panel>,
     panels_to_open: Vec<dock::Panel>,
     toolbar: egui_viewport_toolbar::ToolbarState,
@@ -319,7 +325,7 @@ impl SettingsPage {
             Self::Color => egui_prefs2::Category::new(ph::MONITOR, "Color"),
             Self::Controls => egui_prefs2::Category::new(ph::MONITOR, "Controls"),
             Self::Fonts => egui_prefs2::Category::new(ph::TEXT_T, "Fonts"),
-            Self::Animation => egui_prefs2::Category::new(ph::MONITOR, "Animation"),
+            Self::Animation => egui_prefs2::Category::new(ph::FILM_STRIP, "Animation"),
         }
     }
     /// The page named `name` (case-insensitive tab label).
@@ -465,6 +471,44 @@ impl Default for Settings {
         }
     }
 }
+/// A numeric Settings row: slider over `range`, Ctrl-click / row menu resets to `default`.
+fn f_row(label: &str, v: f32, range: std::ops::RangeInclusive<f32>, default: f32) -> AttrField {
+    AttrField::new(label, AttrValue::Float(v))
+        .with_ui_options(vec![range.start().to_string(), range.end().to_string()])
+        .with_default(AttrValue::Float(default))
+}
+/// A checkbox Settings row.
+fn b_row(label: &str, v: bool, default: bool) -> AttrField {
+    AttrField::new(label, AttrValue::Bool(v)).with_default(AttrValue::Bool(default))
+}
+/// Draws Settings `rows` as an attribute grid with the Attribute Editor's metrics and hands every
+/// edit (row label, new value) to `apply`.
+fn prefs_grid(
+    ui: &mut egui::Ui,
+    metrics: AttrMetrics,
+    state: &mut AttrGridState,
+    mut rows: Vec<AttrField>,
+    mut apply: impl FnMut(&str, AttrValue),
+) {
+    struct Plain;
+    impl AttrGridHooks for Plain {}
+    let metrics = metrics.normalized();
+    let config = crate::world_ui::grid_config(metrics);
+    ui.scope(|ui| {
+        metrics.apply(ui);
+        // The label column starts at the old table's width, scaled with the body font.
+        if state.table.widths.is_empty() {
+            let body = ui.style().text_styles.get(&egui::TextStyle::Body).map_or(13.0, |f| f.size);
+            state.table.widths.push(130.0 * (body / 13.0).max(1.0));
+        }
+        for (label, value) in
+            render_grid_with_config(ui, &mut rows, state, &HashSet::new(), &config, &mut Plain)
+        {
+            apply(&label, value);
+        }
+    });
+}
+
 fn settings_path() -> PathBuf {
     crate::warpbro_dir().join("settings.json")
 }
@@ -524,6 +568,7 @@ impl App {
             display: Default::default(),
             colour: crate::ocio::State::new(scene.colour.clone()),
             prefs: Default::default(),
+            prefs_grids: Default::default(),
             dock: dock::default_layout(),
             panels_to_open: Vec::new(),
             toolbar: Default::default(),
@@ -708,33 +753,58 @@ impl App {
                     }
                     SettingsPage::Controls => {
                         egui_prefs2::section_header(ui, "Camera controls");
-                        egui_attr_table::attr_table(ui, |t| {
-                            t.row("Mouse sensitivity").default(1.0).slider(&mut self.controls.look_sensitivity, 0.1..=5.0);
-                            t.row("Flight speed ×").default(1.0).slider(&mut self.controls.fly_speed, 0.02..=50.0);
-                            t.row("Translate decay, s").default(0.6).slider(&mut self.controls.translate_decay, 0.02..=5.0);
-                            t.row("Rotate decay, s").default(0.25).slider(&mut self.controls.rotate_decay, 0.02..=5.0);
-                            t.row("Inertial look").default(true).checkbox(&mut self.controls.inertial_look);
-                            t.row("Horizon flip, °").default(60.0).slider(&mut self.controls.flip_degrees, 20.0..=85.0);
-                            t.row("Shift fast ×").default(4.0).slider(&mut self.controls.fast_multiplier, 1.0..=20.0);
-                            t.row("Alt slow ×").default(0.1).slider(&mut self.controls.slow_multiplier, 0.01..=1.0);
+                        let am = self.world_ui.attribute_metrics;
+                        let c = &mut self.controls;
+                        prefs_grid(ui, am, &mut self.prefs_grids[0], vec![
+                            f_row("Mouse sensitivity", c.look_sensitivity, 0.1..=5.0, 1.0),
+                            f_row("Flight speed ×", c.fly_speed, 0.02..=50.0, 1.0),
+                            f_row("Translate decay, s", c.translate_decay, 0.02..=5.0, 0.6),
+                            f_row("Rotate decay, s", c.rotate_decay, 0.02..=5.0, 0.25),
+                            b_row("Inertial look", c.inertial_look, true),
+                            f_row("Horizon flip, °", c.flip_degrees, 20.0..=85.0, 60.0),
+                            f_row("Shift fast ×", c.fast_multiplier, 1.0..=20.0, 4.0),
+                            f_row("Alt slow ×", c.slow_multiplier, 0.01..=1.0, 0.1),
+                        ], |label, v| match (label, v) {
+                            ("Mouse sensitivity", AttrValue::Float(v)) => c.look_sensitivity = v,
+                            ("Flight speed ×", AttrValue::Float(v)) => c.fly_speed = v,
+                            ("Translate decay, s", AttrValue::Float(v)) => c.translate_decay = v,
+                            ("Rotate decay, s", AttrValue::Float(v)) => c.rotate_decay = v,
+                            ("Inertial look", AttrValue::Bool(v)) => c.inertial_look = v,
+                            ("Horizon flip, °", AttrValue::Float(v)) => c.flip_degrees = v,
+                            ("Shift fast ×", AttrValue::Float(v)) => c.fast_multiplier = v,
+                            ("Alt slow ×", AttrValue::Float(v)) => c.slow_multiplier = v,
+                            _ => {}
                         });
                         egui_prefs2::section_header(ui, "Slot buttons");
-                        egui_attr_table::attr_table(ui, |t| {
-                            t.row("Swap copy/paste mouse buttons").default(false).checkbox(&mut self.controls.swap_slot_buttons);
+                        prefs_grid(ui, am, &mut self.prefs_grids[1], vec![
+                            b_row("Swap copy/paste mouse buttons", c.swap_slot_buttons, false),
+                        ], |_, v| {
+                            if let AttrValue::Bool(v) = v { c.swap_slot_buttons = v }
                         });
                         ui.label(format!(
                             "CamClip and colour presets · {}",
                             crate::hotkeys::slot_hint(self.controls.swap_slot_buttons, "copy", "paste")
                         ));
                         egui_prefs2::section_header(ui, "Attribute controls");
-                        let defaults = egui_attr_grid::AttrMetrics::default();
+                        let defaults = AttrMetrics::default();
                         let metrics = &mut self.world_ui.attribute_metrics;
-                        egui_attr_table::attr_table(ui, |table| {
-                            table.row("Field height").default(defaults.field_height).slider(&mut metrics.field_height, egui_attr_grid::AttrMetrics::FIELD_HEIGHT_RANGE);
-                            table.row("Numeric field width").default(defaults.numeric_width).slider(&mut metrics.numeric_width, egui_attr_grid::AttrMetrics::NUMERIC_WIDTH_RANGE);
-                            table.row("Icon size").default(defaults.icon_side).slider(&mut metrics.icon_side, egui_attr_grid::AttrMetrics::ICON_SIDE_RANGE);
-                            table.row("Row spacing").default(defaults.row_gap).slider(&mut metrics.row_gap, egui_attr_grid::AttrMetrics::ROW_GAP_RANGE);
-                            table.row("Component spacing").default(defaults.component_gap).slider(&mut metrics.component_gap, egui_attr_grid::AttrMetrics::COMPONENT_GAP_RANGE);
+                        let m = *metrics;
+                        prefs_grid(ui, am, &mut self.prefs_grids[2], vec![
+                            f_row("Field height", m.field_height, AttrMetrics::FIELD_HEIGHT_RANGE, defaults.field_height),
+                            f_row("Numeric field width", m.numeric_width, AttrMetrics::NUMERIC_WIDTH_RANGE, defaults.numeric_width),
+                            f_row("Icon size", m.icon_side, AttrMetrics::ICON_SIDE_RANGE, defaults.icon_side),
+                            f_row("Row spacing", m.row_gap, AttrMetrics::ROW_GAP_RANGE, defaults.row_gap),
+                            f_row("Component spacing", m.component_gap, AttrMetrics::COMPONENT_GAP_RANGE, defaults.component_gap),
+                        ], |label, v| {
+                            let AttrValue::Float(v) = v else { return };
+                            match label {
+                                "Field height" => metrics.field_height = v,
+                                "Numeric field width" => metrics.numeric_width = v,
+                                "Icon size" => metrics.icon_side = v,
+                                "Row spacing" => metrics.row_gap = v,
+                                "Component spacing" => metrics.component_gap = v,
+                                _ => {}
+                            }
                         });
                         *metrics = metrics.normalized();
                         ui.label("Attribute Editor, Timeline and Render Settings share these sizes.");
@@ -2343,7 +2413,7 @@ impl App {
                     &self.bookmarks
                 };
                 if entries.is_empty() {
-                    ui.label("No bookmarks yet: ★ Bookmark saves the current scene.");
+                    ui.label("No bookmarks yet: Save bookmark stores the current scene.");
                 }
                 let gap = 6.0;
                 let padding = egui::Frame::group(ui.style()).inner_margin.sum();
