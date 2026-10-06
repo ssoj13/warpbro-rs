@@ -16,8 +16,6 @@ mod denoise;
 mod environment;
 mod fs_name;
 mod inspector;
-#[cfg(test)]
-mod timeline;
 // Keep the copied viewer API intact, including its CPU oracle used by tests.
 mod export;
 mod exr_io;

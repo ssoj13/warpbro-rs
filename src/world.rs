@@ -1662,7 +1662,7 @@ impl WorldDocument {
         let camera = document
             .insert(WorldKind::Camera, "Camera", scene, None)
             .expect("Valid scene");
-        let light = document
+        document
             .insert(WorldKind::DirectionalLight, "Sun", scene, None)
             .expect("Valid scene");
         let environment = document
@@ -1674,81 +1674,6 @@ impl WorldDocument {
         document.node_mut(fractal).expect("Fractal")["material"] = json!(material);
         document.active_camera = Some(camera);
         document.active_environment = Some(environment);
-        for (path, track) in &scene.animation.tracks {
-            let id = if path.starts_with("/render/") {
-                settings
-            } else if path.starts_with("/camera/") {
-                camera
-            } else if path.starts_with("/lighting/") {
-                light
-            } else if path.starts_with("/environment/") {
-                environment
-            } else if path.starts_with("/material/") {
-                material
-            } else {
-                fractal
-            };
-            for key in track.keys() {
-                let translated = if path.starts_with("/object/") {
-                    match path.as_str() {
-                        "/object/offset" => "/transform/position",
-                        "/object/rotation_degrees" => "/transform/rotation_degrees",
-                        "/object/scale" => "/transform/scale",
-                        _ => path,
-                    }
-                } else {
-                    path
-                };
-                let value = if path == "/object/rotation_degrees" {
-                    Value::Array(
-                        key.value
-                            .as_array()
-                            .expect("Legacy rotation vector")
-                            .iter()
-                            .map(|v| json!(-v.as_f64().expect("Legacy rotation component")))
-                            .collect(),
-                    )
-                } else if path == "/object/scale" {
-                    json!(([key.value.as_f64().unwrap_or(1.0); 3]))
-                } else {
-                    key.value.clone()
-                };
-                document
-                    .set_attribute(
-                        id,
-                        translated,
-                        value.clone(),
-                        key.frame,
-                        true,
-                        key.interpolation,
-                    )
-                    .expect("Valid legacy key");
-                if path == "/lighting/background" || path.starts_with("/lighting/sky_") {
-                    document
-                        .set_attribute(
-                            environment,
-                            translated,
-                            value.clone(),
-                            key.frame,
-                            true,
-                            key.interpolation,
-                        )
-                        .expect("Valid sky key");
-                }
-                if path.starts_with("/render/") {
-                    document
-                        .set_attribute(
-                            fractal,
-                            translated,
-                            value,
-                            key.frame,
-                            true,
-                            key.interpolation,
-                        )
-                        .expect("Valid render key");
-                }
-            }
-        }
         document
     }
     fn insert(
