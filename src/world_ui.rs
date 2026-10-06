@@ -955,7 +955,7 @@ impl WorldUi {
                         attr.component
                             .map(component_label)
                             .map(str::to_owned)
-                            .unwrap_or_else(|| property_label(&attr.path)),
+                            .unwrap_or_else(|| crate::world::attribute_label(&attr.path)),
                     );
                     section.values.push(attr.value.clone());
                 }
@@ -1039,7 +1039,7 @@ impl WorldUi {
             }
             for a in parents {
                 lanes.push(Lane {
-                    label: property_label(&a.path),
+                    label: crate::world::attribute_label(&a.path),
                     path: Some(a.path.clone()),
                     value: a.value.clone(),
                     frames: a.frames.clone(),
@@ -2610,35 +2610,6 @@ fn transport_icon(
 }
 fn component_label(index: usize) -> &'static str {
     ["X", "Y", "Z", "W"].get(index).copied().unwrap_or("")
-}
-fn property_label(path: &str) -> String {
-    match path {
-        "/material_id" => return "Material".into(),
-        crate::world::CAMERA_ORBIT_SPEED => return "Orbit speed (°/s)".into(),
-        crate::world::CAMERA_ORBIT_PHASE => return "Orbit phase (°)".into(),
-        "/transform/position" => return "Translate".into(),
-        "/transform/rotation" | "/transform/rotation_degrees" => return "Rotate".into(),
-        "/transform/scale" => return "Scale".into(),
-        _ => {}
-    }
-    let parts: Vec<_> = path.trim_start_matches('/').split('/').collect();
-    let parts = if parts.len() > 1 {
-        &parts[1..]
-    } else {
-        &parts[..]
-    };
-    parts
-        .iter()
-        .map(|part| {
-            let text = part.replace('_', " ");
-            let mut chars = text.chars();
-            chars
-                .next()
-                .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
-                .unwrap_or_default()
-        })
-        .collect::<Vec<_>>()
-        .join(" · ")
 }
 /// An attribute's animation for the shared controls (egui-attr-grid): animated = it has keys,
 /// keyed = one of them at `frame`. None for a non-keyable attribute (no controls).
@@ -4665,7 +4636,7 @@ mod tests {
                 egui::CentralPanel::default().show(ui, |ui| {
                     for (i, attr) in attrs.iter().enumerate() {
                         let mut lane = Lane {
-                            label: property_label(&attr.path),
+                            label: crate::world::attribute_label(&attr.path),
                             path: Some(attr.path.clone()),
                             value: attr.value.clone(),
                             frames: vec![],
@@ -4798,5 +4769,40 @@ mod tests {
                 state.inspector(ui, &mut e);
             });
         });
+    }
+    #[test]
+    fn every_attribute_label_fits_the_default_label_column() {
+        let state = WorldUi::default();
+        let cell = grid_config(state.attribute_metrics)
+            .row_rects(
+                Rect::from_min_size(Pos2::ZERO, Vec2::new(2000.0, 20.0)),
+                state.attribute_label_width,
+            )
+            .label
+            .width();
+        let ctx = egui::Context::default();
+        let mut wide = Vec::new();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let font = egui::TextStyle::Body.resolve(ui.style());
+            for family in 0..=crate::params::FAMILY_WORLD {
+                let e = WorldEditor::new(WorldDocument::from_scene(&Scene::preset(family)));
+                for node in e.document.nodes() {
+                    for attr in e.document.attributes(node.id, 0.0).unwrap() {
+                        let label = crate::world::attribute_label(&attr.path);
+                        let width = ui
+                            .painter()
+                            .layout_no_wrap(label.clone(), font.clone(), Color32::WHITE)
+                            .size()
+                            .x;
+                        if attr.component.is_none() && width > cell {
+                            wide.push(format!("{label} ({width:.0} > {cell:.0}) {}", attr.path));
+                        }
+                    }
+                }
+            }
+        });
+        wide.sort();
+        wide.dedup();
+        assert!(wide.is_empty(), "labels wider than the column: {wide:#?}");
     }
 }

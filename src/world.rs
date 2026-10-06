@@ -1089,6 +1089,40 @@ pub(crate) fn attribute_range(path: &str) -> Option<(f64, f64)> {
         _ => None,
     }
 }
+/// The row label of attribute `path`: its tail, because the Attribute Editor's section already
+/// names the category, and a formula section the family ("/formula/Mandelbulb/power" is "Power").
+/// A Hybrid keeps its step as the one qualifier that tells two sub-formulas' parameters apart
+/// ("/formula/Hybrid/bulb/power" is "Bulb · Power"). ONE function for every attribute view.
+pub(crate) fn attribute_label(path: &str) -> String {
+    match path {
+        "/material_id" => return "Material".into(),
+        CAMERA_ORBIT_SPEED => return "Orbit speed (°/s)".into(),
+        CAMERA_ORBIT_PHASE => return "Orbit phase (°)".into(),
+        "/transform/position" => return "Translate".into(),
+        "/transform/rotation" | "/transform/rotation_degrees" => return "Rotate".into(),
+        "/transform/scale" => return "Scale".into(),
+        _ => {}
+    }
+    let parts: Vec<_> = path.trim_start_matches('/').split('/').collect();
+    let tail = match parts.as_slice() {
+        ["formula", "Hybrid", rest @ ..] => rest,
+        ["formula", _, rest @ ..] if !rest.is_empty() => rest,
+        [_, rest @ ..] if !rest.is_empty() => rest,
+        all => all,
+    };
+    tail.iter()
+        .map(|part| {
+            let text = part.replace('_', " ");
+            let mut chars = text.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 /// The reset value of attribute `path` of a node of `kind`: its value at frame 0 in a FRESH world,
 /// the scene the app starts with. ONE source for every reset button; a path the fresh world's node
 /// does not have (another formula family's parameter) has none.
@@ -1941,7 +1975,7 @@ impl WorldDocument {
             let keyable = !matches!(path.as_str(), "/locked" | "/solo" | "/start" | "/end");
             out.push(WorldAttribute {
                 path: path.clone(),
-                label: crate::animation::label(path),
+                label: attribute_label(path),
                 value: self.attribute_value(id, path, frame)?,
                 frames: attrs.key_frames(path),
                 keyable,

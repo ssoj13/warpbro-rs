@@ -34,17 +34,3 @@ impl Scene {
     }
 }
 
-pub fn label(path: &str) -> String {
-    path.trim_start_matches('/')
-        .split('/')
-        .map(|part| {
-            let s = part.replace('_', " ");
-            let mut chars = s.chars();
-            chars
-                .next()
-                .map(|c| c.to_uppercase().to_string() + chars.as_str())
-                .unwrap_or_default()
-        })
-        .collect::<Vec<_>>()
-        .join(" / ")
-}
