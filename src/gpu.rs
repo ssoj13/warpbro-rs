@@ -805,7 +805,7 @@ pub mod kernels {
     /// The longest sphere-tracing step is `2 (t_exit - t_enter) / STEP_CAP_STEPS`, a fixed share
     /// of the ray's interval, independent of the step budget (Mandelbulber's step limits are
     /// too). It used to divide by `max_steps`, so a larger budget also shortened every step.
-    /// Measured on BUG1 frame 27 (BUG1.md, "Марш"): with a budget large enough to converge,
+    /// Measured on BUG1 frame 27 (PLAN.md, "Findings worth keeping", phantom hits): with a budget large enough to converge,
     /// divisors 256 and 8192 give 69 531 and 69 537 hits of 147 456 rays - the cap barely
     /// matters once rays converge; 256 is the former default's cap.
     const STEP_CAP_STEPS: f32 = 256.0;
