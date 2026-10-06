@@ -605,7 +605,6 @@ impl App {
         egui_phosphor::add_to_fonts(&mut definitions, egui_phosphor::Variant::Regular);
         ctx.set_fonts(definitions);
         ctx.set_zoom_factor(self.fonts.zoom);
-        egui_attr_table::set_label_width(ctx, 130.0 * (self.fonts.body / 13.0).max(1.0));
         ctx.all_styles_mut(|style| {
             for (kind, size, family) in [
                 (

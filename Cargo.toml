@@ -84,13 +84,11 @@ env_logger = "0.11"
 egui-attr-grid = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
 # The HDR colour picker (timeline colour lanes; the AE gets it through egui-attr-grid).
 egui-colorpicker = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
-egui-attr-table = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
 egui-titlebar = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
 egui-statusbar = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
 egui-widgets-config = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
 egui-track-timeline = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
 curves = { git = "ssh://git@github.com/ssoj13/curves-rs.git", branch = "main", features = ["serde"] }
-box-rs = { git = "ssh://git@github.com/ssoj13/box-rs.git", branch = "main" }
 # Radiance .hdr only: EXR environments are read by `exr_io` (exr-core); the `exr` feature would pull crates.io exrs.
 image = { version = "0.25", default-features = false, features = ["hdr"] }
 # Local time for the output folder names.

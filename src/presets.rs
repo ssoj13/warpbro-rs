@@ -4,7 +4,7 @@ use crate::scene::{Coloring, Facing, Formula, Kifs, KifsKind, MaterialModel, Sce
 use crate::world::{
     CAMERA_ORBIT_PHASE, CAMERA_ORBIT_SPEED, NodeId, WorldCommand, WorldDocument, WorldEditor,
 };
-use curves::CurveKind;
+use curves::Tan;
 use serde_json::{Value, json};
 
 pub struct AnimatedPreset {
@@ -53,7 +53,7 @@ fn track(commands: &mut Vec<WorldCommand>, id: NodeId, path: &str, values: [Valu
         id,
         path: path.into(),
         frames: TIMES.to_vec(),
-        kind: CurveKind::Smooth,
+        kind: Tan::Smooth,
     });
 }
 

@@ -39,16 +39,8 @@ pub struct SceneEvent {
 }
 
 pub(crate) fn decode_scene(text: &str) -> Result<crate::scene::Scene, String> {
-    let document = match serde_json::from_str::<crate::world::WorldDocument>(text) {
-        Ok(document) => document,
-        Err(world_error) => {
-            let legacy =
-                serde_json::from_str::<crate::scene::Scene>(text).map_err(|legacy_error| {
-                    format!("Invalid scene: {world_error}; legacy scene: {legacy_error}")
-                })?;
-            crate::world::WorldDocument::from_scene(&legacy)
-        }
-    };
+    let document = serde_json::from_str::<crate::world::WorldDocument>(text)
+        .map_err(|e| format!("Invalid scene: {e}"))?;
     let mut scene = document.snapshot(f64::from(document.first))?;
     scene.animation.first = document.first;
     scene.animation.last = document.last;
@@ -257,12 +249,15 @@ mod tests {
     }
 
     #[test]
-    fn scene_decoder_migrates_legacy_and_rejects_invalid_input() {
-        let legacy = crate::scene::Scene::preset(crate::params::FAMILY_BOX);
-        let decoded = decode_scene(&serde_json::to_string(&legacy).unwrap()).unwrap();
+    fn scene_decoder_reads_a_world_document_and_rejects_anything_else() {
+        let scene = crate::scene::Scene::preset(crate::params::FAMILY_BOX);
+        let world = crate::world::WorldDocument::from_scene(&scene);
+        let decoded = decode_scene(&serde_json::to_string(&world).unwrap()).unwrap();
         let document = decoded.document.as_ref().unwrap();
-        assert_eq!(document.snapshot(0.0).unwrap().formula, legacy.formula);
+        assert_eq!(document.snapshot(0.0).unwrap().formula, scene.formula);
         assert!(decode_scene("{broken json").is_err());
+        // The pre-world single-scene format is not read.
+        assert!(decode_scene(&serde_json::to_string(&scene).unwrap()).is_err());
     }
 
     #[test]

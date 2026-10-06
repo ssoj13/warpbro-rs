@@ -2025,9 +2025,30 @@ mod tests {
         scene.camera.target = [1000.0; 3];
         scene.lighting.sun_intensity = 0.0;
         scene.lighting.sky_intensity = 0.0;
-        scene.key_parameter("/lighting/sky_intensity", 3.0);
-        scene.lighting.sky_intensity = 2.0;
-        scene.key_parameter("/lighting/sky_intensity", 4.0);
+        // Sky intensity 0 at frame 3, 2 at frame 4, keyed on the environment node.
+        let mut editor = crate::world::WorldEditor::new(crate::world::WorldDocument::from_scene(&scene));
+        let environment = editor
+            .document
+            .nodes()
+            .into_iter()
+            .find(|n| n.kind == crate::world::WorldKind::Environment)
+            .unwrap()
+            .id;
+        for (frame, value) in [(3.0, 0.0), (4.0, 2.0)] {
+            let path = "/lighting/sky_intensity".to_string();
+            editor
+                .execute(crate::world::WorldCommand::Key { id: environment, path: path.clone(), frame })
+                .unwrap();
+            editor
+                .execute(crate::world::WorldCommand::SetAttribute {
+                    id: environment,
+                    path,
+                    value: serde_json::json!(value),
+                    frame,
+                })
+                .unwrap();
+        }
+        scene.document = Some(Box::new(editor.document));
         controller.start(&scene, &service).unwrap();
         let until = std::time::Instant::now() + Duration::from_secs(90);
         // Deliberately never poll GUI events or call update while the pipeline runs.

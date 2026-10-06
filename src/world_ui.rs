@@ -1,7 +1,7 @@
 //! Object panels. Widgets report intents; WorldEditor owns all document changes.
 use egui_attr_grid::{AnimIntent, AnimState, AttrMetrics, ChannelExpansion};
 use crate::world::{NodeId, WorldAttribute, WorldCommand, WorldEditor, WorldKind, WorldNodeInfo};
-use curves::CurveKind;
+use curves::Tan;
 use egui::{Color32, Pos2, Rect, Sense, Vec2};
 use egui_attr_grid::{AttrField, AttrGridHooks, AttrValue as GridValue, render_grid_with_config};
 use egui_outliner::{ContextItem, OutlinerAction, OutlinerConfig, OutlinerModel, TreeNode};
@@ -167,10 +167,23 @@ struct GridSectionCache {
     frame: u64,
 }
 
+/// The ONE grid configuration of every attribute row in the app (Attribute Editor, Render
+/// Settings, Preferences) and of the timeline rows aligned with them: the metrics' geometry plus
+/// the value actions WarpBro offers (reset, copy, paste). The timeline projects its rows from the
+/// same config, so the action buttons cannot shift its columns.
+pub(crate) fn grid_config(metrics: egui_attr_grid::AttrMetrics) -> egui_attr_grid::AttrGridConfig {
+    egui_attr_grid::AttrGridConfig {
+        actions: egui_attr_grid::ValueActions::BASIC,
+        ..metrics.grid_config()
+    }
+}
+
 pub struct WorldUi {
     pub playhead: u32,
     pub playing: bool,
     pub auto_key: bool,
+    /// Settings > Animation > New key type; the app hands it to the editor every frame.
+    pub new_key: Tan,
     pub looping: bool,
     pub attribute_label_width: f32,
     /// Authored outline/canvas split; narrow panels only clamp its drawn width.
@@ -217,6 +230,7 @@ impl Default for WorldUi {
             playhead: 0,
             playing: false,
             auto_key: false,
+            new_key: Tan::Smooth,
             looping: true,
             attribute_label_width: 180.0,
             timeline_outline_width: 340.0,
@@ -493,6 +507,7 @@ impl WorldUi {
         let attribute_label_width = self.attribute_label_width;
         let timeline_outline_width = self.timeline_outline_width;
         let auto_key = self.auto_key;
+        let new_key = self.new_key;
         let file_dialogs = std::mem::take(&mut self.file_dialogs);
         *self = Self::default();
         self.file_dialogs = file_dialogs;
@@ -500,6 +515,7 @@ impl WorldUi {
         self.attribute_label_width = attribute_label_width;
         self.timeline_outline_width = timeline_outline_width;
         self.auto_key = auto_key;
+        self.new_key = new_key;
     }
     pub fn advance(&mut self, dt: f32, editor: &WorldEditor) -> bool {
         if !self.playing {
@@ -892,7 +908,14 @@ impl WorldUi {
         frame: u64,
     ) {
         let field = |attr: &WorldAttribute| {
-            let field = AttrField::new(&attr.path, grid_value(&attr.value)).with_ui_options(grid_hints(attr));
+            let value = grid_value(&attr.value);
+            let mut field = AttrField::new(&attr.path, value.clone()).with_ui_options(grid_hints(attr));
+            // Reset restores the fresh-world value (the grid refuses a default of another type).
+            if let Some(default) = attr.default.as_ref().map(grid_value)
+                && std::mem::discriminant(&default) == std::mem::discriminant(&value)
+            {
+                field = field.with_default(default);
+            }
             match crate::world::attribute_hint(&attr.path) {
                 Some(hint) => field.with_hint(hint),
                 None => field,
@@ -932,7 +955,7 @@ impl WorldUi {
                         attr.component
                             .map(component_label)
                             .map(str::to_owned)
-                            .unwrap_or_else(|| property_label(&attr.path)),
+                            .unwrap_or_else(|| crate::world::attribute_label(&attr.path)),
                     );
                     section.values.push(attr.value.clone());
                 }
@@ -1016,7 +1039,7 @@ impl WorldUi {
             }
             for a in parents {
                 lanes.push(Lane {
-                    label: property_label(&a.path),
+                    label: crate::world::attribute_label(&a.path),
                     path: Some(a.path.clone()),
                     value: a.value.clone(),
                     frames: a.frames.clone(),
@@ -1618,7 +1641,7 @@ impl WorldUi {
             if let Some(intent) = anim_state(attr, frame).and_then(|anim| {
                 egui_attr_grid::animation_controls(
                     ui,
-                    &self.attribute_metrics.grid_config(),
+                    &grid_config(self.attribute_metrics),
                     cells.prefix,
                     anim,
                 )
@@ -1655,7 +1678,7 @@ impl WorldUi {
                 }
             }
             // The row icons sit in the grid's slots: own toggles left, the channel caret right.
-            let config = self.attribute_metrics.grid_config();
+            let config = grid_config(self.attribute_metrics);
             let (left, _) = config.icon_slots(ui, cells.actions);
             if path == "/julia" {
                 let enabled = !lane.value.is_null();
@@ -1978,7 +2001,7 @@ impl WorldUi {
                 );
             });
             ui.menu_button("Interpolation", |ui| {
-                for kind in CurveKind::all() {
+                for kind in Tan::ALL {
                     if ui
                         .add_enabled(!self.keys.is_empty(), egui::Button::new(kind.label()))
                         .clicked()
@@ -2228,7 +2251,7 @@ impl WorldUi {
                         .open(open)
                         .tint(section_color(group), 0.16)
                         .show(ui, |ui| {
-                            let config = self.attribute_metrics.grid_config();
+                            let config = grid_config(self.attribute_metrics);
                             section.state.table.widths.resize(1, 0.0);
                             section.state.table.widths[0] = self.attribute_label_width;
                             let mut commands = Vec::new();
@@ -2393,13 +2416,26 @@ impl AttrGridHooks for WorldGridHooks<'_> {
             self.ui_state.reveal_in_timeline(self.id, attr);
             ui.close();
         }
+        // The grid resets only the rows it edits itself; a row this host edits resets here.
+        if owns_editor(attr, &field.value)
+            && let Some(default) = attr.default.as_ref().filter(|d| **d != self.values[index])
+            && ui.button("Reset to default").clicked()
+        {
+            self.commands.push(WorldCommand::SetAttribute {
+                id: self.id,
+                path: attr.path.clone(),
+                value: default.clone(),
+                frame: self.frame,
+            });
+            ui.close();
+        }
     }
     fn actions(&mut self, ui: &mut egui::Ui, field: &AttrField) {
         let Some(index) = self.index(field) else {
             return;
         };
         let attr = &self.attrs[self.indices[index]];
-        let config = self.ui_state.attribute_metrics.grid_config();
+        let config = grid_config(self.ui_state.attribute_metrics);
         let (left, _) = config.icon_slots(ui, ui.max_rect());
         if attr.path == "/julia" {
             let enabled = !self.values[index].is_null();
@@ -2426,16 +2462,12 @@ impl AttrGridHooks for WorldGridHooks<'_> {
         field: &mut AttrField,
         _mixed: bool,
         _layout: &ValueEditorLayout,
+        _extra: &egui_attr_grid::EditorCtx,
     ) -> Option<bool> {
         record_grid_rect(&field.key, ui.max_rect());
         let index = self.index(field)?;
         let attr = &self.attrs[self.indices[index]];
-        if !attr.choices.is_empty()
-            || attr.path == "/material_id"
-            || attr.path == "/environment/path"
-            || attr.path.starts_with("/custom/")
-            || matches!(field.value, GridValue::Label(_))
-        {
+        if owns_editor(attr, &field.value) {
             let changed = self.ui_state.edit_attribute(
                 ui,
                 self.id,
@@ -2462,6 +2494,15 @@ impl AttrGridHooks for WorldGridHooks<'_> {
         }
         None
     }
+}
+/// Rows whose editor the host draws (choices, pickers, custom and label-shaped values): the grid
+/// offers only Copy on them, so their Reset lives in the host's context menu.
+fn owns_editor(attr: &WorldAttribute, value: &GridValue) -> bool {
+    !attr.choices.is_empty()
+        || attr.path == "/material_id"
+        || attr.path == "/environment/path"
+        || attr.path.starts_with("/custom/")
+        || matches!(value, GridValue::Label(_))
 }
 fn same_value_shape(before: &Value, after: &Value) -> bool {
     match (before, after) {
@@ -2490,7 +2531,7 @@ fn grid_hints(attr: &WorldAttribute) -> Vec<String> {
     if !attr.value.is_number() {
         return Vec::new();
     }
-    crate::world::slider_options(&attr.path, attr.value.is_u64() || attr.value.is_i64())
+    crate::world::slider_options(attr.slider, attr.range, attr.value.is_u64() || attr.value.is_i64())
 }
 fn grid_value(value: &Value) -> GridValue {
     match value {
@@ -2553,7 +2594,7 @@ fn property_rects(
     label_width: f32,
     metrics: AttrMetrics,
 ) -> egui_widgets_config::attr_layout::AttrRowRects {
-    metrics.grid_config().row_rects(row, label_width)
+    grid_config(metrics).row_rects(row, label_width)
 }
 fn transport_icon(
     ui: &mut egui::Ui,
@@ -2569,35 +2610,6 @@ fn transport_icon(
 }
 fn component_label(index: usize) -> &'static str {
     ["X", "Y", "Z", "W"].get(index).copied().unwrap_or("")
-}
-fn property_label(path: &str) -> String {
-    match path {
-        "/material_id" => return "Material".into(),
-        crate::world::CAMERA_ORBIT_SPEED => return "Orbit speed (°/s)".into(),
-        crate::world::CAMERA_ORBIT_PHASE => return "Orbit phase (°)".into(),
-        "/transform/position" => return "Translate".into(),
-        "/transform/rotation" | "/transform/rotation_degrees" => return "Rotate".into(),
-        "/transform/scale" => return "Scale".into(),
-        _ => {}
-    }
-    let parts: Vec<_> = path.trim_start_matches('/').split('/').collect();
-    let parts = if parts.len() > 1 {
-        &parts[1..]
-    } else {
-        &parts[..]
-    };
-    parts
-        .iter()
-        .map(|part| {
-            let text = part.replace('_', " ");
-            let mut chars = text.chars();
-            chars
-                .next()
-                .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
-                .unwrap_or_default()
-        })
-        .collect::<Vec<_>>()
-        .join(" · ")
 }
 /// An attribute's animation for the shared controls (egui-attr-grid): animated = it has keys,
 /// keyed = one of them at `frame`. None for a non-keyable attribute (no controls).
@@ -2710,7 +2722,7 @@ fn schema_editor(
             ui.cursor().min,
             Vec2::new(ui.available_width(), ui.spacing().interact_size.y),
         );
-        if let Some(rect) = layout.numeric_cells_iter(area, 1).next() {
+        if let Some(rect) = layout.spread_cells(area, 1).next() {
             return numeric_editor(ui, value, &attr.path, rect, None, Some(range));
         }
         return false;
@@ -2733,7 +2745,7 @@ fn value_editor(
     );
     match value {
         Value::Bool(v) => {
-            let Some(rect) = layout.numeric_cells_iter(area, 1).next() else {
+            let Some(rect) = layout.spread_cells(area, 1).next() else {
                 return false;
             };
             cell_ui(ui, rect, (path, "bool"), |ui| {
@@ -2744,7 +2756,7 @@ fn value_editor(
             .inner
         }
         Value::Number(_) => {
-            let Some(rect) = layout.numeric_cells_iter(area, 1).next() else {
+            let Some(rect) = layout.spread_cells(area, 1).next() else {
                 return false;
             };
             numeric_editor(ui, value, path, rect, None, None)
@@ -2766,7 +2778,7 @@ fn value_editor(
             let count = a.len();
             for (i, (value, rect)) in a
                 .iter_mut()
-                .zip(layout.numeric_cells_iter(area, count))
+                .zip(layout.spread_cells(area, count))
                 .enumerate()
             {
                 changed |= numeric_editor(ui, value, path, rect, Some(i), None);
@@ -4202,7 +4214,7 @@ mod tests {
     }
 
     #[test]
-    fn numeric_cells_keep_compact_and_large_hit_rectangles_with_long_negative_values() {
+    fn spread_cells_fill_the_row_and_keep_large_hit_rectangles_with_long_negative_values() {
         for metrics in [
             AttrMetrics::default(),
             AttrMetrics {
@@ -4225,7 +4237,7 @@ mod tests {
                         Vec2::new(400.0, metrics.row_height()),
                     );
                     let layout = metrics.value_layout();
-                    let cells = layout.numeric_cells_iter(row, 3);
+                    let cells = layout.spread_cells(row, 3);
                     for (index, rect) in cells.enumerate() {
                         numeric_editor(
                             ui,
@@ -4246,13 +4258,16 @@ mod tests {
             NUMERIC_RECT_TRACES.with(|trace| {
                 let trace = trace.borrow();
                 assert_eq!(trace.len(), 3);
+                assert!((trace[2].2.right() - 430.0).abs() < 0.6, "{:?}", trace[2].2);
                 for (response, interaction, cell) in trace.iter() {
                     assert!(
                         response.height() <= metrics.field_height + 0.6,
                         "{metrics:?}: {response:?}"
                     );
+                    // The cells share the whole row (the grid's own geometry): at least the
+                    // compact width, never past the cell.
                     assert!(
-                        interaction.width() <= metrics.numeric_width + 0.1,
+                        interaction.width() >= metrics.numeric_width,
                         "{metrics:?}: {interaction:?}"
                     );
                     assert!(
@@ -4386,7 +4401,7 @@ mod tests {
         let at = state
             .attribute_metrics
             .value_layout()
-            .numeric_cells_iter(cell, 3)
+            .spread_cells(cell, 3)
             .next()
             .unwrap()
             .center();
@@ -4588,7 +4603,7 @@ mod tests {
                             Rect::from_min_size(Pos2::new(20.0, 50.0), Vec2::new(width, 200.0)),
                         ));
                     state.attribute_metrics.apply(&mut grid_ui);
-                    let config = state.attribute_metrics.grid_config();
+                    let config = grid_config(state.attribute_metrics);
                     let mut commands = Vec::new();
                     let mut value_commands = Vec::new();
                     let mut hooks = WorldGridHooks {
@@ -4621,7 +4636,7 @@ mod tests {
                 egui::CentralPanel::default().show(ui, |ui| {
                     for (i, attr) in attrs.iter().enumerate() {
                         let mut lane = Lane {
-                            label: property_label(&attr.path),
+                            label: crate::world::attribute_label(&attr.path),
                             path: Some(attr.path.clone()),
                             value: attr.value.clone(),
                             frames: vec![],
@@ -4754,5 +4769,40 @@ mod tests {
                 state.inspector(ui, &mut e);
             });
         });
+    }
+    #[test]
+    fn every_attribute_label_fits_the_default_label_column() {
+        let state = WorldUi::default();
+        let cell = grid_config(state.attribute_metrics)
+            .row_rects(
+                Rect::from_min_size(Pos2::ZERO, Vec2::new(2000.0, 20.0)),
+                state.attribute_label_width,
+            )
+            .label
+            .width();
+        let ctx = egui::Context::default();
+        let mut wide = Vec::new();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let font = egui::TextStyle::Body.resolve(ui.style());
+            for family in 0..=crate::params::FAMILY_WORLD {
+                let e = WorldEditor::new(WorldDocument::from_scene(&Scene::preset(family)));
+                for node in e.document.nodes() {
+                    for attr in e.document.attributes(node.id, 0.0).unwrap() {
+                        let label = crate::world::attribute_label(&attr.path);
+                        let width = ui
+                            .painter()
+                            .layout_no_wrap(label.clone(), font.clone(), Color32::WHITE)
+                            .size()
+                            .x;
+                        if attr.component.is_none() && width > cell {
+                            wide.push(format!("{label} ({width:.0} > {cell:.0}) {}", attr.path));
+                        }
+                    }
+                }
+            }
+        });
+        wide.sort();
+        wide.dedup();
+        assert!(wide.is_empty(), "labels wider than the column: {wide:#?}");
     }
 }

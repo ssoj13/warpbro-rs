@@ -3,7 +3,7 @@
 #[path = "world_tests.rs"]
 mod tests;
 use crate::scene::Scene;
-use curves::CurveKind;
+use curves::Tan;
 use playa_engine::entities::anim::{Animation, Channel, Keyframe};
 use playa_engine::entities::{AttrValue, Attrs};
 pub use playa_graph::NodeId;
@@ -13,6 +13,7 @@ use playa_graph::{Graph, Node, RustBox};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::LazyLock;
 
 /// Marker of WarpBro nodes on the system clipboard, so foreign text is never pasted as nodes.
 const CLIPBOARD_KEY: &str = "warpbro_nodes";
@@ -30,7 +31,7 @@ pub fn parse_clipboard(text: &str) -> Option<HashMap<String, Value>> {
 pub(crate) const CAMERA_ORBIT_SPEED: &str = "/camera/orbit_speed_degrees";
 pub(crate) const CAMERA_ORBIT_PHASE: &str = "/camera/orbit_phase_degrees";
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WorldKind {
     Fractal,
     Camera,
@@ -83,6 +84,9 @@ pub struct WorldAttribute {
     pub slider: Option<Slider>,
     /// An RGB colour (`is_color_attribute`).
     pub color: bool,
+    /// What "Reset" restores: the attribute's value in a fresh world ([`attribute_default`]).
+    /// None: the attribute has no counterpart there (another formula family's parameter).
+    pub default: Option<Value>,
 }
 
 /// The span a parameter's slider covers: its useful range. Typing may go past it, up to the
@@ -140,7 +144,7 @@ pub enum WorldCommand {
         id: NodeId,
         path: String,
         frames: Vec<f64>,
-        kind: CurveKind,
+        kind: Tan,
     },
     SetMetadata {
         id: NodeId,
@@ -230,6 +234,8 @@ pub struct WorldEditor {
     redo: Vec<WorldEditSnapshot>,
     pending_edit: Option<PendingWorldEdit>,
     revision: u64,
+    /// Interpolation of every key this editor creates (Settings > Animation > New key type).
+    pub new_key: Tan,
 }
 impl WorldEditor {
     pub fn new(mut document: WorldDocument) -> Self {
@@ -249,6 +255,7 @@ impl WorldEditor {
             redo: vec![],
             revision: 0,
             pending_edit: None,
+            new_key: Tan::Smooth,
         }
     }
     /// Cache invalidation token, combined with the document UUID by consumers.
@@ -497,7 +504,7 @@ impl WorldEditor {
                         held,
                         frame,
                         false,
-                        CurveKind::Linear,
+                        self.new_key,
                     )?;
                 }
             }
@@ -683,7 +690,7 @@ impl WorldEditor {
                                 attr_json(value.clone()),
                                 frame,
                                 false,
-                                CurveKind::Linear,
+                                self.new_key,
                             )?;
                         }
                     }
@@ -759,13 +766,13 @@ impl WorldEditor {
                     self.document.assert_unlocked(id)?;
                 }
                 self.document
-                    .set_attribute(id, &path, value, frame, false, CurveKind::Linear)?;
+                    .set_attribute(id, &path, value, frame, false, self.new_key)?;
             }
             WorldCommand::Key { id, path, frame } => {
                 self.document.assert_unlocked(id)?;
                 let value = self.document.attribute_value(id, &path, frame)?;
                 self.document
-                    .set_attribute(id, &path, value, frame, true, CurveKind::Linear)?;
+                    .set_attribute(id, &path, value, frame, true, self.new_key)?;
             }
             WorldCommand::RemoveKey { id, path, frame } => {
                 self.document.assert_unlocked(id)?;
@@ -808,7 +815,7 @@ impl WorldEditor {
                         held,
                         frame,
                         false,
-                        CurveKind::Linear,
+                        self.new_key,
                     )?;
                 }
             }
@@ -830,19 +837,13 @@ impl WorldEditor {
                         if component.as_ref().is_some_and(|(_, i)| *i != index) {
                             continue;
                         }
-                        let moved: Vec<_> = ch
+                        let moves: Vec<_> = ch
                             .keys()
                             .iter()
-                            .filter(|k| frames.contains(&k.frame))
-                            .copied()
+                            .filter(|k| frames.contains(&k.t()))
+                            .map(|k| (k.t(), k.t() + delta))
                             .collect();
-                        for key in &moved {
-                            ch.remove_key(key.frame);
-                        }
-                        for mut key in moved {
-                            key.frame += delta;
-                            ch.upsert_key(key);
-                        }
+                        ch.move_keys(&moves);
                     }
                 }
                 self.document.store_attrs(id, &attrs)?;
@@ -867,15 +868,14 @@ impl WorldEditor {
                         if component.as_ref().is_some_and(|(_, i)| *i != index) {
                             continue;
                         }
-                        let keys: Vec<_> = ch
+                        let times: Vec<_> = ch
                             .keys()
                             .iter()
-                            .filter(|k| frames.contains(&k.frame))
-                            .copied()
+                            .map(|k| k.t())
+                            .filter(|t| frames.contains(t))
                             .collect();
-                        for mut key in keys {
-                            key.interp = if discrete { CurveKind::Step } else { kind };
-                            ch.upsert_key(key);
+                        for t in times {
+                            ch.set_tan(t, if discrete { Tan::Constant } else { kind });
                         }
                     }
                 }
@@ -902,7 +902,7 @@ impl WorldEditor {
             for (path, value) in writes {
                 changed |= editor
                     .document
-                    .write_navigation_value(id, &mut attrs, path, value, frame, auto_key)?;
+                    .write_navigation_value(id, &mut attrs, path, value, frame, auto_key, editor.new_key)?;
             }
             // Navigation mode is a static preference on the camera, never a generated key.
             if attrs.is_animated("/camera/free_flight")
@@ -1089,11 +1089,71 @@ pub(crate) fn attribute_range(path: &str) -> Option<(f64, f64)> {
         _ => None,
     }
 }
+/// The row label of attribute `path`: its tail, because the Attribute Editor's section already
+/// names the category, and a formula section the family ("/formula/Mandelbulb/power" is "Power").
+/// A Hybrid keeps its step as the one qualifier that tells two sub-formulas' parameters apart
+/// ("/formula/Hybrid/bulb/power" is "Bulb · Power"). ONE function for every attribute view.
+pub(crate) fn attribute_label(path: &str) -> String {
+    match path {
+        "/material_id" => return "Material".into(),
+        CAMERA_ORBIT_SPEED => return "Orbit speed (°/s)".into(),
+        CAMERA_ORBIT_PHASE => return "Orbit phase (°)".into(),
+        "/transform/position" => return "Translate".into(),
+        "/transform/rotation" | "/transform/rotation_degrees" => return "Rotate".into(),
+        "/transform/scale" => return "Scale".into(),
+        _ => {}
+    }
+    let parts: Vec<_> = path.trim_start_matches('/').split('/').collect();
+    let tail = match parts.as_slice() {
+        ["formula", "Hybrid", rest @ ..] => rest,
+        ["formula", _, rest @ ..] if !rest.is_empty() => rest,
+        [_, rest @ ..] if !rest.is_empty() => rest,
+        all => all,
+    };
+    tail.iter()
+        .map(|part| {
+            let text = part.replace('_', " ");
+            let mut chars = text.chars();
+            chars
+                .next()
+                .map(|first| first.to_uppercase().collect::<String>() + chars.as_str())
+                .unwrap_or_default()
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
+/// The reset value of attribute `path` of a node of `kind`: its value at frame 0 in a FRESH world,
+/// the scene the app starts with. ONE source for every reset button; a path the fresh world's node
+/// does not have (another formula family's parameter) has none.
+pub(crate) fn attribute_default(kind: WorldKind, path: &str) -> Option<Value> {
+    static FRESH: LazyLock<HashMap<(WorldKind, String), Value>> = LazyLock::new(|| {
+        let world = WorldDocument::from_scene(&Scene::preset(crate::params::FAMILY_BULB));
+        let mut defaults = HashMap::new();
+        for node in world.nodes() {
+            let Ok(attrs) = world.attrs(node.id) else { continue };
+            for (path, _) in attrs.iter() {
+                if let Ok(value) = world.attribute_value(node.id, path, 0.0) {
+                    // The first node of a kind defines it (one camera, one sun, ...).
+                    defaults.entry((node.kind, path.clone())).or_insert(value);
+                }
+            }
+        }
+        defaults
+    });
+    FRESH.get(&(kind, path.to_owned())).cloned()
+}
+
 /// The attribute grid's options of a numeric attribute: its slider span, a step of 1 for an
 /// integer, "log" for a logarithmic span and "soft" when the hard limits reach past it. One
-/// rule for the Attribute Editor and Render settings.
-pub(crate) fn slider_options(path: &str, integer: bool) -> Vec<String> {
-    let Some(slider) = attribute_slider(path) else {
+/// rule for the Attribute Editor (from `WorldAttribute::slider` / `range`, which components
+/// inherit from their vector) and Render settings (from the path's tables).
+pub(crate) fn slider_options(
+    slider: Option<Slider>,
+    range: Option<(f64, f64)>,
+    integer: bool,
+) -> Vec<String> {
+    let Some(slider) = slider else {
         return Vec::new();
     };
     let mut options = vec![slider.min.to_string(), slider.max.to_string()];
@@ -1103,10 +1163,15 @@ pub(crate) fn slider_options(path: &str, integer: bool) -> Vec<String> {
     if slider.log {
         options.push("log".into());
     }
-    if attribute_range(path) != Some((slider.min, slider.max)) {
+    if range != Some((slider.min, slider.max)) {
         options.push("soft".into());
     }
     options
+}
+
+/// [`slider_options`] of the attribute at `path`.
+pub(crate) fn path_slider_options(path: &str, integer: bool) -> Vec<String> {
+    slider_options(attribute_slider(path), attribute_range(path), integer)
 }
 
 /// Slider spans of every numeric parameter, one table (the operator chose explicit spans over
@@ -1431,6 +1496,12 @@ fn is_color_attribute(path: &str) -> bool {
 }
 
 /// A number clamped to the attribute's hard limits; other values pass through.
+/// Tangent for a value written at `frame`: a key that already exists keeps its out kind (editing a
+/// value must not reset its interpolation), a new key takes `new` (Settings > Animation).
+fn key_tan(ch: &Channel, frame: f64, new: Tan) -> Tan {
+    ch.keys().iter().find(|k| k.t() == frame).map_or(new, |k| k.out.kind)
+}
+
 fn clamp_to_range(path: &str, value: Value) -> Value {
     match (attribute_range(path), value.as_f64()) {
         (Some((min, max)), Some(v)) if v < min || v > max => numeric_like(&value, v.clamp(min, max)),
@@ -1650,7 +1721,7 @@ impl WorldDocument {
         let camera = document
             .insert(WorldKind::Camera, "Camera", scene, None)
             .expect("Valid scene");
-        let light = document
+        document
             .insert(WorldKind::DirectionalLight, "Sun", scene, None)
             .expect("Valid scene");
         let environment = document
@@ -1662,81 +1733,6 @@ impl WorldDocument {
         document.node_mut(fractal).expect("Fractal")["material"] = json!(material);
         document.active_camera = Some(camera);
         document.active_environment = Some(environment);
-        for (path, track) in &scene.animation.tracks {
-            let id = if path.starts_with("/render/") {
-                settings
-            } else if path.starts_with("/camera/") {
-                camera
-            } else if path.starts_with("/lighting/") {
-                light
-            } else if path.starts_with("/environment/") {
-                environment
-            } else if path.starts_with("/material/") {
-                material
-            } else {
-                fractal
-            };
-            for key in track.keys() {
-                let translated = if path.starts_with("/object/") {
-                    match path.as_str() {
-                        "/object/offset" => "/transform/position",
-                        "/object/rotation_degrees" => "/transform/rotation_degrees",
-                        "/object/scale" => "/transform/scale",
-                        _ => path,
-                    }
-                } else {
-                    path
-                };
-                let value = if path == "/object/rotation_degrees" {
-                    Value::Array(
-                        key.value
-                            .as_array()
-                            .expect("Legacy rotation vector")
-                            .iter()
-                            .map(|v| json!(-v.as_f64().expect("Legacy rotation component")))
-                            .collect(),
-                    )
-                } else if path == "/object/scale" {
-                    json!(([key.value.as_f64().unwrap_or(1.0); 3]))
-                } else {
-                    key.value.clone()
-                };
-                document
-                    .set_attribute(
-                        id,
-                        translated,
-                        value.clone(),
-                        key.frame,
-                        true,
-                        key.interpolation,
-                    )
-                    .expect("Valid legacy key");
-                if path == "/lighting/background" || path.starts_with("/lighting/sky_") {
-                    document
-                        .set_attribute(
-                            environment,
-                            translated,
-                            value.clone(),
-                            key.frame,
-                            true,
-                            key.interpolation,
-                        )
-                        .expect("Valid sky key");
-                }
-                if path.starts_with("/render/") {
-                    document
-                        .set_attribute(
-                            fractal,
-                            translated,
-                            value,
-                            key.frame,
-                            true,
-                            key.interpolation,
-                        )
-                        .expect("Valid render key");
-                }
-            }
-        }
         document
     }
     fn insert(
@@ -1976,17 +1972,19 @@ impl WorldDocument {
             {
                 continue;
             }
+            let keyable = !matches!(path.as_str(), "/locked" | "/solo" | "/start" | "/end");
             out.push(WorldAttribute {
                 path: path.clone(),
-                label: crate::animation::label(path),
+                label: attribute_label(path),
                 value: self.attribute_value(id, path, frame)?,
                 frames: attrs.key_frames(path),
-                keyable: !matches!(path.as_str(), "/locked" | "/solo" | "/start" | "/end"),
+                keyable,
                 component: None,
                 choices: attribute_choices(path),
                 range: attribute_range(path),
                 slider: attribute_slider(path),
                 color: is_color_attribute(path),
+                default: keyable.then(|| attribute_default(kind, path)).flatten(),
             });
         }
         if self.supports_material(id) {
@@ -2006,6 +2004,7 @@ impl WorldDocument {
                 range: None,
                 slider: None,
                 color: false,
+                default: None,
             });
         }
         let parents = out.clone();
@@ -2018,6 +2017,7 @@ impl WorldDocument {
                 for (component, value) in values.iter().enumerate() {
                     let mut attr = parent.clone();
                     attr.path = format!("{}/{}", parent.path, component);
+                    attr.default = parent.default.as_ref().and_then(|d| d.get(component)).cloned();
                     attr.label = format!(
                         "{} / {}",
                         parent.label,
@@ -2032,7 +2032,7 @@ impl WorldDocument {
                     attr.frames = attrs
                         .anim(&parent.path)
                         .and_then(|anim| anim.channels.get(component))
-                        .map(|ch| ch.keys().iter().map(|k| k.frame).collect())
+                        .map(|ch| ch.keys().iter().map(|k| k.t()).collect())
                         .unwrap_or_default();
                     out.push(attr);
                 }
@@ -2152,7 +2152,7 @@ impl WorldDocument {
         value: Value,
         frame: f64,
         key: bool,
-        kind: CurveKind,
+        kind: Tan,
     ) -> Result<(), String> {
         if !frame.is_finite() {
             return Err("Invalid key time".into());
@@ -2182,7 +2182,7 @@ impl WorldDocument {
                     .anim_mut(&parent)
                     .and_then(|anim| anim.channels.get_mut(component))
                 {
-                    ch.upsert_key(Keyframe::with_interp(frame, scalar, kind));
+                    ch.upsert_key(Keyframe::with_tan(frame, scalar, key_tan(ch, frame, kind)));
                 }
             } else {
                 a.set(&parent, to_attr(&vector));
@@ -2237,13 +2237,15 @@ impl WorldDocument {
             } else {
                 to_attr(&value)
             };
+            let tans: Vec<Tan> = a
+                .anim(path)
+                .map(|anim| anim.channels.iter().map(|c| key_tan(c, frame, kind)).collect())
+                .unwrap_or_default();
             a.add_key(path, frame, &attr);
             if let Some(anim) = a.anim_mut(path) {
-                for channel in &mut anim.channels {
-                    if let Some(mut k) = channel.keys().iter().find(|k| k.frame == frame).copied() {
-                        k.interp = if discrete { CurveKind::Step } else { kind };
-                        channel.upsert_key(k);
-                    }
+                for (i, channel) in anim.channels.iter_mut().enumerate() {
+                    let tan = if discrete { Tan::Constant } else { tans.get(i).copied().unwrap_or(kind) };
+                    channel.set_tan(frame, tan);
                 }
             }
         } else {
@@ -2511,6 +2513,7 @@ impl WorldDocument {
         desired: Value,
         frame: f64,
         auto_key: bool,
+        kind: Tan,
     ) -> Result<bool, String> {
         let sampled = self.resolve_attribute(id, path, frame, &mut HashSet::new())?;
         let mut base = attrs
@@ -2561,15 +2564,12 @@ impl WorldDocument {
                 if attrs.anim(path).is_none() {
                     attrs.set_anim(path, Some(Animation::with_arity(arity)));
                 }
-                attrs
+                let ch = attrs
                     .anim_mut(path)
                     .and_then(|a| a.channels.get_mut(component))
-                    .ok_or("Invalid camera animation arity")?
-                    .upsert_key(Keyframe::with_interp(
-                        frame,
-                        (wanted - added) as f32,
-                        CurveKind::Linear,
-                    ));
+                    .ok_or("Invalid camera animation arity")?;
+                let tan = key_tan(ch, frame, kind);
+                ch.upsert_key(Keyframe::with_tan(frame, (wanted - added) as f32, tan));
             } else if animated {
                 if arity == 1 {
                     offset = json!(wanted - raw);

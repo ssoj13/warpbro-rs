@@ -5,8 +5,8 @@ use crate::{
     world::NodeId,
 };
 use playa_engine::{
-    colour::ColorSpaceId,
-    core::{CacheManager, GlobalFrameCache},
+    colour::{ColorSpaceId, Tier},
+    core::{CacheManager, GlobalFrameCache, global_cache::TierCache},
     entities::{
         CacheStrategy,
         frame::{Frame as PlayaFrame, PixelBuffer, PixelFormat, Premult},
@@ -392,11 +392,19 @@ struct FrameMetadata {
     denoise_ms: f32,
     denoise_error: Option<String>,
 }
+/// The one tier every preview frame is made at: Playa's cache is keyed by tier, and a WarpBro
+/// preview cache is private to one request (draft and final previews never share a cache), so its
+/// view of the cache is fixed. Frames are stamped with it on insert.
+const TIER: Tier = Tier::BEST;
+
 /// All native pixel ownership belongs to Playa's cache. Metadata cannot keep evicted pixels alive.
 pub(crate) struct PreviewCache {
     pub request: PreviewRequest,
     pub manager: Arc<CacheManager>,
-    cache: GlobalFrameCache,
+    /// The owner of the frames, kept for `clear_all` (a `TierCache` view cannot drop a whole cache).
+    cache: Arc<GlobalFrameCache>,
+    /// The cache at [`TIER`]: every read and write goes through it.
+    view: TierCache,
     metadata: Vec<Option<FrameMetadata>>,
     codes_id: NodeId,
     linear_id: NodeId,
@@ -423,11 +431,15 @@ impl PreviewCache {
                 manager.mem().1 / 1048576
             ));
         }
-        let cache =
-            GlobalFrameCache::new(count.saturating_mul(2), manager.clone(), CacheStrategy::All);
+        let cache = Arc::new(GlobalFrameCache::new(
+            count.saturating_mul(2),
+            manager.clone(),
+            CacheStrategy::All,
+        ));
         Ok(Self {
             request,
             manager,
+            view: cache.at(TIER),
             cache,
             metadata: vec![None; count],
             codes_id: NodeId::new(),
@@ -519,28 +531,26 @@ impl PreviewCache {
             Premult::Opaque,
         )
         .map_err(|e| e.to_string())?;
-        self.cache.insert(self.codes_id.into(), index, codes, epoch);
-        self.cache
-            .insert(self.linear_id.into(), index, linear, epoch);
+        codes.set_tier(TIER);
+        linear.set_tier(TIER);
+        self.view.insert(self.codes_id.into(), index, codes, epoch);
+        self.view.insert(self.linear_id.into(), index, linear, epoch);
         self.metadata[index as usize] = Some(meta);
         Ok(())
     }
     pub fn contains(&self, number: u32) -> bool {
         self.index(number).is_some_and(|index| {
             self.metadata[index as usize].is_some()
-                && self.cache.get_status(self.codes_id.into(), index).is_some()
-                && self
-                    .cache
-                    .get_status(self.linear_id.into(), index)
-                    .is_some()
+                && self.view.get_status(self.codes_id.into(), index).is_some()
+                && self.view.get_status(self.linear_id.into(), index).is_some()
         })
     }
     pub fn get_into(&self, number: u32, frame: &mut Frame) -> Option<()> {
         let index = self.index(number)?;
         let meta = self.metadata[index as usize].as_ref()?;
-        let codes = self.cache.get(self.codes_id.into(), index)?.cpu_raster()?.0;
+        let codes = self.view.get(self.codes_id.into(), index)?.cpu_raster()?.0;
         let linear = self
-            .cache
+            .view
             .get(self.linear_id.into(), index)?
             .cpu_raster()?
             .0;

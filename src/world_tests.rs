@@ -27,7 +27,7 @@ fn glass_node_transmission_is_keyable_shared_and_roundtrips() {
             json!(0.5),
             0.0,
             true,
-            CurveKind::Linear,
+            Tan::Linear,
         )
         .unwrap();
     e.document
@@ -37,7 +37,7 @@ fn glass_node_transmission_is_keyable_shared_and_roundtrips() {
             json!(1.5),
             20.0,
             true,
-            CurveKind::Linear,
+            Tan::Linear,
         )
         .unwrap();
     let attrs = e.document.attributes(material, 10.0).unwrap();
@@ -91,7 +91,7 @@ fn old_material_schema_gains_glass_controls_without_losing_existing_keys() {
             json!(0.2),
             0.0,
             true,
-            CurveKind::Linear,
+            Tan::Linear,
         )
         .unwrap();
     e.document
@@ -101,7 +101,7 @@ fn old_material_schema_gains_glass_controls_without_losing_existing_keys() {
             json!(0.8),
             20.0,
             true,
-            CurveKind::Linear,
+            Tan::Linear,
         )
         .unwrap();
     let expected = e.document.material(id, 10.0).unwrap();
@@ -563,7 +563,7 @@ fn camera_navigation_auto_key_compensates_existing_offsets_and_keys_changed_comp
         animation.channels[0]
             .keys()
             .iter()
-            .map(|k| k.frame)
+            .map(|k| k.t())
             .collect::<Vec<_>>(),
         vec![0.0, 10.0]
     );
@@ -951,31 +951,6 @@ fn editor_revision_invalidates_caches_on_edit_undo_and_redo_only() {
     assert!(e.revision() > revision);
 }
 #[test]
-fn legacy_object_rotation_migrates_to_playa_cw_axes_without_changing_pose() {
-    let mut scene = Scene::preset(0);
-    scene.object.offset = [1.0, 2.0, 3.0];
-    scene.object.scale = 2.5;
-    scene.object.rotation_degrees = [15.0, 30.0, 45.0];
-    scene.key_parameter("/object/rotation_degrees", 0.0);
-    scene.object.rotation_degrees = [30.0, 60.0, 90.0];
-    scene.key_parameter("/object/rotation_degrees", 10.0);
-    let world = WorldDocument::from_scene(&scene);
-    for frame in [0.0, 3.5, 10.0] {
-        let legacy = scene.evaluated(frame).unwrap();
-        let pack = legacy.pack(1, 1);
-        let index = crate::params::P_OBJ_AXES;
-        let rows: [[f32; 3]; 3] =
-            std::array::from_fn(|i| std::array::from_fn(|j| pack[index + 3 * i + j]));
-        let rotation = glam::Mat3::from_cols_array_2d(&rows);
-        let point = glam::Vec3::new(0.3, 0.7, 1.1);
-        let expected =
-            glam::Vec3::from(legacy.object.offset) + rotation * point * legacy.object.scale;
-        let snapshot = world.snapshot(frame).unwrap();
-        let matrix = glam::Mat4::from_cols_array_2d(&snapshot.objects[0].object_world.unwrap());
-        assert!((expected - matrix.transform_point3(point)).length() < 1e-5);
-    }
-}
-#[test]
 fn component_stopwatch_disables_only_selected_channel_and_holds_value() {
     let mut e = editor();
     let camera = find(&e, WorldKind::Camera);
@@ -1070,42 +1045,10 @@ fn migrates_all_formula_families_without_dropping_parameters() {
     }
 }
 #[test]
-fn legacy_structural_and_discrete_keys_hold_until_boundary() {
-    let mut s = Scene::preset(0);
-    s.key_parameter("/formula", 0.0);
-    s.formula = Scene::preset(7).formula;
-    s.key_parameter("/formula", 10.25);
-    s.key_parameter("/julia", 0.0);
-    s.julia = Some([0.3, 0.4, 0.5]);
-    s.key_parameter("/julia", 10.25);
-    s.key_parameter("/lighting/background", 0.0);
-    s.lighting.background = false;
-    s.key_parameter("/lighting/background", 10.25);
-    let w = WorldDocument::from_scene(&s);
-    for frame in [0.0, 5.0, 10.24, 10.25, 12.0] {
-        let legacy = s.evaluated(frame).unwrap();
-        let world = w.snapshot(frame).unwrap();
-        assert_eq!(world.formula, legacy.formula, "frame={frame}");
-        assert_eq!(world.julia, legacy.julia);
-        assert_eq!(world.lighting.background, legacy.lighting.background);
-    }
-}
-#[test]
 fn numeric_component_keys_and_render_keys_share_playa_evaluation() {
     let mut s = Scene::preset(0);
-    s.key_parameter("/camera/target", 0.0);
     s.camera.target = [10.0, 20.0, 30.0];
-    s.key_parameter("/camera/target", 10.5);
-    s.key_parameter("/render/step_factor", 0.0);
-    s.render.step_factor = 0.9;
-    s.key_parameter("/render/step_factor", 10.5);
     let w = WorldDocument::from_scene(&s);
-    for frame in [0.0, 1.25, 5.25, 10.5] {
-        let a = s.evaluated(frame).unwrap();
-        let b = w.snapshot(frame).unwrap();
-        assert_eq!(a.camera.target, b.camera.target);
-        assert!((a.render.step_factor - b.render.step_factor).abs() < 1e-6);
-    }
     let mut e = WorldEditor::new(w);
     let camera = find(&e, WorldKind::Camera);
     e.execute(WorldCommand::Key {
@@ -1643,22 +1586,31 @@ fn julia_schema_toggle_accepts_custom_constants_and_is_undoable() {
     );
 }
 #[test]
-fn render_schema_filters_fractal_controls_without_dropping_stored_tracks() {
-    let mut scene = Scene::preset(0);
-    scene.key_parameter("/render/exposure_stops", 0.0);
-    scene.render.exposure_stops = 2.5;
-    scene.key_parameter("/render/exposure_stops", 12.0);
-    let world = WorldDocument::from_scene(&scene);
+fn render_schema_filters_fractal_controls_but_keeps_world_settings_keys() {
+    let scene = Scene::preset(0);
+    let mut editor = WorldEditor::new(WorldDocument::from_scene(&scene));
+    let settings = editor
+        .document
+        .nodes()
+        .into_iter()
+        .find(|n| n.name == "World Settings")
+        .unwrap()
+        .id;
+    for (frame, value) in [(0.0, 0.0), (12.0, 2.5)] {
+        editor
+            .execute(WorldCommand::Key {
+                id: settings,
+                path: "/render/exposure_stops".into(),
+                frame,
+            })
+            .unwrap();
+        set(&mut editor, settings, "/render/exposure_stops", json!(value), frame);
+    }
+    let world = editor.document;
     let fractal = world
         .nodes()
         .into_iter()
         .find(|n| n.kind == WorldKind::Fractal)
-        .unwrap()
-        .id;
-    let settings = world
-        .nodes()
-        .into_iter()
-        .find(|n| n.name == "World Settings")
         .unwrap()
         .id;
     let descriptors = world.attributes(fractal, 0.0).unwrap();
@@ -1679,26 +1631,16 @@ fn render_schema_filters_fractal_controls_without_dropping_stored_tracks() {
     );
     assert!(
         world
-            .attrs(fractal)
+            .attrs(settings)
             .unwrap()
             .is_animated("/render/exposure_stops")
     );
+    // Two keys: a straight ramp 0 -> 2.5 over 12 frames.
     for frame in [0.0, 6.0, 12.0] {
-        assert_eq!(
-            world
-                .node_scene(fractal, frame)
-                .unwrap()
-                .render
-                .exposure_stops,
-            scene.evaluated(frame).unwrap().render.exposure_stops
-        );
-        assert_eq!(
-            world.snapshot(frame).unwrap().render.exposure_stops,
-            scene.evaluated(frame).unwrap().render.exposure_stops
-        );
+        let want = 2.5 * (frame as f32) / 12.0;
+        assert!((world.snapshot(frame).unwrap().render.exposure_stops - want).abs() < 1e-5);
     }
 }
-
 #[test]
 fn clipboard_copy_paste_and_duplicate_remap_ids_in_one_undo_step() {
     let mut e = editor();
@@ -1909,4 +1851,28 @@ fn every_attribute_has_a_hover_hint() {
         attribute_hint("/formula/Apollonian/scale"),
         attribute_hint("/formula/Mandelbox/scale")
     );
+}
+#[test]
+fn attributes_carry_the_fresh_world_value_as_their_reset_default() {
+    let mut e = editor();
+    let camera = find(&e, WorldKind::Camera);
+    let pick = |e: &WorldEditor, path: &str| {
+        e.document
+            .attributes(camera, 0.0)
+            .unwrap()
+            .into_iter()
+            .find(|a| a.path == path)
+            .unwrap()
+    };
+    let fresh = pick(&e, "/camera/distance").value;
+    let target = pick(&e, "/camera/target").value;
+    set(&mut e, camera, "/camera/distance", json!(7.5), 0.0);
+    set(&mut e, camera, "/camera/target/0", json!(99.0), 0.0);
+    let distance = pick(&e, "/camera/distance");
+    assert_eq!(distance.value, json!(7.5));
+    assert_eq!(distance.default, Some(fresh));
+    // A component's default is its element of the vector's default.
+    assert_eq!(pick(&e, "/camera/target/0").default, Some(target[0].clone()));
+    // Locks and time range are not resettable parameters.
+    assert_eq!(pick(&e, "/locked").default, None);
 }
