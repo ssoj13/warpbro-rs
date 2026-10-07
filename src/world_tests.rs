@@ -1054,10 +1054,13 @@ fn constructs_all_formula_families_without_dropping_parameters() {
         let snapshot = world.snapshot(0.0).unwrap();
         assert_eq!(snapshot.formula, s.formula);
         assert_eq!(snapshot.material, s.material);
-        assert_eq!(snapshot.render, s.render);
+        let mut expected_render = s.render.clone();
+        expected_render.iterations = Scene::preset(crate::params::FAMILY_BULB).render.iterations;
+        assert_eq!(snapshot.render, expected_render);
         assert_eq!(snapshot.camera, s.camera);
         assert_eq!(snapshot.environment, s.environment);
         assert_eq!(snapshot.objects.len(), 1);
+        assert_eq!(snapshot.objects[0].render.iterations, s.render.iterations);
         assert_eq!(snapshot.lights.len(), 1);
         assert_eq!(
             world.runtime_graph().unwrap().nodes.len(),
@@ -1610,13 +1613,7 @@ fn julia_schema_toggle_accepts_custom_constants_and_is_undoable() {
 fn render_schema_filters_fractal_controls_but_keeps_world_settings_keys() {
     let scene = Scene::preset(0);
     let mut editor = WorldEditor::new(WorldDocument::from_scene(&scene));
-    let settings = editor
-        .document
-        .nodes()
-        .into_iter()
-        .find(|n| n.name == "World Settings")
-        .unwrap()
-        .id;
+    let settings = editor.document.output_render_profile().unwrap();
     for (frame, value) in [(0.0, 0.0), (12.0, 2.5)] {
         editor
             .execute(WorldCommand::Key {
@@ -1641,6 +1638,22 @@ fn render_schema_filters_fractal_controls_but_keeps_world_settings_keys() {
         .unwrap()
         .id;
     let descriptors = world.attributes(fractal, 0.0).unwrap();
+    assert_eq!(
+        world.node(fractal).unwrap()["gpu"]["render"],
+        json!({"iterations":scene.render.iterations})
+    );
+    assert!(
+        !world
+            .attrs(fractal)
+            .unwrap()
+            .contains("/render/exposure_stops")
+    );
+    assert!(
+        !world
+            .attrs(fractal)
+            .unwrap()
+            .contains("/render/max_bounces")
+    );
     assert_eq!(
         descriptors
             .iter()
@@ -2106,4 +2119,469 @@ fn current_world_format_roundtrips_but_old_and_future_graph_versions_are_rejecte
             "decoding never repairs a document"
         );
     }
+}
+
+#[test]
+fn render_profiles_route_auto_locked_and_output_without_mutating_document() {
+    use crate::render_profiles::{RenderMethod, ViewportMode};
+    let mut e = editor();
+    let saved = e.document.clone();
+    let output = e.document.output_render_profile().unwrap();
+    let policy = e.document.viewport_policy(0.0).unwrap();
+    let moving = e.document.viewport_render(0.0, true).unwrap();
+    let still = e.document.viewport_render(0.0, false).unwrap();
+    assert_eq!(moving.profile, policy.moving_id);
+    assert_eq!(moving.method, RenderMethod::Fast);
+    assert_eq!(
+        (
+            moving.samples,
+            moving.resolution_scale,
+            moving.render.max_bounces
+        ),
+        (64, 0.5, 2)
+    );
+    assert_eq!(still.profile, policy.still_id);
+    assert_eq!(still.method, RenderMethod::Full);
+    assert_ne!(output, policy.moving_id);
+    assert_ne!(output, policy.still_id);
+    assert_eq!(
+        e.document, saved,
+        "routing is transient and authors no data"
+    );
+    let viewport = e.document.viewport_settings_id().unwrap();
+    set(
+        &mut e,
+        viewport,
+        "/viewport/mode",
+        json!(ViewportMode::Locked),
+        0.0,
+    );
+    set(
+        &mut e,
+        viewport,
+        "/viewport/manual_id",
+        json!(policy.moving_id),
+        0.0,
+    );
+    assert_eq!(
+        e.document.viewport_render(0.0, false).unwrap().profile,
+        policy.moving_id
+    );
+    let exported = e.document.snapshot(0.0).unwrap();
+    assert_eq!(exported.render, saved.snapshot(0.0).unwrap().render);
+    assert!(
+        !e.document.graph.bus_slots["world"]
+            .as_object()
+            .unwrap()
+            .contains_key("render")
+    );
+    assert!(!e.document.graph.bus_slots.contains_key("settings_node"));
+}
+
+#[test]
+fn render_template_instantiation_remaps_pair_and_undoes_assignment_atomically() {
+    use crate::render_profiles::{CatalogRole, ProfileTarget};
+    let mut e = editor();
+    e.execute(WorldCommand::CreateRenderProfile {
+        name: "Studio".into(),
+        role: CatalogRole::Template,
+        source: None,
+        target: None,
+    })
+    .unwrap();
+    let template = e.selection.unwrap();
+    let template_quality = e.document.render_quality(template).unwrap();
+    assert_eq!(
+        e.document.catalog_role(template_quality).unwrap(),
+        Some(CatalogRole::Template)
+    );
+    set(
+        &mut e,
+        template_quality,
+        "/quality/samples",
+        json!(123),
+        0.0,
+    );
+    let before = e.document.clone();
+    let count = before.nodes().len();
+    e.execute(WorldCommand::InstantiateRenderTemplate {
+        id: template,
+        name: "Studio still".into(),
+        target: Some(ProfileTarget::Still),
+    })
+    .unwrap();
+    let instance = e.selection.unwrap();
+    let quality = e.document.render_quality(instance).unwrap();
+    assert_ne!(instance, template);
+    assert_ne!(quality, template_quality);
+    assert_eq!(e.document.nodes().len(), count + 2);
+    assert_eq!(e.document.viewport_policy(0.0).unwrap().still_id, instance);
+    assert_eq!(
+        e.document.effective_render(instance, 0.0).unwrap().samples,
+        123
+    );
+    let applied = e.document.clone();
+    assert!(e.undo());
+    assert_eq!(e.document, before);
+    assert!(e.redo());
+    assert_eq!(e.document, applied);
+    set(
+        &mut e,
+        template_quality,
+        "/quality/samples",
+        json!(777),
+        0.0,
+    );
+    assert_eq!(
+        e.document.effective_render(instance, 0.0).unwrap().samples,
+        123
+    );
+    assert_eq!(
+        e.document.effective_render(template, 0.0).unwrap().samples,
+        777
+    );
+}
+
+#[test]
+fn live_render_profile_edits_reach_all_uuid_consumers_and_roundtrip() {
+    use crate::render_profiles::ProfileTarget;
+    let mut e = editor();
+    let policy = e.document.viewport_policy(0.0).unwrap();
+    let viewport = e.document.viewport_settings_id().unwrap();
+    let output = e.document.output_render_profile().unwrap();
+    set(
+        &mut e,
+        viewport,
+        ProfileTarget::Still.viewport_path().unwrap(),
+        json!(policy.moving_id),
+        0.0,
+    );
+    e.execute(WorldCommand::SetOutputRender(policy.moving_id))
+        .unwrap();
+    let quality = e.document.render_quality(policy.moving_id).unwrap();
+    set(&mut e, quality, "/quality/max_bounces", json!(5), 0.0);
+    for moving in [true, false] {
+        assert_eq!(
+            e.document
+                .viewport_render(0.0, moving)
+                .unwrap()
+                .render
+                .max_bounces,
+            5
+        );
+    }
+    assert_eq!(e.document.snapshot(0.0).unwrap().render.max_bounces, 5);
+    let encoded = serde_json::to_string(&e.document).unwrap();
+    let restored: WorldDocument = serde_json::from_str(&encoded).unwrap();
+    restored.validate_render_profiles(0.0).unwrap();
+    assert_eq!(restored, e.document);
+    assert_eq!(restored.render_quality(policy.moving_id).unwrap(), quality);
+    assert_ne!(output, restored.output_render_profile().unwrap());
+}
+
+#[test]
+fn profile_reference_validation_rejects_missing_wrong_template_and_animated_refs() {
+    use crate::render_profiles::CatalogRole;
+    let mut e = editor();
+    let viewport = e.document.viewport_settings_id().unwrap();
+    let fractal = e.selection.unwrap();
+    let saved = e.document.clone();
+    for target in [fractal, NodeId::new()] {
+        assert!(
+            e.execute(WorldCommand::SetAttribute {
+                id: viewport,
+                path: "/viewport/moving_id".into(),
+                value: json!(target),
+                frame: 0.0,
+            })
+            .is_err()
+        );
+        assert_eq!(e.document, saved);
+    }
+    e.execute(WorldCommand::CreateRenderProfile {
+        name: "Draft".into(),
+        role: CatalogRole::Template,
+        source: None,
+        target: None,
+    })
+    .unwrap();
+    let template = e.selection.unwrap();
+    let before = e.document.clone();
+    assert!(e.execute(WorldCommand::SetOutputRender(template)).is_err());
+    assert_eq!(e.document, before);
+    assert!(
+        e.execute(WorldCommand::SetAttribute {
+            id: viewport,
+            path: "/viewport/manual_id".into(),
+            value: json!(template),
+            frame: 0.0
+        })
+        .is_err()
+    );
+    assert!(
+        e.execute(WorldCommand::Key {
+            id: viewport,
+            path: "/viewport/still_id".into(),
+            frame: 0.0
+        })
+        .is_err()
+    );
+    assert_eq!(e.document, before);
+    let mut invalid = saved;
+    invalid
+        .graph
+        .bus_slots
+        .insert("output_render".into(), json!(NodeId::new()));
+    assert!(
+        invalid.snapshot(0.0).is_err(),
+        "load/evaluation never repairs missing refs"
+    );
+}
+
+#[test]
+fn assigned_profiles_guard_delete_and_explicit_reassignment_allows_atomic_delete() {
+    let mut e = editor();
+    let output = e.document.output_render_profile().unwrap();
+    let quality = e.document.render_quality(output).unwrap();
+    let still = e.document.viewport_policy(0.0).unwrap().still_id;
+    let before = e.document.clone();
+    assert!(e.execute(WorldCommand::Delete(output)).is_err());
+    assert!(e.execute(WorldCommand::Delete(quality)).is_err());
+    assert_eq!(e.document, before);
+    e.execute(WorldCommand::Batch(vec![
+        WorldCommand::SetOutputRender(still),
+        WorldCommand::Delete(output),
+        WorldCommand::Delete(quality),
+    ]))
+    .unwrap();
+    assert!(!e.document.graph.nodes.contains_key(&output.to_string()));
+    assert!(!e.document.graph.nodes.contains_key(&quality.to_string()));
+    assert!(e.undo());
+    assert_eq!(e.document, before);
+}
+
+#[test]
+fn standalone_quality_templates_are_independent_atomic_instances() {
+    use crate::render_profiles::CatalogRole;
+    let mut e = editor();
+    let output = e.document.output_render_profile().unwrap();
+    e.execute(WorldCommand::CreateQualityProfile {
+        name: "Draft quality".into(),
+        role: CatalogRole::Template,
+        source: None,
+        target: None,
+    })
+    .unwrap();
+    let template = e.selection.unwrap();
+    set(&mut e, template, "/quality/samples", json!(31), 0.0);
+    let before = e.document.clone();
+    e.execute(WorldCommand::InstantiateQualityTemplate {
+        id: template,
+        name: "Delivery quality".into(),
+        target: Some(output),
+    })
+    .unwrap();
+    let quality = e.selection.unwrap();
+    assert_ne!(quality, template);
+    assert_eq!(e.document.render_quality(output).unwrap(), quality);
+    assert_eq!(
+        e.document.effective_render(output, 0.0).unwrap().samples,
+        31
+    );
+    let applied = e.document.clone();
+    assert!(e.undo());
+    assert_eq!(e.document, before);
+    assert!(e.redo());
+    assert_eq!(e.document, applied);
+    set(&mut e, template, "/quality/samples", json!(59), 0.0);
+    assert_eq!(
+        e.document.effective_render(output, 0.0).unwrap().samples,
+        31
+    );
+}
+
+#[test]
+fn profile_fast_materials_are_evaluated_only_and_preserve_transmission_and_geometry() {
+    use crate::scene::MaterialModel;
+    let mut scene = Scene::preset(0);
+    scene.material.model = MaterialModel::StandardSurface;
+    scene.material.transmission = 0.0;
+    let mut e = WorldEditor::new(WorldDocument::from_scene(&scene));
+    let fractal = e.selection.unwrap();
+    let material = e.document.assigned_material(fractal).unwrap().unwrap();
+    let policy = e.document.viewport_policy(0.0).unwrap();
+    let saved = e.document.clone();
+    let fast = e
+        .document
+        .snapshot_with_render_profile(policy.moving_id, 0.0)
+        .unwrap();
+    assert_eq!(fast.objects[0].material.model, MaterialModel::Fast);
+    assert_eq!(fast.objects[0].render.iterations, scene.render.iterations);
+    assert_eq!(fast.objects[0].render.max_bounces, 2);
+    let full = e
+        .document
+        .snapshot_with_render_profile(policy.still_id, 0.0)
+        .unwrap();
+    assert_eq!(
+        full.objects[0].material.model,
+        MaterialModel::StandardSurface
+    );
+    assert_eq!(e.document, saved);
+    e.execute(WorldCommand::SetOutputRender(policy.moving_id))
+        .unwrap();
+    assert_eq!(
+        e.document.snapshot(0.0).unwrap().objects[0].material.model,
+        MaterialModel::Fast
+    );
+    assert_eq!(
+        e.document
+            .snapshot_with_render_profile(policy.still_id, 0.0)
+            .unwrap()
+            .objects[0]
+            .material
+            .model,
+        MaterialModel::StandardSurface
+    );
+    set(&mut e, material, "/material/transmission", json!(0.75), 0.0);
+    assert_eq!(
+        e.document
+            .snapshot_with_render_profile(policy.moving_id, 0.0)
+            .unwrap()
+            .objects[0]
+            .material
+            .model,
+        MaterialModel::StandardSurface
+    );
+    assert_eq!(
+        e.document.material(material, 0.0).unwrap().model,
+        MaterialModel::StandardSurface
+    );
+}
+
+#[test]
+fn canonical_settings_validation_rejects_missing_fields_and_invalid_unused_templates() {
+    use crate::render_profiles::CatalogRole;
+    let mut e = editor();
+    e.execute(WorldCommand::CreateQualityProfile {
+        name: "Unused".into(),
+        role: CatalogRole::Template,
+        source: None,
+        target: None,
+    })
+    .unwrap();
+    let template = e.selection.unwrap();
+    let mut broken = e.document.clone();
+    let mut attrs = broken.attrs(template).unwrap();
+    attrs.set("/quality/samples", to_attr(&json!("not samples")));
+    broken.store_attrs(template, &attrs).unwrap();
+    assert!(
+        broken.snapshot(0.0).is_err(),
+        "unused templates obey the same schema"
+    );
+    let mut missing = e.document;
+    let mut attrs = missing.attrs(template).unwrap();
+    attrs.remove("/quality/step_factor");
+    missing.store_attrs(template, &attrs).unwrap();
+    assert!(
+        missing.snapshot(0.0).is_err(),
+        "GPU schema defaults never replace missing authored fields"
+    );
+}
+
+#[test]
+fn persisted_settings_references_reject_animation_and_connections_instead_of_sampling_first() {
+    let e = editor();
+    let render = e.document.output_render_profile().unwrap();
+    let first_quality = e.document.render_quality(render).unwrap();
+    let still = e.document.viewport_policy(0.0).unwrap().still_id;
+    let later_quality = e.document.render_quality(still).unwrap();
+    assert_ne!(first_quality, later_quality);
+    let mut animated = e.document.clone();
+    let path = "/render/quality_id";
+    let mut attrs = animated.attrs(render).unwrap();
+    // Discrete animation channels evaluate numeric dictionary indices, not UUID strings.
+    attrs.set(path, AttrValue::Float(0.0));
+    let mut animation = Animation::with_arity(1);
+    animation.channels[0].upsert_key(Keyframe::with_tan(0.0, 0.0, Tan::Constant));
+    animation.channels[0].upsert_key(Keyframe::with_tan(10.0, 1.0, Tan::Constant));
+    attrs.set_anim(path, Some(animation));
+    animated.store_attrs(render, &attrs).unwrap();
+    animated.node_mut(render).unwrap()["discrete"][path] = json!([first_quality, later_quality]);
+    assert_eq!(
+        animated.attribute_value(render, path, 0.0).unwrap(),
+        json!(first_quality)
+    );
+    assert_eq!(
+        animated.attribute_value(render, path, 20.0).unwrap(),
+        json!(later_quality)
+    );
+    let restored: WorldDocument =
+        serde_json::from_str(&serde_json::to_string(&animated).unwrap()).unwrap();
+    assert!(restored.render_quality(render).is_err());
+    assert!(restored.effective_render(render, 20.0).is_err());
+    assert!(restored.snapshot(0.0).is_err());
+    let mut connected = e.document;
+    let mut attrs = connected.attrs(render).unwrap();
+    attrs.set_conn(
+        path,
+        Some(playa_engine::entities::attrs::AttrConnection {
+            source_layer: still.0,
+            source_key: path.into(),
+        }),
+    );
+    connected.store_attrs(render, &attrs).unwrap();
+    let restored: WorldDocument =
+        serde_json::from_str(&serde_json::to_string(&connected).unwrap()).unwrap();
+    assert!(restored.snapshot(0.0).is_err());
+    assert!(restored.render_quality(render).is_err());
+}
+
+#[test]
+fn viewport_policy_is_static_in_commands_and_persisted_graphs() {
+    let mut e = editor();
+    let viewport = e.document.viewport_settings_id().unwrap();
+    let original = e.document.clone();
+    for descriptor in e
+        .document
+        .attributes(viewport, 0.0)
+        .unwrap()
+        .into_iter()
+        .filter(|attr| attr.path.starts_with("/viewport/"))
+    {
+        assert!(!descriptor.keyable);
+        assert!(
+            e.execute(WorldCommand::Key {
+                id: viewport,
+                path: descriptor.path,
+                frame: 10.0
+            })
+            .is_err()
+        );
+        assert_eq!(e.document, original);
+    }
+    let path = "/viewport/target_fps";
+    let mut animated = original.clone();
+    let mut attrs = animated.attrs(viewport).unwrap();
+    let mut animation = Animation::with_arity(1);
+    animation.channels[0].upsert_key(Keyframe::with_tan(0.0, 30.0, Tan::Constant));
+    attrs.set_anim(path, Some(animation));
+    animated.store_attrs(viewport, &attrs).unwrap();
+    let restored: WorldDocument =
+        serde_json::from_str(&serde_json::to_string(&animated).unwrap()).unwrap();
+    assert!(restored.snapshot(0.0).is_err());
+    assert!(restored.viewport_policy(0.0).is_err());
+    let mut connected = original;
+    let mut attrs = connected.attrs(viewport).unwrap();
+    attrs.set_conn(
+        path,
+        Some(playa_engine::entities::attrs::AttrConnection {
+            source_layer: viewport.0,
+            source_key: "/viewport/batch_budget_ms".into(),
+        }),
+    );
+    connected.store_attrs(viewport, &attrs).unwrap();
+    let restored: WorldDocument =
+        serde_json::from_str(&serde_json::to_string(&connected).unwrap()).unwrap();
+    assert!(restored.snapshot(0.0).is_err());
+    assert!(restored.viewport_policy(0.0).is_err());
 }

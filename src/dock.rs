@@ -419,12 +419,51 @@ impl App {
         }
         .show(ui, rect, &mut state, |ui| {
             use egui_widgets_config::icons as ph;
-            egui_viewport_toolbar::exposure_control(
-                ui,
-                &mut self.scene.render.exposure_stops,
-                &mut self.exposure_hold,
-                -10.0..=10.0,
-            );
+            let frame = f64::from(self.world_ui.playhead);
+            let active_profile = self
+                .world
+                .document
+                .viewport_policy(frame)
+                .map(|policy| {
+                    policy.selected(
+                        self.world_ui.playing
+                            || self.last_change.elapsed().as_secs_f32() * 1000.0
+                                < policy.settle_delay_ms,
+                    )
+                })
+                .and_then(|id| self.world.document.effective_render(id, frame));
+            if let Ok(effective) = &active_profile {
+                let mut exposure = effective.render.exposure_stops;
+                egui_viewport_toolbar::exposure_control(
+                    ui,
+                    &mut exposure,
+                    &mut self.exposure_hold,
+                    -10.0..=10.0,
+                );
+                if exposure != effective.render.exposure_stops {
+                    let gesture = ui
+                        .input(|input| input.pointer.primary_down())
+                        .then(|| {
+                            egui::Id::new((
+                                "viewport_camera_edit",
+                                self.world.document.active_camera,
+                            ))
+                            .value()
+                        })
+                        .or_else(|| self.world.active_edit());
+                    if let Err(error) = self.world.execute_edit(
+                        crate::world::WorldCommand::SetAttribute {
+                            id: effective.profile,
+                            path: "/render/exposure_stops".into(),
+                            value: serde_json::json!(exposure),
+                            frame,
+                        },
+                        gesture,
+                    ) {
+                        self.status = error;
+                    }
+                }
+            }
             ui.separator();
             self.colour.set_hdr(true);
             let changed = self.colour.quick_view_ui(ui);
@@ -437,38 +476,23 @@ impl App {
                 self.open_settings(super::SettingsPage::Color);
             }
             ui.separator();
-            ui.label("Proxy:");
-            egui::ComboBox::from_id_salt("viewport_proxy")
-                .width(60.0)
-                .selected_text(if self.resolution >= 0.99 {
-                    "1:1"
-                } else if self.resolution >= 0.49 {
-                    "1/2"
-                } else {
-                    "1/4"
-                })
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut self.resolution, 1.0, "1:1");
-                    ui.selectable_value(&mut self.resolution, 0.5, "1/2");
-                    ui.selectable_value(&mut self.resolution, 0.25, "1/4");
-                });
-            ui.add(
-                egui::DragValue::new(&mut self.target_spp)
-                    .range(1..=65536)
-                    .suffix(" spp"),
-            )
-            .on_hover_text("Samples to converge");
+            let actions = crate::render_profiles_ui::toolbar(
+                ui,
+                &mut self.world,
+                f64::from(self.world_ui.playhead),
+            );
+            self.profile_ui_actions(actions);
             ui.separator();
-            ui.toggle_value(&mut self.paused, ph::PAUSE)
-                .on_hover_text("Pause rendering");
             // A/B of the viewport only: the scene's denoise settings (World Settings) and exports
             // stay as authored, and denoising keeps running so switching back is instant.
-            let denoising = self.scene.render.denoise.enabled;
+            let denoising = active_profile
+                .as_ref()
+                .is_ok_and(|effective| effective.render.denoise.enabled);
             let mut shown = denoising && !self.raw_view;
             if ui
                 .add_enabled(denoising, egui::Button::selectable(shown, ph::PATH_TRACE))
                 .on_hover_text("Viewport: denoised / raw samples")
-                .on_disabled_hover_text("Denoising is off in World Settings")
+                .on_disabled_hover_text("Denoising is off in the selected viewport profile")
                 .clicked()
             {
                 shown = !shown;

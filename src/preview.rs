@@ -41,6 +41,8 @@ impl PreviewMode {
 pub struct PreviewRequest {
     pub generation: u64,
     pub scene: Arc<Scene>,
+    /// Canonical viewport profile frozen for cache rendering; None is a standalone scene.
+    pub render_profile: Option<NodeId>,
     pub first: u32,
     pub last: u32,
     pub fps: f32,
@@ -63,6 +65,7 @@ impl PreviewRequest {
                 _ => false,
             };
         scene_matches
+            && self.render_profile == other.render_profile
             && self.cache_bounds() == other.cache_bounds()
             && self.width == other.width
             && self.height == other.height
@@ -91,6 +94,14 @@ impl PreviewRequest {
             .ok_or("Preview range must contain 1..=100001 frames".into())
     }
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(profile) = self.render_profile {
+            let document = self
+                .scene
+                .document
+                .as_ref()
+                .ok_or("A profile preview requires a frozen world document")?;
+            document.effective_render(profile, f64::from(self.first))?;
+        }
         self.frame_count()?;
         let (first, last) = self.cache_bounds();
         if last
@@ -534,7 +545,8 @@ impl PreviewCache {
         codes.set_tier(TIER);
         linear.set_tier(TIER);
         self.view.insert(self.codes_id.into(), index, codes, epoch);
-        self.view.insert(self.linear_id.into(), index, linear, epoch);
+        self.view
+            .insert(self.linear_id.into(), index, linear, epoch);
         self.metadata[index as usize] = Some(meta);
         Ok(())
     }
@@ -549,11 +561,7 @@ impl PreviewCache {
         let index = self.index(number)?;
         let meta = self.metadata[index as usize].as_ref()?;
         let codes = self.view.get(self.codes_id.into(), index)?.cpu_raster()?.0;
-        let linear = self
-            .view
-            .get(self.linear_id.into(), index)?
-            .cpu_raster()?
-            .0;
+        let linear = self.view.get(self.linear_id.into(), index)?.cpu_raster()?.0;
         let (PixelBuffer::U8(codes), PixelBuffer::F32(linear)) = (codes.as_ref(), linear.as_ref())
         else {
             return None;
@@ -625,6 +633,7 @@ mod tests {
         PreviewRequest {
             generation: 19,
             scene: Arc::new(Scene::preset(crate::params::FAMILY_BULB)),
+            render_profile: None,
             first: 10,
             last: 12,
             fps: 24.0,

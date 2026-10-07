@@ -6,6 +6,72 @@ Per-repo detail: WarpBro `PLAN.md` ("After the 2026-10-06 merge" section), Playa
 
 ## Current continuation (2026-10-06, systematic update in progress)
 
+### Render/quality nodes checkpoint — 2026-10-07, validated source
+
+User priority is completing canonical render/quality profiles and templates. Compiler and
+cross-repo work below is retained history; it is not a substitute for this deliverable.
+Current source passed the final test/build gates below. Publication is recorded by the
+implementation commit on main; no unverified remote SHA or push receipt is asserted here.
+
+- `WorldKind::RenderSettings / QualitySettings / ViewportSettings` are canonical graph
+  nodes. Profile/Template is `metadata.catalog_role`; settings values are not duplicated in
+  a persisted preset DTO. Local catalog entries save with WorldDocument.
+- Settings → Render & Viewport has named buttons. LMB recalls to Moving/Still/Manual/Output; quality
+  recall chooses a RenderSettings node. RMB opens Edit, Rename, Save as profile/template.
+  Creation, independent copies and template instantiation use new UUIDs. A render template
+  creates a render/quality pair and remaps its quality reference in one Undo operation.
+- Existing Attribute Editor owns parameters, animation, resets and typed UUID choices.
+  Toolbar and Settings bind the same ViewportSettings node. The quality UUID reference
+  and all /viewport/* fields are static; commands/loading reject persisted animation and
+  connections on them. Numeric render/quality parameters remain animatable at frame time.
+  Auto chooses Moving while active and Still after settle delay; Locked uses Manual.
+  Pause stops new samples; Freeze holds the previous request and pauses it, preserves the
+  displayed image and ignores late frames.
+- Progressive viewport uses one Target, sharing film for identical effective tracing inputs
+  and extent. Cache preview freezes an explicit Still (Auto) or Manual (Locked) profile UUID
+  with that quality's samples/scale; worker evaluates each frame using that chosen profile.
+- Fast remains World path tracing with approximate opaque materials, preserving transmitting
+  models. Full retains authored models. No WorldDirect or real-time performance acceptance.
+  Moving defaults are editable Fast / 64 samples / 0.5 scale / two bounces.
+- Output is an independent render reference. At this checkpoint the export freezes the
+  document and fixes samples/resolution scale from Output Quality at the first job frame;
+  other scene/render attributes evaluate per frame. OutputModule nodes/templates and
+  external subgraph catalogs remain future work.
+- Missing/invalid references, wrong kinds, invalid settings and deletion of referenced
+  settings are rejected. No compatibility migration or default repair is introduced.
+- Final ordinary cuda-oxide suite: **271 passed, zero failed, ten ignored, four filtered**,
+  42.40s. Release compile took 5m28s including a Cargo build-directory lock wait.
+  The four previously certified native-movie fixtures were intentionally filtered;
+  no extra demo videos or renders were generated.
+- Production `python bootstrap.py b` passed: release compile 4m45s, bootstrap build 4m49s;
+  actual NVIDIA GeForce RTX 3080 Ti CUDA readiness took 75.41s. The installed
+  `f3f1098a77` backend was unchanged; this deliverable makes no compiler-producer changes.
+- Final plain locked/offline all-target check passed in 5.79s with no warnings.
+  Owned rustfmt check and staged Git whitespace check passed.
+- The sole independent branch review closed three P2 findings with source fixes and
+  regressions: same-UUID reload cache invalidation, static typed-reference/viewport policy
+  rejection, and rejection of a late Auto preview result after switching to Locked.
+- GitNexus evidence covers the owned mirror `C:/Temp/warpbro-profile-audit-47dbf83e061c2`:
+  12 current Rust files SHA-verified; incremental refresh at 16:49:42; detect_changes(all)
+  reported 258 symbols / 14 files, HIGH, zero flows. Two main-name aliases in tools/mp4-quality
+  and xtask were unchanged by actual Git/SHA checks; the actual 13 source paths include
+  inspector deletion. The canonical/global graph was not repaired or certified.
+- Remaining publication step: publish this authorized implementation to main and verify
+  the remote receipt. WorldDirect, external catalog, OutputModule presets and the
+  SquareBob node-profile port remain open.
+
+Final logs under `C:/Users/joss1/.filesystem-mcp-rs/tmp`:
+
+- tests: `run_command_1791391699187_43d47637-99ab-4e6b-a237-e7d9b6d4b6e5_stdout.log`
+  and its `_stderr.log` companion;
+- production build: `run_command_1791391667484_4fb51ea3-4985-4f3b-90c9-7f3a72c1db1f_stdout.log`
+  and its `_stderr.log` companion;
+- plain check: `run_command_1791392027817_66e7d804-69c4-4757-9481-c1ce3007fb36_stderr.log`.
+
+Concrete behavior and remaining work: [docs/render-profiles.md](docs/render-profiles.md).
+Implementation: world.rs, render_profiles.rs, render_profiles_ui.rs, app.rs,
+render_service.rs and export.rs. Preserve unrelated edits and earlier receipts below.
+
 ### Latest checkpoint — 2026-10-07
 
 This checkpoint supersedes the runtime/publication statuses in the 2026-10-06 table below;

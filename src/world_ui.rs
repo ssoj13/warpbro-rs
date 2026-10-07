@@ -283,6 +283,9 @@ fn kind_label(k: WorldKind) -> &'static str {
         WorldKind::Environment => "Environment",
         WorldKind::Group => "Group",
         WorldKind::Material => "Material",
+        WorldKind::RenderSettings => "Render Settings",
+        WorldKind::QualitySettings => "Quality Settings",
+        WorldKind::ViewportSettings => "Viewport Settings",
     }
 }
 fn kind_icon(k: WorldKind) -> &'static str {
@@ -293,6 +296,8 @@ fn kind_icon(k: WorldKind) -> &'static str {
         WorldKind::Environment => ph::ENVIRONMENT,
         WorldKind::Group => ph::FOLDER,
         WorldKind::Material => ph::PALETTE,
+        WorldKind::RenderSettings | WorldKind::QualitySettings => ph::GEAR,
+        WorldKind::ViewportSettings => ph::MONITOR,
     }
 }
 fn kind_color(k: WorldKind) -> Color32 {
@@ -303,6 +308,9 @@ fn kind_color(k: WorldKind) -> Color32 {
         WorldKind::Environment => Color32::from_rgb(95, 169, 150),
         WorldKind::Group => Color32::from_rgb(142, 149, 163),
         WorldKind::Material => Color32::from_rgb(190, 132, 155),
+        WorldKind::RenderSettings => Color32::from_rgb(196, 96, 96),
+        WorldKind::QualitySettings => Color32::from_rgb(145, 175, 105),
+        WorldKind::ViewportSettings => Color32::from_rgb(100, 180, 210),
     }
 }
 /// Title tint of an Attribute Editor section: the node-kind colour where the section is that
@@ -316,7 +324,9 @@ pub(crate) fn section_color(group: &str) -> Color32 {
         "Environment" => kind_color(WorldKind::Environment),
         "Material" => kind_color(WorldKind::Material),
         "Transform" => Color32::from_rgb(214, 140, 80),
-        "Render" => Color32::from_rgb(196, 96, 96),
+        "Render" => kind_color(WorldKind::RenderSettings),
+        "Quality" => kind_color(WorldKind::QualitySettings),
+        "Viewport" => kind_color(WorldKind::ViewportSettings),
         "Color" => Color32::from_rgb(100, 180, 210),
         _ => Color32::from_rgb(150, 150, 150),
     }
@@ -331,6 +341,8 @@ fn category(path: &str) -> &'static str {
         "light" | "lighting" => "Light",
         "environment" => "Environment",
         "render" => "Render",
+        "quality" => "Quality",
+        "viewport" => "Viewport",
         "colour" | "color" => "Color",
         _ => "Custom",
     }
@@ -632,6 +644,9 @@ impl WorldUi {
                     WorldKind::Environment,
                     WorldKind::Group,
                     WorldKind::Material,
+                    WorldKind::RenderSettings,
+                    WorldKind::QualitySettings,
+                    WorldKind::ViewportSettings,
                 ] {
                     if ui
                         .button(format!("{} {}", kind_icon(kind), kind_label(kind)))
@@ -2081,7 +2096,29 @@ impl WorldUi {
         a: &WorldAttribute,
         materials: &[WorldNodeInfo],
     ) -> bool {
-        if a.path == "/material_id" {
+        if let Some(kind) = crate::render_profiles::reference_kind(&a.path) {
+            let selected = value.as_str().and_then(NodeId::parse);
+            let label = materials
+                .iter()
+                .find(|node| Some(node.id) == selected)
+                .map(|node| node.name.as_str())
+                .unwrap_or("Missing settings reference");
+            let mut changed = false;
+            egui::ComboBox::from_id_salt(("settings_reference", id, &a.path))
+                .width(ui.available_width())
+                .selected_text(label)
+                .show_ui(ui, |ui| {
+                    for node in materials
+                        .iter()
+                        .filter(|node| node.kind == kind && a.choices.contains(&json!(node.id)))
+                    {
+                        changed |= ui
+                            .selectable_value(value, json!(node.id), &node.name)
+                            .changed();
+                    }
+                });
+            changed
+        } else if a.path == "/material_id" {
             let selected = value.as_str().and_then(NodeId::parse);
             let label = materials
                 .iter()
@@ -2223,6 +2260,14 @@ impl WorldUi {
             .changed()
         {
             self.command(e, WorldCommand::Rename { id, name });
+        }
+        let actions = crate::render_profiles_ui::node_actions(ui, e, id, node.kind);
+        if let Some(error) = actions.error {
+            self.error = Some(error);
+        }
+        if let Some(edit) = actions.edit {
+            e.selection = Some(edit);
+            e.selected = vec![edit];
         }
         if node.kind == WorldKind::Camera {
             if ui.button("Use as active camera").clicked() {
@@ -2558,6 +2603,7 @@ fn owns_editor(attr: &WorldAttribute, value: &GridValue) -> bool {
     !attr.choices.is_empty()
         || attr.path == "/material_id"
         || attr.path == "/environment/path"
+        || crate::render_profiles::reference_kind(&attr.path).is_some()
         || attr.path.starts_with("/custom/")
         || matches!(value, GridValue::Label(_))
 }
@@ -2639,7 +2685,7 @@ fn grid_json(value: GridValue, template: &Value) -> Value {
     }
 }
 
-const ATTRIBUTE_GROUPS: [&str; 9] = [
+const ATTRIBUTE_GROUPS: [&str; 11] = [
     "Transform",
     "Fractal",
     "Camera",
@@ -2647,6 +2693,8 @@ const ATTRIBUTE_GROUPS: [&str; 9] = [
     "Environment",
     "Material",
     "Render",
+    "Quality",
+    "Viewport",
     "Color",
     "Custom",
 ];
@@ -3812,6 +3860,12 @@ mod tests {
     #[test]
     fn outliner_reparent_respects_sibling_index_and_undo() {
         let mut e = editor();
+        e.execute(WorldCommand::Create {
+            kind: WorldKind::Group,
+            name: "Parent".into(),
+            parent: None,
+        })
+        .unwrap();
         let nodes = e.document.nodes();
         let original = nodes.iter().map(|n| n.id).collect::<Vec<_>>();
         let moved = nodes
@@ -4892,22 +4946,17 @@ mod tests {
         let id = e.selection.unwrap();
         state.expanded.insert(id);
         state.groups.insert((id, "@Transform".into()));
-        let render_node = e
-            .document
-            .nodes()
-            .into_iter()
-            .find(|n| n.kind == WorldKind::Group)
-            .expect("World settings node");
-        state.groups.insert((render_node.id, "@Render".into()));
+        let render_node = e.document.output_render_profile().unwrap();
+        state.groups.insert((render_node, "@Render".into()));
         let render_lanes = state.lanes(
-            render_node.id,
-            &e.document.attributes(render_node.id, 0.0).unwrap(),
+            render_node,
+            &e.document.attributes(render_node, 0.0).unwrap(),
         );
         assert!(
             render_lanes
                 .iter()
-                .any(|lane| lane.path.as_deref() == Some("/render/iterations")),
-            "Render iterations must remain projected after grouping"
+                .any(|lane| lane.path.as_deref() == Some("/render/exposure_stops")),
+            "Canonical render exposure must remain projected after grouping"
         );
         let _ = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show(ui, |ui| {

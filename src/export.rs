@@ -90,6 +90,8 @@ pub struct ExportSettings {
     pub dir: PathBuf,
     pub width: usize,
     pub height: usize,
+    /// Resolved Output quality target for a frozen export job, never authored here.
+    #[serde(skip)]
     pub samples: u32,
     pub first: u32,
     pub last: u32,
@@ -443,6 +445,15 @@ impl ExportController {
             return Err("An export is already running".into());
         }
         let mut settings = self.settings.clone();
+        if let Some(document) = &scene.document {
+            let effective = document
+                .effective_render(document.output_render_profile()?, f64::from(settings.first))?;
+            settings.samples = effective.samples;
+            settings.width =
+                ((settings.width as f32 * effective.resolution_scale).round() as usize).max(1);
+            settings.height =
+                ((settings.height as f32 * effective.resolution_scale).round() as usize).max(1);
+        }
         // Validate against the output root first so a rejected export leaves no empty folder.
         settings.resolve(&self.out_root);
         settings.validate()?;
@@ -562,8 +573,8 @@ impl ExportController {
                     ui.label(format!(".{}", self.settings.suffix()));
                 }); ui.end_row();
                 ui.label("Resolution"); ui.horizontal(|ui| { ui.add(egui::DragValue::new(&mut self.settings.width).range(1..=16384)); ui.label("×"); ui.add(egui::DragValue::new(&mut self.settings.height).range(1..=16384)); }); ui.end_row();
-                ui.label("Samples / frame"); ui.add(egui::DragValue::new(&mut self.settings.samples).range(1..=1_000_000)); ui.end_row();
-                ui.label("Denoise"); ui.checkbox(&mut self.settings.denoise_at_completion, "Once at completion").on_hover_text("Run OIDN once after all samples of each exported frame; override World Settings cadence."); ui.end_row();
+                ui.label("Samples / frame"); ui.label(format!("{} · Output Quality", self.settings.samples)); ui.end_row();
+                ui.label("Denoise"); ui.checkbox(&mut self.settings.denoise_at_completion, "Once at completion").on_hover_text("Run OIDN once after all samples of each exported frame; override Output profile denoise cadence."); ui.end_row();
                 ui.label("Frame range"); ui.horizontal(|ui| {
                     ui.add(egui::DragValue::new(&mut self.settings.first).range(0..=u32::MAX)); ui.label("…"); ui.add(egui::DragValue::new(&mut self.settings.last).range(0..=u32::MAX));
                     if ui.button("Current frame").on_hover_text("Render only the frame under the playhead.").clicked() {
@@ -2223,6 +2234,16 @@ mod tests {
                 })
                 .unwrap();
         }
+        let output = editor.document.output_render_profile().unwrap();
+        let quality = editor.document.render_quality(output).unwrap();
+        editor
+            .execute(crate::world::WorldCommand::SetAttribute {
+                id: quality,
+                path: "/quality/samples".into(),
+                value: serde_json::json!(2),
+                frame: 0.0,
+            })
+            .unwrap();
         scene.document = Some(Box::new(editor.document));
         controller.start(&scene, &service).unwrap();
         let until = std::time::Instant::now() + Duration::from_secs(90);

@@ -15,7 +15,6 @@ use egui_display::export::{HLG_REFERENCE_PEAK_NITS, HdrScale};
 pub use egui_display::export::{HdrLevels, PngEncoding, hdr_scale, write_png};
 
 const QUEUE_LIMIT: usize = 16;
-const PREVIEW_HOLD: Duration = Duration::from_millis(180);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewportRequest {
@@ -30,6 +29,10 @@ pub struct ViewportRequest {
     pub raw: bool,
     pub active: bool,
     pub interactive: bool,
+    /// Selected moving profile in Auto mode; the worker never substitutes hidden quality.
+    pub preview: bool,
+    pub batch_budget_ms: f32,
+    pub target_fps: f32,
     pub seed: u32,
     pub output_hdr: bool,
     pub white_nits: f32,
@@ -376,7 +379,8 @@ impl RenderService {
     pub fn request_viewport(&self, request: ViewportRequest) {
         let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
         state.requested_generation = request.generation;
-        state.requested_interactive = request.active && !request.paused && request.interactive;
+        state.requested_interactive =
+            request.active && !request.paused && request.interactive && request.preview;
         state.viewport = Some(request);
         self.shared.wake.notify_one();
     }
@@ -709,9 +713,7 @@ fn trace_key(request: &ViewportRequest) -> Vec<f32> {
 struct Viewport {
     request: ViewportRequest,
     key: Vec<f32>,
-    changed: Instant,
-    full: Option<Target>,
-    preview: Option<Target>,
+    target: Option<Target>,
     dirty: bool,
     last_preview: bool,
     last_publish: Instant,
@@ -719,17 +721,10 @@ struct Viewport {
 impl Viewport {
     fn new(request: ViewportRequest) -> Self {
         let key = trace_key(&request);
-        let changed = if request.interactive {
-            Instant::now()
-        } else {
-            Instant::now() - PREVIEW_HOLD
-        };
         Self {
             request,
             key,
-            changed,
-            full: None,
-            preview: None,
+            target: None,
             dirty: true,
             last_preview: false,
             last_publish: Instant::now() - Duration::from_millis(20),
@@ -742,16 +737,11 @@ impl Viewport {
             || request.scene.environment.key() != self.request.scene.environment.key()
             || request.seed != self.request.seed
         {
-            self.changed = Instant::now();
             // Seed is deliberately absent from Gpu's accumulation key, so explicitly discard its targets.
             if request.seed != self.request.seed {
-                self.full = None;
-                self.preview = None;
+                self.target = None;
             }
             self.key = key;
-        }
-        if request.interactive && !self.request.interactive {
-            self.changed = Instant::now();
         }
         self.dirty |= self.request != request;
         self.request = request;
@@ -924,7 +914,10 @@ fn step_preview(
         if let Some(number) = number {
             let request = &session.cache.request;
             let scene = if let Some(document) = &request.scene.document {
-                document.snapshot(number as f64)
+                match request.render_profile {
+                    Some(profile) => document.snapshot_with_render_profile(profile, number as f64),
+                    None => document.snapshot(number as f64),
+                }
             } else {
                 Ok(request.scene.as_ref().clone())
             };
@@ -1461,9 +1454,7 @@ fn thumbnail_snapshot(mut scene: Scene) -> Result<Scene, String> {
 }
 
 fn viewport_interactive(viewport: &Viewport) -> bool {
-    viewport.request.active
-        && !viewport.request.paused
-        && (viewport.request.interactive || viewport.changed.elapsed() < PREVIEW_HOLD)
+    viewport.request.active && !viewport.request.paused && viewport.request.interactive
 }
 fn background_batch_allowed(last_ms: f32, last_spp: u32, interactive: bool) -> bool {
     // A CUDA kernel cannot be preempted here. If even one previously measured sample
@@ -1471,12 +1462,15 @@ fn background_batch_allowed(last_ms: f32, last_spp: u32, interactive: bool) -> b
     !interactive || (last_spp > 0 && last_ms > 0.0 && last_ms / last_spp as f32 <= 8.0)
 }
 pub(crate) fn batch_size(target: &Target, remaining: u32) -> u32 {
+    batch_size_for_budget(target, remaining, 8.0)
+}
+fn batch_size_for_budget(target: &Target, remaining: u32, budget_ms: f32) -> u32 {
     if remaining == 0 {
         return 0;
     }
     let per_sample = target.last_ms / target.last_spp.max(1) as f32;
     let batch = if per_sample > 0.0 {
-        (8.0 / per_sample) as u32
+        (budget_ms / per_sample) as u32
     } else {
         1
     };
@@ -1487,18 +1481,10 @@ fn step_viewport(gpu: &mut Gpu, active: &mut Viewport, shared: &Shared) -> bool 
     if !request.active {
         return false;
     }
-    let preview =
-        !request.paused && (request.interactive || active.changed.elapsed() < PREVIEW_HOLD);
-    let (width, height) = if preview {
-        ((request.width / 2).max(1), (request.height / 2).max(1))
-    } else {
-        (request.width, request.height)
-    };
-    let slot = if preview {
-        &mut active.preview
-    } else {
-        &mut active.full
-    };
+    let preview = request.preview;
+    let (width, height) = (request.width, request.height);
+    // Profiles share the film whenever their effective trace inputs and extent agree.
+    let slot = &mut active.target;
     let fresh = slot
         .as_ref()
         .is_none_or(|t| t.width != width || t.height != height);
@@ -1509,36 +1495,29 @@ fn step_viewport(gpu: &mut Gpu, active: &mut Viewport, shared: &Shared) -> bool 
     // Detect accumulation resets without the extra tonemap/OCIO/readback that a zero-spp
     // step would perform. The selected traced or display-only batch runs exactly once.
     if active.dirty || fresh || active.last_preview != preview {
-        gpu.prepare_target(target, &request.scene, preview.then_some(2));
+        gpu.prepare_target(target, &request.scene, None);
     }
     target.raw_view = request.raw;
-    let goal = if preview {
-        request.target_spp.min(64)
-    } else {
-        request.target_spp
-    };
+    let goal = request.target_spp;
     let spp = if request.paused {
         0
     } else {
-        batch_size(target, goal.saturating_sub(target.samples))
+        batch_size_for_budget(
+            target,
+            goal.saturating_sub(target.samples),
+            request.batch_budget_ms,
+        )
     };
     if spp == 0 && !active.dirty && !fresh && active.last_preview == preview {
         return false;
     }
-    let final_pass = !preview && target.samples.saturating_add(spp) >= goal;
-    gpu.step(
-        target,
-        &request.scene,
-        spp,
-        request.seed,
-        preview.then_some(2),
-        final_pass,
-    );
+    let final_pass = target.samples.saturating_add(spp) >= goal;
+    gpu.step(target, &request.scene, spp, request.seed, None, final_pass);
     if active.dirty
         || fresh
         || active.last_preview != preview
         || target.complete(goal)
-        || active.last_publish.elapsed() >= Duration::from_millis(16)
+        || active.last_publish.elapsed() >= Duration::from_secs_f32(1.0 / request.target_fps)
     {
         let frame = Arc::new(Frame::snapshot(
             target,
@@ -1570,6 +1549,7 @@ mod tests {
         let request = crate::preview::PreviewRequest {
             generation: 901,
             scene: Arc::new(scene),
+            render_profile: None,
             first: 250,
             last: 252,
             fps: 24.0,
@@ -1649,6 +1629,7 @@ mod tests {
         let full = crate::preview::PreviewRequest {
             generation: 41,
             scene: Arc::new(request().scene),
+            render_profile: None,
             first: 0,
             last: 0,
             fps: 24.0,
@@ -1730,6 +1711,7 @@ mod tests {
         let req = crate::preview::PreviewRequest {
             generation: 5,
             scene: Arc::new(request().scene),
+            render_profile: None,
             first: 10,
             last: 12,
             fps: 24.0,
@@ -1827,6 +1809,7 @@ mod tests {
         let req = crate::preview::PreviewRequest {
             generation: 5,
             scene: Arc::new(request().scene),
+            render_profile: None,
             first: 10,
             last: 12,
             fps: 24.0,
@@ -1880,6 +1863,9 @@ mod tests {
             raw: false,
             active: true,
             interactive: false,
+            preview: false,
+            batch_budget_ms: 8.0,
+            target_fps: 60.0,
             seed: 0,
             output_hdr: false,
             white_nits: 100.0,
@@ -2214,6 +2200,7 @@ mod tests {
         for completed in 1..100 {
             let mut next = request();
             next.interactive = true;
+            next.preview = true;
             next.generation = completed + 3;
             service.request_viewport(next.clone());
             publish_frame(&service.shared, completed_frame(completed, true));
@@ -2248,6 +2235,7 @@ mod tests {
         let mut next = request();
         next.generation = 10;
         next.interactive = true;
+        next.preview = true;
         service.request_viewport(next.clone());
         publish_frame(&service.shared, completed_frame(9, false));
         assert!(service.take_latest_frame().is_none());
@@ -2257,6 +2245,32 @@ mod tests {
         assert!(service.take_latest_frame().is_none());
         publish_frame(&service.shared, completed_frame(10, false));
         assert_eq!(service.take_latest_frame().unwrap().generation, 10);
+    }
+
+    #[test]
+    fn locked_moving_request_rejects_late_auto_preview() {
+        let service = RenderService {
+            worker_thread: None,
+            shared: Arc::new(Shared {
+                state: Mutex::new(Mailbox::default()),
+                wake: Condvar::new(),
+            }),
+        };
+        let mut next = request();
+        next.generation = 10;
+        next.interactive = true;
+        next.preview = true;
+        service.request_viewport(next.clone());
+        publish_frame(&service.shared, completed_frame(9, true));
+        // Switch policy while the camera is still moving, before consuming the old frame.
+        next.generation = 11;
+        next.preview = false;
+        service.request_viewport(next);
+        assert!(service.take_latest_frame().is_none());
+        publish_frame(&service.shared, completed_frame(10, true));
+        assert!(service.take_latest_frame().is_none());
+        publish_frame(&service.shared, completed_frame(11, false));
+        assert_eq!(service.take_latest_frame().unwrap().generation, 11);
     }
 
     #[test]
@@ -2384,13 +2398,13 @@ mod tests {
         initial.interactive = true;
         initial.paused = false;
         viewport.update(initial.clone());
-        assert!(viewport.changed.elapsed() < PREVIEW_HOLD);
-        viewport.changed = Instant::now() - PREVIEW_HOLD;
+        assert!(viewport_interactive(&viewport));
+        // The UI evaluates the authored settle delay and explicitly sends the still profile.
+        initial.interactive = false;
+        initial.preview = false;
         viewport.update(initial);
-        assert!(
-            viewport.changed.elapsed() >= PREVIEW_HOLD,
-            "A stale interactive flag cannot hold preview forever"
-        );
+        assert!(!viewport_interactive(&viewport));
+        assert!(!viewport.request.preview);
     }
 
     #[test]

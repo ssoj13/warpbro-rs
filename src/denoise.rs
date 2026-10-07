@@ -199,14 +199,6 @@ pub enum Mode {
     ColorAlbedoNormal,
 }
 impl Mode {
-    pub const ALL: [Self; 3] = [Self::Color, Self::ColorAlbedo, Self::ColorAlbedoNormal];
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Color => "Color",
-            Self::ColorAlbedo => "Color + Albedo",
-            Self::ColorAlbedoNormal => "Color + Albedo + Normal",
-        }
-    }
     fn native(self) -> OidnMode {
         match self {
             Self::Color => OidnMode::Color,
@@ -223,14 +215,8 @@ pub enum Quality {
     High,
 }
 impl Quality {
+    #[cfg(test)]
     pub const ALL: [Self; 3] = [Self::Fast, Self::Balanced, Self::High];
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Fast => "Fast",
-            Self::Balanced => "Balanced",
-            Self::High => "High",
-        }
-    }
     fn native(self) -> pt_denoise_oidn::Quality {
         match self {
             Self::Fast => pt_denoise_oidn::Quality::Fast,

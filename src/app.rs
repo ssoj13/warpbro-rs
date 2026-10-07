@@ -21,8 +21,6 @@ mod dock;
 const THUMB_W: usize = 224;
 const THUMB_H: usize = 126;
 const THUMB_SPP: u32 = 24;
-/// After the last camera / parameter change, keep the low-resolution preview this long.
-const PREVIEW_HOLD_S: f32 = 0.18;
 
 pub fn run() -> anyhow::Result<()> {
     crate::window::run()
@@ -150,7 +148,6 @@ pub(crate) struct App {
     snapshot_clones: usize,
     status_layout: egui_statusbar::StatusBarLayout,
     status_resizable: bool,
-    render_editor: crate::inspector::RenderEditor,
     gallery: Vec<Entry>,
     bookmarks: Vec<Entry>,
 
@@ -161,8 +158,8 @@ pub(crate) struct App {
     spp_per_frame: u32,
     last_change: Instant,
     last_scene: Scene,
-    resolution: f32,
-    paused: bool,
+    /// Evaluated selected-profile scene; invalidated by graph revision, time or profile.
+    viewport_scene: Option<(playa_graph::NodeId, u64, u64, Scene)>,
     /// Viewport A/B: raw samples instead of the denoised image (view state, not the scene).
     raw_view: bool,
     /// Exposure parked by the toolbar's EV bypass (`exposure_control`).
@@ -304,15 +301,17 @@ pub(crate) enum SettingsPage {
     Fonts,
     Animation,
     CameraRecorder,
+    Render,
 }
 impl SettingsPage {
-    const ALL: [Self; 6] = [
+    const ALL: [Self; 7] = [
         Self::Display,
         Self::Color,
         Self::Controls,
         Self::Fonts,
         Self::Animation,
         Self::CameraRecorder,
+        Self::Render,
     ];
     fn category(self) -> egui_prefs2::Category<'static> {
         use egui_widgets_config::icons as ph;
@@ -322,6 +321,7 @@ impl SettingsPage {
             Self::Controls => egui_prefs2::Category::new(ph::MONITOR, "Controls"),
             Self::Fonts => egui_prefs2::Category::new(ph::TEXT, "Fonts"),
             Self::Animation => egui_prefs2::Category::new(ph::MEDIA, "Animation"),
+            Self::Render => egui_prefs2::Category::new(ph::GEAR, "Render & Viewport"),
             Self::CameraRecorder => {
                 egui_prefs2::Category::new(egui_widgets_config::icons::RECORD, "Camera recorder")
             }
@@ -562,6 +562,7 @@ impl App {
             gui_fps: 60,
             origin: scene.clone(),
             last_scene: scene.clone(),
+            viewport_scene: None,
             scene: scene.clone(),
             world: crate::world::WorldEditor::new(crate::world::WorldDocument::from_scene(&scene)),
             world_ui: Default::default(),
@@ -607,7 +608,6 @@ impl App {
             snapshot_clones: 0,
             status_layout: Default::default(),
             status_resizable: true,
-            render_editor: Default::default(),
             gallery,
             bookmarks: load_bookmarks(),
 
@@ -617,8 +617,6 @@ impl App {
             target_spp: 1024,
             spp_per_frame: 1,
             last_change: Instant::now(),
-            resolution: 1.0,
-            paused: false,
             raw_view: false,
             exposure_hold: 0.0,
             show_ui: true,
@@ -708,6 +706,32 @@ impl App {
         self.panels_to_open.push(dock::Panel::Settings);
     }
 
+    pub(super) fn profile_ui_actions(&mut self, actions: crate::render_profiles_ui::Actions) {
+        if let Some(id) = actions.edit {
+            self.world.selection = Some(id);
+            self.world.selected = vec![id];
+            self.panels_to_open.push(dock::Panel::Inspector);
+        }
+        if let Some(error) = actions.error {
+            self.status = error;
+        }
+    }
+
+    fn set_viewport_flag(&mut self, path: &str, value: bool) {
+        let result = self.world.document.viewport_settings_id().and_then(|id| {
+            self.world
+                .execute(crate::world::WorldCommand::SetAttribute {
+                    id,
+                    path: path.into(),
+                    value: serde_json::json!(value),
+                    frame: 0.0,
+                })
+        });
+        if let Err(error) = result {
+            self.status = error;
+        }
+    }
+
     /// Settings layout and category bodies adapted directly from exr-view::ui_settings.
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
@@ -748,6 +772,10 @@ impl App {
                         if ui.button("Display output & reference white…").clicked() { destination = Some(SettingsPage::Display); }
                         ui.add_space(8.0);
                         changed = self.colour.ui(ui, &mut browse, self.controls.swap_slot_buttons);
+                    }
+                    SettingsPage::Render => {
+                        let actions = crate::render_profiles_ui::settings(ui, &mut self.world, &mut self.world_ui);
+                        self.profile_ui_actions(actions);
                     }
                     SettingsPage::Fonts => self.fonts_ui(ui),
                     SettingsPage::CameraRecorder => self.camera_recorder_ui(ui),
@@ -838,6 +866,8 @@ impl App {
                 self.recorder_options = Default::default();
             } else if category == SettingsPage::Animation as usize {
                 self.world_ui.new_key = curves::Tan::Smooth;
+            } else if category == SettingsPage::Render as usize {
+                self.status = "Reset profile values in Attribute Editor".into();
             } else {
                 self.controls = Default::default();
                 self.world_ui.attribute_metrics = Default::default();
@@ -1272,6 +1302,7 @@ impl App {
         self.scene_file_path = None;
         self.scene_file_pending = None;
         self.evaluated_world = None;
+        self.viewport_scene = None;
         self.load_revision = self.load_revision.wrapping_add(1);
         let document = crate::world::WorldDocument::from_scene(&scene);
         self.world_ui.reset();
@@ -1924,6 +1955,25 @@ impl App {
         };
     }
     fn step_viewport(&mut self, w: usize, h: usize, output_hdr: bool, white_nits: f32) {
+        let policy = match self
+            .world
+            .document
+            .viewport_policy(f64::from(self.world_ui.playhead))
+        {
+            Ok(policy) => policy,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
+        if policy.frozen {
+            if let Some(request) = &mut self.request {
+                request.paused = true;
+                request.interactive = false;
+                self.renderer.request_viewport(request.clone());
+            }
+            return;
+        }
         let mut snapshot = self.scene.clone();
         snapshot.animation = Default::default();
         let mut traced = snapshot.clone();
@@ -1935,34 +1985,90 @@ impl App {
         if traced != self.last_scene {
             self.last_change = Instant::now();
         }
+        // Compare the authored output snapshot, never the previously selected moving profile.
         self.last_scene = snapshot.clone();
-        if self.request.as_ref().is_none_or(|r| {
-            r.scene != snapshot
-                || r.width != w
-                || r.height != h
-                || r.seed != self.seed
-                || r.raw != self.raw_view
-                || r.target_spp != self.target_spp
-                || r.output_hdr != output_hdr
-                || r.white_nits != white_nits
-        }) {
-            self.generation = self.generation.wrapping_add(1);
+        let moving = self.world_ui.playing
+            || self.last_change.elapsed().as_secs_f32() * 1000.0 < policy.settle_delay_ms;
+        let effective = match self
+            .world
+            .document
+            .viewport_render(f64::from(self.world_ui.playhead), moving)
+        {
+            Ok(effective) => effective,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
+        let profile_key = (
+            effective.profile,
+            self.world.revision(),
+            f64::from(self.world_ui.playhead).to_bits(),
+        );
+        if self
+            .viewport_scene
+            .as_ref()
+            .is_none_or(|cached| (cached.0, cached.1, cached.2) != profile_key)
+        {
+            match self
+                .world
+                .document
+                .snapshot_with_render_profile(effective.profile, f64::from(self.world_ui.playhead))
+            {
+                Ok(scene) => {
+                    self.viewport_scene = Some((profile_key.0, profile_key.1, profile_key.2, scene))
+                }
+                Err(error) => {
+                    self.status = error;
+                    return;
+                }
+            }
         }
-        let req = ViewportRequest {
+        snapshot = self
+            .viewport_scene
+            .as_ref()
+            .expect("evaluated selected profile")
+            .3
+            .clone();
+        // Navigation is authored at the end of this UI frame; use the current pose immediately.
+        snapshot.camera = self.scene.camera;
+        snapshot.colour = self.scene.colour.clone();
+        snapshot.animation = Default::default();
+        snapshot.render = effective.render;
+        let width = ((w as f32 * effective.resolution_scale).round() as usize).max(1);
+        let height = ((h as f32 * effective.resolution_scale).round() as usize).max(1);
+        self.target_spp = effective.samples;
+        let preview = policy.mode == crate::render_profiles::ViewportMode::Auto && moving;
+        let mut req = ViewportRequest {
             active: true,
             generation: self.generation,
             scene: snapshot,
-            width: w,
-            height: h,
-            target_spp: self.target_spp,
-            paused: self.paused,
+            width,
+            height,
+            target_spp: effective.samples,
+            paused: policy.paused,
             raw: self.raw_view,
-            interactive: self.world_ui.playing
-                || self.last_change.elapsed().as_secs_f32() < PREVIEW_HOLD_S,
+            interactive: moving,
+            preview,
+            batch_budget_ms: policy.batch_budget_ms.min(1000.0 / policy.target_fps),
+            target_fps: policy.target_fps,
             seed: self.seed,
             output_hdr,
             white_nits,
         };
+        if self.request.as_ref().is_none_or(|old| {
+            old.scene != req.scene
+                || old.width != width
+                || old.height != height
+                || old.seed != req.seed
+                || old.raw != req.raw
+                || old.target_spp != req.target_spp
+                || old.output_hdr != output_hdr
+                || old.white_nits != white_nits
+        }) {
+            self.generation = self.generation.wrapping_add(1);
+            req.generation = self.generation;
+        }
         self.viewport_stamp = Some((
             req.generation,
             playa_graph::NodeId(self.world.document.graph.id),
@@ -1973,6 +2079,11 @@ impl App {
         self.request = Some(req);
     }
     fn poll_events(&mut self, ctx: &egui::Context) {
+        let frozen = self
+            .world
+            .document
+            .viewport_policy(f64::from(self.world_ui.playhead))
+            .is_ok_and(|policy| policy.frozen);
         while let Some(result) = self.io.poll_templates() {
             self.templates_pending = false;
             match result {
@@ -1982,6 +2093,7 @@ impl App {
             ctx.request_repaint();
         }
         if let Some(frame) = self.renderer.take_latest_frame()
+            && !frozen
             && !self.preview.displaying_preview()
             && !(self.frame_from_cache && self.preview.position().is_some())
         {
@@ -1997,6 +2109,10 @@ impl App {
         }
         for event in self.renderer.drain_events() {
             if let Some(frame) = self.preview.handle(&event) {
+                if frozen {
+                    self.preview.recycle(frame);
+                    continue;
+                }
                 self.showing_preview = true;
                 if let Some(old) = self.frame.replace(frame)
                     && self.frame_from_cache
@@ -2143,6 +2259,27 @@ impl App {
     }
 
     fn export_ui(&mut self, ui: &mut egui::Ui) {
+        match self.world.document.output_render_profile().and_then(|id| {
+            self.world
+                .document
+                .effective_render(id, f64::from(self.export.settings.first))
+        }) {
+            Ok(effective) => {
+                self.export.settings.samples = effective.samples;
+                if ui
+                    .button("Edit Output quality in Attribute Editor")
+                    .clicked()
+                {
+                    self.profile_ui_actions(crate::render_profiles_ui::Actions {
+                        edit: Some(effective.quality),
+                        error: None,
+                    });
+                }
+            }
+            Err(error) => {
+                self.status = error;
+            }
+        }
         let timeline = (
             self.world.document.first,
             self.world.document.last,
@@ -2557,7 +2694,20 @@ impl App {
                 }
             });
             ui.menu_button("View", |ui| {
-                ui.checkbox(&mut self.paused, "Pause rendering");
+                if let Ok(policy) = self
+                    .world
+                    .document
+                    .viewport_policy(f64::from(self.world_ui.playhead))
+                {
+                    let mut paused = policy.paused;
+                    if ui.checkbox(&mut paused, "Pause rendering").changed() {
+                        self.set_viewport_flag("/viewport/paused", paused);
+                    }
+                }
+                if ui.button("Render & Viewport settings…").clicked() {
+                    self.open_settings(SettingsPage::Render);
+                    ui.close();
+                }
                 if ui
                     .selectable_label(self.scene.camera.free_flight, "Free flight")
                     .clicked()
@@ -2695,28 +2845,14 @@ impl App {
     }
 
     fn inspector(&mut self, ui: &mut egui::Ui) {
-        let section_id = ui.id().with("render_settings_open");
-        let open = ui.data(|data| data.get_temp::<bool>(section_id).unwrap_or(false));
-        let response = egui_titlebar::CollapsingSection::new("Render settings")
-            .id_salt("render_settings")
-            .open(open)
-            .tint(crate::world_ui::section_color("Render"), 0.28)
-            .show(ui, |ui| {
-                crate::inspector::render(
-                    ui,
-                    &mut self.render_editor,
-                    &mut self.scene.render,
-                    &mut self.target_spp,
-                    &mut self.resolution,
-                    &mut self.seed,
-                    &mut self.world_ui.attribute_label_width,
-                    self.world_ui.attribute_metrics,
-                );
-                if ui.button("New noise seed").clicked() {
-                    self.seed = self.seed.wrapping_add(7920);
-                }
-            });
-        ui.data_mut(|data| data.insert_temp(section_id, response.header.open));
+        ui.horizontal(|ui| {
+            if ui.button("Render & Viewport profiles…").clicked() {
+                self.open_settings(SettingsPage::Render);
+            }
+            if ui.button("New noise seed").clicked() {
+                self.seed = self.seed.wrapping_add(7920);
+            }
+        });
         self.remember_material_targets();
         if let Some(material) = self.world.selection
             && self
@@ -2923,7 +3059,7 @@ impl App {
             self.scene.camera.target = [0.0; 3];
         }
 
-        let ppp = ui.ctx().pixels_per_point() * self.resolution;
+        let ppp = ui.ctx().pixels_per_point();
         let (w, h) = (
             ((avail.x * ppp) as usize).max(16),
             ((avail.y * ppp) as usize).max(16),
@@ -2992,15 +3128,36 @@ impl App {
     ) -> (playa_graph::NodeId, u64, bool, u32, u32, usize, usize, u32) {
         let state =
             ctx.data(|d| d.get_temp::<egui_display::DisplayState>(egui_display::state_id()));
+        let effective = self
+            .world
+            .document
+            .viewport_render(f64::from(self.world_ui.playhead), false)
+            .ok();
+        let extent = self
+            .viewport_rect
+            .map(|rect| {
+                let scale = effective.as_ref().map_or(1.0, |r| r.resolution_scale);
+                let ppp = ctx.pixels_per_point();
+                (
+                    ((rect.width() * ppp).max(16.0) * scale).round() as usize,
+                    ((rect.height() * ppp).max(16.0) * scale).round() as usize,
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    self.request.as_ref().map_or(640, |r| r.width),
+                    self.request.as_ref().map_or(360, |r| r.height),
+                )
+            });
         (
             playa_graph::NodeId(self.world.document.graph.id),
             self.world.revision(),
             state.as_ref().is_some_and(|s| s.output.is_hdr()),
             state.as_ref().map_or(100.0, |s| s.target.white).to_bits(),
             self.seed,
-            self.request.as_ref().map_or(640, |r| r.width),
-            self.request.as_ref().map_or(360, |r| r.height),
-            self.target_spp,
+            extent.0.max(1),
+            extent.1.max(1),
+            effective.as_ref().map_or(0, |r| r.samples),
         )
     }
 
@@ -3026,7 +3183,7 @@ impl App {
             return;
         }
         let key = self.preview_identity(ctx);
-        if viewport.target_spp != self.target_spp
+        if viewport.target_spp != key.7
             || viewport.output_hdr != key.2
             || viewport.white_nits.to_bits() != key.3
             || viewport.seed != key.4
@@ -3043,7 +3200,7 @@ impl App {
             self.make_preview_request(
                 self.world.document.first,
                 self.world.document.last,
-                self.target_spp,
+                key.7,
                 ctx,
             )
         };
@@ -3073,6 +3230,12 @@ impl App {
         crate::preview::PreviewRequest {
             generation: self.preview_sequence,
             scene,
+            render_profile: self
+                .world
+                .document
+                .viewport_policy(f64::from(first))
+                .ok()
+                .map(|policy| policy.selected(false)),
             first,
             last,
             fps: self.world.document.fps as f32,
@@ -3097,7 +3260,7 @@ impl App {
         self.world.finish_edit();
         self.preview_sequence = self.preview_sequence.wrapping_add(1);
         let key = self.preview_identity(ctx);
-        let request = self.make_preview_request(first, last, mode.samples(self.target_spp), ctx);
+        let request = self.make_preview_request(first, last, mode.samples(key.7), ctx);
         self.start_preview_request(request, mode.cache_all(), key);
     }
 
@@ -3752,11 +3915,194 @@ mod tests {
     }
 
     #[test]
+    fn reopening_same_document_rebuilds_selected_profile_scene() {
+        let _gpu_test = crate::test_gpu::lock();
+        let mut app = App::new();
+        let viewport = app.world.document.viewport_settings_id().unwrap();
+        app.world
+            .execute(crate::world::WorldCommand::SetAttribute {
+                id: viewport,
+                path: "/viewport/mode".into(),
+                value: serde_json::json!("Locked"),
+                frame: 0.0,
+            })
+            .unwrap();
+        let mut initial = app.scene.clone();
+        initial.document = Some(Box::new(app.world.document.clone()));
+        app.load(initial);
+        app.last_change = Instant::now() - std::time::Duration::from_secs(2);
+        app.step_viewport(1, 1, false, 100.0);
+        let previous = app.request.as_ref().unwrap().scene.objects.clone();
+        let original_id = app.world.document.graph.id;
+        assert_eq!(app.world.revision(), 0);
+        let mut edited = crate::world::WorldEditor::new(app.world.document.clone());
+        let fractal = edited
+            .document
+            .nodes()
+            .into_iter()
+            .find(|node| node.kind == crate::world::WorldKind::Fractal)
+            .unwrap()
+            .id;
+        edited
+            .execute(crate::world::WorldCommand::SetAttribute {
+                id: fractal,
+                path: "/transform/position/0".into(),
+                value: serde_json::json!(3.0),
+                frame: 0.0,
+            })
+            .unwrap();
+        let manual = edited.document.viewport_policy(0.0).unwrap().manual_id;
+        let expected = edited
+            .document
+            .snapshot_with_render_profile(manual, 0.0)
+            .unwrap()
+            .objects;
+        assert_ne!(expected, previous);
+        let mut reopened = app.scene.clone();
+        reopened.document = Some(Box::new(edited.document));
+        app.load(reopened);
+        assert_eq!(app.world.document.graph.id, original_id);
+        assert_eq!(app.world.revision(), 0);
+        app.last_change = Instant::now() - std::time::Duration::from_secs(2);
+        app.step_viewport(1, 1, false, 100.0);
+        assert_eq!(app.request.as_ref().unwrap().scene.objects, expected);
+    }
+
+    #[test]
+    fn node_profiles_route_runtime_and_cache_without_mutating_output() {
+        let _gpu_test = crate::test_gpu::lock();
+        use crate::world::WorldCommand;
+        use serde_json::json;
+        let mut app = App::new();
+        let policy = app.world.document.viewport_policy(0.0).unwrap();
+        let moving_q = app.world.document.render_quality(policy.moving_id).unwrap();
+        let still_q = app.world.document.render_quality(policy.still_id).unwrap();
+        let output = app.world.document.output_render_profile().unwrap();
+        let output_q = app.world.document.render_quality(output).unwrap();
+        for (id, path, value) in [
+            (moving_q, "/quality/samples", json!(19)),
+            (moving_q, "/quality/max_bounces", json!(1)),
+            (moving_q, "/quality/resolution_scale", json!(0.25)),
+            (still_q, "/quality/samples", json!(41)),
+            (still_q, "/quality/max_bounces", json!(6)),
+            (still_q, "/quality/resolution_scale", json!(0.75)),
+            (output_q, "/quality/samples", json!(997)),
+        ] {
+            app.world
+                .execute(WorldCommand::SetAttribute {
+                    id,
+                    path: path.into(),
+                    value,
+                    frame: 0.0,
+                })
+                .unwrap();
+        }
+        let authored = app.world.document.clone();
+        app.last_change = Instant::now();
+        app.step_viewport(128, 64, false, 100.0);
+        let moving = app.request.as_ref().unwrap();
+        assert_eq!(
+            (
+                moving.width,
+                moving.height,
+                moving.target_spp,
+                moving.scene.render.max_bounces
+            ),
+            (32, 16, 19, 1)
+        );
+        assert!(moving.preview);
+        assert_eq!(app.world.document, authored);
+        let ctx = egui::Context::default();
+        app.viewport_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(128.0, 64.0),
+        ));
+        let key = app.preview_identity(&ctx);
+        let cached = app.make_preview_request(0, 10, key.7, &ctx);
+        assert_eq!((cached.width, cached.height, cached.spp), (96, 48, 41));
+        assert_eq!(cached.render_profile, Some(policy.still_id));
+        app.last_change = Instant::now() - std::time::Duration::from_secs(2);
+        app.step_viewport(128, 64, false, 100.0);
+        let still = app.request.as_ref().unwrap();
+        assert_eq!(
+            (
+                still.width,
+                still.height,
+                still.target_spp,
+                still.scene.render.max_bounces
+            ),
+            (96, 48, 41, 6)
+        );
+        assert!(!still.preview);
+        assert_eq!(app.world.document, authored);
+        let generation = app.generation;
+        app.world
+            .execute(WorldCommand::Rename {
+                id: policy.still_id,
+                name: "Renamed still".into(),
+            })
+            .unwrap();
+        app.step_viewport(128, 64, false, 100.0);
+        assert_eq!(
+            app.generation, generation,
+            "A catalog name does not change effective film content"
+        );
+        let viewport = app.world.document.viewport_settings_id().unwrap();
+        app.world
+            .execute(WorldCommand::Batch(vec![
+                WorldCommand::SetAttribute {
+                    id: viewport,
+                    path: "/viewport/mode".into(),
+                    value: json!("Locked"),
+                    frame: 0.0,
+                },
+                WorldCommand::SetAttribute {
+                    id: viewport,
+                    path: "/viewport/manual_id".into(),
+                    value: json!(policy.moving_id),
+                    frame: 0.0,
+                },
+            ]))
+            .unwrap();
+        app.step_viewport(128, 64, false, 100.0);
+        assert_eq!(app.request.as_ref().unwrap().target_spp, 19);
+        assert!(!app.request.as_ref().unwrap().preview);
+        assert_eq!(
+            app.world
+                .document
+                .effective_render(output, 0.0)
+                .unwrap()
+                .samples,
+            997
+        );
+        app.set_viewport_flag("/viewport/frozen", true);
+        let frozen = app.request.clone().unwrap();
+        app.scene.camera.yaw_degrees += 20.0;
+        app.step_viewport(512, 256, false, 100.0);
+        let request = app.request.as_ref().unwrap();
+        assert_eq!(
+            (request.width, request.height, &request.scene),
+            (frozen.width, frozen.height, &frozen.scene)
+        );
+        assert!(request.paused);
+    }
+
+    #[test]
     fn viewport_cache_accepts_only_final_current_authoring_frames() {
         let _gpu_test = crate::test_gpu::lock();
         let ctx = egui::Context::default();
         let mut app = App::new();
-        app.target_spp = 8;
+        let still = app.world.document.viewport_policy(0.0).unwrap().still_id;
+        let quality = app.world.document.render_quality(still).unwrap();
+        app.world
+            .execute(crate::world::WorldCommand::SetAttribute {
+                id: quality,
+                path: "/quality/samples".into(),
+                value: serde_json::json!(8),
+                frame: 0.0,
+            })
+            .unwrap();
+        app.last_change = Instant::now() - std::time::Duration::from_secs(2);
         app.step_viewport(1, 1, false, 100.0);
         let make_frame = |samples, preview| {
             Arc::new(Frame {
@@ -3803,7 +4149,14 @@ mod tests {
         );
         assert_eq!(app.preview.cached_spp(), Some(8));
         let key = app.preview_key;
-        app.target_spp = 16;
+        app.world
+            .execute(crate::world::WorldCommand::SetAttribute {
+                id: quality,
+                path: "/quality/samples".into(),
+                value: serde_json::json!(16),
+                frame: 0.0,
+            })
+            .unwrap();
         assert_ne!(key, Some(app.preview_identity(&ctx)));
     }
 

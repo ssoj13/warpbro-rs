@@ -16,7 +16,6 @@ mod color;
 mod denoise;
 mod environment;
 mod fs_name;
-mod inspector;
 // Keep the copied viewer API intact, including its CPU oracle used by tests.
 mod export;
 mod exr_io;
@@ -37,6 +36,8 @@ mod presets;
 mod preview;
 mod render;
 mod render_bench;
+mod render_profiles;
+mod render_profiles_ui;
 mod render_service;
 mod sampler;
 mod scene;

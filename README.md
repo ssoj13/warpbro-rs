@@ -206,8 +206,9 @@ prevents edits. The active camera remains active when its layer is hidden.
 Bookmarks save a Playa `SubnetFile` with node attributes, material UUID assignments and
 arbitrary JSON metadata. Each node separates its GPU baseline (`gpu`) from Playa attributes
 and animation (`host`), discrete-value dictionaries and metadata. Evaluated `Scene` objects
-and device buffers are temporary. Legacy scenes migrate their transforms and keys, including
-the rotation convention; layer order is separate from hierarchy and physical occlusion.
+and device buffers are temporary. Render/quality profiles use canonical settings nodes in
+this graph; documents missing the current settings schema are rejected rather than repaired.
+Layer order is separate from hierarchy and physical occlusion.
 
 **Settings → Display / Color** uses the same `egui-prefs2` layout as exr-view. Display uses
 `egui-display::settings_ui` directly: output, SDR reference white and HLG display peak, with
@@ -235,6 +236,40 @@ OCIO config loading also run in background workers. Window presentation uses a s
 device from offscreen OCIO processing, so surface reconfiguration does not wait for that
 worker's queue. The GUI still performs drawing and GPU presentation; the configured FPS is a
 target, not a guarantee under GPU or system load.
+
+### Render and quality profiles
+
+**Settings → Render & Viewport** contains named render and quality buttons. Choose **Recall to**
+(Moving, Still, Manual or Output), then left-click a render profile to assign its live UUID.
+For quality buttons, **Recall quality to** chooses the render node whose quality reference
+will change. Right-click a named button to edit it in the existing Attribute Editor, rename
+it, or **Save as profile… / Save as template…**.
+
+Profiles and templates are the same `RenderSettings` / `QualitySettings` nodes with different
+catalog metadata. New profiles and Save as create new nodes. Applying a render template
+creates an independent render/quality pair with new UUIDs and one Undo step; changing the
+template later does not change that pair. The catalog is saved in the World document.
+**File → Templates** remains the separate whole-scene catalog.
+
+The viewport toolbar selects **Auto / Locked** and exposes **Profiles**, pause and freeze.
+Auto uses Moving during scene/camera activity and playback, then Still after the node's settle
+delay; Locked always uses Manual. Both toolbar and Settings edit the same
+`ViewportSettings` references. Its Attribute Editor controls target FPS, settle delay and
+batch budget. The quality UUID reference and every viewport-policy field are static;
+commands and loading reject animation/connections on them. Numeric render/quality values
+remain animatable and evaluate at frame time. Output has its own independent render profile.
+The progressive viewport shares accumulation across profiles with identical effective tracing inputs and image extent.
+Freeze keeps the displayed image and ignores late frames. Cache preview fixes Still in Auto
+or Manual in Locked; Moving does not change the cached job's profile or quality.
+
+**Fast** uses the existing World path tracer with approximate opaque-material shading,
+preserving transmitting material models. **Full** keeps authored material models.
+The selected quality node owns samples, resolution scale, tracing limits and adaptive sampling.
+Fresh Moving settings start at Fast, 64 samples, half resolution and two bounces; these are
+editable profile values. No real-time WorldDirect or guaranteed navigation FPS is claimed.
+
+See [the node contract and remaining work](docs/render-profiles.md) for cloning, shared
+references, validation, pause/freeze and export semantics.
 
 ### OIDN denoising
 
@@ -283,9 +318,10 @@ CUDA_HOME=/usr/local/cuda CUDA_OXIDE_LLC=/usr/bin/llc-22 cargo oxide test -- --r
 ### Render / Encode
 
 Open **Render → Render / Encode…** or **Window → Render / Encode**. This dockable panel
-uses Playa's shared encoder schema. Pick the format tab, a file **Name**, resolution,
-**Samples / frame** and the inclusive frame range (**Current frame** renders the frame under the
-playhead). A one-frame range writes `name.<suffix>`; a longer range writes
+uses Playa's shared encoder schema. Pick the format tab, a file **Name**, resolution
+and the inclusive frame range (**Current frame** renders the frame under the playhead).
+The panel shows the sample count from **Output Quality**; edit that node in the Attribute Editor.
+A one-frame range writes `name.<suffix>`; a longer range writes
 `name.000001.<suffix>`, ... (the number before the whole suffix: `name.000001.pq.png`).
 
 - **PNG:** the monitor rendering baked in, as **SDR · 8-bit sRGB / BT.709**, **HDR10 · 16-bit PQ /
@@ -313,10 +349,13 @@ display. The panel shows the choice under **Output transform** and lets you over
   gamma 1.96, so there it looks lighter and flatter; judge SDR video in Resolve, mpv or on a TV.
   The display transform is baked in. Width and height must be even. HDR video is unavailable.
 
-Each frame receives the requested sample count. The World document is frozen at export start;
-each frame evaluates its Playa animation at that frame's time, including transforms, lights,
-visibility and discrete keys. When OIDN is enabled, the scene-linear EXR output contains the
-final denoised radiance; exposure and OCIO remain excluded.
+The World document is frozen at export start. Output Quality supplies the job's sample
+target and resolution scale, evaluated at its first frame; these two values remain fixed for
+the job. Other scene and render/quality attributes evaluate from the frozen document at each
+frame's time, including transforms, lights, visibility and discrete keys. Edit Output Quality
+in the Attribute Editor; viewport activity and profile routing do not change the export.
+When OIDN is enabled, the scene-linear EXR output contains the final denoised radiance;
+exposure and OCIO remain excluded.
 An autonomous coordinator advances rendering and a bounded writer queue handles encoding
 and file output even when the GUI stops updating. **Cancel** stops sampling new frames, drains completed frames and flushes delayed codec packets to publish a playable partial movie. Completed frames remain; cancellation before the first complete video frame creates no movie. Every export
 writes into its own new folder, and finished outputs are published atomically.
@@ -350,9 +389,13 @@ Open work is tracked in [PLAN.md](PLAN.md).
 File Open/Save/Save As and five 250-frame presets (frames 0–249 at 24 FPS) are implemented.
 Camera orbit speed (degrees/second) and phase are animatable World attributes; old scenes default
 to zero speed. Timeline evaluation supports independent seeking and animated speed.
-The current release suite passed 211 tests with 8 ignored GPU/visual probes (62.07 s).
-The earlier final production release build passed without Rust warnings; the latest startup build
-passed with two dead-code warnings. All 250 final preset curves
+The final 2026-10-07 ordinary cuda-oxide suite passed 271 tests with zero failures,
+ten ignored probes and four intentionally filtered, previously certified native-movie fixtures
+(42.40 s). The production release build passed and the executable initialized CUDA on the
+RTX 3080 Ti. The final locked/offline all-target check passed without warnings; the sole
+branch review's three P2 findings were fixed with regressions. Exact receipts and remaining
+work are in [HANDOFF.md](HANDOFF.md). No additional demonstration renders were required.
+All 250 final preset curves
 are covered by CPU tests. The 1,250-frame GPU run at 160×90/4 SPP preceded only the last bounded
 Chrome tune; the final 15-still rerun at 640×360/32 SPP passed and its
 [contact sheet](target/verification/unfolding-v2/contact.png) was inspected, including Chrome's accepted first frame. Native File interactions and manual UI latency remain pending.
@@ -428,7 +471,9 @@ The timings above predate this bridge, the World tracer and OIDN integration.
 ```text
 src/gpu.rs        the kernels (#[cuda_module]): estimates, march, normals, lighting, integrator, tonemap
 src/scene.rs      evaluated Scene, legacy serde, formulas, presets and parameter packing
-src/world.rs      Playa World document, migration, evaluator, commands and undo/redo
+src/world.rs      Playa World document, canonical settings nodes, evaluator, commands and undo/redo
+src/render_profiles.rs   evaluated render/quality and viewport-policy contracts
+src/render_profiles_ui.rs   named profile/template catalog and shared viewport bindings
 src/world_ui.rs   Outliner, object Attribute Editor and layered component Timeline
 src/presets.rs    five authored 250-frame animated World presets
 src/camera_orbit.rs   deterministic timeline integration of camera orbit speed
