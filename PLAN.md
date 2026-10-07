@@ -47,6 +47,7 @@ unfinished gates. No extra approval is needed for the already authorized scope.
   no findings. Six policy tests did not execute in `21437`: disk-full regex-syntax IO stopped
   compilation. No files were deleted; later six output-policy tests and strict Rust 1.96
   release all-target clippy passed. Sole Apps producer review is closed without findings.
+  Docs-only `8127947` is published with byte-identical consumed d411 source; no rebuild for prose.
 - [x] Verify scoped SquareBob FrozenRenderSession/camera logic after `b487bbb` and restore fix
   `6c1e4edbcd470aac466b77c245acbdca2023d350` against d411. Nine files plus ColorPipeline
   now own the frozen DirEntry/camera/quality/options, own color pipeline and existing 3D/2D
@@ -57,19 +58,27 @@ unfinished gates. No extra approval is needed for the already authorized scope.
   passed in latest-source `95027`. Sole Plan review closed with
   one P2, corrected in `6c1`; no repeated review was requested. Release bin suite `95027`
   completed its release build in 19m16s: runtime 56 passed, one failed, three ignored.
-  Full suite is not passed. No zero-copy encoder claim; full EXR metadata remains open.
+  That earlier failed run is superseded by final ordinary `48040`: compile 1m40s,
+  57 passed / zero failed / three ignored in 0.98s. Main
+  `8ac9d58f6f4245d431ed7f892e34ad1d9c58d511` is verified at the exact remote, clean/current.
+  Production `21158` passed in 1m59s with actual squarebob.exe --help exit 0; release locked
+  workspace/all-targets `33869` passed in 4m55s, no warnings/errors. No zero-copy encoder claim;
+  full EXR metadata remains open and ignored GPU evidence is outside these receipts.
 - [ ] Finish SquareBob toolbar/CamClip/preset acceptance. Foundation 24 UI + one GPU tests
   passed and seven screenshots were generated. Root visual inspection found narrow overlap/
   floating-bar and fade-fixture issues. Existing camera/preset/store/pointer UI tests passed.
-  Remaining latest-suite failure is
+  The earlier failure was
   `app::viewport_toolbar::tests::narrow_viewport_toolbar_horizontal_scroll_reaches_camera_slots`:
   `toolbar text geometry` while measuring a hidden clipped label with no emitted painter
-  geometry. Root is diagnosing before a fix; correction/rerun is still open.
+  geometry. Corrected fixture measures ordering at 1200px with both labels visible, then
+  real 280px scroll/camera visibility/separate scrollbar row. Final ordinary suite passed;
+  diagnostics retained, no production UI change.
   No new screenshots are accepted. Per the latest user instruction, extra screenshots/demo
   movies are skipped after relevant tests pass and are not mandatory completion blockers.
   Five mandatory nullable LMB-recall/RMB-store camera slots and named preset buttons remain
   incomplete WarpBro OCIO/proxy/denoise/snapshot/full-toolbar parity.
-- [ ] Finish runtime WarpBro DE/cache/toolbar/paired-benchmark verification after published
+- [ ] Finish WarpBro full DE-boundary performance acceptance after published docs `d1bc4ba8`
+  and production source
   `cd505435cfafff60102f6038e55fb44d148f8e36` (four files: lock/app/gpu/ocio), following
   baseline `301b61e`. d411 integration passed plain all-target in 28.01s, no warnings.
   Strict clippy stopped at the existing fractal-materials eight-argument factory before
@@ -77,10 +86,19 @@ unfinished gates. No extra approval is needed for the already authorized scope.
   passed / one failed / nine ignored; its remaining lens fixture was fixed and four targeted
   lens tests passed. Actual OIDN HDR/all-quality, PNG-video PQ HEVC/PQ ProRes/HLG HEVC/SDR
   ProRes tags+CLL, and Vulkan partial exact `24000/1001` each passed one gate. Specialized
-  Fast one-object radiance still fails at max_abs `5.9247017e-5`; Fast two-object and
-  StandardSurface one/two-object radiance/albedo/normals are exact. Trace the shared field
-  boundary; no tolerance change is claimed. Earlier display/view key omitted current input/
-  look; latest DE/cache runtime behavior and paired benchmark remain pending.
+  radiance/all guides are now exact on all four routes with unchanged tolerance; 15 OCIO
+  tests passed, including invalid-input/look warm-cache. Ordinary oxide `27252` passed 254,
+  zero failed, ten intentionally ignored, four previously certified native-movie fixtures
+  filtered, in 35.80s; no movie reruns. Full DE boundary remains about
+  27–28% slower. Narrow affine attempt failed the original oracle because the compiler
+  dropped inline-never intent; it was reverted and correct published source is frozen.
+  Authorized cuda-oxide inline-intent propagation fix is pending plan/compile in an owned
+  producer checkout/tool build, not a global replacement. Do not mark performance accepted
+  or WarpBro complete from the numerical/OCIO receipts.
+  Producer base `C:/projects/projects.rust.cg/nv/cuda-oxide-windows` is tracked-clean
+  `f3f1098`; isolated candidate worktree is planned. Proposed canonical InlineIntent
+  Default/Hint/Always/Never maps Rust Always/Force to Always and propagates attributes
+  through MIR to LLVM; implementation/acceptance is pending.
 - [ ] Finish the native app queue: COLMAP seven/seven actual ingest tests and 35m30s native
   release passed at 8c4+9d. Its coherent-d411 follow-up
   `8d44976db7e76f3a1f34ab535d72eb3cdd365d7c` is published; cached native `43593` is
@@ -105,7 +123,12 @@ remains foreign-locked and was not repaired. Isolated GITNEXUS_HOME `analyze --o
 fresh graph, but CLI graph_status/list_repos read the stale canonical `.gitnexus`; impact
 could not find a new test. See BUG3.md, 2026-10-07: fresh registry/meta is not fresh tool-query
 evidence. Root is preparing a SHA-verified owned mirror using default local `.gitnexus`,
-without `--out`; no recovery is claimed yet. Earlier CRITICAL camera impact/two-file LOW
+without `--out`. Latest authoritative pre-8ac mirror at
+`C:/projects/projects.rust.cg/.codex-worktrees/squarebob-main-gate-20261007-0407c6ea38691`
+has two latest files SHA-verified, standard local DB 5968 nodes / 13831 edges and fresh
+HEAD/index `6c1` at 08:21:08. Precommit detect: nine symbols / two files, LOW / zero flows.
+Original/global graph repair is not claimed; Apps' canonical resolved-storage architecture
+fix still awaits source/tests. Earlier CRITICAL camera impact/two-file LOW
 detect and exact remote commit/push receipts are historical, not newer-test graph coverage.
 Shared widgets and Audio full post-push
 indexes passed and are fresh. WarpBro's earlier isolated registry has 3556 nodes / 9918

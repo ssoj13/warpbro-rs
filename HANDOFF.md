@@ -14,21 +14,29 @@ that table and the previous shift's entries remain history. The whole scope rema
 | Work | Verified receipt | Still open |
 |---|---|---|
 | GitNexus | Published coherent-d411 lock follow-up `0aa9f32`, following `ec11c6a2ad54eee9b27f477c531b6b9625ec18aa`; earlier six Git + 87 MCP tests, native GUI + CLI build (42m38s), two actual help calls and post-commit reindex passed | Foreign installed MCP was not replaced; no new native receipt is inferred from the lock publication |
-| Shared toolbar / output policy | Published `d4117f50`: 15 toolbar tests, six output-policy tests and strict Rust 1.96 release all-target clippy passed. Pure OutputKind/view resolver shares actual WarpBro policy; sole Apps producer review closed with no findings | Earlier disk-full `21437` stopped before tests and was not a source failure; successful later gates supersede that pending status. Latest SquareBob consumer source is not yet passed |
-| SquareBob UI | Latest release suite `95027`: build 19m16s, runtime 56 passed / one failed / three ignored. Existing camera/preset/store/pointer UI tests passed; earlier foundation produced seven screenshots | One failure: `app::viewport_toolbar::tests::narrow_viewport_toolbar_horizontal_scroll_reaches_camera_slots` panics `toolbar text geometry` while measuring a hidden clipped label whose painter emits no geometry; root is diagnosing before a fix. No full-suite PASS. Historical visual rejection stands; no new screenshots accepted or extra demo/screenshot generation requested |
-| SquareBob export freeze | Source published `b487bbb`, followed by camera-restore fix `6c1e4edbcd470aac466b77c245acbdca2023d350`. All nine ordinary Frozen session tests and camera regressions passed in latest-source `95027`. Resource invalidation is separate from an authored-camera action. Sole Plan review closed; its P2 was corrected in `6c1` | Latest suite still has the narrow-toolbar failure; do not call the entire consumer suite passed. No zero-copy encoder claim. Full EXR metadata and remaining OCIO/proxy/denoise/snapshot/toolbar features remain open |
-| WarpBro | Main `cd505435cfafff60102f6038e55fb44d148f8e36` published after baseline `301b61e`: four files (lock/app/gpu/ocio), d411 integrated; plain all-target passed in 28.01s with no warnings | Runtime DE/cache/toolbar/paired benchmark pending; no tolerance change. Earlier specialized Fast one-object radiance failed at max_abs `5.9247017e-5`. Strict clippy stopped in the existing fractal-materials eight-argument factory before linting WarpBro; no strict WarpBro clippy PASS |
+| Shared toolbar / output policy | Published `d4117f50`: 15 toolbar tests, six output-policy tests and strict Rust 1.96 release all-target clippy passed. Pure OutputKind/view resolver shares actual WarpBro policy; sole Apps producer review closed with no findings. Latest `8127947` is docs-only, consumed source byte-identical to d411 | Earlier disk-full `21437` stopped before tests and was not a source failure. No rebuild is needed for the docs-only follow-up; consumer GPU/native color parity remains outside ordinary-test receipts |
+| SquareBob UI/build | Main `8ac9d58f6f4245d431ed7f892e34ad1d9c58d511` verified against exact remote, source clean/current. Final ordinary `48040`: compile 1m40s, 57 passed / zero failed / three ignored in 0.98s. Production `21158` passed in 1m59s; actual squarebob.exe --help exited 0. Release locked workspace/all-targets `33869` passed in 4m55s without warnings/errors | Narrow-toolbar measurement fixture is corrected; production UI unchanged. Historical visual rejection stands; no new screenshots accepted. Ignored GPU/demo tests were not run; no extra demos/movies/screenshots after the passing ordinary suite |
+| SquareBob export freeze | Published `b487bbb` → camera restore `6c1e4edbcd470aac466b77c245acbdca2023d350` → final `8ac9d58f6f4245d431ed7f892e34ad1d9c58d511`. All nine ordinary Frozen session tests and camera regressions passed. Resource invalidation is separate from authored-camera action; sole Plan review P2 corrected | No zero-copy encoder claim. Full EXR metadata and remaining OCIO/proxy/denoise/snapshot/toolbar features remain open; passing ordinary/build gates do not execute ignored GPU freeze evidence |
+| WarpBro | Published docs `d1bc4ba8`, production source `cd505435cfafff60102f6038e55fb44d148f8e36`; plain all-target 28.01s passed. Ordinary oxide `27252` passed 254 / zero failed / ten intentionally ignored, four previously certified native-movie fixtures filtered, in 35.80s. Numerical four routes/all guides exact with unchanged tolerance; 15 OCIO tests passed, including invalid-input/look warm-cache | Full DE boundary is about 27–28% slower. Narrow affine attempt failed the original oracle because inline-never intent was dropped by the compiler; attempt was reverted, published correct source frozen. Authorized cuda-oxide inline-intent propagation fix uses an owned producer checkout/tool build, pending plan/compile; no global tool replacement or performance acceptance. Earlier strict clippy stopped before WarpBro linting at the existing fractal-materials eight-argument factory |
 | App queue | COLMAP seven/seven actual ingest tests and native release (35m30s) passed at 8c4+9d; coherent-d411 follow-up `8d44976db7e76f3a1f34ab535d72eb3cdd365d7c` published. EXV `2ef5db6`, RV `d1cafd2`, Watermark `9628dcb`, GitNexus `0aa9f32`, OTIO `229dfb4` published coherent d411 locks. Audio `db929c8` published coherent 8c4 lock and locked offline metadata passed | COLMAP cached native `43593` is rebuilding dependencies. Audio has no current new native receipt. OTIO's 21 tests/demo receipts stand by byte-identical used config-source proof; lock publication alone does not certify every app's native UI |
 
 FrozenRenderSession preserves actual GPU causes through worker errors and a final readback
 drain; its 3D SDR path uses RGBA16F float rather than pre-gamma 8-bit data. Configuration/LUT
-bake failures are strict. Latest scoped Frozen session/camera tests passed; the complete
-consumer suite remains failed on its separate narrow-toolbar geometry assertion.
+bake failures are strict. Final ordinary consumer suite and production/workspace gates passed.
+The narrow-toolbar fixture now measures natural ordering at 1200px with both labels visible,
+then actual 280px scrolling, camera-button visibility and the separate scrollbar row; its
+former hidden-label failure diagnostics are retained. This fix changes no production UI.
 The user requested push of all authorized work to main. Preserve the existing videos below;
 do not run gratuitous extra videos/renders after their tests pass.
 Additional review/demo movies and screenshot regeneration are skipped once relevant tests
 pass. Historical narrow visual rejection remains recorded; it is not a claim of accepted
 new screenshots or an optional-artifact blocker. Necessary consumer logic/runtime tests continue.
+
+Compiler work is planned against clean tracked `f3f1098` in
+`C:/projects/projects.rust.cg/nv/cuda-oxide-windows`, using an isolated candidate worktree.
+The proposed canonical InlineIntent is Default/Hint/Always/Never, with Rust Always/Force
+mapping to Always and attributes carried through MIR to LLVM. It is not implemented or accepted
+by these documentation/test receipts.
 
 Retained video evidence is under `C:/Temp/bob`:
 - `delivery-20261007-0615`: twelve technical three-frame 64x64 clips.
@@ -46,7 +54,12 @@ SquareBob DB is still foreign-locked and was not repaired. The owned isolated GI
 list_repos loaded the stale canonical `.gitnexus` instead. Registry/meta freshness does not
 certify tool-query freshness; a new test was absent from impact. Exact reproduction is in
 oh-my-harness BUG3.md, 2026-10-07. Use a SHA-verified owned mirror with default local
-`.gitnexus`, without `--out`; root is preparing that reliable fallback, not claiming recovery.
+`.gitnexus`, without `--out`. Authoritative pre-8ac mirror is
+`C:/projects/projects.rust.cg/.codex-worktrees/squarebob-main-gate-20261007-0407c6ea38691`:
+two latest files SHA-verified, local DB 5968 nodes / 13831 edges, HEAD/index `6c1` fresh
+at 08:21:08; precommit detect covered nine symbols / two files, LOW / zero flows.
+These receipts cover that owned mirror, not original/global graph repair. GitNexus's canonical
+resolved-storage architecture fix is underway in Apps, with source/tests still pending.
 Earlier CRITICAL camera-path impact/scoped two-file LOW detect and exact remote commit/push
 receipts remain historical; do not reuse them as proof of the newer test's graph coverage.
 Shared widgets and Audio post-push full indexes passed and are fresh. WarpBro's earlier isolated registry graph has
