@@ -13,16 +13,22 @@ that table and the previous shift's entries remain history. The whole scope rema
 
 | Work | Verified receipt | Still open |
 |---|---|---|
-| GitNexus | Published `ec11c6a2ad54eee9b27f477c531b6b9625ec18aa`; six Git + 87 MCP tests passed, native GUI + CLI build passed in 42m38s, two actual help calls exited 0, post-commit reindex passed | Foreign installed MCP was not replaced; these receipts do not refresh other repositories' graphs |
-| Shared toolbar / output policy | Solid toolbar and mandatory ToolbarState persistence source; 15 ordinary tests passed on Rust 1.96 after the natural 44px-button/font fixture correction. Pure OutputKind/view resolver extracts actual WarpBro policy in egui-display::export. Sole producer review closed with no findings | Producer is not published. Six-test policy run `21437` stopped on disk-full regex-syntax IO before tests, not a source/test failure. No files were deleted; about 45 GB subsequently became free. Current coherent-8c4-lock run `82388` is active |
-| SquareBob UI | Foundation: 24 UI tests passed; one GPU gate produced seven screenshots | Visual inspection found narrow overlap/floating toolbar and fade-fixture issues. Fixes are source-ready, but regenerated shots are not accepted. Five camera slots and named preset buttons are not full WarpBro toolbar parity |
-| SquareBob export freeze | FrozenRenderSession source complete across nine files plus ColorPipeline; it owns frozen DirEntry/camera/quality/options, its ColorPipeline and existing 3D/2D renderer resources moved from author fields | Eight ordinary + one ignored GPU tests are source-only; no compile/test/reindex receipt yet, awaiting published shared API. No authored time/flag mutation or zero-copy encoder claim. Full EXR metadata and remaining OCIO/proxy/denoise/snapshot/toolbar features remain open |
-| WarpBro | Default-schema run: 256 passed, one failed, nine ignored. The remaining lens fixture was then corrected; four targeted lens tests passed. Actual OIDN HDR/all-quality, PNG-video HDR/SDR tags+CLL and Vulkan partial `24000/1001` each passed one gate | Specialized Fast one-object radiance still fails: max_abs `5.9247017e-5`. Fast two-object and StandardSurface one/two-object radiance/albedo/normals are exact. Owner traces the shared field boundary; no tolerance/kernel change yet. New shared-view policy and cache-key migration are pending; current key omits current input/look |
-| App queue | SquareBob floating Git dependencies audited against actual remotes; explicit fscan pin moved `5f57` → `94dd173` | COLMAP native `75655` is active on 8c4; B fixture is 7406 bytes / 48 frames / stride 3 / expected 16, not yet run. EXV/RV wait for the new widgets SHA |
+| GitNexus | Published coherent-d411 lock follow-up `0aa9f32`, following `ec11c6a2ad54eee9b27f477c531b6b9625ec18aa`; earlier six Git + 87 MCP tests, native GUI + CLI build (42m38s), two actual help calls and post-commit reindex passed | Foreign installed MCP was not replaced; no new native receipt is inferred from the lock publication |
+| Shared toolbar / output policy | Published `d4117f50`: 15 toolbar tests, six output-policy tests and strict Rust 1.96 release all-target clippy passed. Pure OutputKind/view resolver shares actual WarpBro policy; sole Apps producer review closed with no findings | Earlier disk-full `21437` stopped before tests and was not a source failure; successful later gates supersede that pending status. Latest SquareBob consumer source is not yet passed |
+| SquareBob UI | Latest release suite `95027`: build 19m16s, runtime 56 passed / one failed / three ignored. Existing camera/preset/store/pointer UI tests passed; earlier foundation produced seven screenshots | One failure: `app::viewport_toolbar::tests::narrow_viewport_toolbar_horizontal_scroll_reaches_camera_slots` panics `toolbar text geometry` while measuring a hidden clipped label whose painter emits no geometry; root is diagnosing before a fix. No full-suite PASS. Historical visual rejection stands; no new screenshots accepted or extra demo/screenshot generation requested |
+| SquareBob export freeze | Source published `b487bbb`, followed by camera-restore fix `6c1e4edbcd470aac466b77c245acbdca2023d350`. All nine ordinary Frozen session tests and camera regressions passed in latest-source `95027`. Resource invalidation is separate from an authored-camera action. Sole Plan review closed; its P2 was corrected in `6c1` | Latest suite still has the narrow-toolbar failure; do not call the entire consumer suite passed. No zero-copy encoder claim. Full EXR metadata and remaining OCIO/proxy/denoise/snapshot/toolbar features remain open |
+| WarpBro | Main `cd505435cfafff60102f6038e55fb44d148f8e36` published after baseline `301b61e`: four files (lock/app/gpu/ocio), d411 integrated; plain all-target passed in 28.01s with no warnings | Runtime DE/cache/toolbar/paired benchmark pending; no tolerance change. Earlier specialized Fast one-object radiance failed at max_abs `5.9247017e-5`. Strict clippy stopped in the existing fractal-materials eight-argument factory before linting WarpBro; no strict WarpBro clippy PASS |
+| App queue | COLMAP seven/seven actual ingest tests and native release (35m30s) passed at 8c4+9d; coherent-d411 follow-up `8d44976db7e76f3a1f34ab535d72eb3cdd365d7c` published. EXV `2ef5db6`, RV `d1cafd2`, Watermark `9628dcb`, GitNexus `0aa9f32`, OTIO `229dfb4` published coherent d411 locks. Audio `db929c8` published coherent 8c4 lock and locked offline metadata passed | COLMAP cached native `43593` is rebuilding dependencies. Audio has no current new native receipt. OTIO's 21 tests/demo receipts stand by byte-identical used config-source proof; lock publication alone does not certify every app's native UI |
 
 FrozenRenderSession preserves actual GPU causes through worker errors and a final readback
 drain; its 3D SDR path uses RGBA16F float rather than pre-gamma 8-bit data. Configuration/LUT
-bake failures are strict. These are current source contracts, not passed consumer gates.
+bake failures are strict. Latest scoped Frozen session/camera tests passed; the complete
+consumer suite remains failed on its separate narrow-toolbar geometry assertion.
+The user requested push of all authorized work to main. Preserve the existing videos below;
+do not run gratuitous extra videos/renders after their tests pass.
+Additional review/demo movies and screenshot regeneration are skipped once relevant tests
+pass. Historical narrow visual rejection remains recorded; it is not a claim of accepted
+new screenshots or an optional-artifact blocker. Necessary consumer logic/runtime tests continue.
 
 Retained video evidence is under `C:/Temp/bob`:
 - `delivery-20261007-0615`: twelve technical three-frame 64x64 clips.
@@ -35,8 +41,15 @@ Retained video evidence is under `C:/Temp/bob`:
 
 Graph evidence is scoped: SquareBob owned mirror full-force `54164` passed (5861 nodes,
 13403 relationships), then serialized `94939` and five-file reindex passed. The canonical
-SquareBob DB is still foreign-locked and is not fresh. Shared CLI ec11 one-file reindex passed
-before the new policy helper; another reindex is needed. WarpBro's isolated registry graph has
+SquareBob DB is still foreign-locked and was not repaired. The owned isolated GITNEXUS_HOME
+`analyze --out` wrote a fresh graph at the original current checkout, but CLI graph_status/
+list_repos loaded the stale canonical `.gitnexus` instead. Registry/meta freshness does not
+certify tool-query freshness; a new test was absent from impact. Exact reproduction is in
+oh-my-harness BUG3.md, 2026-10-07. Use a SHA-verified owned mirror with default local
+`.gitnexus`, without `--out`; root is preparing that reliable fallback, not claiming recovery.
+Earlier CRITICAL camera-path impact/scoped two-file LOW detect and exact remote commit/push
+receipts remain historical; do not reuse them as proof of the newer test's graph coverage.
+Shared widgets and Audio post-push full indexes passed and are fresh. WarpBro's earlier isolated registry graph has
 3556 nodes / 9918 relationships; detect reported 503 symbols / 42 files, CRITICAL combined
 expected scope, and passed inspection. No original/global freshness is claimed.
 

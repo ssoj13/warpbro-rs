@@ -36,49 +36,79 @@ recorded below; do not use the old branch names as the current publication state
 The older receipts below remain historical; use this checkpoint for current publication and
 unfinished gates. No extra approval is needed for the already authorized scope.
 
-- [x] Publish GitNexus `ec11c6a2ad54eee9b27f477c531b6b9625ec18aa`: six Git + 87 MCP
+- [x] Publish GitNexus `ec11c6a2ad54eee9b27f477c531b6b9625ec18aa`, followed by coherent-d411
+  lock `0aa9f32`: earlier six Git + 87 MCP
   tests, native GUI/CLI build (42m38s), two actual help exit-0 calls and post-commit reindex
   passed. The foreign installed MCP was not replaced.
-- [ ] Publish current shared toolbar/output policy after its pending gate. Solid toolbar/
-  mandatory ToolbarState source passed 15 ordinary tests on Rust 1.96; the actual 44px
+- [x] Publish shared toolbar/output policy `d4117f50`. Solid toolbar/
+  mandatory ToolbarState passed 15 ordinary tests on Rust 1.96; the actual 44px
   natural-button/font fixture is corrected. Pure OutputKind/view resolver in the existing
   egui-display export module shares actual WarpBro policy; one producer review closed with
   no findings. Six policy tests did not execute in `21437`: disk-full regex-syntax IO stopped
-  compilation. No files were deleted; about 45 GB became free. Coherent-8c4-lock run `82388`
-  is active, not passed. The producer is not yet published.
-- [ ] Consume that SHA and verify SquareBob FrozenRenderSession. Nine files plus ColorPipeline
+  compilation. No files were deleted; later six output-policy tests and strict Rust 1.96
+  release all-target clippy passed. Sole Apps producer review is closed without findings.
+- [x] Verify scoped SquareBob FrozenRenderSession/camera logic after `b487bbb` and restore fix
+  `6c1e4edbcd470aac466b77c245acbdca2023d350` against d411. Nine files plus ColorPipeline
   now own the frozen DirEntry/camera/quality/options, own color pipeline and existing 3D/2D
   renderer resources moved from author fields. Author time/flags are not mutated; GPU error
   causes survive worker failure/final readback drain. 3D SDR uses RGBA16F float, strict config/
-  LUT failures. Eight ordinary + one ignored GPU tests are source-only: no compile/test/reindex
-  receipt yet. No zero-copy encoder claim; full EXR metadata remains open.
+  LUT failures. Resource invalidation is separate from an authored-camera action; four
+  finish/cancel × failed-path camera regressions and all nine ordinary Frozen session tests
+  passed in latest-source `95027`. Sole Plan review closed with
+  one P2, corrected in `6c1`; no repeated review was requested. Release bin suite `95027`
+  completed its release build in 19m16s: runtime 56 passed, one failed, three ignored.
+  Full suite is not passed. No zero-copy encoder claim; full EXR metadata remains open.
 - [ ] Finish SquareBob toolbar/CamClip/preset acceptance. Foundation 24 UI + one GPU tests
   passed and seven screenshots were generated. Root visual inspection found narrow overlap/
-  floating-bar and fade-fixture issues; source fixes await regenerated accepted screenshots.
+  floating-bar and fade-fixture issues. Existing camera/preset/store/pointer UI tests passed.
+  Remaining latest-suite failure is
+  `app::viewport_toolbar::tests::narrow_viewport_toolbar_horizontal_scroll_reaches_camera_slots`:
+  `toolbar text geometry` while measuring a hidden clipped label with no emitted painter
+  geometry. Root is diagnosing before a fix; correction/rerun is still open.
+  No new screenshots are accepted. Per the latest user instruction, extra screenshots/demo
+  movies are skipped after relevant tests pass and are not mandatory completion blockers.
   Five mandatory nullable LMB-recall/RMB-store camera slots and named preset buttons remain
   incomplete WarpBro OCIO/proxy/denoise/snapshot/full-toolbar parity.
-- [ ] Finish WarpBro verification and shared view/cache migration. Schema gate recorded 256
+- [ ] Finish runtime WarpBro DE/cache/toolbar/paired-benchmark verification after published
+  `cd505435cfafff60102f6038e55fb44d148f8e36` (four files: lock/app/gpu/ocio), following
+  baseline `301b61e`. d411 integration passed plain all-target in 28.01s, no warnings.
+  Strict clippy stopped at the existing fractal-materials eight-argument factory before
+  WarpBro linting; no strict WarpBro clippy PASS. Earlier schema gate recorded 256
   passed / one failed / nine ignored; its remaining lens fixture was fixed and four targeted
   lens tests passed. Actual OIDN HDR/all-quality, PNG-video PQ HEVC/PQ ProRes/HLG HEVC/SDR
   ProRes tags+CLL, and Vulkan partial exact `24000/1001` each passed one gate. Specialized
   Fast one-object radiance still fails at max_abs `5.9247017e-5`; Fast two-object and
   StandardSurface one/two-object radiance/albedo/normals are exact. Trace the shared field
-  boundary before any tolerance/kernel change. Pending shared view-policy/cache migration
-  must correct the actual current-input/look omission in the display/view key.
-- [ ] Finish the native app queue: COLMAP `75655` is active on 8c4; its 7406-byte B fixture
-  has 48 frames / stride 3 / expected 16 and has not yet run. EXV/RV wait for the new widgets
-  SHA. SquareBob floating Git refs were checked against actual remotes; the explicit fscan
-  pin was updated `5f57` → `94dd173`.
+  boundary; no tolerance change is claimed. Earlier display/view key omitted current input/
+  look; latest DE/cache runtime behavior and paired benchmark remain pending.
+- [ ] Finish the native app queue: COLMAP seven/seven actual ingest tests and 35m30s native
+  release passed at 8c4+9d. Its coherent-d411 follow-up
+  `8d44976db7e76f3a1f34ab535d72eb3cdd365d7c` is published; cached native `43593` is
+  rebuilding dependencies. EXV `2ef5db6`, RV `d1cafd2`, Watermark `9628dcb`, GitNexus
+  `0aa9f32` and OTIO `229dfb4` published coherent d411 locks. OTIO 21 tests/demo receipts
+  stand by byte-identical used config-source proof. Audio `db929c8` published coherent 8c4
+  lock; locked offline metadata passed, with no current new native receipt. SquareBob floating
+  Git refs were checked against actual remotes; fscan pin is `94dd173`.
 
 All videos remain under `C:/Temp/bob`; exact retained folders/dimensions are in
 [HANDOFF.md](HANDOFF.md). Twelve SquareBob technical three-frame 64x64 clips are distinct
 from the actual WarpBro Kvazaar/Vulkan motion and fractional/HDR fixtures. Old screenshots
 in `ui-20261007` do not establish narrow acceptance.
+Push all authorized work to main as requested; preserve existing artifacts and avoid gratuitous
+new videos/renders after their tests pass. Publication is not all-scope completion.
+Skip additional review/demo movies and screenshot regeneration after relevant tests pass;
+continue necessary logic/runtime tests and retain the historical narrow visual rejection.
 
 Scoped graph receipts: owned SquareBob mirror full-force `54164` passed (5861 nodes / 13403
 relationships), then serialized `94939` and five-file reindex passed; original canonical DB
-remains foreign-locked/unfresh. Shared ec11 CLI one-file reindex predates the new policy helper;
-reindex again after that source change. WarpBro isolated registry has 3556 nodes / 9918
+remains foreign-locked and was not repaired. Isolated GITNEXUS_HOME `analyze --out` wrote a
+fresh graph, but CLI graph_status/list_repos read the stale canonical `.gitnexus`; impact
+could not find a new test. See BUG3.md, 2026-10-07: fresh registry/meta is not fresh tool-query
+evidence. Root is preparing a SHA-verified owned mirror using default local `.gitnexus`,
+without `--out`; no recovery is claimed yet. Earlier CRITICAL camera impact/two-file LOW
+detect and exact remote commit/push receipts are historical, not newer-test graph coverage.
+Shared widgets and Audio full post-push
+indexes passed and are fresh. WarpBro's earlier isolated registry has 3556 nodes / 9918
 relationships; combined expected detect scope, 503 symbols / 42 files, was CRITICAL and
 inspected successfully. No global/original graph freshness claim.
 
