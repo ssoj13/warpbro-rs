@@ -6,12 +6,14 @@ Per-repo detail: WarpBro `PLAN.md` ("After the 2026-10-06 merge" section), Playa
 
 ## Current continuation (2026-10-06, systematic update in progress)
 
-### Render/quality nodes checkpoint — 2026-10-07, validated source
+### Render/quality nodes checkpoint — 2026-10-07, published source
 
 User priority is completing canonical render/quality profiles and templates. Compiler and
 cross-repo work below is retained history; it is not a substitute for this deliverable.
-Current source passed the final test/build gates below. Publication is recorded by the
-implementation commit on main; no unverified remote SHA or push receipt is asserted here.
+Current source passed the final test/build gates below and was published as
+[d3eccd229c6fad6d81d5ef70fb867cef5821a78a](https://github.com/ssoj13/warpbro-rs/commit/d3eccd229c6fad6d81d5ef70fb867cef5821a78a).
+Exact origin/main was verified by git ls-remote at 17:02:33; this receipt covers the source
+commit, not the subsequent documentation-only checkpoint commit.
 
 - `WorldKind::RenderSettings / QualitySettings / ViewportSettings` are canonical graph
   nodes. Profile/Template is `metadata.catalog_role`; settings values are not duplicated in
@@ -56,9 +58,15 @@ implementation commit on main; no unverified remote SHA or push receipt is asser
   reported 258 symbols / 14 files, HIGH, zero flows. Two main-name aliases in tools/mp4-quality
   and xtask were unchanged by actual Git/SHA checks; the actual 13 source paths include
   inspector deletion. The canonical/global graph was not repaired or certified.
-- Remaining publication step: publish this authorized implementation to main and verify
-  the remote receipt. WorldDirect, external catalog, OutputModule presets and the
-  SquareBob node-profile port remain open.
+- Direct pushes to main returned remote InternalServerError. Publication used the owned
+  temporary branch `codex/render-quality-profiles-d3eccd2`, then a GitHub REST update of
+  main with `force=false`; git ls-remote confirmed the exact source SHA above.
+  Receipt: `run_command_1791392552766_6b35899f-2a34-4e48-9af0-5f45dd1a56c8_stdout.log`.
+- Postcommit owned-mirror HEAD and index both match d3eccd2: is_stale=false and
+  unstaged changes=false after incremental refresh at 16:59:19. This does not certify
+  the canonical/global graph.
+- WorldDirect, external catalog, OutputModule presets and the SquareBob node-profile
+  port remain open.
 
 Final logs under `C:/Users/joss1/.filesystem-mcp-rs/tmp`:
 
