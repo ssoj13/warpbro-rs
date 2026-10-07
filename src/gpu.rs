@@ -721,37 +721,22 @@ pub mod kernels {
         ]
     }
 
-    /// Signed transformed estimate and trap (fractal3d.wgsl signed_distance_and_trap).
     #[inline(always)]
-    fn signed_distance_and_trap<const F: u32>(
+    fn bounded_distance_and_trap(
         ctx: Context<'_>,
-        x: V3,
-        trap_mode: u32,
+        q: V3,
+        d: f32,
+        trap: f32,
+        world_clip: bool,
     ) -> (f32, f32) {
-        let q = object_point(ctx, x);
-        let family = if F == FAMILY_WORLD {
-            pr(ctx, P_FAMILY) as u32
-        } else {
-            F
-        };
-        let (d, trap) = match family {
-            FAMILY_BULB => bulb_distance(ctx, q, trap_mode),
-            FAMILY_BOX => box_distance(ctx, q, trap_mode),
-            FAMILY_QUAT => quat_distance(ctx, q, trap_mode),
-            FAMILY_KIFS => kifs_distance(ctx, q, trap_mode),
-            FAMILY_KLEINIAN => kleinian_distance(ctx, q, trap_mode),
-            FAMILY_PSEUDO_KLEINIAN => pseudo_kleinian_distance(ctx, q, trap_mode),
-            FAMILY_APOLLONIAN => apollonian_distance(ctx, q, trap_mode),
-            _ => hybrid_distance(ctx, q, trap_mode),
-        };
         let radius = pr(ctx, P_BOUND_RADIUS);
         let d = if radius > 0.0 {
             d.max(length(q) - radius)
         } else {
             d
         };
-        // Use the same clipped field for marching and its normal stencil.
-        let d = if F == FAMILY_WORLD || ctx.world {
+        // Marching and every normal stencil must sample the same clipped field.
+        let d = if world_clip {
             d.max(length(q) - ctx.objects[ctx.object * OBJECT_STRIDE + O_CLIP_RADIUS])
         } else {
             d
@@ -764,6 +749,44 @@ pub mod kernels {
             },
             trap,
         )
+    }
+
+    /// Share transformed Mandelbulb arithmetic across the runtime and specialized routes.
+    /// The call boundary prevents caller-specific contraction of its DE/affine stencil.
+    #[inline(never)]
+    fn bulb_estimate(ctx: Context<'_>, x: V3, trap_mode: u32, world_clip: bool) -> (f32, f32) {
+        let q = object_point(ctx, x);
+        let (d, trap) = bulb_distance(ctx, q, trap_mode);
+        bounded_distance_and_trap(ctx, q, d, trap, world_clip)
+    }
+
+    /// Signed transformed estimate and trap (fractal3d.wgsl signed_distance_and_trap).
+    #[inline(always)]
+    fn signed_distance_and_trap<const F: u32>(
+        ctx: Context<'_>,
+        x: V3,
+        trap_mode: u32,
+    ) -> (f32, f32) {
+        let family = if F == FAMILY_WORLD {
+            pr(ctx, P_FAMILY) as u32
+        } else {
+            F
+        };
+        let world_clip = F == FAMILY_WORLD || ctx.world;
+        if family == FAMILY_BULB {
+            return bulb_estimate(ctx, x, trap_mode, world_clip);
+        }
+        let q = object_point(ctx, x);
+        let (d, trap) = match family {
+            FAMILY_BOX => box_distance(ctx, q, trap_mode),
+            FAMILY_QUAT => quat_distance(ctx, q, trap_mode),
+            FAMILY_KIFS => kifs_distance(ctx, q, trap_mode),
+            FAMILY_KLEINIAN => kleinian_distance(ctx, q, trap_mode),
+            FAMILY_PSEUDO_KLEINIAN => pseudo_kleinian_distance(ctx, q, trap_mode),
+            FAMILY_APOLLONIAN => apollonian_distance(ctx, q, trap_mode),
+            _ => hybrid_distance(ctx, q, trap_mode),
+        };
+        bounded_distance_and_trap(ctx, q, d, trap, world_clip)
     }
 
     #[inline(always)]
@@ -968,11 +991,7 @@ pub mod kernels {
             let point = add(origin, mul(dir, t));
             let (d, trap, object) = march_sample::<F>(ctx, point, trap_mode);
             let eps = footprint(base, slope, t, point);
-            let hit = if primary {
-                d <= eps
-            } else {
-                d < eps
-            };
+            let hit = if primary { d <= eps } else { d < eps };
             if hit {
                 let bracket = match outside {
                     Some(bracket) if d <= 0.0 && kind != RAY_VISIBILITY => bracket,

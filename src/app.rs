@@ -4317,6 +4317,7 @@ mod tests {
             for _ in 0..3 {
                 let mut toolbar_rect = egui::Rect::NOTHING;
                 let mut gap = 0.0;
+                let mut minimum_height = 0.0;
                 let mut output = ctx.run_ui(
                     egui::RawInput {
                         screen_rect: Some(egui::Rect::from_min_size(
@@ -4328,9 +4329,18 @@ mod tests {
                     |root| {
                         egui::CentralPanel::default().show(root, |ui| {
                             gap = ui.spacing().item_spacing.x;
+                            minimum_height = ui.spacing().interact_size.y.max(
+                                ui.text_style_height(&egui::TextStyle::Body)
+                                    + 2.0 * ui.spacing().button_padding.y,
+                            ) + egui::style::ScrollStyle::solid()
+                                .allocated_width();
                             toolbar_rect = app.viewport_toolbar(ui, ui.max_rect()).rect;
                         });
                     },
+                );
+                assert!(
+                    toolbar_rect.height() >= minimum_height,
+                    "the viewport must retain room for controls and the separate scroll track"
                 );
                 let text_rect = |wanted: &str| {
                     output.shapes.iter().find_map(|shape| {

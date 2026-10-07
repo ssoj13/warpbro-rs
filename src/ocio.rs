@@ -37,6 +37,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context as _, Result, anyhow, bail};
+pub use egui_display::export::OutputKind;
+use egui_display::export::{OutputView, OutputViewEncoding, resolve_output_view};
 use serde::{Deserialize, Serialize};
 use vfx_ocio::builtin::embedded;
 use vfx_ocio::color_matrix::{Adaptation, REC709, conversion_matrix_from_xyz_d65};
@@ -78,19 +80,8 @@ pub fn source(sel_config: &str) -> String {
         .unwrap_or_else(|| "ocio://default".to_owned())
 }
 
-/// What kind of display an output file is encoded for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum OutputKind {
-    /// SDR: sRGB / BT.709 style displays.
-    Sdr,
-    /// HDR, BT.2100 PQ (HDR10).
-    Pq,
-    /// HDR, BT.2100 HLG.
-    Hlg,
-}
-
 /// Names a [`Sel`] resolves to in one config.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Names {
     pub input: String,
     pub display: String,
@@ -108,9 +99,9 @@ pub struct Ocio {
     cfg: vfx_ocio::Config,
     /// [`Ocio::working_space`], found once per load.
     working: std::sync::OnceLock<Option<String>>,
-    /// Measured peaks of the HDR views [`Ocio::output_transform`] ranks, by (display, view):
+    /// Measured peaks keyed by every resolved processor input, within this config load:
     /// building a view's processor to probe it is too slow to repeat every UI frame.
-    peaks: std::sync::Mutex<std::collections::HashMap<(String, String), Option<f32>>>,
+    peaks: std::sync::Mutex<std::collections::HashMap<Names, Option<f32>>>,
 }
 
 /// The load counter behind [`Ocio::serial`].
@@ -241,23 +232,24 @@ impl Ocio {
     /// HDR displays are told apart by their names (the ACES configs' convention, as Nuke and
     /// Resolve do); the export panel shows the choice and lets it be overridden.
     pub fn display_is(&self, display: &str, kind: OutputKind) -> bool {
-        let name = display.to_ascii_uppercase();
-        match kind {
-            OutputKind::Sdr => true,
-            OutputKind::Pq => {
-                name.contains("PQ") || name.contains("ST2084") || name.contains("ST-2084")
-            }
-            OutputKind::Hlg => name.contains("HLG"),
-        }
+        kind.display_is(display)
     }
 
     /// Whether view `view` of `display` renders for `kind` (HDR views for PQ / HLG, picture SDR
     /// views for SDR).
     pub fn view_is(&self, display: &str, view: &str, kind: OutputKind) -> bool {
-        let enc = self.view_encoding(display, view);
-        match kind {
-            OutputKind::Sdr => enc != Some(Encoding::Hdr) && enc != Some(Encoding::Data),
-            OutputKind::Pq | OutputKind::Hlg => enc == Some(Encoding::Hdr),
+        self.output_view(display, view).encoding.fits(kind)
+    }
+
+    fn output_view<'a>(&self, display: &'a str, view: &'a str) -> OutputView<'a> {
+        OutputView {
+            display,
+            view,
+            encoding: match self.view_encoding(display, view) {
+                Some(Encoding::Hdr) => OutputViewEncoding::Hdr,
+                Some(Encoding::Data) => OutputViewEncoding::Data,
+                _ => OutputViewEncoding::Picture,
+            },
         }
     }
 
@@ -272,63 +264,42 @@ impl Ocio {
         peak_nits: f32,
     ) -> Result<(String, String)> {
         let hdr = kind != OutputKind::Sdr;
-        if let Ok(n) = self.resolve(current, hdr)
-            && self.display_is(&n.display, kind)
-            && self.view_is(&n.display, &n.view, kind)
-        {
-            return Ok((n.display, n.view));
-        }
+        let names = self.resolve(current, hdr).ok();
+        let mut candidates = Vec::new();
         for display in self.displays(hdr) {
-            if !self.display_is(display, kind) {
-                continue;
-            }
-            let views: Vec<&str> = self
-                .views(display, hdr)
-                .into_iter()
-                .filter(|v| self.view_is(display, v, kind))
-                .collect();
-            let view = if hdr {
-                views.iter().copied().min_by(|a, b| {
-                    let d = |v: &str| {
-                        self.view_peak(current, display, v)
-                            .map_or(f32::MAX, |n| (n - peak_nits).abs())
-                    };
-                    d(a).total_cmp(&d(b))
-                })
-            } else {
-                views.first().copied()
-            };
-            if let Some(view) = view {
-                return Ok((display.to_owned(), view.to_owned()));
+            for view in self.views(display, hdr) {
+                candidates.push(self.output_view(display, view));
             }
         }
-        bail!(
-            "the config has no {} display: choose the output transform",
-            match kind {
-                OutputKind::Sdr => "SDR",
-                OutputKind::Pq => "PQ (HDR10)",
-                OutputKind::Hlg => "HLG",
-            }
+        let selected = resolve_output_view(
+            names
+                .as_ref()
+                .map(|n| (n.display.as_str(), n.view.as_str())),
+            kind,
+            peak_nits,
+            &candidates,
+            |display, view| self.view_peak(current, display, view),
         )
+        .map_err(anyhow::Error::msg)?;
+        Ok((selected.display.to_owned(), selected.view.to_owned()))
     }
 
     /// The measured peak in nits of HDR `view` on `display` (with `current`'s input and look),
     /// cached per load; None when it is not an HDR view or cannot be built / measured.
     fn view_peak(&self, current: &Sel, display: &str, view: &str) -> Option<f32> {
-        let key = (display.to_owned(), view.to_owned());
-        if let Ok(peaks) = self.peaks.lock()
-            && let Some(peak) = peaks.get(&key)
-        {
-            return *peak;
-        }
         let sel = Sel {
             display: display.into(),
             view: view.into(),
             ..current.clone()
         };
+        let names = self.resolve(&sel, true).ok()?;
+        if let Ok(peaks) = self.peaks.lock()
+            && let Some(peak) = peaks.get(&names)
+        {
+            return *peak;
+        }
         let peak = self
-            .resolve(&sel, true)
-            .and_then(|names| self.transform(&names, true))
+            .transform(&names, true)
             .ok()
             .and_then(|t| t.light().ok())
             .and_then(|light| match light {
@@ -336,7 +307,7 @@ impl Ocio {
                 crate::color::DisplayLight::Relative => None,
             });
         if let Ok(mut peaks) = self.peaks.lock() {
-            peaks.insert(key, peak);
+            peaks.insert(names, peak);
         }
         peak
     }
@@ -533,7 +504,8 @@ impl Transform {
         if !self.absolute {
             return Ok(crate::color::DisplayLight::Relative);
         }
-        let peak_nits = egui_display::export::measure_display_peak(|probe| self.proc.apply_rgb(probe), 100.0)?;
+        let peak_nits =
+            egui_display::export::measure_display_peak(|probe| self.proc.apply_rgb(probe), 100.0)?;
         Ok(crate::color::DisplayLight::Absolute { peak_nits })
     }
 
@@ -1449,6 +1421,41 @@ mod tests {
                 assert!((peak_nits - 1000.0).abs() < 10.0, "{peak_nits}")
             }
             other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn hdr_view_peak_cache_validates_current_input_and_look() {
+        let o = Ocio::load("ocio://studio-config-latest").unwrap();
+        let current = crate::color::default_selection();
+        let display = "Rec.2100-PQ - Display";
+        let view = "ACES 2.0 - HDR 1000 nits (P3 D65)";
+        let warmed = o.view_peak(&current, display, view).unwrap();
+        assert!((warmed - 1000.0).abs() < 10.0);
+        for invalid in [
+            Sel {
+                working_input: "nonexistent input".into(),
+                ..current.clone()
+            },
+            Sel {
+                look: "nonexistent look".into(),
+                ..current.clone()
+            },
+        ] {
+            let selected = Sel {
+                display: display.into(),
+                view: view.into(),
+                ..invalid.clone()
+            };
+            // The real native processor rejects this request. A warmed view must
+            // not bypass its changed input/look validation or reuse that peak.
+            assert!(
+                o.resolve(&selected, true)
+                    .and_then(|names| o.transform(&names, true))
+                    .is_err()
+            );
+            assert_eq!(o.view_peak(&invalid, display, view), None);
+            assert_eq!(o.view_peak(&current, display, view), Some(warmed));
         }
     }
 

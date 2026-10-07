@@ -1791,7 +1791,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3147,7 +3147,7 @@ dependencies = [
 [[package]]
 name = "egui-attr-grid"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#3443b6f46a2a72526c9542b1e7d8e528c88142bc"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
 dependencies = [
  "egui",
  "egui-colorpicker",
@@ -3163,7 +3163,7 @@ dependencies = [
 [[package]]
 name = "egui-colorpicker"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#3443b6f46a2a72526c9542b1e7d8e528c88142bc"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
 dependencies = [
  "egui",
  "egui-widgets-config",
@@ -3173,7 +3173,7 @@ dependencies = [
 [[package]]
 name = "egui-display"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#3443b6f46a2a72526c9542b1e7d8e528c88142bc"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
 dependencies = [
  "av-util-core",
  "bytemuck",
@@ -3195,7 +3195,7 @@ dependencies = [
 [[package]]
 name = "egui-dock-layout"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#3443b6f46a2a72526c9542b1e7d8e528c88142bc"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
 dependencies = [
  "egui",
  "egui-layout-manager",
@@ -3220,7 +3220,7 @@ dependencies = [
 [[package]]
 name = "egui-file-field"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#3443b6f46a2a72526c9542b1e7d8e528c88142bc"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
 dependencies = [
  "egui",
  "egui-widgets-config",
@@ -3230,7 +3230,7 @@ dependencies = [
 [[package]]
 name = "egui-font-picker"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#3443b6f46a2a72526c9542b1e7d8e528c88142bc"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
 dependencies = [
  "egui",
 ]
@@ -3238,7 +3238,7 @@ dependencies = [
 [[package]]
 name = "egui-hdr-view"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#3443b6f46a2a72526c9542b1e7d8e528c88142bc"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
 dependencies = [
  "bytemuck",
  "egui",
@@ -3249,7 +3249,7 @@ dependencies = [
 [[package]]
 name = "egui-layout-manager"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#3443b6f46a2a72526c9542b1e7d8e528c88142bc"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
 dependencies = [
  "egui",
  "egui-widgets-config",
@@ -3260,7 +3260,7 @@ dependencies = [
 [[package]]
 name = "egui-outliner"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#3443b6f46a2a72526c9542b1e7d8e528c88142bc"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
 dependencies = [
  "egui",
  "egui-widgets-config",
@@ -3269,7 +3269,7 @@ dependencies = [
 [[package]]
 name = "egui-pattern"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#3443b6f46a2a72526c9542b1e7d8e528c88142bc"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
 dependencies = [
  "egui",
  "log",
@@ -3286,7 +3286,7 @@ dependencies = [
 [[package]]
 name = "egui-prefs2"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#3443b6f46a2a72526c9542b1e7d8e528c88142bc"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
 dependencies = [
  "box-rs",
  "egui",
@@ -3298,7 +3298,7 @@ dependencies = [
 [[package]]
 name = "egui-preset"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#3443b6f46a2a72526c9542b1e7d8e528c88142bc"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
 dependencies = [
  "egui",
  "egui-widgets-config",
@@ -3308,7 +3308,7 @@ dependencies = [
 [[package]]
 name = "egui-slider"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#3443b6f46a2a72526c9542b1e7d8e528c88142bc"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
 dependencies = [
  "egui",
 ]
@@ -3316,7 +3316,7 @@ dependencies = [
 [[package]]
 name = "egui-splitter-table"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#3443b6f46a2a72526c9542b1e7d8e528c88142bc"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
 dependencies = [
  "egui",
  "egui-widgets-config",
@@ -3326,7 +3326,7 @@ dependencies = [
 [[package]]
 name = "egui-statusbar"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#3443b6f46a2a72526c9542b1e7d8e528c88142bc"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
 dependencies = [
  "egui",
  "egui-widgets-config",
@@ -3336,7 +3336,7 @@ dependencies = [
 [[package]]
 name = "egui-titlebar"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#3443b6f46a2a72526c9542b1e7d8e528c88142bc"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
 dependencies = [
  "egui",
  "egui-widgets-config",
@@ -3345,7 +3345,7 @@ dependencies = [
 [[package]]
 name = "egui-track-timeline"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#3443b6f46a2a72526c9542b1e7d8e528c88142bc"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
 dependencies = [
  "egui",
  "egui-pattern",
@@ -3356,7 +3356,7 @@ dependencies = [
 [[package]]
 name = "egui-viewport-toolbar"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#3443b6f46a2a72526c9542b1e7d8e528c88142bc"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
 dependencies = [
  "egui",
  "egui-colorpicker",
@@ -3386,7 +3386,7 @@ dependencies = [
 [[package]]
 name = "egui-widgets-config"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#3443b6f46a2a72526c9542b1e7d8e528c88142bc"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
 dependencies = [
  "egui",
  "egui-phosphor",
@@ -3659,7 +3659,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6987,7 +6987,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -7507,7 +7507,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8064,7 +8064,7 @@ version = "0.2.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c2499c2d826531388872b2268718aed907a39bd785ab0dcfe57fab26283f92e"
 dependencies = [
- "skrifa 0.44.0",
+ "skrifa 0.40.0",
  "yazi",
  "zeno",
 ]
@@ -8220,7 +8220,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -9914,7 +9914,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
