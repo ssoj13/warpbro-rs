@@ -54,6 +54,7 @@ av-codec = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main",
 av-hwaccel-vulkan = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main", features = ["vulkan"] }
 av-codec-core = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
 av-format-core = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
+av-format = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
 av-format-movenc = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
 av-swscale = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
 av-util-core = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }

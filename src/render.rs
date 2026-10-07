@@ -161,7 +161,7 @@ impl PreparationInputs {
                 .all(|(input, object)| input.matches(object, false))
     }
 }
-/// Material specialization belongs to the evaluated world, not the root scene's legacy
+/// Material specialization belongs to the evaluated world, not the root scene's snapshot
 /// material. Cache it with the packed upload so launches do not rescan authoring nodes.
 /// Only homogeneous Fast worlds use specialized kernels; Full and mixed worlds retain
 /// the universal dispatcher because material specialization did not establish a speed gain.
@@ -496,7 +496,13 @@ impl Gpu {
         let cfg = LaunchConfig1D::new(TALLY_THREADS as u32 / BLOCK, BLOCK, 0);
         let prepared = self.module.prepare_tally(cfg).expect("prepare tally");
         self.module
-            .tally(&self.stream, &prepared, &target.accum, &target.stats, &mut target.tally)
+            .tally(
+                &self.stream,
+                &prepared,
+                &target.accum,
+                &target.stats,
+                &mut target.tally,
+            )
             .expect("tally");
         target
             .tally
@@ -506,7 +512,11 @@ impl Gpu {
             .tally_host
             .iter()
             .fold((0.0f64, 0.0f64), |(l, s), t| (l + t[0], s + t[1]));
-        target.unresolved = if samples > 0.0 { (unresolved / samples) as f32 } else { 0.0 };
+        target.unresolved = if samples > 0.0 {
+            (unresolved / samples) as f32
+        } else {
+            0.0
+        };
     }
 
     /// Adaptive sampling after a traced batch: the `adapt` kernel decides per tile, the host reads
@@ -526,7 +536,13 @@ impl Gpu {
         let cfg = LaunchConfig1D::new(tiles.div_ceil(BLOCK), BLOCK, 0);
         let prepared = self.module.prepare_adapt(cfg).expect("prepare adapt");
         self.module
-            .adapt(&self.stream, &prepared, &target.accum, &target.stats, &mut target.active)
+            .adapt(
+                &self.stream,
+                &prepared,
+                &target.accum,
+                &target.stats,
+                &mut target.active,
+            )
             .expect("adapt");
         target
             .active
@@ -601,8 +617,11 @@ impl Gpu {
             tally_host: vec![[0.0; 2]; TALLY_THREADS],
             unresolved: 0.0,
             active: {
-                let mut active = DeviceBuffer::zeroed(&self.stream, padded / 32).expect("tile flags");
-                active.copy_from_host(&self.stream, &vec![1u32; padded / 32]).expect("activate tiles");
+                let mut active =
+                    DeviceBuffer::zeroed(&self.stream, padded / 32).expect("tile flags");
+                active
+                    .copy_from_host(&self.stream, &vec![1u32; padded / 32])
+                    .expect("activate tiles");
                 active
             },
             active_host: vec![1; padded / 32],
@@ -683,7 +702,11 @@ impl Gpu {
         params: &[f32; P_COUNT],
     ) -> bool {
         let mut key = *params;
-        for i in TONEMAP_ONLY.iter().chain(PER_LAUNCH.iter()).chain(SCHEDULE_ONLY.iter()) {
+        for i in TONEMAP_ONLY
+            .iter()
+            .chain(PER_LAUNCH.iter())
+            .chain(SCHEDULE_ONLY.iter())
+        {
             key[*i] = 0.0;
         }
         if target.key.len() == P_COUNT + prepared.trace.len()
@@ -1208,6 +1231,7 @@ pub(crate) fn validate_world(scene: &Scene) -> Result<(), String> {
 
 impl WorldUpload {
     fn new(scene: &Scene, width: u32, height: u32) -> Result<Self, String> {
+        scene.camera.validate_lens()?;
         let mut params = scene.pack(width, height);
         let mut objects = Vec::new();
         let mut lights = Vec::new();
@@ -1321,8 +1345,23 @@ impl Target {
             return Err(format!("Colour transform failed: {e}"));
         }
         let sdr = || self.pixels.iter().flat_map(|p| p.to_le_bytes()).collect();
-        let scale = crate::render_service::hdr_scale(self.light_kind, &self.light, sdr_white_nits, encoding);
-        crate::render_service::write_png(path, self.width, self.height, &self.light, sdr, encoding, scale, overwrite).map(|_| ())
+        let scale = crate::render_service::hdr_scale(
+            self.light_kind,
+            &self.light,
+            sdr_white_nits,
+            encoding,
+        );
+        crate::render_service::write_png(
+            path,
+            self.width,
+            self.height,
+            &self.light,
+            sdr,
+            encoding,
+            scale,
+            overwrite,
+        )
+        .map(|_| ())
     }
 
     /// Display light, linear Rec.709, normalized to 100 nits (matching exr-view).
@@ -1330,7 +1369,15 @@ impl Target {
         if let Some(e) = &self.colour_error {
             return Err(format!("Colour transform failed: {e}"));
         }
-        crate::exr_io::write_rgb(path, self.width, self.height, &self.light, &crate::color::DISPLAY_PRIMS, Some(100.0), true)
+        crate::exr_io::write_rgb(
+            path,
+            self.width,
+            self.height,
+            &self.light,
+            &crate::color::DISPLAY_PRIMS,
+            Some(100.0),
+            true,
+        )
     }
 }
 
@@ -1342,6 +1389,7 @@ mod tests {
     #[test]
     #[ignore = "renders CUDA glass comparison PNGs; run explicitly with --ignored --nocapture"]
     fn cuda_glass_visual_probe() {
+        let _gpu_test = crate::test_gpu::lock();
         let _ = env_logger::try_init();
         let output = std::env::current_dir().unwrap().join("target/glass-probe");
         std::fs::create_dir_all(&output).unwrap();
@@ -1359,7 +1407,16 @@ mod tests {
                 }
             })
             .collect();
-        crate::exr_io::write_rgb(&environment, 512, 256, &checker, &crate::color::DISPLAY_PRIMS, None, true).unwrap();
+        crate::exr_io::write_rgb(
+            &environment,
+            512,
+            256,
+            &checker,
+            &crate::color::DISPLAY_PRIMS,
+            None,
+            true,
+        )
+        .unwrap();
         let mut gpu = Gpu::new().unwrap();
         for (family, shape) in [(FAMILY_KIFS, "sphere"), (FAMILY_BULB, "bulb")] {
             for preset in ["GlassClear", "GlassBottleGreen", "GlassWaterGreen"] {
@@ -1393,7 +1450,14 @@ mod tests {
                 }
                 assert!(target.colour_error.is_none(), "{:?}", target.colour_error);
                 let path = output.join(format!("{shape}-{preset}.png"));
-                target.save_png(&path, crate::render_service::PngEncoding::displayed(target.light_kind.hdr()), crate::color::BT2408_SDR_WHITE_NITS, true).unwrap();
+                target
+                    .save_png(
+                        &path,
+                        crate::render_service::PngEncoding::displayed(target.light_kind.hdr()),
+                        crate::color::BT2408_SDR_WHITE_NITS,
+                        true,
+                    )
+                    .unwrap();
                 eprintln!("glass_visual {} samples={}", path.display(), target.samples);
             }
         }
@@ -1401,6 +1465,7 @@ mod tests {
 
     #[test]
     fn transmission_packing_promotes_fast_and_invalidates_preparation() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut scene = dark_world();
         scene
             .objects
@@ -1427,6 +1492,7 @@ mod tests {
 
     #[test]
     fn cuda_glass_exits_signed_and_unsigned_solids_and_absorbs_green_by_depth() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut gpu = Gpu::new().unwrap();
         for family in [FAMILY_KIFS, FAMILY_BULB] {
             let mut object = Scene::preset(family);
@@ -1496,7 +1562,10 @@ mod tests {
                         hue[1] > hue[0] * 5.0 && hue[1] > hue[2] * 2.0,
                         "{green:?} = Rec.709 {hue:?}"
                     );
-                    for (value, expected) in green[..3].iter().zip(crate::color::to_working([0.12, 0.82, 0.25])) {
+                    for (value, expected) in green[..3]
+                        .iter()
+                        .zip(crate::color::to_working([0.12, 0.82, 0.25]))
+                    {
                         assert!(
                             (*value - expected).abs() < expected * 0.15 + 0.01,
                             "depth family={family} world={world}: {green:?}"
@@ -1509,6 +1578,7 @@ mod tests {
 
     #[test]
     fn prepared_world_material_tracks_packed_objects_and_model_edits() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut cache = PreparationCache::default();
         let mut scene = dark_world();
         scene.material.model = MaterialModel::StandardSurface;
@@ -1577,20 +1647,25 @@ mod tests {
     #[test]
     #[ignore = "requires CUDA; compares specialized kernels against the mixed-world oracle"]
     fn cuda_specialized_world_materials_preserve_radiance_and_affine_guides() {
+        let _gpu_test = crate::test_gpu::lock();
         fn compare_pixels(
             actual: &[[f32; 4]],
             expected: &[[f32; 4]],
             approximate: bool,
             label: &str,
-        ) {
+        ) -> Option<String> {
             assert_eq!(actual.len(), expected.len());
             let mut max_absolute = 0.0f32;
             let mut max_relative = 0.0f32;
+            let mut worst = (0, 0);
             let mut passed = true;
-            for (a, b) in actual.iter().zip(expected) {
+            for (index, (a, b)) in actual.iter().zip(expected).enumerate() {
                 for channel in 0..4 {
                     let difference = (a[channel] - b[channel]).abs();
-                    max_absolute = max_absolute.max(difference);
+                    if difference > max_absolute {
+                        max_absolute = difference;
+                        worst = (index, channel);
+                    }
                     max_relative = max_relative.max(difference / b[channel].abs().max(1e-12));
                     passed &= if approximate {
                         a[channel].is_finite()
@@ -1601,17 +1676,19 @@ mod tests {
                     };
                 }
             }
-            assert!(
-                passed,
-                "{label}: max_absolute={max_absolute:e}, max_relative={max_relative:e}, approximate={approximate}"
+            let diagnostic = format!(
+                "{label}: max_absolute={max_absolute:e}, max_relative={max_relative:e}, approximate={approximate}, pixel={}, channel={}, actual={:?}, expected={:?}",
+                worst.0, worst.1, actual[worst.0], expected[worst.0]
             );
+            println!("{diagnostic}, passed={passed}");
+            (!passed).then_some(diagnostic)
         }
         fn compare_guides(
             actual: &[[f32; 4]],
             expected: &[[f32; 4]],
             approximate: bool,
             label: &str,
-        ) {
+        ) -> Option<String> {
             assert_eq!(actual.len(), expected.len());
             // Alpha stores the accumulated sample count. Zero RGB identifies a miss
             // for the nonblack materials/normals used by this fixture.
@@ -1623,9 +1700,10 @@ mod tests {
                     "{label}: hit/miss differs at pixel {index}"
                 );
             }
-            compare_pixels(actual, expected, approximate, label);
+            compare_pixels(actual, expected, approximate, label)
         }
         let mut gpu = Gpu::new().unwrap();
+        let mut errors = Vec::new();
         for model in [MaterialModel::Fast, MaterialModel::StandardSurface] {
             for object_count in [1usize, 2] {
                 let mut scene = dark_world();
@@ -1690,36 +1768,38 @@ mod tests {
                 let reference_radiance = gpu.raw_scene_linear(&reference);
                 assert!(specialized_radiance.iter().any(|p| p[0] > 0.0));
                 let approximate = model == MaterialModel::Fast && object_count == 1;
-                compare_pixels(
+                errors.extend(compare_pixels(
                     &specialized_radiance,
                     &reference_radiance,
                     approximate,
                     &format!("radiance for {model:?}, objects={object_count}"),
-                );
+                ));
                 let specialized_albedo = gpu.guide_sums(&specialized, &specialized.albedo);
                 assert!(specialized_albedo.iter().any(|p| p[0] > 0.0 && p[0] > p[2]));
                 if object_count == 2 {
                     assert!(specialized_albedo.iter().any(|p| p[2] > 0.0 && p[2] > p[0]));
                 }
-                compare_guides(
+                errors.extend(compare_guides(
                     &specialized_albedo,
                     &gpu.guide_sums(&reference, &reference.albedo),
                     approximate,
                     &format!("albedo for {model:?}, objects={object_count}"),
-                );
-                compare_guides(
+                ));
+                errors.extend(compare_guides(
                     &gpu.guide_sums(&specialized, &specialized.normal),
                     &gpu.guide_sums(&reference, &reference.normal),
                     approximate,
                     &format!("normals for {model:?}, objects={object_count}"),
-                );
+                ));
             }
         }
         gpu.force_mixed_world = false;
+        assert!(errors.is_empty(), "specialized world errors: {errors:#?}");
     }
 
     #[test]
     fn preparation_reuses_display_edits_and_invalidates_runtime_geometry() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut cache = PreparationCache::default();
         let mut scene = dark_world();
         scene.objects.push(world_object(
@@ -1773,6 +1853,7 @@ mod tests {
 
     #[test]
     fn preparation_preview_full_and_all_formula_packs_remain_exact() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut cache = PreparationCache::default();
         for family in 0..=FAMILY_HYBRID {
             let mut scene = Scene::preset(family);
@@ -1805,6 +1886,7 @@ mod tests {
 
     #[test]
     fn preparation_failures_are_cached_until_actual_inputs_change() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut scene = dark_world();
         scene
             .objects
@@ -1820,6 +1902,7 @@ mod tests {
 
     #[test]
     fn resident_upload_identity_restores_a_after_b_and_retries_failure() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut resident = Resident::<u32>::default();
         let mut copies = Vec::new();
         for key in [1, 1, 2, 2, 1] {
@@ -1858,6 +1941,7 @@ mod tests {
 
     #[test]
     fn texel_identity_ignores_environment_gain_rotation_but_tracks_reload_and_palettes() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut scene = dark_world();
         scene.environment.enabled = true;
         scene.environment.path = "fixture.exr".into();
@@ -1882,6 +1966,7 @@ mod tests {
 
     #[test]
     fn padded_readback_reuses_storage_and_preserves_normalization_and_guide_counts() {
+        let _gpu_test = crate::test_gpu::lock();
         let (width, height) = (9usize, 5usize);
         let mut tiled = vec![[f32::NAN; 4]; width.div_ceil(8) * height.div_ceil(4) * 32];
         let expected: Vec<_> = (0..width * height)
@@ -1912,6 +1997,7 @@ mod tests {
 
     #[test]
     fn typed_display_key_tracks_colour_and_revision_without_denoise() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut scene = Scene::preset(FAMILY_BULB);
         let key = DisplayKey::new(&scene, 0);
         scene.render.denoise.interval += 1;
@@ -1927,6 +2013,7 @@ mod tests {
     #[test]
     #[ignore = "CPU preparation timing; run explicitly with --ignored --nocapture"]
     fn preparation_benchmark() {
+        let _gpu_test = crate::test_gpu::lock();
         const ITERATIONS: u64 = 10_000;
         let mut scene = dark_world();
         scene.objects = vec![
@@ -1958,6 +2045,7 @@ mod tests {
 
     #[test]
     fn cuda_resident_world_restore_matches_uninterrupted_reference() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut gpu = Gpu::new().unwrap();
         let mut a = dark_world();
         a.objects.push(world_object(
@@ -2011,6 +2099,7 @@ mod tests {
 
     #[test]
     fn cuda_failed_environment_reload_keeps_resident_identity_and_caches_decode_error() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut gpu = Gpu::new().unwrap();
         let mut scene = dark_world();
         scene
@@ -2068,20 +2157,35 @@ mod tests {
     }
     #[test]
     fn cuda_adaptive_sampling_stops_converged_tiles_and_keeps_sky_exact() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut gpu = Gpu::new().unwrap();
         let mut scene = Scene::preset(FAMILY_BULB);
         scene.camera.distance *= 4.0; // mostly sky: those tiles converge at the minimum
         scene.render.denoise.enabled = false;
-        scene.render.adaptive = crate::scene::Adaptive { enabled: true, noise_threshold: 0.05, min_samples: 16 };
+        scene.render.adaptive = crate::scene::Adaptive {
+            enabled: true,
+            noise_threshold: 0.05,
+            min_samples: 16,
+        };
         let budget = 4096;
         let mut target = gpu.target(64, 48);
         while !target.complete(budget) {
             gpu.step(&mut target, &scene, 16, 0, None, false);
         }
-        assert!(target.converged && target.samples < budget, "{} samples", target.samples);
+        assert!(
+            target.converged && target.samples < budget,
+            "{} samples",
+            target.samples
+        );
         assert_eq!(target.active_tiles.0, 0);
-        let counts: Vec<f32> = gpu.guide_sums(&target, &target.accum).iter().map(|p| p[3]).collect();
-        let (low, high) = counts.iter().fold((f32::MAX, 0.0f32), |(l, h), &c| (l.min(c), h.max(c)));
+        let counts: Vec<f32> = gpu
+            .guide_sums(&target, &target.accum)
+            .iter()
+            .map(|p| p[3])
+            .collect();
+        let (low, high) = counts
+            .iter()
+            .fold((f32::MAX, 0.0f32), |(l, h), &c| (l.min(c), h.max(c)));
         assert_eq!(low, 16.0, "sky tiles stop at the minimum");
         assert!(high > low, "noisy fractal tiles keep sampling");
         // Sky radiance is deterministic: per-pixel normalisation must reproduce the uniform render.
@@ -2092,13 +2196,21 @@ mod tests {
         let reference = gpu.raw_scene_linear(&uniform);
         let sky = counts.iter().position(|&c| c == 16.0).unwrap();
         for k in 0..3 {
-            assert!((adaptive[sky][k] - reference[sky][k]).abs() < 1e-5, "{:?} vs {:?}", adaptive[sky], reference[sky]);
+            assert!(
+                (adaptive[sky][k] - reference[sky][k]).abs() < 1e-5,
+                "{:?} vs {:?}",
+                adaptive[sky],
+                reference[sky]
+            );
         }
     }
 
     /// Working-space pixels in Rec.709, the primaries test colours are authored in.
     fn rec709(pixels: &[[f32; 4]]) -> Vec<[f32; 3]> {
-        pixels.iter().map(|p| crate::color::to_709([p[0], p[1], p[2]])).collect()
+        pixels
+            .iter()
+            .map(|p| crate::color::to_709([p[0], p[1], p[2]]))
+            .collect()
     }
     fn dark_world() -> Scene {
         let mut scene = Scene::preset(FAMILY_BULB);
@@ -2113,7 +2225,6 @@ mod tests {
         scene.render.max_steps = 256;
         scene
     }
-
 
     /// BUG1 frame 27 (copper turbine: Hybrid Mandelbulb + octahedral KIFS), self-contained:
     /// grazing rays that need hundreds of march steps, primary rays only.
@@ -2138,7 +2249,7 @@ mod tests {
         scene.camera.roll_degrees = 0.00025211525;
         scene.camera.distance = 2.017553;
         scene.camera.fov_y_degrees = 38.0;
-        scene.camera.aperture = 0.0;
+        scene.camera.f_number = 0.0;
         scene.camera_reference = Some(2.0);
         scene.render.iterations = 12;
         scene.render.step_factor = 0.85;
@@ -2174,6 +2285,7 @@ mod tests {
     /// steps the shortfall is reported and every remaining hit is a converged one.
     #[test]
     fn cuda_march_out_of_steps_is_a_reported_miss_not_a_phantom_hit() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut gpu = Gpu::new().unwrap();
         let budget = crate::scene::DEFAULT_MAX_STEPS;
         let (albedo, normal, unresolved) = frame27_guides(&mut gpu, budget);
@@ -2184,7 +2296,10 @@ mod tests {
         assert!(hits > 60_000, "{hits} primary hits");
 
         let (short_albedo, short_normal, short) = frame27_guides(&mut gpu, 256);
-        assert!(short > 0.1, "frame 27 at 256 steps leaves many rays out of steps: {short}");
+        assert!(
+            short > 0.1,
+            "frame 27 at 256 steps leaves many rays out of steps: {short}"
+        );
         let mut kept = 0;
         for k in 0..normal.len() {
             if short_normal[k][..3] != [0.0; 3] {
@@ -2201,6 +2316,7 @@ mod tests {
 
     #[test]
     fn cuda_curved_hybrid_normals_match_converged_field_gradient() {
+        let _gpu_test = crate::test_gpu::lock();
         let scene = bug1_frame27();
         // Independent f64 field gradients, converged by halving the central difference step
         // from eps/2 to eps/64, at converged hits (4096 march steps) whose neighborhoods keep
@@ -2234,6 +2350,7 @@ mod tests {
 
     #[test]
     fn cuda_tiny_hybrid_gradients_keep_surface_normal_direction() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut gpu = Gpu::new().unwrap();
         let mut authored = Scene::preset(crate::params::FAMILY_HYBRID);
         if let crate::scene::Formula::Hybrid(h) = &mut authored.formula {
@@ -2254,7 +2371,7 @@ mod tests {
         authored.camera.pitch_degrees = -0.55681777;
         authored.camera.distance = 2.017553;
         authored.camera.fov_y_degrees = 38.0;
-        authored.camera.aperture = 0.0;
+        authored.camera.f_number = 0.0;
         authored.render.iterations = 64;
         authored.render.hit_epsilon = 0.001;
         authored.render.denoise.enabled = false;
@@ -2288,8 +2405,10 @@ mod tests {
                 assert!((n.length() - 1.0).abs() < 1e-4);
                 hits += 1;
                 let (x, y) = ((i % w) as u32, (i / w) as u32);
-                let nx = 2.0 * (x as f32 + crate::sampler::sample(x ^ 19, y, 0, 0)) / w as f32 - 1.0;
-                let ny = 1.0 - 2.0 * (y as f32 + crate::sampler::sample(x ^ 19, y, 0, 1)) / h as f32;
+                let nx =
+                    2.0 * (x as f32 + crate::sampler::sample(x ^ 19, y, 0, 0)) / w as f32 - 1.0;
+                let ny =
+                    1.0 - 2.0 * (y as f32 + crate::sampler::sample(x ^ 19, y, 0, 1)) / h as f32;
                 let ray = (forward + right * nx * p[P_HALF_W] + up * ny * p[P_HALF_H]).normalize();
                 if n.dot(-ray) > 0.999999 {
                     fallback += 1;
@@ -2305,6 +2424,7 @@ mod tests {
 
     #[test]
     fn cuda_primary_guides_capture_material_world_normal_and_miss_counts() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut gpu = Gpu::new().unwrap();
         let mut object = Scene::preset(FAMILY_KIFS);
         object.formula =
@@ -2405,6 +2525,7 @@ mod tests {
     #[test]
     #[ignore = "requires actual CUDA and shared wgpu OIDN inference"]
     fn cuda_oidn_final_output_is_linear_and_never_changes_raw_samples() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut gpu = Gpu::new().unwrap();
         let mut scene = dark_world();
         scene.objects = vec![world_object(
@@ -2464,6 +2585,7 @@ mod tests {
 
     #[test]
     fn cuda_denoise_failure_cadence_final_and_settings_preserve_raw_accumulation() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut gpu = Gpu::new().unwrap();
         gpu.denoiser = Some(Err("controlled initialization failure".into()));
         let mut scene = dark_world();
@@ -2508,6 +2630,7 @@ mod tests {
 
     #[test]
     fn world_upload_preserves_affine_shear_and_rejects_singular_transforms() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut scene = dark_world();
         let mut object = world_object(
             FAMILY_BULB,
@@ -2545,6 +2668,7 @@ mod tests {
     }
     #[test]
     fn cuda_world_two_formulas_materials_occlusion_visibility_and_empty_geometry() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut gpu = Gpu::new().unwrap();
         let mut target = gpu.target(32, 24);
         let mut scene = dark_world();
@@ -2591,6 +2715,7 @@ mod tests {
     }
     #[test]
     fn cuda_world_directional_lights_sum_and_object_edits_reset_accumulation() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut gpu = Gpu::new().unwrap();
         let mut target = gpu.target(24, 16);
         let mut scene = dark_world();
@@ -2631,6 +2756,7 @@ mod tests {
     }
     #[test]
     fn cuda_world_secondary_rays_reach_another_objects_emission() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut gpu = Gpu::new().unwrap();
         let mut target = gpu.target(24, 24);
         let mut scene = dark_world();
@@ -2656,6 +2782,7 @@ mod tests {
 
     #[test]
     fn cuda_world_sibling_casts_a_shadow_outside_its_camera_silhouette() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut gpu = Gpu::new().unwrap();
         let mut target = gpu.target(32, 24);
         let mut scene = dark_world();
@@ -2695,11 +2822,21 @@ mod tests {
 
     #[test]
     fn hdr_background_interpolates_texels_instead_of_showing_nearest_blocks() {
+        let _gpu_test = crate::test_gpu::lock();
         let path = std::env::temp_dir().join(format!("frac-env-filter-{}.exr", std::process::id()));
         let texels: Vec<[f32; 4]> = (0..4)
             .map(|i| [8.0 * (i % 2) as f32, 4.0 * (i / 2) as f32, 2.0, 1.0])
             .collect();
-        crate::exr_io::write_rgb(&path, 2, 2, &texels, &crate::color::WORKING_PRIMS, None, true).unwrap();
+        crate::exr_io::write_rgb(
+            &path,
+            2,
+            2,
+            &texels,
+            &crate::color::WORKING_PRIMS,
+            None,
+            true,
+        )
+        .unwrap();
         let mut gpu = Gpu::new().unwrap();
         let mut target = gpu.target(64, 32);
         let mut scene = Scene::preset(FAMILY_QUAT);
@@ -2726,8 +2863,18 @@ mod tests {
 
     #[test]
     fn hdr_environment_lights_surfaces_and_preserves_background_radiance() {
+        let _gpu_test = crate::test_gpu::lock();
         let path = std::env::temp_dir().join(format!("frac-env-gpu-{}.exr", std::process::id()));
-        crate::exr_io::write_rgb(&path, 8, 4, &[[4.0, 2.0, 1.0, 1.0]; 32], &crate::color::WORKING_PRIMS, None, true).unwrap();
+        crate::exr_io::write_rgb(
+            &path,
+            8,
+            4,
+            &[[4.0, 2.0, 1.0, 1.0]; 32],
+            &crate::color::WORKING_PRIMS,
+            None,
+            true,
+        )
+        .unwrap();
         let mut gpu = Gpu::new().unwrap();
         let mut target = gpu.target(16, 8);
         let mut scene = Scene::preset(FAMILY_QUAT);
@@ -2779,6 +2926,7 @@ mod tests {
     }
     #[test]
     fn cuda_float_output_reuses_samples_and_exports_hdr_metadata() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut gpu = Gpu::new().unwrap();
         let mut target = gpu.target(17, 9); // partial CUDA tiles
         let mut scene = Scene::preset(FAMILY_KIFS);
@@ -2833,29 +2981,56 @@ mod tests {
             (PngEncoding::Hlg, png::BitDepth::Sixteen, Some(18)),
             (PngEncoding::Sdr8, png::BitDepth::Eight, None),
         ] {
-            target.save_png(&png, encoding, crate::color::BT2408_SDR_WHITE_NITS, true).unwrap();
+            target
+                .save_png(&png, encoding, crate::color::BT2408_SDR_WHITE_NITS, true)
+                .unwrap();
             let bytes = std::fs::read(&png).unwrap();
             let at = bytes.windows(4).position(|b| b == b"cICP");
             assert_eq!(at.map(|i| bytes[i + 5]), cicp, "{encoding:?} transfer");
-            assert_eq!(bytes.windows(4).any(|b| b == b"cLLI"), encoding == PngEncoding::Hdr10);
+            assert_eq!(
+                bytes.windows(4).any(|b| b == b"cLLI"),
+                encoding == PngEncoding::Hdr10
+            );
             let mut decoder = png::Decoder::new(std::io::Cursor::new(&bytes));
             decoder.set_transformations(png::Transformations::IDENTITY);
             let reader = decoder.read_info().unwrap();
             assert_eq!(reader.info().bit_depth, depth, "{encoding:?}");
             assert_eq!(reader.info().width, 17);
         }
-        assert!(target.save_png(&png, PngEncoding::Sdr8, crate::color::BT2408_SDR_WHITE_NITS, false).is_err(), "existing file without overwrite");
+        assert!(
+            target
+                .save_png(
+                    &png,
+                    PngEncoding::Sdr8,
+                    crate::color::BT2408_SDR_WHITE_NITS,
+                    false
+                )
+                .is_err(),
+            "existing file without overwrite"
+        );
         let exr_path = dir.join("display.exr");
         target.save_display_exr(&exr_path).unwrap();
         assert_eq!(
             crate::exr_io::read_attr::<exr_core::attr::Chromaticities>(&exr_path, "chromaticities"),
             Some(exr_core::attr::Chromaticities::default())
         );
-        assert_eq!(crate::exr_io::read_attr::<f32>(&exr_path, "whiteLuminance"), Some(100.0));
+        assert_eq!(
+            crate::exr_io::read_attr::<f32>(&exr_path, "whiteLuminance"),
+            Some(100.0)
+        );
         scene.colour.view = "missing view".into();
         gpu.step(&mut target, &scene, 0, 0, None, false);
         assert!(target.colour_error.is_some());
-        assert!(target.save_png(&png, crate::render_service::PngEncoding::Sdr8, crate::color::BT2408_SDR_WHITE_NITS, true).is_err());
+        assert!(
+            target
+                .save_png(
+                    &png,
+                    crate::render_service::PngEncoding::Sdr8,
+                    crate::color::BT2408_SDR_WHITE_NITS,
+                    true
+                )
+                .is_err()
+        );
         let display_before_reset = target.light.clone();
         scene.camera.yaw_degrees += 5.0;
         assert!(gpu.prepare_target(&mut target, &scene, None));
@@ -2874,16 +3049,15 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
-    fn old_bookmarks_default_to_aces2_and_ignore_a_stored_input() {
+    fn obsolete_bookmark_colour_payloads_are_rejected() {
+        let _gpu_test = crate::test_gpu::lock();
         let scene = Scene::preset(FAMILY_BULB);
         let mut json = serde_json::to_value(&scene).unwrap();
         json.as_object_mut().unwrap().remove("colour");
-        let restored: Scene = serde_json::from_value(json).unwrap();
-        assert_eq!(restored.colour, crate::color::default_selection());
-        // Scenes saved while the input was a choice still load; the working space wins.
+        assert!(serde_json::from_value::<Scene>(json).is_err());
+        // Obsolete colour fields cannot silently reinterpret scene input.
         let mut json = serde_json::to_value(&scene).unwrap();
         json["colour"]["input"] = "Linear Rec.709 (sRGB)".into();
-        let restored: Scene = serde_json::from_value(json).unwrap();
-        assert_eq!(restored.colour, scene.colour);
+        assert!(serde_json::from_value::<Scene>(json).is_err());
     }
 }

@@ -6,6 +6,12 @@ use std::{
     thread,
 };
 
+fn report(done: &mpsc::Sender<Result<String, String>>, result: Result<String, String>) {
+    if let Err(mpsc::SendError(result)) = done.send(result) {
+        log::warn!("Filesystem result has no receiver: {result:?}");
+    }
+}
+
 pub enum Command {
     SaveFrame {
         frame: Arc<Frame>,
@@ -78,12 +84,18 @@ impl IoService {
                 };
                 loop {
                     match rx.recv_timeout(std::time::Duration::from_millis(50)) {
-                        Ok(Command::SaveFrame { frame, path, file, sdr_white_nits }) => {
+                        Ok(Command::SaveFrame {
+                            frame,
+                            path,
+                            file,
+                            sdr_white_nits,
+                        }) => {
                             let result = frame.save(&path, file, sdr_white_nits);
-                            let _ = done.send(result.map(|_| format!("Saved {}", path.display())));
+                            report(&done, result.map(|_| format!("Saved {}", path.display())));
                         }
                         Ok(Command::Write { path, text }) => {
-                            let _ = done.send(
+                            report(
+                                &done,
                                 write(&path, &text)
                                     .map(|_| format!("Saved {}", path.display()))
                                     .map_err(|e| e.to_string()),
@@ -110,12 +122,17 @@ impl IoService {
                         }
                         Ok(Command::Delete(path)) => {
                             if let Err(e) = std::fs::remove_file(path) {
-                                let _ = done.send(Err(e.to_string()));
+                                report(&done, Err(e.to_string()));
                             }
                         }
                         Err(mpsc::RecvTimeoutError::Disconnected) => {
                             if let Some((path, text)) = pending.lock().unwrap().take() {
-                                let _ = write(&path, &text);
+                                if let Err(error) = write(&path, &text) {
+                                    log::error!(
+                                        "Final settings save {} failed: {error}",
+                                        path.display()
+                                    );
+                                }
                             }
                             break;
                         }
@@ -125,7 +142,7 @@ impl IoService {
                     if let Some((path, text)) = next
                         && let Err(e) = write(&path, &text)
                     {
-                        let _ = done.send(Err(format!("Settings save failed: {e}")));
+                        report(&done, Err(format!("Settings save failed: {e}")));
                     }
                 }
             })

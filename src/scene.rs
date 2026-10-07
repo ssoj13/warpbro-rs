@@ -216,23 +216,17 @@ pub const DEFAULT_MAX_STEPS: u32 = 4096;
 
 #[cfg(test)]
 mod glass_probe_tests {
-    /// A scene saved before the setting existed renders glass as it did (256 probes).
     #[test]
     fn scenes_without_glass_probes_load_with_the_former_count() {
         let mut json = serde_json::to_value(super::Scene::preset(0).render).unwrap();
         json.as_object_mut().unwrap().remove("glass_probes");
-        let render: super::Render = serde_json::from_value(json).unwrap();
-        assert_eq!(render.glass_probes, super::DEFAULT_GLASS_PROBES);
+        assert!(serde_json::from_value::<super::Render>(json).is_err());
         assert_eq!(super::DEFAULT_GLASS_PROBES, 256);
     }
 }
 
-/// The glass interior resolution of every preset and of scenes saved before the setting
-/// (`Render::glass_probes`): the probe count every exit used before it was a setting.
+/// The glass interior resolution of a fresh scene.
 pub const DEFAULT_GLASS_PROBES: u32 = 256;
-fn default_glass_probes() -> u32 {
-    DEFAULT_GLASS_PROBES
-}
 
 /// fractal3d.rs HIT_EPSILON_PER_PIXEL: a footprint is hit_epsilon / this of a pixel.
 const HIT_EPSILON_PER_PIXEL: f32 = 0.008;
@@ -313,18 +307,22 @@ impl Formula {
 // =============================================================================
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Camera {
     pub target: [f32; 3],
     pub yaw_degrees: f32,
     pub pitch_degrees: f32,
-    #[serde(default)]
+
     pub roll_degrees: f32,
-    #[serde(default)]
+
     pub free_flight: bool,
     /// In framing radii of the formula.
     pub distance: f32,
     pub fov_y_degrees: f32,
-    pub aperture: f32,
+    /// Physical f-number (focal length / entrance pupil diameter); 0 disables depth of field.
+    pub f_number: f32,
+    /// Full vertical film gate in scene units. The metre convention uses 0.024 for 24 mm.
+    pub sensor_height: f32,
     /// In framing radii; 0 = focus on the target.
     pub focus_distance: f32,
 }
@@ -376,16 +374,16 @@ pub struct Facing {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Material {
     pub model: MaterialModel,
-    #[serde(default)]
+
     pub color_source: ColorSource,
-    #[serde(default = "default_base_color")]
+
     pub base_color: [f32; 3],
-    #[serde(default)]
+
     pub facing: Option<Facing>,
     /// The library preset this material came from (UI label only).
-    #[serde(default)]
     pub preset: Option<String>,
     pub base: f32,
     pub base_tint: [f32; 3],
@@ -398,15 +396,12 @@ pub struct Material {
     pub specular_anisotropy: f32,
     pub specular_rotation: f32,
     /// Fraction of dielectric base energy that refracts rather than diffuses.
-    #[serde(default)]
     pub transmission: f32,
     /// Interface tint when depth is zero; Beer-Lambert transmittance at depth otherwise.
-    #[serde(default = "default_transmission_color")]
     pub transmission_color: [f32; 3],
-    #[serde(default)]
+
     pub transmission_extra_roughness: f32,
     /// World-space reference distance for absorption. Zero disables volume absorption.
-    #[serde(default)]
     pub transmission_depth: f32,
     pub sheen: f32,
     pub sheen_color: [f32; 3],
@@ -432,6 +427,7 @@ pub enum Coloring {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Render {
     pub iterations: u32,
     pub max_steps: u32,
@@ -446,22 +442,20 @@ pub struct Render {
     /// march their distance but never step shorter. A resolution, not the march's step budget:
     /// on a glass Mandelbulb 4096 against 256 is 10-30x the render time and a darker, more
     /// structured interior. An exit not found is `Outcome::Unresolved` (counted).
-    #[serde(default = "default_glass_probes")]
     pub glass_probes: u32,
     pub exposure_stops: f32,
     pub saturation: f32,
     pub reinhard: bool,
     /// OIDN works on neutral scene-linear samples before display transforms.
-    #[serde(default)]
     pub denoise: crate::denoise::Settings,
-    #[serde(default)]
+
     pub adaptive: Adaptive,
 }
 
 /// Adaptive sampling (V-Ray noise threshold / Redshift adaptive error): 8x4 pixel tiles stop
 /// receiving samples once their noise is below the threshold; the sample target stays the maximum.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct Adaptive {
     pub enabled: bool,
     /// Relative standard error of a pixel's mean luminance, `se / sqrt(mean)`.
@@ -471,7 +465,11 @@ pub struct Adaptive {
 }
 impl Default for Adaptive {
     fn default() -> Self {
-        Self { enabled: true, noise_threshold: 0.01, min_samples: 16 }
+        Self {
+            enabled: true,
+            noise_threshold: 0.01,
+            min_samples: 16,
+        }
     }
 }
 impl Adaptive {
@@ -486,6 +484,7 @@ impl Adaptive {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Scene {
     /// Evaluated world data; the editor owns the authoring document.
     #[serde(skip)]
@@ -501,9 +500,11 @@ pub struct Scene {
     /// Frozen document carried only by exports/bookmark entries, never CUDA requests.
     #[serde(skip)]
     pub document: Option<Box<crate::world::WorldDocument>>,
-    #[serde(default)]
+
+    /// Transient timeline view; WorldDocument owns the persisted range and frame rate.
+    #[serde(skip)]
     pub animation: crate::animation::Animation,
-    #[serde(default)]
+
     pub environment: crate::environment::Environment,
     pub name: String,
     pub formula: Formula,
@@ -518,11 +519,46 @@ pub struct Scene {
     pub trap_axis: u32,
     pub trap_scale: f32,
     pub render: Render,
-    #[serde(default = "crate::color::default_selection")]
+
     pub colour: crate::ocio::Sel,
 }
 
 impl Camera {
+    pub fn validate_lens(&self) -> Result<(), String> {
+        if !self.fov_y_degrees.is_finite()
+            || !(0.0 < self.fov_y_degrees && self.fov_y_degrees < 180.0)
+        {
+            return Err("Camera vertical FOV must be between 0 and 180 degrees".into());
+        }
+        if !self.sensor_height.is_finite() || self.sensor_height <= 0.0 {
+            return Err("Camera sensor height must be positive and finite in scene units".into());
+        }
+        if !self.f_number.is_finite() || self.f_number < 0.0 {
+            return Err("Camera f-number must be finite and nonnegative (0 is pinhole)".into());
+        }
+        let focal_length = self.focal_length();
+        let radius = self.lens_radius();
+        if !focal_length.is_finite()
+            || focal_length <= 0.0
+            || !radius.is_finite()
+            || (self.f_number > 0.0 && radius <= 0.0)
+        {
+            return Err("Camera lens dimensions exceed the finite scene-unit range".into());
+        }
+        Ok(())
+    }
+    /// OpenUSD GfCamera: full vertical gate / (2 * tan(vertical FOV / 2)).
+    pub fn focal_length(&self) -> f32 {
+        self.sensor_height / (2.0 * (0.5 * self.fov_y_degrees.to_radians()).tan())
+    }
+    /// Physical entrance pupil radius in scene units; OpenUSD fStop=0 is a pinhole.
+    pub fn lens_radius(&self) -> f32 {
+        if self.f_number > 0.0 {
+            (f64::from(self.focal_length()) / (2.0 * f64::from(self.f_number))) as f32
+        } else {
+            0.0
+        }
+    }
     pub fn orientation(&self) -> glam::Quat {
         glam::Quat::from_euler(
             glam::EulerRot::YXZ,
@@ -541,7 +577,8 @@ impl Camera {
             free_flight: false,
             distance: 2.5318,
             fov_y_degrees: fov,
-            aperture: 0.0,
+            f_number: 0.0,
+            sensor_height: 0.024,
             focus_distance: 0.0,
         }
     }
@@ -563,10 +600,6 @@ impl Default for Lighting {
             background: true,
         }
     }
-}
-
-fn default_transmission_color() -> [f32; 3] {
-    [1.0; 3]
 }
 
 fn default_base_color() -> [f32; 3] {
@@ -885,7 +918,7 @@ impl Scene {
         put3(&mut p, P_CAM_UP, up);
         p[P_HALF_W] = half_w;
         p[P_HALF_H] = half_h;
-        p[P_APERTURE] = c.aperture * camera_radius * 0.05;
+        p[P_APERTURE] = c.lens_radius();
         p[P_FOCUS_DISTANCE] = if c.focus_distance > 0.0 {
             c.focus_distance * camera_radius
         } else {
@@ -1218,4 +1251,54 @@ fn rotation_matrix4(degrees: [f32; 3]) -> [[f32; 4]; 4] {
         m = out;
     }
     m.map(|row| row.map(|v| v as f32))
+}
+
+#[cfg(test)]
+mod lens_tests {
+    use super::*;
+    #[test]
+    fn physical_gate_fov_and_f_number_pack_scene_unit_pupil_radius() {
+        let mut scene = Scene::preset(0);
+        scene.camera.fov_y_degrees = (2.0 * (0.024_f32 / (2.0 * 0.050)).atan()).to_degrees();
+        scene.camera.f_number = 2.0;
+        assert!((scene.camera.focal_length() - 0.050).abs() < 1e-7);
+        assert!((scene.pack(1280, 720)[P_APERTURE] - 0.0125).abs() < 1e-7);
+        scene.camera.f_number = 4.0;
+        assert!((scene.camera.lens_radius() - 0.00625).abs() < 1e-7);
+        scene.camera.sensor_height *= 2.0;
+        assert!((scene.camera.lens_radius() - 0.0125).abs() < 1e-7);
+        scene.camera.f_number = 0.0;
+        assert_eq!(scene.pack(1280, 720)[P_APERTURE], 0.0);
+    }
+}
+
+#[cfg(test)]
+mod lens_validation_tests {
+    use super::*;
+    #[test]
+    fn invalid_physical_lens_dimensions_are_rejected_even_for_pinhole() {
+        for gate in [-0.024, 0.0, f32::INFINITY, f32::NAN] {
+            let mut camera = Camera::default_fov(45.0);
+            camera.sensor_height = gate;
+            assert!(camera.validate_lens().is_err());
+        }
+        for f_number in [-1.0, f32::INFINITY, f32::NAN] {
+            let mut camera = Camera::default_fov(45.0);
+            camera.f_number = f_number;
+            assert!(camera.validate_lens().is_err());
+        }
+        for fov in [0.0, -1.0, 180.0, 181.0, f32::NAN] {
+            assert!(Camera::default_fov(fov).validate_lens().is_err());
+        }
+        assert!(Camera::default_fov(45.0).validate_lens().is_ok());
+        let mut camera = Camera::default_fov(45.0);
+        camera.f_number = f32::from_bits(1);
+        assert!(camera.validate_lens().is_err());
+        camera.f_number = f32::MAX;
+        assert!(
+            camera.validate_lens().is_ok(),
+            "the pupil remains a representable subnormal"
+        );
+        assert!(camera.lens_radius() > 0.0);
+    }
 }

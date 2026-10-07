@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 /// First / last frame and frame rate of a scene.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct Animation {
     pub first: u32,
     pub last: u32,
@@ -33,4 +33,3 @@ impl Scene {
         Ok(base)
     }
 }
-

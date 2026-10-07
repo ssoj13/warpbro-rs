@@ -73,7 +73,7 @@ pub fn scene(index: usize) -> Result<Scene, String> {
     base.animation.fps = 24.0;
     base.camera.distance = [3.8, 3.1, 2.6, 3.8, 3.1][index];
     base.camera.pitch_degrees = 14.0;
-    base.camera.aperture = 0.0;
+    base.camera.f_number = 0.0;
     base.render.max_bounces = 4;
     base.render.exposure_stops = 0.0;
     base.material.model = MaterialModel::StandardSurface;

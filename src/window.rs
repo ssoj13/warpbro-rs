@@ -84,7 +84,7 @@ impl Native {
         surface.configure(&device, &config);
         let ctx = egui::Context::default();
         let mut fonts = egui::FontDefinitions::default();
-        egui_phosphor::add_to_fonts(&mut fonts, egui_phosphor::Variant::Regular);
+        egui_widgets_config::add_icon_font(&mut fonts);
         ctx.set_fonts(fonts);
         // Solid scroll bars reserve their width: egui's default floating bars paint over the
         // right edge of every scroll area (e.g. the Attribute Editor's per-row expand buttons).

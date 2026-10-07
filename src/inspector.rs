@@ -97,8 +97,12 @@ impl Row {
     fn hint(self) -> Option<&'static str> {
         match self {
             Row::TargetSamples => Some("Samples per pixel the viewport renders before it stops."),
-            Row::ViewportScale => Some("Viewport resolution relative to the window: lower renders faster."),
-            Row::Seed => Some("Random sequence of the samples; a new seed gives a different noise pattern."),
+            Row::ViewportScale => {
+                Some("Viewport resolution relative to the window: lower renders faster.")
+            }
+            Row::Seed => {
+                Some("Random sequence of the samples; a new seed gives a different noise pattern.")
+            }
             _ => self.path().and_then(crate::world::attribute_hint),
         }
     }
@@ -143,10 +147,16 @@ impl Row {
             Row::Denoise => AttrValue::Bool(r.denoise.enabled),
             Row::DenoiseInterval => AttrValue::UInt(r.denoise.interval),
             Row::DenoiseMode => AttrValue::UInt(
-                crate::denoise::Mode::ALL.iter().position(|m| *m == r.denoise.mode).unwrap_or(0) as u32,
+                crate::denoise::Mode::ALL
+                    .iter()
+                    .position(|m| *m == r.denoise.mode)
+                    .unwrap_or(0) as u32,
             ),
             Row::DenoiseQuality => AttrValue::UInt(
-                crate::denoise::Quality::ALL.iter().position(|q| *q == r.denoise.quality).unwrap_or(0) as u32,
+                crate::denoise::Quality::ALL
+                    .iter()
+                    .position(|q| *q == r.denoise.quality)
+                    .unwrap_or(0) as u32,
             ),
             Row::TargetSamples => AttrValue::UInt(*s.target),
             Row::ViewportScale => AttrValue::Float(*s.resolution),
@@ -171,7 +181,9 @@ impl Row {
             (Row::Saturation, AttrValue::Float(v)) => r.saturation = limit(v.into()) as f32,
             (Row::Reinhard, AttrValue::Bool(v)) => r.reinhard = v,
             (Row::Denoise, AttrValue::Bool(v)) => r.denoise.enabled = v,
-            (Row::DenoiseInterval, AttrValue::UInt(v)) => r.denoise.interval = limit(v.into()) as u32,
+            (Row::DenoiseInterval, AttrValue::UInt(v)) => {
+                r.denoise.interval = limit(v.into()) as u32
+            }
             (Row::DenoiseMode, AttrValue::UInt(v)) => {
                 if let Some(mode) = crate::denoise::Mode::ALL.get(v as usize) {
                     r.denoise.mode = *mode;
@@ -278,7 +290,7 @@ pub fn render(
     resolution: &mut f32,
     seed: &mut u32,
     label_width: &mut f32,
-    metrics: egui_attr_grid::AttrMetrics,
+    metrics: egui_widgets_config::AttrMetrics,
 ) {
     let metrics = metrics.normalized();
     metrics.apply(ui);
@@ -291,7 +303,15 @@ pub fn render(
     for (field, row) in editor.fields.iter_mut().zip(Row::ALL) {
         field.value = row.get(&settings);
     }
-    let config = crate::world_ui::grid_config(metrics);
+    metrics.apply(ui);
+    let config = egui_attr_grid::AttrGridConfig {
+        value_box_width: Some(egui_attr_grid::value_box_width(
+            ui,
+            &editor.fields,
+            metrics.numeric_width,
+        )),
+        ..crate::world_ui::grid_config(metrics)
+    };
     let mut hooks = RenderHooks {
         denoise: settings.render.denoise.enabled,
     };
@@ -339,10 +359,16 @@ mod tests {
             assert!(row.hint().is_some(), "{row:?} has no hint");
         }
         Row::GlassProbes.set(&mut s, AttrValue::UInt(0));
-        assert_eq!(s.render.glass_probes, 1, "the world's hard limit holds here too");
+        assert_eq!(
+            s.render.glass_probes, 1,
+            "the world's hard limit holds here too"
+        );
         let span = Row::MarchSteps.ui_options();
         let max: f64 = span[1].parse().unwrap();
-        assert!(max >= f64::from(crate::scene::DEFAULT_MAX_STEPS), "{span:?}");
+        assert!(
+            max >= f64::from(crate::scene::DEFAULT_MAX_STEPS),
+            "{span:?}"
+        );
     }
 
     #[test]

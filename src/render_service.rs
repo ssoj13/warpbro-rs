@@ -10,6 +10,10 @@ use std::time::{Duration, Instant};
 use crate::render::{Gpu, Target};
 use crate::scene::Scene;
 
+#[cfg(test)]
+use egui_display::export::{HLG_REFERENCE_PEAK_NITS, HdrScale};
+pub use egui_display::export::{HdrLevels, PngEncoding, hdr_scale, write_png};
+
 const QUEUE_LIMIT: usize = 16;
 const PREVIEW_HOLD: Duration = Duration::from_millis(180);
 
@@ -31,85 +35,6 @@ pub struct ViewportRequest {
     pub white_nits: f32,
 }
 
-/// How a PNG encodes a frame's display light.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub enum PngEncoding {
-    /// 8-bit sRGB / BT.709 SDR: the SDR view's codes (an HDR view is rendered for SDR too).
-    #[default]
-    Sdr8,
-    /// 16-bit BT.2100 PQ, BT.2020 primaries; `cICP`, `mDCV`, `cLLI`.
-    Hdr10,
-    /// 16-bit BT.2100 HLG, BT.2020 primaries, for a display of the given peak; `cICP`, `mDCV`.
-    Hlg,
-}
-impl PngEncoding {
-    pub const ALL: [Self; 3] = [Self::Sdr8, Self::Hdr10, Self::Hlg];
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Sdr8 => "SDR · 8-bit sRGB / BT.709",
-            Self::Hdr10 => "HDR10 · 16-bit PQ / BT.2020",
-            Self::Hlg => "HLG · 16-bit BT.2020",
-        }
-    }
-    pub fn hdr(self) -> bool {
-        self != Self::Sdr8
-    }
-    /// What a monitor shows: HDR10 for an HDR output, else SDR. PQ, not HLG: the monitor shows
-    /// absolute display light, which PQ encodes as it is.
-    pub fn displayed(hdr: bool) -> Self {
-        if hdr { Self::Hdr10 } else { Self::Sdr8 }
-    }
-    /// The file suffix after the stem, for every PNG writer (snapshot, export, CLI): HDR PNGs
-    /// name their transfer so they are not taken for SDR (an HDR10 PNG in a viewer that
-    /// ignores `cICP` looks washed out).
-    pub fn suffix(self) -> &'static str {
-        match self {
-            Self::Sdr8 => "png",
-            Self::Hdr10 => "pq.png",
-            Self::Hlg => "hlg.png",
-        }
-    }
-}
-
-/// How a frame's display light becomes nits in an HDR PNG.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct HdrScale {
-    /// Nits of the light's 1.0: 100 for an HDR view's absolute light, the SDR white for
-    /// relative light (the monitor's when it shows HDR, else BT.2408's 203).
-    pub unit_nits: f32,
-    /// The mastering display (`mDCV`, HLG system gamma): the HDR view's measured peak, or the
-    /// brightest relative light in nits.
-    pub peak_nits: f32,
-}
-
-/// The BT.2100 HLG reference display: the peak an HLG file of relative light is graded for,
-/// so its SDR white (BT.2408: 203 nits) lands near 75 % signal, not at full signal.
-pub const HLG_REFERENCE_PEAK_NITS: f32 = 1000.0;
-
-/// The most light PQ carries (BT.2100).
-const PQ_PEAK_NITS: f32 = 10_000.0;
-
-/// The one rule from a frame's light to HDR file nits (`HdrScale`) for `encoding`, for every
-/// PNG writer. Absolute light: 1.0 = 100 nits, the view's measured peak. Relative light: 1.0
-/// at `sdr_white_nits`; the peak is the brightest light for PQ, the HLG reference display for
-/// HLG (HLG is relative to its display).
-pub fn hdr_scale(
-    kind: crate::color::DisplayLight,
-    light: &[[f32; 4]],
-    sdr_white_nits: f32,
-    encoding: PngEncoding,
-) -> HdrScale {
-    let (unit_nits, peak_nits) = match (kind, encoding) {
-        (crate::color::DisplayLight::Absolute { peak_nits }, _) => (100.0, peak_nits),
-        (crate::color::DisplayLight::Relative, PngEncoding::Hlg) => (sdr_white_nits, HLG_REFERENCE_PEAK_NITS),
-        (crate::color::DisplayLight::Relative, _) => {
-            let max = light.iter().map(|p| p[0].max(p[1]).max(p[2])).fold(1.0f32, f32::max);
-            (sdr_white_nits, sdr_white_nits * max)
-        }
-    };
-    HdrScale { unit_nits, peak_nits: peak_nits.min(PQ_PEAK_NITS) }
-}
-
 /// The file a viewport snapshot (or a PNG export) is saved as. An SDR PNG holds the SDR
 /// rendering (an HDR view is rendered for SDR too, `Frame::sdr_bytes`); an HDR PNG and the
 /// display EXR hold the display light an HDR monitor shows, unclipped above SDR white.
@@ -127,87 +52,6 @@ impl FrameFile {
             Self::DisplayExr => "display.exr",
         }
     }
-}
-
-/// The light an HDR PNG records (`mDCV`, `cLLI`): what a video made of the sequence carries
-/// as its HDR metadata (`export::ExportSettings::ffmpeg_args`), aggregated over the frames
-/// (`Self::merge`).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct HdrLevels {
-    /// The mastering display's peak (`HdrScale::peak_nits`).
-    pub peak_nits: f32,
-    /// Measured content light level; PQ only (HLG is relative to its display).
-    pub content: Option<egui_display::screenshot::ContentLight>,
-}
-impl HdrLevels {
-    /// The levels of a clip: the brightest mastering peak, MaxCLL and MaxFALL of all frames.
-    pub fn merge(self, other: Self) -> Self {
-        let content = match (self.content, other.content) {
-            (Some(a), Some(b)) => Some(egui_display::screenshot::ContentLight {
-                max_cll: a.max_cll.max(b.max_cll),
-                max_fall: a.max_fall.max(b.max_fall),
-            }),
-            (a, b) => a.or(b),
-        };
-        Self { peak_nits: self.peak_nits.max(other.peak_nits), content }
-    }
-}
-
-/// Write display light as a PNG: the one encoder behind the viewport, export and CLI writers.
-/// `light` is linear Rec.709 display light, `scale` says how it becomes nits (`hdr_scale`);
-/// `sdr` yields the 8-bit sRGB codes, read only for SDR. Returns what an HDR file records
-/// (None for SDR).
-#[allow(clippy::too_many_arguments)]
-pub fn write_png(
-    path: &Path,
-    width: usize,
-    height: usize,
-    light: &[[f32; 4]],
-    sdr: impl FnOnce() -> Vec<u8>,
-    encoding: PngEncoding,
-    scale: HdrScale,
-    overwrite: bool,
-) -> Result<Option<HdrLevels>, String> {
-    let peak_nits = scale.peak_nits;
-    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
-    }
-    av_util_core::outfile::check_overwrite(path, overwrite).map_err(|e| e.to_string())?;
-    let u16s = |codes: [f32; 3]| codes.map(|c| (c.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16);
-    let nits = |p: &[f32; 4]| egui_display::rec2020_nits([p[0], p[1], p[2]], scale.unit_nits);
-    let hdr = |code: &dyn Fn([f32; 3]) -> [f32; 3]| {
-        egui_display::screenshot::Pixels::Rgba16(
-            light
-                .iter()
-                .flat_map(|p| {
-                    let [r, g, b] = u16s(code(nits(p)));
-                    [r, g, b, 65535]
-                })
-                .collect(),
-        )
-    };
-    let (output, pixels) = match encoding {
-        PngEncoding::Sdr8 => (egui_display::Output::Sdr8, egui_display::screenshot::Pixels::Rgba8(sdr())),
-        PngEncoding::Hdr10 => (
-            egui_display::Output::Hdr10,
-            hdr(&|n| n.map(|v| egui_display::pq(v.clamp(0.0, 10000.0)))),
-        ),
-        PngEncoding::Hlg => (
-            egui_display::Output::Hlg,
-            hdr(&|n| egui_display::hlg(n.map(|v| v.max(0.0)), peak_nits)),
-        ),
-    };
-    let capture = egui_display::screenshot::Capture {
-        output,
-        width: width as u32,
-        height: height as u32,
-        // The file says where its SDR white is and which display it was graded for.
-        white_nits: scale.unit_nits,
-        peak_nits: if encoding.hdr() { peak_nits } else { scale.unit_nits },
-        pixels,
-    };
-    let (_, content) = capture.save_measured(path).map_err(|e| e.to_string())?;
-    Ok(encoding.hdr().then_some(HdrLevels { peak_nits, content }))
 }
 
 /// CPU data only. The GPU context, buffers and progressive targets never leave the worker.
@@ -313,24 +157,49 @@ impl Frame {
     }
     /// `sdr_white_nits`: the nits of relative light's 1.0 in an HDR file (`hdr_scale`).
     /// Returns what an HDR file records (`write_png`).
-    pub fn save_png(&self, path: &Path, encoding: PngEncoding, sdr_white_nits: f32, overwrite: bool) -> Result<Option<HdrLevels>, String> {
+    pub fn save_png(
+        &self,
+        path: &Path,
+        encoding: PngEncoding,
+        sdr_white_nits: f32,
+        overwrite: bool,
+    ) -> Result<Option<HdrLevels>, String> {
         if let Some(e) = &self.colour_error {
             return Err(format!("Colour transform failed: {e}"));
         }
         let scale = hdr_scale(self.light_kind, &self.light, sdr_white_nits, encoding);
-        write_png(path, self.width, self.height, &self.light, || self.sdr_bytes.as_ref().clone(), encoding, scale, overwrite)
+        write_png(
+            path,
+            self.width,
+            self.height,
+            &self.light,
+            || self.sdr_bytes.as_ref().clone(),
+            encoding,
+            scale,
+            overwrite,
+        )
     }
     pub fn save_display_exr(&self, path: &Path) -> Result<(), String> {
         if let Some(e) = &self.colour_error {
             return Err(format!("Colour transform failed: {e}"));
         }
-        crate::exr_io::write_rgb(path, self.width, self.height, &self.light, &crate::color::DISPLAY_PRIMS, Some(100.0), true)
+        crate::exr_io::write_rgb(
+            path,
+            self.width,
+            self.height,
+            &self.light,
+            &crate::color::DISPLAY_PRIMS,
+            Some(100.0),
+            true,
+        )
     }
     /// Save this frame as `file` (viewport snapshots: File menu and the viewport toolbar);
     /// `sdr_white_nits` as in [`Self::save_png`].
     pub fn save(&self, path: &Path, file: FrameFile, sdr_white_nits: f32) -> Result<(), String> {
         match file {
-            FrameFile::Png(encoding) => self.save_png(path, encoding, sdr_white_nits, true).map(|_| ()),
+            FrameFile::Png(encoding) => self
+                .save_png(path, encoding, sdr_white_nits, true)
+                .map(|_| ()),
             FrameFile::DisplayExr => self.save_display_exr(path),
         }
     }
@@ -450,6 +319,8 @@ struct Shared {
 }
 pub struct RenderService {
     shared: Arc<Shared>,
+    #[cfg(test)]
+    worker_thread: Option<thread::JoinHandle<()>>,
 }
 impl RenderService {
     pub fn spawn() -> Self {
@@ -459,7 +330,7 @@ impl RenderService {
         });
         let worker = shared.clone();
         // CUDA objects are constructed here, not on the caller and moved between threads.
-        thread::Builder::new()
+        let _worker_thread = thread::Builder::new()
             .name("frac-cuda".into())
             .spawn(move || {
                 let result =
@@ -496,7 +367,11 @@ impl RenderService {
                 }
             })
             .expect("start CUDA worker");
-        Self { shared }
+        Self {
+            shared,
+            #[cfg(test)]
+            worker_thread: Some(_worker_thread),
+        }
     }
     pub fn request_viewport(&self, request: ViewportRequest) {
         let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -679,7 +554,14 @@ impl Drop for RenderService {
             .unwrap_or_else(|e| e.into_inner())
             .stopping = true;
         self.shared.wake.notify_one();
-        // Do not join on the UI thread; the worker finishes its bounded CUDA batch and exits.
+        // Production never joins the UI thread. Tests must release the adapter only after the
+        // worker has dropped its CUDA/OIDN resources, otherwise the next test races teardown.
+        #[cfg(test)]
+        if let Some(worker) = self.worker_thread.take() {
+            if worker.join().is_err() {
+                log::error!("CUDA test worker panicked during shutdown");
+            }
+        }
     }
 }
 fn recycle_mailbox_frame(state: &mut Mailbox, frame: Arc<Frame>) {
@@ -1572,9 +1454,8 @@ fn run_worker(shared: &Shared) {
     }
 }
 fn thumbnail_snapshot(mut scene: Scene) -> Result<Scene, String> {
-    if let Some(document) = scene.document.take() {
-        scene = document.snapshot(document.first as f64)?;
-    }
+    let document = crate::world::WorldDocument::from_scene(&scene);
+    scene = document.snapshot(f64::from(document.first))?;
     scene.render.max_bounces = scene.render.max_bounces.min(3);
     Ok(scene)
 }
@@ -1681,6 +1562,7 @@ mod tests {
     #[test]
     #[ignore = "requires CUDA; verifies Playa cache then play through the real worker"]
     fn cuda_preview_caches_inclusive_range_then_replays_native_presentation() {
+        let _gpu_test = crate::test_gpu::lock();
         let service = RenderService::spawn();
         let mut scene = Scene::preset(crate::params::FAMILY_BULB);
         scene.colour.on = false;
@@ -1763,6 +1645,7 @@ mod tests {
 
     #[test]
     fn switching_draft_and_final_profiles_preserves_final_pixels() {
+        let _gpu_test = crate::test_gpu::lock();
         let full = crate::preview::PreviewRequest {
             generation: 41,
             scene: Arc::new(request().scene),
@@ -1817,6 +1700,7 @@ mod tests {
 
     #[test]
     fn preview_pool_waits_for_staged_bytes_and_reuses_arc_identity() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut pool = PresentationPool::default();
         let frame = pool.acquire().unwrap();
         let identity = Arc::as_ptr(&frame);
@@ -1838,6 +1722,7 @@ mod tests {
     }
     #[test]
     fn preview_mailbox_retains_begin_coalesces_seek_and_recycles_replaced_results() {
+        let _gpu_test = crate::test_gpu::lock();
         let shared = Shared {
             state: Mutex::new(Mailbox::default()),
             wake: Condvar::new(),
@@ -1928,7 +1813,9 @@ mod tests {
     }
     #[test]
     fn preview_controller_shutdown_drops_pending_transport_without_waiting() {
+        let _gpu_test = crate::test_gpu::lock();
         let service = RenderService {
+            worker_thread: None,
             shared: Arc::new(Shared {
                 state: Mutex::new(Mailbox {
                     stopping: true,
@@ -1962,6 +1849,7 @@ mod tests {
 
     #[test]
     fn hdr_canvas_direct_bytes_match_original_float_canvas() {
+        let _gpu_test = crate::test_gpu::lock();
         let pixels = [[-2.0, 0.0031308, 7.0, 0.0], [0.0, 1.0, 0.25, 0.5]];
         for gain in [1.0, 0.5, 100.0 / 203.0] {
             let original: Vec<[f32; 4]> = pixels
@@ -2026,16 +1914,48 @@ mod tests {
     /// bright as the screen.
     #[test]
     fn hdr_scale_puts_sdr_white_where_the_monitor_shows_it() {
+        let _gpu_test = crate::test_gpu::lock();
         use crate::color::DisplayLight;
         let light = [[1.0, 0.5, 0.25, 1.0], [2.0, 0.0, 0.0, 1.0]];
         let relative = hdr_scale(DisplayLight::Relative, &light, 203.0, PngEncoding::Hdr10);
-        assert_eq!(relative, HdrScale { unit_nits: 203.0, peak_nits: 406.0 });
+        assert_eq!(
+            relative,
+            HdrScale {
+                unit_nits: 203.0,
+                peak_nits: 406.0
+            }
+        );
         let hlg = hdr_scale(DisplayLight::Relative, &light, 203.0, PngEncoding::Hlg);
-        assert_eq!(hlg, HdrScale { unit_nits: 203.0, peak_nits: HLG_REFERENCE_PEAK_NITS });
-        let absolute = hdr_scale(DisplayLight::Absolute { peak_nits: 1000.0 }, &light, 203.0, PngEncoding::Hdr10);
-        assert_eq!(absolute, HdrScale { unit_nits: 100.0, peak_nits: 1000.0 });
-        let unbounded = hdr_scale(DisplayLight::Relative, &[[1.0e3, 0.0, 0.0, 1.0]], 203.0, PngEncoding::Hdr10);
-        assert_eq!(unbounded.peak_nits, 10_000.0, "mDCV never exceeds what PQ carries");
+        assert_eq!(
+            hlg,
+            HdrScale {
+                unit_nits: 203.0,
+                peak_nits: HLG_REFERENCE_PEAK_NITS
+            }
+        );
+        let absolute = hdr_scale(
+            DisplayLight::Absolute { peak_nits: 1000.0 },
+            &light,
+            203.0,
+            PngEncoding::Hdr10,
+        );
+        assert_eq!(
+            absolute,
+            HdrScale {
+                unit_nits: 100.0,
+                peak_nits: 1000.0
+            }
+        );
+        let unbounded = hdr_scale(
+            DisplayLight::Relative,
+            &[[1.0e3, 0.0, 0.0, 1.0]],
+            203.0,
+            PngEncoding::Hdr10,
+        );
+        assert_eq!(
+            unbounded.peak_nits, 10_000.0,
+            "mDCV never exceeds what PQ carries"
+        );
 
         // The written PQ code of white is PQ(203 nits).
         let mut frame = Arc::try_unwrap(completed_frame(1, false)).ok().unwrap();
@@ -2043,14 +1963,20 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("frac-hdr-scale-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("white.pq.png");
-        frame.save(&path, FrameFile::Png(PngEncoding::Hdr10), 203.0).unwrap();
-        let decoder = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap()));
+        frame
+            .save(&path, FrameFile::Png(PngEncoding::Hdr10), 203.0)
+            .unwrap();
+        let decoder =
+            png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap()));
         let mut reader = decoder.read_info().unwrap();
         let mut buf = vec![0; reader.output_buffer_size().unwrap()];
         reader.next_frame(&mut buf).unwrap();
         let green = u16::from_be_bytes([buf[2], buf[3]]);
         let expected = (egui_display::pq(203.0) * 65535.0 + 0.5) as u16;
-        assert!(green.abs_diff(expected) <= 1, "{green} vs PQ(203) {expected}");
+        assert!(
+            green.abs_diff(expected) <= 1,
+            "{green} vs PQ(203) {expected}"
+        );
         // The metadata says the same: SDR white at 203 nits, mastered for the brightest light.
         let info = reader.info();
         let white = info
@@ -2069,6 +1995,7 @@ mod tests {
     /// BT.709 (negative linear Rec.709 light) reaches the BT.2020 codes unclipped.
     #[test]
     fn hdr10_png_of_a_p3_view_keeps_its_peak_and_gamut() {
+        let _gpu_test = crate::test_gpu::lock();
         use crate::color::DisplayLight;
         let ocio = crate::ocio::Ocio::load("ocio://studio-config-latest").unwrap();
         let sel = crate::ocio::Sel {
@@ -2076,16 +2003,24 @@ mod tests {
             view: "ACES 2.0 - HDR 500 nits (P3 D65)".into(),
             ..crate::color::default_selection()
         };
-        let transform = ocio.transform(&ocio.resolve(&sel, true).unwrap(), true).unwrap();
+        let transform = ocio
+            .transform(&ocio.resolve(&sel, true).unwrap(), true)
+            .unwrap();
         let kind = transform.light().unwrap();
-        let DisplayLight::Absolute { peak_nits } = kind else { panic!("{kind:?}") };
+        let DisplayLight::Absolute { peak_nits } = kind else {
+            panic!("{kind:?}")
+        };
         assert!((peak_nits - 500.0).abs() < 5.0, "{peak_nits}");
 
         // Saturated ACEScg green (a brighter one is tone-mapped toward white, inside BT.709),
         // and a highlight far above the view's range.
         let mut light = [[0.0, 1.0, 0.0, 1.0], [1.0e3, 1.0e3, 1.0e3, 1.0]];
         transform.processor().apply_rgba(&mut light);
-        assert!(light[0][..3].iter().any(|&v| v < -1.0e-3), "P3 green lies outside BT.709: {:?}", light[0]);
+        assert!(
+            light[0][..3].iter().any(|&v| v < -1.0e-3),
+            "P3 green lies outside BT.709: {:?}",
+            light[0]
+        );
 
         let mut frame = Arc::try_unwrap(completed_frame(1, false)).ok().unwrap();
         frame.width = 2;
@@ -2094,30 +2029,65 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("frac-hdr-p3-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("p3.pq.png");
-        frame.save(&path, FrameFile::Png(PngEncoding::Hdr10), 203.0).unwrap();
+        frame
+            .save(&path, FrameFile::Png(PngEncoding::Hdr10), 203.0)
+            .unwrap();
 
         let bytes = std::fs::read(&path).unwrap();
-        let cicp = bytes.windows(8).find(|w| &w[..4] == b"cICP").map(|w| w[4..8].to_vec());
+        let cicp = bytes
+            .windows(8)
+            .find(|w| &w[..4] == b"cICP")
+            .map(|w| w[4..8].to_vec());
         assert_eq!(cicp, Some(vec![9, 16, 0, 1]));
-        let decoder = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap()));
+        let decoder =
+            png::Decoder::new(std::io::BufReader::new(std::fs::File::open(&path).unwrap()));
         let mut reader = decoder.read_info().unwrap();
         let mut buf = vec![0; reader.output_buffer_size().unwrap()];
         reader.next_frame(&mut buf).unwrap();
         let mdcv = reader.info().mastering_display_color_volume.expect("mDCV");
-        assert_eq!(mdcv.max_luminance, (peak_nits * 10_000.0).round() as u32, "the view's measured peak");
+        assert_eq!(
+            mdcv.max_luminance,
+            (peak_nits * 10_000.0).round() as u32,
+            "the view's measured peak"
+        );
 
-        let codes = |nits: [f32; 3]| nits.map(|v| (egui_display::pq(v.clamp(0.0, 10_000.0)) * 65535.0 + 0.5) as u16);
-        let written: Vec<u16> = buf[..6].chunks(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
-        let exact = codes(egui_display::rec2020_nits([light[0][0], light[0][1], light[0][2]], 100.0));
-        let clipped = codes(egui_display::rec2020_nits(light[0][..3].iter().map(|v| v.max(0.0)).collect::<Vec<_>>().try_into().unwrap(), 100.0));
+        let codes = |nits: [f32; 3]| {
+            nits.map(|v| (egui_display::pq(v.clamp(0.0, 10_000.0)) * 65535.0 + 0.5) as u16)
+        };
+        let written: Vec<u16> = buf[..6]
+            .chunks(2)
+            .map(|c| u16::from_be_bytes([c[0], c[1]]))
+            .collect();
+        let exact = codes(egui_display::rec2020_nits(
+            [light[0][0], light[0][1], light[0][2]],
+            100.0,
+        ));
+        let clipped = codes(egui_display::rec2020_nits(
+            light[0][..3]
+                .iter()
+                .map(|v| v.max(0.0))
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+            100.0,
+        ));
         for c in 0..3 {
-            assert!(written[c].abs_diff(exact[c]) <= 1, "channel {c}: {written:?} vs {exact:?}");
+            assert!(
+                written[c].abs_diff(exact[c]) <= 1,
+                "channel {c}: {written:?} vs {exact:?}"
+            );
         }
-        assert_ne!(exact, clipped, "the test colour must tell a gamut clip apart");
+        assert_ne!(
+            exact, clipped,
+            "the test colour must tell a gamut clip apart"
+        );
         // The highlight lands at the view's peak, not at SDR white.
         let highlight = u16::from_be_bytes([buf[10], buf[11]]);
         let peak_code = (egui_display::pq(peak_nits) * 65535.0 + 0.5) as u16;
-        assert!(highlight.abs_diff(peak_code) <= 70, "{highlight} vs PQ({peak_nits}) {peak_code}");
+        assert!(
+            highlight.abs_diff(peak_code) <= 70,
+            "{highlight} vs PQ({peak_nits}) {peak_code}"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -2126,26 +2096,43 @@ mod tests {
     /// names tell the transfers apart.
     #[test]
     fn snapshot_files_encode_what_they_name() {
+        let _gpu_test = crate::test_gpu::lock();
         let frame = completed_frame(1, false);
         let dir = std::env::temp_dir().join(format!("frac-snapshot-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let cicp = |path: &std::path::Path| {
             let bytes = std::fs::read(path).unwrap();
-            bytes.windows(8).find(|w| &w[..4] == b"cICP").map(|w| w[4..8].to_vec())
+            bytes
+                .windows(8)
+                .find(|w| &w[..4] == b"cICP")
+                .map(|w| w[4..8].to_vec())
         };
-        let srgb = |path: &std::path::Path| std::fs::read(path).unwrap().windows(4).any(|w| w == b"sRGB");
+        let srgb = |path: &std::path::Path| {
+            std::fs::read(path)
+                .unwrap()
+                .windows(4)
+                .any(|w| w == b"sRGB")
+        };
         for (file, expected) in [
             (FrameFile::Png(PngEncoding::Sdr8), None),
             (FrameFile::Png(PngEncoding::Hdr10), Some(vec![9, 16, 0, 1])),
         ] {
             let path = dir.join(format!("shot.{}", file.suffix()));
-            frame.save(&path, file, crate::color::BT2408_SDR_WHITE_NITS).unwrap();
+            frame
+                .save(&path, file, crate::color::BT2408_SDR_WHITE_NITS)
+                .unwrap();
             assert_eq!(cicp(&path), expected, "{file:?}");
             // SDR says so with the sRGB chunk (egui-display's contract), HDR with cICP.
             assert_eq!(srgb(&path), expected.is_none(), "{file:?}");
         }
         let exr = dir.join(format!("shot.{}", FrameFile::DisplayExr.suffix()));
-        frame.save(&exr, FrameFile::DisplayExr, crate::color::BT2408_SDR_WHITE_NITS).unwrap();
+        frame
+            .save(
+                &exr,
+                FrameFile::DisplayExr,
+                crate::color::BT2408_SDR_WHITE_NITS,
+            )
+            .unwrap();
         assert!(exr.is_file());
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -2153,6 +2140,7 @@ mod tests {
     #[test]
     #[ignore = "requires actual CUDA and shared wgpu OIDN inference"]
     fn cuda_export_forces_oidn_below_interval_and_publishes_linear_result() {
+        let _gpu_test = crate::test_gpu::lock();
         let service = RenderService::spawn();
         let mut scene = Scene::preset(crate::params::FAMILY_BULB);
         scene.world_render = true;
@@ -2196,7 +2184,9 @@ mod tests {
                     assert!(frame.radiance.iter().any(|p| p[0] > 1.0));
                     // OCIO is off: display light is the exposed working-space radiance in Rec.709.
                     for (light, radiance) in frame.light.iter().zip(&frame.radiance) {
-                        let want = crate::color::to_709([radiance[0], radiance[1], radiance[2]].map(|v| 4.0 * v));
+                        let want = crate::color::to_709(
+                            [radiance[0], radiance[1], radiance[2]].map(|v| 4.0 * v),
+                        );
                         for k in 0..3 {
                             assert!((light[k] - want[k]).abs() < 1e-4);
                         }
@@ -2213,7 +2203,9 @@ mod tests {
 
     #[test]
     fn continuous_requests_cannot_starve_completed_previews_or_move_backwards() {
+        let _gpu_test = crate::test_gpu::lock();
         let service = RenderService {
+            worker_thread: None,
             shared: Arc::new(Shared {
                 state: Mutex::new(Mailbox::default()),
                 wake: Condvar::new(),
@@ -2245,7 +2237,9 @@ mod tests {
 
     #[test]
     fn obsolete_full_frames_and_idle_previews_remain_strictly_filtered() {
+        let _gpu_test = crate::test_gpu::lock();
         let service = RenderService {
+            worker_thread: None,
             shared: Arc::new(Shared {
                 state: Mutex::new(Mailbox::default()),
                 wake: Condvar::new(),
@@ -2267,6 +2261,7 @@ mod tests {
 
     #[test]
     fn interactive_export_batches_require_a_known_small_gpu_cost() {
+        let _gpu_test = crate::test_gpu::lock();
         assert!(!background_batch_allowed(0.0, 0, true));
         assert!(!background_batch_allowed(32.0, 1, true));
         assert!(background_batch_allowed(16.0, 4, true));
@@ -2276,6 +2271,7 @@ mod tests {
 
     #[test]
     fn display_and_pause_changes_reuse_the_trace_key_but_camera_changes_do_not() {
+        let _gpu_test = crate::test_gpu::lock();
         let original = request();
         let mut changed = original.clone();
         changed.scene.render.exposure_stops += 1.0;
@@ -2295,6 +2291,7 @@ mod tests {
     }
     #[test]
     fn bookmark_thumbnail_evaluates_frozen_world_at_first_frame_before_quality_cap() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut scene = Scene::preset(crate::params::FAMILY_BULB);
         scene.render.max_bounces = 8;
         let document = crate::world::WorldDocument::from_scene(&scene);
@@ -2305,14 +2302,15 @@ mod tests {
         assert_eq!(thumbnail.objects, expected.objects);
         assert_eq!(thumbnail.lights, expected.lights);
         assert_eq!(thumbnail.render.max_bounces, 3);
-        let mut legacy = Scene::preset(crate::params::FAMILY_BOX);
-        legacy.render.max_bounces = 7;
-        let legacy = thumbnail_snapshot(legacy).unwrap();
-        assert!(!legacy.world_render && legacy.objects.is_empty());
-        assert_eq!(legacy.render.max_bounces, 3);
+        let mut preset = Scene::preset(crate::params::FAMILY_BOX);
+        preset.render.max_bounces = 7;
+        let preset = thumbnail_snapshot(preset).unwrap();
+        assert!(preset.world_render && !preset.objects.is_empty());
+        assert_eq!(preset.render.max_bounces, 3);
     }
     #[test]
     fn world_trace_key_tracks_evaluated_objects_and_lights_but_ignores_labels() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut original = request();
         original.scene.world_render = true;
         original
@@ -2342,7 +2340,9 @@ mod tests {
     }
     #[test]
     fn latest_mailbox_coalesces_and_commands_are_bounded_with_priority_cancel() {
+        let _gpu_test = crate::test_gpu::lock();
         let service = RenderService {
+            worker_thread: None,
             shared: Arc::new(Shared {
                 state: Mutex::new(Mailbox::default()),
                 wake: Condvar::new(),
@@ -2374,6 +2374,7 @@ mod tests {
     }
     #[test]
     fn identical_paused_requests_do_not_dirty_and_preview_expires_without_ui_updates() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut initial = request();
         initial.paused = true;
         let mut viewport = Viewport::new(initial.clone());
@@ -2394,7 +2395,9 @@ mod tests {
 
     #[test]
     fn export_reply_and_port_lifetime_are_independent_of_gui_backpressure() {
+        let _gpu_test = crate::test_gpu::lock();
         let service = RenderService {
+            worker_thread: None,
             shared: Arc::new(Shared {
                 state: Mutex::new(Mailbox::default()),
                 wake: Condvar::new(),
@@ -2443,6 +2446,7 @@ mod tests {
 
     #[test]
     fn cancelled_completion_does_not_block_on_an_undrained_reply() {
+        let _gpu_test = crate::test_gpu::lock();
         let shared = Shared {
             state: Mutex::new(Mailbox::default()),
             wake: Condvar::new(),
@@ -2468,6 +2472,7 @@ mod tests {
 
     #[test]
     fn progress_is_coalesced_and_zero_or_huge_allocations_are_rejected() {
+        let _gpu_test = crate::test_gpu::lock();
         let shared = Shared {
             state: Mutex::new(Mailbox::default()),
             wake: Condvar::new(),

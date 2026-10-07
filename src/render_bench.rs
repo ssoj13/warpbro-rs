@@ -1,4 +1,4 @@
-//! Deterministic measurements of evaluated editor worlds, rather than legacy gallery kernels.
+//! Deterministic measurements of evaluated editor worlds, rather than standalone gallery kernels.
 //!
 //! Raw RGB artifacts deliberately bypass denoising, exposure and display transforms. Comparing
 //! independent seeds against a high-sample reference measures convergence as well as throughput;
@@ -249,4 +249,39 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    #[ignore = "runs the GPU world benchmark; optional WARP_BRO_WORLD_BENCH_ARGS JSON argv"]
+    fn paired_world_de_benchmark() {
+        let _gpu_test = crate::test_gpu::lock();
+        let args = match std::env::var("WARP_BRO_WORLD_BENCH_ARGS") {
+            Ok(json) => serde_json::from_str::<Vec<String>>(&json).expect("benchmark JSON argv"),
+            Err(_) => {
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos();
+                let directory = std::env::temp_dir().join(format!(
+                    "warpbro-world-de-bench-{}-{stamp}",
+                    std::process::id()
+                ));
+                vec![
+                    "WarpBro".into(),
+                    "--world-bench".into(),
+                    directory.to_string_lossy().into_owned(),
+                    "128".into(),
+                    "128".into(),
+                    "8".into(),
+                    "--case".into(),
+                    "fast-metal".into(),
+                    "--seed".into(),
+                    "17".into(),
+                ]
+            }
+        };
+        super::run(&args).expect("world DE benchmark");
+    }
 }

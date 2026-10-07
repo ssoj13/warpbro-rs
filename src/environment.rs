@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+
 pub struct Environment {
     pub path: String,
     pub enabled: bool,
@@ -45,7 +45,14 @@ impl Map {
             let (w, h, pixels, prims) = crate::exr_io::read_rgb(path)?;
             let m = crate::color::working_from(&prims)
                 .map_err(|e| format!("Environment {}: chromaticities: {e}", path.display()))?;
-            return Self::from_pixels(w, h, pixels.into_iter().map(|p| crate::color::mul(&m, p)).collect());
+            return Self::from_pixels(
+                w,
+                h,
+                pixels
+                    .into_iter()
+                    .map(|p| crate::color::mul(&m, p))
+                    .collect(),
+            );
         }
         let reader = image::ImageReader::open(path)
             .map_err(|e| format!("Environment {}: {e}", path.display()))?
@@ -60,7 +67,10 @@ impl Map {
             return Err("Environment is limited to 16 megapixels / 16384 per axis".into());
         }
         // Radiance .hdr has no primaries tag in practice: it is read as Rec.709.
-        let pixels = img.pixels().map(|p| crate::color::to_working(p.0)).collect();
+        let pixels = img
+            .pixels()
+            .map(|p| crate::color::to_working(p.0))
+            .collect();
         Self::from_pixels(w, h, pixels)
     }
     /// `pixels` are working-space (ACEScg) radiance; `load` converts files into it.
@@ -126,14 +136,37 @@ mod tests {
             .encode(&pixels, 4, 2)
             .unwrap();
         let rgba = |c: [f32; 3]| [[c[0], c[1], c[2], 1.0]; 8];
-        crate::exr_io::write_rgb(&exr709, 4, 2, &rgba(rec709), &crate::color::DISPLAY_PRIMS, None, true).unwrap();
-        crate::exr_io::write_rgb(&exr_ap1, 4, 2, &rgba(ap1), &crate::color::WORKING_PRIMS, None, true).unwrap();
+        crate::exr_io::write_rgb(
+            &exr709,
+            4,
+            2,
+            &rgba(rec709),
+            &crate::color::DISPLAY_PRIMS,
+            None,
+            true,
+        )
+        .unwrap();
+        crate::exr_io::write_rgb(
+            &exr_ap1,
+            4,
+            2,
+            &rgba(ap1),
+            &crate::color::WORKING_PRIMS,
+            None,
+            true,
+        )
+        .unwrap();
         // The same light, tagged either way, loads as the same working-space radiance (above one).
         for path in [&hdr, &exr709, &exr_ap1] {
             let map = Map::load(path).unwrap();
             assert_eq!((map.width, map.height), (4, 2));
             for k in 0..3 {
-                assert!((map.texels[0][k] - ap1[k]).abs() < 1e-5, "{}: {:?} vs {ap1:?}", path.display(), map.texels[0]);
+                assert!(
+                    (map.texels[0][k] - ap1[k]).abs() < 1e-5,
+                    "{}: {:?} vs {ap1:?}",
+                    path.display(),
+                    map.texels[0]
+                );
             }
         }
         std::fs::remove_dir_all(dir).unwrap();

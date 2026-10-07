@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 pub const COUNT: usize = 5;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+
 pub struct CameraSlots {
     pub slots: [Option<Camera>; COUNT],
 }
@@ -109,7 +109,11 @@ mod tests {
     fn strip_clicks_follow_the_shared_mapping_in_both_layouts() {
         use egui::PointerButton::{Primary, Secondary};
         for swap in [false, true] {
-            let (store, recall) = if swap { (Primary, Secondary) } else { (Secondary, Primary) };
+            let (store, recall) = if swap {
+                (Primary, Secondary)
+            } else {
+                (Secondary, Primary)
+            };
             let ctx = egui::Context::default();
             let mut slots = CameraSlots::default();
             let mut camera = crate::scene::Scene::preset(crate::params::FAMILY_BULB).camera;
@@ -117,7 +121,10 @@ mod tests {
                 let mut action = None;
                 let output = ctx.run_ui(
                     egui::RawInput {
-                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(400.0, 100.0))),
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(400.0, 100.0),
+                        )),
                         events,
                         ..Default::default()
                     },
@@ -132,8 +139,18 @@ mod tests {
             let click = |pos: egui::Pos2, button| {
                 vec![
                     egui::Event::PointerMoved(pos),
-                    egui::Event::PointerButton { pos, button, pressed: true, modifiers: Default::default() },
-                    egui::Event::PointerButton { pos, button, pressed: false, modifiers: Default::default() },
+                    egui::Event::PointerButton {
+                        pos,
+                        button,
+                        pressed: true,
+                        modifiers: Default::default(),
+                    },
+                    egui::Event::PointerButton {
+                        pos,
+                        button,
+                        pressed: false,
+                        modifiers: Default::default(),
+                    },
                 ]
             };
             frame(&mut slots, &mut camera, vec![]);
@@ -168,7 +185,10 @@ mod tests {
         let mut slots = CameraSlots::default();
         let mut camera = crate::scene::Scene::preset(crate::params::FAMILY_BULB).camera;
         let original = camera;
-        assert!(!slots.restore(2, &mut camera), "an empty slot leaves the camera");
+        assert!(
+            !slots.restore(2, &mut camera),
+            "an empty slot leaves the camera"
+        );
         assert_eq!(camera, original);
         camera.yaw_degrees = 37.0;
         camera.target = [0.1, 0.2, 0.3];

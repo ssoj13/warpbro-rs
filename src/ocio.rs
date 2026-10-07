@@ -48,7 +48,7 @@ use vfx_ocio::{
 /// What the user picked; persisted (`persist::Config::ocio`). Empty names mean the
 /// config's defaults ([`Ocio::resolve`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct Sel {
     /// OCIO is the display transform of the colour image (else the built-in one).
     pub on: bool,
@@ -148,11 +148,18 @@ impl Ocio {
         let Ok(processor) = self.cfg.processor(name, "aces_interchange") else {
             return Some(false);
         };
-        let mut probe = [[1.0f32, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.18, 0.5, 2.0]];
+        let mut probe = [
+            [1.0f32, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.18, 0.5, 2.0],
+        ];
         let want = probe.map(crate::color::to_ap0);
         processor.apply_rgb(&mut probe);
         Some(probe.iter().zip(want).all(|(got, want)| {
-            got.iter().zip(want).all(|(g, w)| (g - w).abs() <= 1e-4 * w.abs().max(1.0))
+            got.iter()
+                .zip(want)
+                .all(|(g, w)| (g - w).abs() <= 1e-4 * w.abs().max(1.0))
         }))
     }
 
@@ -222,7 +229,11 @@ impl Ocio {
 
     /// The encoding of view `view` of `display`, by name.
     fn view_encoding(&self, display: &str, view: &str) -> Option<Encoding> {
-        let v = self.cfg.get_views(display).into_iter().find(|v| v.name() == view)?;
+        let v = self
+            .cfg
+            .get_views(display)
+            .into_iter()
+            .find(|v| v.name() == view)?;
         self.encoding(display, v)
     }
 
@@ -233,7 +244,9 @@ impl Ocio {
         let name = display.to_ascii_uppercase();
         match kind {
             OutputKind::Sdr => true,
-            OutputKind::Pq => name.contains("PQ") || name.contains("ST2084") || name.contains("ST-2084"),
+            OutputKind::Pq => {
+                name.contains("PQ") || name.contains("ST2084") || name.contains("ST-2084")
+            }
             OutputKind::Hlg => name.contains("HLG"),
         }
     }
@@ -252,7 +265,12 @@ impl Ocio {
     /// wins when it already fits; otherwise the config's first fitting display, with its view
     /// whose measured peak ([`Ocio::view_peak`]) is closest to `peak_nits` for HDR, its first
     /// view for SDR.
-    pub fn output_transform(&self, current: &Sel, kind: OutputKind, peak_nits: f32) -> Result<(String, String)> {
+    pub fn output_transform(
+        &self,
+        current: &Sel,
+        kind: OutputKind,
+        peak_nits: f32,
+    ) -> Result<(String, String)> {
         let hdr = kind != OutputKind::Sdr;
         if let Ok(n) = self.resolve(current, hdr)
             && self.display_is(&n.display, kind)
@@ -303,7 +321,11 @@ impl Ocio {
         {
             return *peak;
         }
-        let sel = Sel { display: display.into(), view: view.into(), ..current.clone() };
+        let sel = Sel {
+            display: display.into(),
+            view: view.into(),
+            ..current.clone()
+        };
         let peak = self
             .resolve(&sel, true)
             .and_then(|names| self.transform(&names, true))
@@ -329,7 +351,9 @@ impl Ocio {
     pub fn resolve(&self, sel: &Sel, hdr: bool) -> Result<Names> {
         let input = if sel.working_input.is_empty() {
             self.working_space()
-                .ok_or_else(|| anyhow!("the config has no linear AP1 (ACEScg) colour space: pick it in Input"))?
+                .ok_or_else(|| {
+                    anyhow!("the config has no linear AP1 (ACEScg) colour space: pick it in Input")
+                })?
                 .to_owned()
         } else if self.cfg.colorspace(&sel.working_input).is_some() {
             sel.working_input.clone()
@@ -477,7 +501,6 @@ pub struct Transform {
 
 /// Scene light (working space) far above every view's range, so a tone-mapped view returns its
 /// peak for it (ACES 2.0's tone scale is asymptotic: at 1e5 it is at its peak to f32 precision).
-const PEAK_PROBE: f32 = 1.0e5;
 
 impl Transform {
     pub(crate) fn processor(&self) -> &Processor {
@@ -510,13 +533,7 @@ impl Transform {
         if !self.absolute {
             return Ok(crate::color::DisplayLight::Relative);
         }
-        let mut probe = [[PEAK_PROBE, PEAK_PROBE, PEAK_PROBE, 1.0]];
-        self.proc.apply_rgba(&mut probe);
-        // Display reference 1.0 = 100 nits.
-        let peak_nits = 100.0 * probe[0][0].max(probe[0][1]).max(probe[0][2]);
-        if !(peak_nits.is_finite() && peak_nits > 0.0 && peak_nits <= 10_000.0 * 1.001) {
-            return Err(format!("OCIO view has no measurable peak ({peak_nits} nits): not a tone-mapped HDR view"));
-        }
+        let peak_nits = egui_display::export::measure_display_peak(|probe| self.proc.apply_rgb(probe), 100.0)?;
         Ok(crate::color::DisplayLight::Absolute { peak_nits })
     }
 
@@ -898,7 +915,8 @@ impl State {
         self.poll();
         let before = self.sel.clone();
         let mut reload = false;
-        self.presets.ui(ui, &mut self.sel, &mut self.preset_edit, swap);
+        self.presets
+            .ui(ui, &mut self.sel, &mut self.preset_edit, swap);
         ui.add_space(4.0);
         ui.checkbox(&mut self.sel.on, "OCIO display transform")
             .on_hover_text("Show the colour image through the OCIO display / view (isolated channels stay raw).\nOff: the built-in sRGB display with the tone operator.");
@@ -943,7 +961,7 @@ impl State {
             ui.horizontal(|ui| {
                 combo(ui, "ocio.working_input", &mut self.sel.working_input, &inputs, &auto_input);
                 if let Some(name) = &input_warning {
-                    ui.colored_label(egui::Color32::LIGHT_RED, egui_phosphor::regular::WARNING)
+                    ui.colored_label(egui_widgets_config::semantic(ui).warn, egui_widgets_config::icons::WARNING)
                         .on_hover_text(format!("\"{name}\" is not linear AP1: colours will be wrong."));
                 }
             });
@@ -998,7 +1016,7 @@ pub struct ColourPreset {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(default)]
+
 pub struct ColourPresets {
     pub slots: [ColourPreset; 4],
 }
@@ -1006,10 +1024,25 @@ pub struct ColourPresets {
 impl Default for ColourPresets {
     fn default() -> Self {
         let choices = [
-            ("SDR · sRGB", "sRGB - Display", "ACES 2.0 - SDR 100 nits (Rec.709)", ""),
-            ("SDR · P3", "Display P3 - Display", "ACES 2.0 - SDR 100 nits (P3 D65)", ""),
+            (
+                "SDR · sRGB",
+                "sRGB - Display",
+                "ACES 2.0 - SDR 100 nits (Rec.709)",
+                "",
+            ),
+            (
+                "SDR · P3",
+                "Display P3 - Display",
+                "ACES 2.0 - SDR 100 nits (P3 D65)",
+                "",
+            ),
             ("sRGB, no rendering", "sRGB - Display", "Un-tone-mapped", ""),
-            ("HDR · 1000 nits", "Display P3 HDR - Display", "ACES 2.0 - HDR 1000 nits (P3 D65)", "ACES 1.3 Reference Gamut Compression"),
+            (
+                "HDR · 1000 nits",
+                "Display P3 HDR - Display",
+                "ACES 2.0 - HDR 1000 nits (P3 D65)",
+                "ACES 1.3 Reference Gamut Compression",
+            ),
         ];
         Self {
             slots: choices.map(|(name, display, view, look)| ColourPreset {
@@ -1036,22 +1069,41 @@ struct PresetEdit {
 
 impl ColourPresets {
     pub fn store(&mut self, index: usize, name: &str, selection: &Sel) -> bool {
-        let Some(slot) = self.slots.get_mut(index) else { return false };
+        let Some(slot) = self.slots.get_mut(index) else {
+            return false;
+        };
         let name = name.trim();
-        if name.is_empty() { return false; }
-        *slot = ColourPreset { name: name.into(), selection: selection.clone() };
+        if name.is_empty() {
+            return false;
+        }
+        *slot = ColourPreset {
+            name: name.into(),
+            selection: selection.clone(),
+        };
         true
     }
 
     pub fn restore(&self, index: usize, selection: &mut Sel) -> bool {
-        let Some(slot) = self.slots.get(index) else { return false };
+        let Some(slot) = self.slots.get(index) else {
+            return false;
+        };
         *selection = slot.selection.clone();
         true
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, selection: &mut Sel, edit: &mut Option<PresetEdit>, swap: bool) {
+    fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        selection: &mut Sel,
+        edit: &mut Option<PresetEdit>,
+        swap: bool,
+    ) {
         use crate::hotkeys::{SlotClick, slot_click, slot_hint};
-        let mapping = slot_hint(swap, "name and save the current colour settings", "restore this preset");
+        let mapping = slot_hint(
+            swap,
+            "name and save the current colour settings",
+            "restore this preset",
+        );
         ui.horizontal_wrapped(|ui| {
             ui.label("Color presets");
             for (index, slot) in self.slots.iter().enumerate() {
@@ -1059,15 +1111,31 @@ impl ColourPresets {
                 let hint = format!(
                     "{mapping}\n\nConfig: {}\nInput: {}\nDisplay: {}\nView: {}\nLook: {}\nOCIO: {}",
                     source(&s.config),
-                    if s.working_input.is_empty() { "auto ACEScg" } else { &s.working_input },
-                    s.display, s.view,
-                    if s.look.is_empty() { "the view's looks" } else { &s.look },
+                    if s.working_input.is_empty() {
+                        "auto ACEScg"
+                    } else {
+                        &s.working_input
+                    },
+                    s.display,
+                    s.view,
+                    if s.look.is_empty() {
+                        "the view's looks"
+                    } else {
+                        &s.look
+                    },
                     if s.on { "on" } else { "off" },
                 );
-                let response = ui.add(egui::Button::new(&slot.name).selected(s == selection)).on_hover_text(hint);
+                let response = ui
+                    .add(egui::Button::new(&slot.name).selected(s == selection))
+                    .on_hover_text(hint);
                 match slot_click(&response, swap) {
                     Some(SlotClick::Store) => {
-                        *edit = Some(PresetEdit { index, name: slot.name.clone(), selection: selection.clone(), focus: true });
+                        *edit = Some(PresetEdit {
+                            index,
+                            name: slot.name.clone(),
+                            selection: selection.clone(),
+                            focus: true,
+                        });
                     }
                     Some(SlotClick::Recall) => *selection = slot.selection.clone(),
                     None => {}
@@ -1085,10 +1153,16 @@ impl ColourPresets {
                 .open(&mut open)
                 .show(ui.ctx(), |ui| {
                     ui.label(format!("Preset {}", draft.index + 1));
-                    let response = ui.add(egui::TextEdit::singleline(&mut draft.name).hint_text("Preset name"));
-                    if draft.focus { response.request_focus(); draft.focus = false; }
+                    let response = ui
+                        .add(egui::TextEdit::singleline(&mut draft.name).hint_text("Preset name"));
+                    if draft.focus {
+                        response.request_focus();
+                        draft.focus = false;
+                    }
                     let valid = !draft.name.trim().is_empty();
-                    save = valid && response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    save = valid
+                        && response.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     cancel = ui.input(|i| i.key_pressed(egui::Key::Escape));
                     ui.horizontal(|ui| {
                         save |= ui.add_enabled(valid, egui::Button::new("Save")).clicked();
@@ -1168,20 +1242,45 @@ mod tests {
         } else {
             (egui::PointerButton::Secondary, egui::PointerButton::Primary)
         };
-        let frame = |ctx: &egui::Context, presets: &mut ColourPresets, sel: &mut Sel, edit: &mut Option<PresetEdit>, events: Vec<egui::Event>| -> egui::FullOutput {
-            ctx.run_ui(egui::RawInput {
-                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0))),
-                events,
-                ..Default::default()
-            }, |root| {
-                egui::CentralPanel::default().show(root, |ui| presets.ui(ui, sel, edit, swap));
-            })
+        let frame = |ctx: &egui::Context,
+                     presets: &mut ColourPresets,
+                     sel: &mut Sel,
+                     edit: &mut Option<PresetEdit>,
+                     events: Vec<egui::Event>|
+         -> egui::FullOutput {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(900.0, 600.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| presets.ui(ui, sel, edit, swap));
+                },
+            )
         };
         fn mouse(pos: egui::Pos2, button: egui::PointerButton, pressed: bool) -> Vec<egui::Event> {
-            vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton { pos, button, pressed, modifiers: Default::default() }]
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button,
+                    pressed,
+                    modifiers: Default::default(),
+                },
+            ]
         }
         fn key(key: egui::Key) -> Vec<egui::Event> {
-            vec![egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() }]
+            vec![egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            }]
         }
         let ctx = egui::Context::default();
         let mut presets = ColourPresets::default();
@@ -1191,31 +1290,78 @@ mod tests {
         let mut edit = None;
         frame(&ctx, &mut presets, &mut sel, &mut edit, vec![]);
         let output = frame(&ctx, &mut presets, &mut sel, &mut edit, vec![]);
-        let pos = output.shapes.iter().find_map(|s| match &s.shape {
-            egui::epaint::Shape::Text(t) if t.galley.text() == "SDR · sRGB" => Some(t.pos + t.galley.rect.center().to_vec2()),
-            _ => None,
-        }).unwrap();
-        frame(&ctx, &mut presets, &mut sel, &mut edit, mouse(pos, store, true));
-        frame(&ctx, &mut presets, &mut sel, &mut edit, mouse(pos, store, false));
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::epaint::Shape::Text(t) if t.galley.text() == "SDR · sRGB" => {
+                    Some(t.pos + t.galley.rect.center().to_vec2())
+                }
+                _ => None,
+            })
+            .unwrap();
+        frame(
+            &ctx,
+            &mut presets,
+            &mut sel,
+            &mut edit,
+            mouse(pos, store, true),
+        );
+        frame(
+            &ctx,
+            &mut presets,
+            &mut sel,
+            &mut edit,
+            mouse(pos, store, false),
+        );
         assert!(edit.is_some());
         assert_eq!(presets, original, "opening the prompt does not overwrite");
         frame(&ctx, &mut presets, &mut sel, &mut edit, vec![]);
         edit.as_mut().unwrap().name = "My HDR".into();
-        frame(&ctx, &mut presets, &mut sel, &mut edit, key(egui::Key::Enter));
+        frame(
+            &ctx,
+            &mut presets,
+            &mut sel,
+            &mut edit,
+            key(egui::Key::Enter),
+        );
         assert!(edit.is_none());
         assert_eq!(presets.slots[0].name, "My HDR");
         assert_eq!(presets.slots[0].selection, expected);
         let saved = presets.clone();
-        edit = Some(PresetEdit { index: 0, name: "Cancelled".into(), selection: Sel::default(), focus: true });
+        edit = Some(PresetEdit {
+            index: 0,
+            name: "Cancelled".into(),
+            selection: Sel::default(),
+            focus: true,
+        });
         frame(&ctx, &mut presets, &mut sel, &mut edit, vec![]);
-        frame(&ctx, &mut presets, &mut sel, &mut edit, key(egui::Key::Escape));
+        frame(
+            &ctx,
+            &mut presets,
+            &mut sel,
+            &mut edit,
+            key(egui::Key::Escape),
+        );
         assert!(edit.is_none());
         assert_eq!(presets, saved);
         sel = Sel::default();
         frame(&ctx, &mut presets, &mut sel, &mut edit, vec![]);
         frame(&ctx, &mut presets, &mut sel, &mut edit, vec![]);
-        frame(&ctx, &mut presets, &mut sel, &mut edit, mouse(pos, recall, true));
-        frame(&ctx, &mut presets, &mut sel, &mut edit, mouse(pos, recall, false));
+        frame(
+            &ctx,
+            &mut presets,
+            &mut sel,
+            &mut edit,
+            mouse(pos, recall, true),
+        );
+        frame(
+            &ctx,
+            &mut presets,
+            &mut sel,
+            &mut edit,
+            mouse(pos, recall, false),
+        );
         assert_eq!(sel, expected);
         assert!(edit.is_none());
     }
@@ -1288,9 +1434,20 @@ mod tests {
             let (_, view) = o.output_transform(&sdr, OutputKind::Pq, want).unwrap();
             assert!(view.contains(nits), "{want} nits -> {view}");
         }
-        let names = o.resolve(&Sel { display: "Rec.2100-PQ - Display".into(), view: "ACES 2.0 - HDR 1000 nits (P3 D65)".into(), ..sdr.clone() }, true).unwrap();
+        let names = o
+            .resolve(
+                &Sel {
+                    display: "Rec.2100-PQ - Display".into(),
+                    view: "ACES 2.0 - HDR 1000 nits (P3 D65)".into(),
+                    ..sdr.clone()
+                },
+                true,
+            )
+            .unwrap();
         match o.transform(&names, true).unwrap().light().unwrap() {
-            crate::color::DisplayLight::Absolute { peak_nits } => assert!((peak_nits - 1000.0).abs() < 10.0, "{peak_nits}"),
+            crate::color::DisplayLight::Absolute { peak_nits } => {
+                assert!((peak_nits - 1000.0).abs() < 10.0, "{peak_nits}")
+            }
             other => panic!("{other:?}"),
         }
     }
@@ -1307,8 +1464,14 @@ mod tests {
         assert_eq!(o.is_working("Linear Rec.709 (sRGB)"), Some(false));
         let studio = Ocio::load("ocio://studio-config-latest").unwrap();
         assert_eq!(studio.working_space(), Some(crate::color::WORKING));
-        let picked = Sel { working_input: "lin_ap1".into(), ..Sel::default() };
-        assert_eq!(studio.is_working(&studio.resolve(&picked, false).unwrap().input), Some(true));
+        let picked = Sel {
+            working_input: "lin_ap1".into(),
+            ..Sel::default()
+        };
+        assert_eq!(
+            studio.is_working(&studio.resolve(&picked, false).unwrap().input),
+            Some(true)
+        );
         assert_eq!(
             (n.display.as_str(), n.view.as_str()),
             ("sRGB - Display", "ACES 2.0 - SDR 100 nits (Rec.709)")

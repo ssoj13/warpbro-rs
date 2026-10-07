@@ -10,6 +10,7 @@ mod tests {
     }
     #[test]
     fn cadence_counts_samples_and_runs_final_only_once() {
+        let _gpu_test = crate::test_gpu::lock();
         let settings = Settings::default();
         let mut state = State::default();
         assert!(!state.due(&settings, 0, true));
@@ -27,6 +28,7 @@ mod tests {
     }
     #[test]
     fn failures_clear_stale_output_and_do_not_retry_every_frame() {
+        let _gpu_test = crate::test_gpu::lock();
         let settings = Settings::default();
         let mut state = State::default();
         assert!(state.due(&settings, 128, false));
@@ -41,6 +43,7 @@ mod tests {
     }
     #[test]
     fn new_generation_discards_old_output_and_cadence() {
+        let _gpu_test = crate::test_gpu::lock();
         let settings = Settings::default();
         let mut state = State::default();
         assert!(state.due(&settings, 512, false));
@@ -56,6 +59,7 @@ mod tests {
     }
     #[test]
     fn settings_refilter_current_samples_without_trace_reset() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut settings = Settings::default();
         let mut state = State::default();
         assert!(state.due(&settings, 128, false));
@@ -77,7 +81,12 @@ mod tests {
     }
     #[test]
     fn interval_zero_keeps_final_pass_and_partial_settings_defaults() {
-        let settings: Settings = serde_json::from_str(r#"{"interval":0}"#).unwrap();
+        let _gpu_test = crate::test_gpu::lock();
+        let settings = Settings {
+            interval: 0,
+            ..Settings::default()
+        };
+        assert!(serde_json::from_str::<Settings>(r#"{"interval":0}"#).is_err());
         assert!(settings.enabled);
         assert_eq!(settings.mode, Mode::ColorAlbedoNormal);
         let mut state = State::default();
@@ -88,6 +97,7 @@ mod tests {
     }
     #[test]
     fn invalid_inputs_fail_before_initializing_gpu() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut processor = Processor::new().unwrap();
         assert!(
             processor
@@ -104,6 +114,7 @@ mod tests {
     #[test]
     #[ignore = "requires a real shared wgpu adapter and embedded OIDN HDR weights"]
     fn gpu_quality_modes_preserve_hdr_reduce_noise_and_reuse_processor() {
+        let _gpu_test = crate::test_gpu::lock();
         let (width, height) = (65, 48); // Padded copy rows, not a 256-byte-aligned width.
         let target = [2.5f32, 1.8, 1.2];
         let pixels = (0..width * height)
@@ -229,7 +240,7 @@ impl Quality {
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+
 pub struct Settings {
     pub enabled: bool,
     pub interval: u32,

@@ -41,6 +41,7 @@ pub enum WorldKind {
     Material,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorldDocument {
     pub graph: SubnetFile,
     pub active_camera: Option<NodeId>,
@@ -49,7 +50,6 @@ pub struct WorldDocument {
     pub last: u32,
     pub fps: f64,
     /// Numbered time marks (After Effects composition markers): slot 0-9 -> frame.
-    #[serde(default)]
     pub marks: BTreeMap<u8, u32>,
 }
 impl PartialEq for WorldDocument {
@@ -238,10 +238,7 @@ pub struct WorldEditor {
     pub new_key: Tan,
 }
 impl WorldEditor {
-    pub fn new(mut document: WorldDocument) -> Self {
-        if let Err(error) = document.upgrade_material_schema() {
-            log::warn!("Material schema upgrade: {error}");
-        }
+    pub fn new(document: WorldDocument) -> Self {
         let selection = document
             .nodes()
             .iter()
@@ -341,6 +338,73 @@ impl WorldEditor {
         self.record_edit(before, gesture);
         Ok(())
     }
+    /// Commit a capture as one undoable edit, preserving keys outside its recorded interval.
+    pub fn record_camera(
+        &mut self,
+        recording: &crate::camera_recorder::Recording,
+    ) -> Result<(usize, usize, f64, u32), String> {
+        if self.document != recording.document || self.revision() != recording.revision {
+            return Err("The document changed during camera recording".into());
+        }
+        let prepared = recording.prepare()?;
+        self.apply_edit(None, |editor| {
+            editor.document.assert_unlocked(prepared.camera)?;
+            let mut attrs = editor.document.attrs(prepared.camera)?;
+            for (path, mut animation) in prepared.channels.clone() {
+                if !attrs.contains(path) {
+                    return Err(format!("Missing camera channel {path}"));
+                }
+                if let Some(previous) = attrs.anim(path) {
+                    if previous.channels.len() != animation.channels.len() {
+                        return Err(format!("Camera channel {path} changed shape"));
+                    }
+                    for (channel, old) in animation.channels.iter_mut().zip(&previous.channels) {
+                        let mut keys: Vec<_> = old
+                            .keys()
+                            .iter()
+                            .filter(|key| key.t() < prepared.first || key.t() > prepared.last)
+                            .cloned()
+                            .collect();
+                        keys.extend_from_slice(channel.keys());
+                        keys.sort_by(|a, b| a.t().total_cmp(&b.t()));
+                        let mut track =
+                            curves::Track::from_keys(keys).map_err(|e| e.to_string())?;
+                        track.set_extrap(old.track().pre(), old.track().post());
+                        channel.replace_track(track);
+                    }
+                }
+                // Captured values describe the visible pose; stale navigation offsets would apply twice.
+                attrs.remove(&format!("/_navigation{path}"));
+                attrs.set_conn(path, None);
+                attrs.set_anim(path, Some(animation));
+            }
+            editor.document.store_attrs(prepared.camera, &attrs)?;
+            if prepared.extend_last > editor.document.last {
+                let old_end = f64::from(editor.document.last) + 1.0;
+                for node in editor.document.nodes() {
+                    let mut attrs = editor.document.attrs(node.id)?;
+                    if !attrs.is_animated("/end")
+                        && attrs.get("/end").cloned().map(attr_json) == Some(json!(old_end))
+                    {
+                        attrs.set(
+                            "/end",
+                            to_attr(&json!(f64::from(prepared.extend_last) + 1.0)),
+                        );
+                        editor.document.store_attrs(node.id, &attrs)?;
+                    }
+                }
+                editor.document.last = prepared.extend_last;
+            }
+            Ok(())
+        })?;
+        Ok((
+            prepared.sample_count,
+            prepared.key_count,
+            prepared.max_error,
+            prepared.last.ceil() as u32,
+        ))
+    }
+
     pub fn undo(&mut self) -> bool {
         self.finish_edit();
         if let Some((d, s, selected)) = self.undo.pop() {
@@ -393,12 +457,19 @@ impl WorldEditor {
                 data[field] = Value::Null;
             }
         }
-        let mut fragment = SubnetFile { nodes, ..self.document.graph.clone() };
+        let mut fragment = SubnetFile {
+            nodes,
+            ..self.document.graph.clone()
+        };
         let map = playa_graph::remap_node_ids(&mut fragment);
         let fresh: HashSet<NodeId> = map.values().copied().collect();
         for data in fragment.nodes.values_mut() {
             // Host UUID references are ordinary data, remapped alongside Playa graph references.
-            if let Some(new) = data["material"].as_str().and_then(NodeId::parse).and_then(|old| map.get(&old)) {
+            if let Some(new) = data["material"]
+                .as_str()
+                .and_then(NodeId::parse)
+                .and_then(|old| map.get(&old))
+            {
                 data["material"] = json!(new);
             }
         }
@@ -498,14 +569,8 @@ impl WorldEditor {
                     }
                     attrs.set_anim(&path, None);
                     self.document.store_attrs(id, &attrs)?;
-                    self.document.set_attribute(
-                        id,
-                        &path,
-                        held,
-                        frame,
-                        false,
-                        self.new_key,
-                    )?;
+                    self.document
+                        .set_attribute(id, &path, held, frame, false, self.new_key)?;
                 }
             }
             WorldCommand::Batch(commands) => {
@@ -639,14 +704,21 @@ impl WorldEditor {
                 self.selection = Some(id);
                 self.selected = vec![id];
             }
-            WorldCommand::CreateMaterialFor { material, name, targets } => {
+            WorldCommand::CreateMaterialFor {
+                material,
+                name,
+                targets,
+            } => {
                 if targets.is_empty() {
                     return Err("Select an object that supports materials".into());
                 }
                 self.apply(WorldCommand::CreateMaterial { material, name })?;
                 let created = self.selection.ok_or("The new material was not selected")?;
                 for id in targets {
-                    self.apply(WorldCommand::AssignMaterial { id, material: Some(created) })?;
+                    self.apply(WorldCommand::AssignMaterial {
+                        id,
+                        material: Some(created),
+                    })?;
                 }
             }
             WorldCommand::ApplyMaterial {
@@ -809,14 +881,8 @@ impl WorldEditor {
                 }
                 self.document.store_attrs(id, &attrs)?;
                 if component.is_none() && !attrs.is_animated(&path) {
-                    self.document.set_attribute(
-                        id,
-                        &path,
-                        held,
-                        frame,
-                        false,
-                        self.new_key,
-                    )?;
+                    self.document
+                        .set_attribute(id, &path, held, frame, false, self.new_key)?;
                 }
             }
             WorldCommand::MoveKeys {
@@ -900,9 +966,15 @@ impl WorldEditor {
             let mut attrs = editor.document.attrs(id)?;
             let mut changed = false;
             for (path, value) in writes {
-                changed |= editor
-                    .document
-                    .write_navigation_value(id, &mut attrs, path, value, frame, auto_key, editor.new_key)?;
+                changed |= editor.document.write_navigation_value(
+                    id,
+                    &mut attrs,
+                    path,
+                    value,
+                    frame,
+                    auto_key,
+                    editor.new_key,
+                )?;
             }
             // Navigation mode is a static preference on the camera, never a generated key.
             if attrs.is_animated("/camera/free_flight")
@@ -942,7 +1014,7 @@ impl WorldEditor {
         self.edit_snapshot_with_gesture(selected, before, after, frame, None)
     }
 
-    /// Bridge legacy/global controls into the same deferred gesture transaction.
+    /// Bridge evaluated/global controls into the same deferred gesture transaction.
     pub fn edit_snapshot_with_gesture(
         &mut self,
         selected: Option<NodeId>,
@@ -1005,7 +1077,7 @@ impl WorldEditor {
                         Value::Array(
                             after["object"]["rotation_degrees"]
                                 .as_array()
-                                .ok_or("Invalid legacy rotation")?
+                                .ok_or("Invalid evaluated rotation")?
                                 .iter()
                                 .map(|v| json!(-v.as_f64().unwrap_or(0.0)))
                                 .collect(),
@@ -1074,13 +1146,17 @@ fn attribute_choices(path: &str) -> Vec<Value> {
 pub(crate) fn attribute_range(path: &str) -> Option<(f64, f64)> {
     match path {
         "/camera/fov_y_degrees" => Some((1.0, 179.0)),
+        "/camera/f_number" => Some((0.0, f32::MAX as f64)),
+        "/camera/sensor_height" => Some((0.000001, f32::MAX as f64)),
         // Axis index of the trap plane (X, Y, Z); the kernel reads min(2).
         "/trap_axis" => Some((0.0, 2.0)),
         "/render/denoise/interval" => Some((0.0, u32::MAX as f64)),
         // Zero would trace nothing (no step, no exit probe): one is the least that means a march.
         "/render/max_steps" | "/render/glass_probes" => Some((1.0, u32::MAX as f64)),
         "/render/adaptive/noise_threshold" => Some((0.0005, 1.0)),
-        "/render/adaptive/min_samples" => Some((crate::scene::Adaptive::MIN_SAMPLES_FLOOR as f64, 65536.0)),
+        "/render/adaptive/min_samples" => {
+            Some((crate::scene::Adaptive::MIN_SAMPLES_FLOOR as f64, 65536.0))
+        }
         "/material/transmission" => Some((0.0, 1.0)),
         "/material/transmission_depth" => Some((0.0, f32::MAX as f64)),
         p if p.ends_with("roughness") || p.ends_with("metallic") || p == "/material/opacity" => {
@@ -1096,6 +1172,10 @@ pub(crate) fn attribute_range(path: &str) -> Option<(f64, f64)> {
 pub(crate) fn attribute_label(path: &str) -> String {
     match path {
         "/material_id" => return "Material".into(),
+        "/camera/f_number" => return "f-number".into(),
+        "/formula/Hybrid/mandelbox/min_radius_ratio" => return "Mandelbox · Min ratio".into(),
+        "/formula/Hybrid/mandelbox/rotation_degrees" => return "Mandelbox · Rotate".into(),
+        "/material/transmission_extra_roughness" => return "Refraction roughness".into(),
         CAMERA_ORBIT_SPEED => return "Orbit speed (°/s)".into(),
         CAMERA_ORBIT_PHASE => return "Orbit phase (°)".into(),
         "/transform/position" => return "Translate".into(),
@@ -1131,7 +1211,9 @@ pub(crate) fn attribute_default(kind: WorldKind, path: &str) -> Option<Value> {
         let world = WorldDocument::from_scene(&Scene::preset(crate::params::FAMILY_BULB));
         let mut defaults = HashMap::new();
         for node in world.nodes() {
-            let Ok(attrs) = world.attrs(node.id) else { continue };
+            let Ok(attrs) = world.attrs(node.id) else {
+                continue;
+            };
             for (path, _) in attrs.iter() {
                 if let Ok(value) = world.attribute_value(node.id, path, 0.0) {
                     // The first node of a kind defines it (one camera, one sun, ...).
@@ -1178,8 +1260,20 @@ pub(crate) fn path_slider_options(path: &str, integer: bool) -> Vec<String> {
 /// guesses from the current value). Fractal parameters match per family, a Hybrid's sub-formula
 /// like its standalone family. A parameter missing here edits as a plain number.
 fn attribute_slider(path: &str) -> Option<Slider> {
-    let lin = |min: f64, max: f64| Some(Slider { min, max, log: false });
-    let log = |min: f64, max: f64| Some(Slider { min, max, log: true });
+    let lin = |min: f64, max: f64| {
+        Some(Slider {
+            min,
+            max,
+            log: false,
+        })
+    };
+    let log = |min: f64, max: f64| {
+        Some(Slider {
+            min,
+            max,
+            log: true,
+        })
+    };
     // RGB channels (their component rows): 0..1 on the rail, HDR values typed past it.
     if is_color_attribute(path) {
         return lin(0.0, 1.0);
@@ -1229,8 +1323,8 @@ fn attribute_slider(path: &str) -> Option<Slider> {
         "/transform/rotation_degrees" => lin(-180.0, 180.0),
         "/transform/scale" => log(0.01, 10.0),
         "/camera/target" => lin(-5.0, 5.0),
-        // In framing radii; 1 = 0.05 radius of lens (`Scene::pack`).
-        "/camera/aperture" => lin(0.0, 10.0),
+        "/camera/f_number" => lin(0.0, 32.0),
+        "/camera/sensor_height" => log(0.001, 0.1),
         "/camera/distance" => log(0.1, 20.0),
         "/camera/focus_distance" => lin(0.0, 10.0),
         "/camera/fov_y_degrees" => lin(5.0, 120.0),
@@ -1276,31 +1370,63 @@ fn attribute_slider(path: &str) -> Option<Slider> {
 /// belongs to), `field` its parameter.
 fn formula_hint(family: &str, field: &str) -> Option<&'static str> {
     Some(match (family, field) {
-        ("Mandelbulb", "power") => "Mandelbulb exponent: z -> z^power in spherical coordinates. 8 is the classic bulb; higher gives more, finer lobes.",
-        ("Mandelbulb", "angle_scale") => "Multiplies the power for the polar (theta) and azimuth (phi) angles separately; 1, 1 is the plain bulb. Stretches the lobes along one angle.",
-        ("Mandelbulb", "angle_phase_degrees") => "Offsets added to the polar and azimuth angles every iteration: twists the bulb.",
-        ("Mandelbulb" | "QuaternionJulia" | "Hybrid", "bailout") => "Escape radius: an orbit farther than this is outside. Larger is more exact near the surface and slower.",
-        ("Mandelbulb" | "Mandelbox" | "Kifs", "rotation_degrees") => "Rotation applied to the point every iteration: folds the structure into spirals. 0 keeps the formula symmetric.",
-        ("Mandelbox", "scale") => "Mandelbox scale per iteration, typically 2 to 3; negative values give the inverted box.",
-        ("Mandelbox", "min_radius_ratio") => "Inner radius of the sphere fold as a fraction of the fixed radius: points inside it are scaled up by the largest factor.",
-        ("Mandelbox", "fixed_radius") => "Radius of the sphere fold: points between the inner radius and this are inverted.",
+        ("Mandelbulb", "power") => {
+            "Mandelbulb exponent: z -> z^power in spherical coordinates. 8 is the classic bulb; higher gives more, finer lobes."
+        }
+        ("Mandelbulb", "angle_scale") => {
+            "Multiplies the power for the polar (theta) and azimuth (phi) angles separately; 1, 1 is the plain bulb. Stretches the lobes along one angle."
+        }
+        ("Mandelbulb", "angle_phase_degrees") => {
+            "Offsets added to the polar and azimuth angles every iteration: twists the bulb."
+        }
+        ("Mandelbulb" | "QuaternionJulia" | "Hybrid", "bailout") => {
+            "Escape radius: an orbit farther than this is outside. Larger is more exact near the surface and slower."
+        }
+        ("Mandelbulb" | "Mandelbox" | "Kifs", "rotation_degrees") => {
+            "Rotation applied to the point every iteration: folds the structure into spirals. 0 keeps the formula symmetric."
+        }
+        ("Mandelbox", "scale") => {
+            "Mandelbox scale per iteration, typically 2 to 3; negative values give the inverted box."
+        }
+        ("Mandelbox", "min_radius_ratio") => {
+            "Inner radius of the sphere fold as a fraction of the fixed radius: points inside it are scaled up by the largest factor."
+        }
+        ("Mandelbox", "fixed_radius") => {
+            "Radius of the sphere fold: points between the inner radius and this are inverted."
+        }
         ("Mandelbox", "fold_limit") => "Box fold: coordinates beyond +/- this are reflected back.",
-        ("Kifs", "kind") => "The polyhedron whose symmetry planes fold space: tetrahedron, octahedron or Menger sponge.",
+        ("Kifs", "kind") => {
+            "The polyhedron whose symmetry planes fold space: tetrahedron, octahedron or Menger sponge."
+        }
         ("Kifs", "scale") => "KIFS scale per iteration (above 1): how much smaller each copy is.",
         ("Kifs", "offset") => "Shifts the fold centre: the copies move apart or together.",
-        ("QuaternionJulia", "constant") => "The Julia constant c (x, y, z, w) of z -> z^2 + c: the shape of the set.",
+        ("QuaternionJulia", "constant") => {
+            "The Julia constant c (x, y, z, w) of z -> z^2 + c: the shape of the set."
+        }
         ("QuaternionJulia", "slice_w") => "The 4D set is cut by a 3D slice at this w.",
         ("QuaternionJulia", "rotation_degrees") => "Turns the 3D slice through the 4D set.",
-        ("Kleinian", "a") => "Kleinian group parameter a: the generator's translation, the size of the circle-packing cells.",
-        ("Kleinian", "b") => "Kleinian group parameter b: the generator's shear; 0 is the symmetric limit set.",
-        ("PseudoKleinian", "box_size") => "Half sizes of the box the point is folded into every iteration.",
+        ("Kleinian", "a") => {
+            "Kleinian group parameter a: the generator's translation, the size of the circle-packing cells."
+        }
+        ("Kleinian", "b") => {
+            "Kleinian group parameter b: the generator's shear; 0 is the symmetric limit set."
+        }
+        ("PseudoKleinian", "box_size") => {
+            "Half sizes of the box the point is folded into every iteration."
+        }
         ("PseudoKleinian", "size") => "Sphere inversion radius squared: larger opens bigger holes.",
         ("PseudoKleinian", "c") => "Offset added after every inversion.",
         ("PseudoKleinian", "offset") => "Centre of the final shape test.",
         ("PseudoKleinian", "thickness") => "Thickness of the final shape: thicker fills the holes.",
-        ("Apollonian", "scale") | ("Hybrid", "apollonian_scale") => "Apollonian inversion strength: larger packs more, smaller spheres.",
-        ("Kleinian" | "PseudoKleinian" | "Apollonian", "bound_radius") => "Radius of the sphere that holds the whole set: rays only march inside it. Too small cuts the fractal off.",
-        ("Hybrid", "steps") => "The formulas applied in turn every iteration (Off skips a slot); their parameters are the Mandelbulb / Mandelbox / KIFS sub-sections.",
+        ("Apollonian", "scale") | ("Hybrid", "apollonian_scale") => {
+            "Apollonian inversion strength: larger packs more, smaller spheres."
+        }
+        ("Kleinian" | "PseudoKleinian" | "Apollonian", "bound_radius") => {
+            "Radius of the sphere that holds the whole set: rays only march inside it. Too small cuts the fractal off."
+        }
+        ("Hybrid", "steps") => {
+            "The formulas applied in turn every iteration (Off skips a slot); their parameters are the Mandelbulb / Mandelbox / KIFS sub-sections."
+        }
         _ => return None,
     })
 }
@@ -1328,10 +1454,18 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
     }
     Some(match path {
         "/formula" => "The fractal family and its parameters.",
-        "/julia" => "Julia mode (Mandelbulb, Mandelbox): every iteration adds this fixed constant instead of the starting point.",
-        "/coloring" => "Where the palette coordinate comes from: Radius (escape radius) or an orbit trap (origin, plane, point).",
-        "/palette" => "The colour ramp the fractal's colouring indexes (when the material takes its colour from the palette).",
-        "/trap_point" => "Orbit trap point: colour by how close the orbit comes to it (Trap point colouring).",
+        "/julia" => {
+            "Julia mode (Mandelbulb, Mandelbox): every iteration adds this fixed constant instead of the starting point."
+        }
+        "/coloring" => {
+            "Where the palette coordinate comes from: Radius (escape radius) or an orbit trap (origin, plane, point)."
+        }
+        "/palette" => {
+            "The colour ramp the fractal's colouring indexes (when the material takes its colour from the palette)."
+        }
+        "/trap_point" => {
+            "Orbit trap point: colour by how close the orbit comes to it (Trap point colouring)."
+        }
         "/trap_axis" => "Orbit trap plane normal axis (Trap plane colouring).",
         "/trap_scale" => "How fast the trap distance runs through the palette.",
         "/material_id" => "The material this fractal is rendered with.",
@@ -1339,14 +1473,25 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
         "/camera/yaw_degrees" => "Camera heading around world up.",
         "/camera/pitch_degrees" => "Camera tilt up / down.",
         "/camera/roll_degrees" => "Camera roll around the view axis.",
-        "/camera/distance" => "Distance from the target in framing radii of the fractal (1 frames it).",
+        "/camera/distance" => {
+            "Distance from the target in framing radii of the fractal (1 frames it)."
+        }
         "/camera/fov_y_degrees" => "Vertical field of view.",
-        "/camera/aperture" => "Lens aperture for depth of field; 0 is a pinhole (all sharp).",
+        "/camera/f_number" => {
+            "Physical f-number: focal length / pupil diameter. 0 disables depth of field."
+        }
+        "/camera/sensor_height" => {
+            "Full vertical sensor gate in scene units (0.024 = 24 mm when one unit is one metre). Focal length = gate / (2 tan(FOV / 2)); independent of camera transform scale."
+        }
         "/camera/focus_distance" => "Focus distance in framing radii; 0 focuses on the target.",
         "/camera/free_flight" => "Free flight: roll is free. Off: the horizon stays level.",
-        "/camera/orbit_speed_degrees" => "Turntable: degrees per second the camera orbits the target (integrated over the animation).",
+        "/camera/orbit_speed_degrees" => {
+            "Turntable: degrees per second the camera orbits the target (integrated over the animation)."
+        }
         "/camera/orbit_phase_degrees" => "Turntable starting angle added to the orbit.",
-        "/environment/enabled" => "Light the scene with the environment image (else the sky gradient).",
+        "/environment/enabled" => {
+            "Light the scene with the environment image (else the sky gradient)."
+        }
         "/environment/path" => "Lat-long HDR / EXR environment image.",
         "/environment/intensity" => "Environment brightness multiplier.",
         "/environment/rotation_degrees" => "Turns the environment around world up.",
@@ -1354,34 +1499,64 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
         "/lighting/sun_elevation" => "Sun height above the horizon (negative: below).",
         "/lighting/sun_color" => "Sun colour.",
         "/lighting/sun_intensity" => "Sun brightness.",
-        "/lighting/sun_angle" => "Sun disc diameter in degrees: larger gives softer shadows (the real sun is ~0.53).",
+        "/lighting/sun_angle" => {
+            "Sun disc diameter in degrees: larger gives softer shadows (the real sun is ~0.53)."
+        }
         "/lighting/sky_intensity" => "Sky light brightness.",
         "/lighting/sky_horizon" => "Sky colour at the horizon.",
         "/lighting/sky_zenith" => "Sky colour straight up.",
-        "/lighting/background" => "Show the sky behind the fractal; off keeps its light but renders the background black.",
-        "/material/model" => "Fast: a quick metal / plastic model. Standard Surface: the full Autodesk Standard Surface (glass, coat, sheen, film); transmission always uses it.",
-        "/material/color_source" => "Base colour from the fractal's palette (colouring) or the solid Base color.",
+        "/lighting/background" => {
+            "Show the sky behind the fractal; off keeps its light but renders the background black."
+        }
+        "/material/model" => {
+            "Fast: a quick metal / plastic model. Standard Surface: the full Autodesk Standard Surface (glass, coat, sheen, film); transmission always uses it."
+        }
+        "/material/color_source" => {
+            "Base colour from the fractal's palette (colouring) or the solid Base color."
+        }
         "/material/base_color" => "Solid base colour (when the colour source is Material).",
         "/material/preset" => "The library preset this material came from (a label only).",
-        "/material/facing" => "Facing blend: toward a second look at grazing angles by (1 - |N.V|)^exponent (pearlescent, falloff).",
+        "/material/facing" => {
+            "Facing blend: toward a second look at grazing angles by (1 - |N.V|)^exponent (pearlescent, falloff)."
+        }
         "/material/facing/color" => "The base colour the facing blend reaches at grazing angles.",
-        "/material/facing/roughness" => "The specular roughness the facing blend reaches at grazing angles.",
+        "/material/facing/roughness" => {
+            "The specular roughness the facing blend reaches at grazing angles."
+        }
         "/material/facing/metallic" => "The metalness the facing blend reaches at grazing angles.",
-        "/material/facing/exponent" => "Falloff power of the facing blend: higher keeps it to the very edge.",
+        "/material/facing/exponent" => {
+            "Falloff power of the facing blend: higher keeps it to the very edge."
+        }
         "/material/base" => "Diffuse / base weight.",
         "/material/base_tint" => "Multiplies the base colour.",
-        "/material/diffuse_roughness" => "Oren-Nayar roughness of the diffuse base: 0 Lambert, 1 dusty.",
+        "/material/diffuse_roughness" => {
+            "Oren-Nayar roughness of the diffuse base: 0 Lambert, 1 dusty."
+        }
         "/material/metalness" => "0 dielectric, 1 metal (the base colour becomes the reflectance).",
         "/material/specular" => "Specular reflection weight.",
         "/material/specular_color" => "Specular tint.",
-        "/material/specular_roughness" => "Microfacet roughness of reflection and refraction: 0 mirror, 1 matte.",
-        "/material/specular_ior" => "Index of refraction: Fresnel reflectance of dielectrics and the bending of glass (1.5 glass, 1.33 water).",
-        "/material/specular_anisotropy" => "Stretches the highlight along the tangent (brushed metal).",
+        "/material/specular_roughness" => {
+            "Microfacet roughness of reflection and refraction: 0 mirror, 1 matte."
+        }
+        "/material/specular_ior" => {
+            "Index of refraction: Fresnel reflectance of dielectrics and the bending of glass (1.5 glass, 1.33 water)."
+        }
+        "/material/specular_anisotropy" => {
+            "Stretches the highlight along the tangent (brushed metal)."
+        }
         "/material/specular_rotation" => "Turns the anisotropy direction.",
-        "/material/transmission" => "Fraction of the dielectric base that refracts through instead of diffusing: 1 is glass.",
-        "/material/transmission_color" => "Glass tint: at the interface when Transmission depth is 0, else the colour left after travelling that depth inside.",
-        "/material/transmission_depth" => "Distance over which light inside the glass is tinted to Transmission color (Beer-Lambert); 0 tints at the surface only.",
-        "/material/transmission_extra_roughness" => "Extra roughness of refraction only (frosted glass).",
+        "/material/transmission" => {
+            "Fraction of the dielectric base that refracts through instead of diffusing: 1 is glass."
+        }
+        "/material/transmission_color" => {
+            "Glass tint: at the interface when Transmission depth is 0, else the colour left after travelling that depth inside."
+        }
+        "/material/transmission_depth" => {
+            "Distance over which light inside the glass is tinted to Transmission color (Beer-Lambert); 0 tints at the surface only."
+        }
+        "/material/transmission_extra_roughness" => {
+            "Extra roughness of refraction only (frosted glass)."
+        }
         "/material/sheen" => "Velvet-like sheen weight at grazing angles.",
         "/material/sheen_color" => "Sheen colour.",
         "/material/sheen_roughness" => "Sheen spread.",
@@ -1391,25 +1566,49 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
         "/material/coat_ior" => "Coat index of refraction.",
         "/material/coat_affect_color" => "How much the coat darkens and saturates the base.",
         "/material/coat_affect_roughness" => "How much the coat roughness roughens the base.",
-        "/material/thin_film_thickness" => "Thin-film interference thickness in nanometres (soap bubble, oil): 0 off.",
+        "/material/thin_film_thickness" => {
+            "Thin-film interference thickness in nanometres (soap bubble, oil): 0 off."
+        }
         "/material/thin_film_ior" => "Thin-film index of refraction.",
         "/material/emission" => "Emitted light strength.",
         "/material/emission_color" => "Emitted light colour.",
-        "/render/iterations" => "Fractal iterations per distance estimate: more resolves finer detail and costs proportionally.",
-        "/render/max_steps" => "Sphere-tracing step budget per ray. A ray that runs out of steps is unresolved: a camera ray shows the background (the OFX Direct preview keeps a sub-pixel near miss), bounce and shadow rays bring no light; the status bar reports the share. Steps a ray does not need cost nothing.",
-        "/render/glass_probes" => "Probes per exit through glass: the most steps an exit march takes and its shortest step (the object's size over this), so the thinnest interior wall or cavity a refracted ray can find. Fields that are zero inside (Mandelbulb and other escape-time fractals) only probe; signed fields (KIFS, Kleinians) march their distance but never step shorter. More finds finer walls and costs proportionally (4096 vs 256: 10-30x on a glass Mandelbulb). An exit it cannot find ends the path and is counted as unresolved.",
-        "/render/hit_epsilon" => "Surface detail: how close a ray must come to count as a hit, relative to the pixel footprint (0.008 is one pixel). Smaller resolves finer detail and needs more steps.",
-        "/render/step_factor" => "Sphere-tracing step as a fraction of the distance estimate: lower is safer on fractals that overestimate, slower.",
-        "/render/max_bounces" => "Path tracing bounces: indirect light, reflections and refractions (glass needs several).",
+        "/render/iterations" => {
+            "Fractal iterations per distance estimate: more resolves finer detail and costs proportionally."
+        }
+        "/render/max_steps" => {
+            "Sphere-tracing step budget per ray. A ray that runs out of steps is unresolved: a camera ray shows the background (the OFX Direct preview keeps a sub-pixel near miss), bounce and shadow rays bring no light; the status bar reports the share. Steps a ray does not need cost nothing."
+        }
+        "/render/glass_probes" => {
+            "Probes per exit through glass: the most steps an exit march takes and its shortest step (the object's size over this), so the thinnest interior wall or cavity a refracted ray can find. Fields that are zero inside (Mandelbulb and other escape-time fractals) only probe; signed fields (KIFS, Kleinians) march their distance but never step shorter. More finds finer walls and costs proportionally (4096 vs 256: 10-30x on a glass Mandelbulb). An exit it cannot find ends the path and is counted as unresolved."
+        }
+        "/render/hit_epsilon" => {
+            "Surface detail: how close a ray must come to count as a hit, relative to the pixel footprint (0.008 is one pixel). Smaller resolves finer detail and needs more steps."
+        }
+        "/render/step_factor" => {
+            "Sphere-tracing step as a fraction of the distance estimate: lower is safer on fractals that overestimate, slower."
+        }
+        "/render/max_bounces" => {
+            "Path tracing bounces: indirect light, reflections and refractions (glass needs several)."
+        }
         "/render/exposure_stops" => "Exposure in stops before the display transform.",
         "/render/saturation" => "Saturation of the displayed image (1 unchanged).",
         "/render/reinhard" => "Legacy Reinhard tone curve instead of the OCIO display transform.",
-        "/render/denoise/enabled" => "OIDN denoising of the displayed image; the raw samples are kept.",
-        "/render/denoise/interval" => "Denoise every N samples while rendering (0: only when the render completes).",
-        "/render/denoise/mode" => "Guide images for OIDN: colour only, + albedo, + albedo and normal (sharpest).",
+        "/render/denoise/enabled" => {
+            "OIDN denoising of the displayed image; the raw samples are kept."
+        }
+        "/render/denoise/interval" => {
+            "Denoise every N samples while rendering (0: only when the render completes)."
+        }
+        "/render/denoise/mode" => {
+            "Guide images for OIDN: colour only, + albedo, + albedo and normal (sharpest)."
+        }
         "/render/denoise/quality" => "OIDN quality: faster or sharper.",
-        "/render/adaptive/enabled" => "Adaptive sampling: stop sampling tiles whose noise is below the threshold.",
-        "/render/adaptive/noise_threshold" => "Relative noise a tile must fall under to stop; lower is cleaner and slower.",
+        "/render/adaptive/enabled" => {
+            "Adaptive sampling: stop sampling tiles whose noise is below the threshold."
+        }
+        "/render/adaptive/noise_threshold" => {
+            "Relative noise a tile must fall under to stop; lower is cleaner and slower."
+        }
         "/render/adaptive/min_samples" => "Samples every pixel takes before its tile may stop.",
         "/transform/position" => "Position in the parent's space.",
         "/transform/rotation_degrees" => "Rotation in degrees.",
@@ -1428,7 +1627,10 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
 /// Editor), or None when it is in use. `value` reads the node's other attributes. The rules follow
 /// what `Scene::pack` and the kernels read: Julia only for Mandelbulb / Mandelbox, the trap
 /// parameters per colouring mode, a Hybrid's sub-formulas only when one of its steps runs them.
-pub(crate) fn inactive_reason<'a>(path: &str, value: impl Fn(&str) -> Option<&'a Value>) -> Option<String> {
+pub(crate) fn inactive_reason<'a>(
+    path: &str,
+    value: impl Fn(&str) -> Option<&'a Value>,
+) -> Option<String> {
     // `path` is `prefix` or one of its components; no allocation (runs per row per frame).
     let under = |prefix: &str| {
         path.strip_prefix(prefix)
@@ -1454,7 +1656,10 @@ pub(crate) fn inactive_reason<'a>(path: &str, value: impl Fn(&str) -> Option<&'a
     let rest = path.strip_prefix("/formula/Hybrid/")?;
     // A hybrid packs only the sub-formulas' shape parameters: one rotation for the whole hybrid
     // (the bulb's) and its own bailout (`Scene::pack`, Formula::Hybrid).
-    let hybrid_own = |p: &str| rest.strip_prefix(p).is_some_and(|r| r.is_empty() || r.starts_with('/'));
+    let hybrid_own = |p: &str| {
+        rest.strip_prefix(p)
+            .is_some_and(|r| r.is_empty() || r.starts_with('/'))
+    };
     if hybrid_own("mandelbox/rotation_degrees") || hybrid_own("kifs/rotation_degrees") {
         return Some("A hybrid turns by the Mandelbulb rotation".into());
     }
@@ -1499,12 +1704,17 @@ fn is_color_attribute(path: &str) -> bool {
 /// Tangent for a value written at `frame`: a key that already exists keeps its out kind (editing a
 /// value must not reset its interpolation), a new key takes `new` (Settings > Animation).
 fn key_tan(ch: &Channel, frame: f64, new: Tan) -> Tan {
-    ch.keys().iter().find(|k| k.t() == frame).map_or(new, |k| k.out.kind)
+    ch.keys()
+        .iter()
+        .find(|k| k.t() == frame)
+        .map_or(new, |k| k.out.kind)
 }
 
 fn clamp_to_range(path: &str, value: Value) -> Value {
     match (attribute_range(path), value.as_f64()) {
-        (Some((min, max)), Some(v)) if v < min || v > max => numeric_like(&value, v.clamp(min, max)),
+        (Some((min, max)), Some(v)) if v < min || v > max => {
+            numeric_like(&value, v.clamp(min, max))
+        }
         _ => value,
     }
 }
@@ -1647,49 +1857,9 @@ fn set_pointer(root: &mut Value, path: &str, value: Value, create: bool) -> Resu
     put(root, &parts, value, create)
 }
 impl WorldDocument {
-    /// Add newly supported material fields once on load. Existing values, UUIDs,
-    /// animation channels and legacy authored looks remain intact; old glass presets
-    /// can be reapplied explicitly to opt into the corrected transmission model.
-    fn upgrade_material_schema(&mut self) -> Result<(), String> {
-        let defaults = [
-            ("/material/transmission", json!(0.0)),
-            ("/material/transmission_color", json!(([1.0; 3]))),
-            ("/material/transmission_extra_roughness", json!(0.0)),
-            ("/material/transmission_depth", json!(0.0)),
-        ];
-        let mut updates = Vec::new();
-        for node in self.nodes().into_iter().filter(|n| n.kind == WorldKind::Material) {
-            let mut attrs = self.attrs(node.id)?;
-            let mut gpu = self.node(node.id)?["gpu"].clone();
-            let mut changed = false;
-            for (path, default) in &defaults {
-                if attrs.get(path).is_none() {
-                    let value = gpu.pointer(path).cloned().unwrap_or_else(|| default.clone());
-                    attrs.set(*path, to_attr(&value));
-                    let key = path.trim_start_matches("/material/");
-                    gpu["material"][key] = value;
-                    changed = true;
-                }
-            }
-            if changed {
-                updates.push((node.id, serde_json::to_value(attrs).map_err(|e| e.to_string())?, gpu));
-            }
-        }
-        for (id, host, gpu) in updates {
-            let node = self.node_mut(id)?;
-            node["host"] = host;
-            node["gpu"] = gpu;
-        }
-        Ok(())
-    }
-
     pub fn from_scene(scene: &Scene) -> Self {
         if let Some(world) = &scene.document {
-            let mut document = (**world).clone();
-            if let Err(error) = document.upgrade_material_schema() {
-                log::warn!("Material schema upgrade: {error}");
-            }
-            return document;
+            return (**world).clone();
         }
         let mut document = Self {
             graph: SubnetFile {
@@ -1762,6 +1932,11 @@ impl WorldDocument {
         ] {
             attrs.set(path, to_attr(&value));
         }
+        if kind == WorldKind::Camera {
+            for path in [CAMERA_ORBIT_SPEED, CAMERA_ORBIT_PHASE] {
+                attrs.set(path, to_attr(&json!(0.0)));
+            }
+        }
         if kind == WorldKind::Fractal {
             attrs.set("/transform/position", to_attr(&json!(scene.object.offset)));
             attrs.set(
@@ -1816,17 +1991,7 @@ impl WorldDocument {
     }
     fn attrs(&self, id: NodeId) -> Result<Attrs, String> {
         let node = self.node(id)?;
-        let mut attrs: Attrs =
-            serde_json::from_value(node["host"].clone()).map_err(|e| e.to_string())?;
-        // Old documents acquire neutral orbit controls without changing their saved poses or IDs.
-        if node["type"].as_str() == Some("Camera") {
-            for path in [CAMERA_ORBIT_SPEED, CAMERA_ORBIT_PHASE] {
-                if !attrs.contains(path) {
-                    attrs.set(path, to_attr(&json!(0.0)));
-                }
-            }
-        }
-        Ok(attrs)
+        serde_json::from_value(node["host"].clone()).map_err(|e| e.to_string())
     }
     fn store_attrs(&mut self, id: NodeId, attrs: &Attrs) -> Result<(), String> {
         self.node_mut(id)?["host"] = serde_json::to_value(attrs).map_err(|e| e.to_string())?;
@@ -1873,7 +2038,10 @@ impl WorldDocument {
     }
     /// References of a fragment that point outside it and are absent from this document
     /// (material, parent), by node key. A paste clears exactly these; the UI reports them.
-    pub fn unresolved_references(&self, nodes: &HashMap<String, Value>) -> Vec<(String, &'static str)> {
+    pub fn unresolved_references(
+        &self,
+        nodes: &HashMap<String, Value>,
+    ) -> Vec<(String, &'static str)> {
         let resolves = |id: &str| nodes.contains_key(id) || self.graph.nodes.contains_key(id);
         let mut out = Vec::new();
         for (key, data) in nodes {
@@ -1890,8 +2058,10 @@ impl WorldDocument {
         if ids.is_empty() {
             return Err("Nothing selected to copy".into());
         }
-        serde_json::to_string(&json!({ CLIPBOARD_KEY: CLIPBOARD_VERSION, "nodes": self.fragment(ids)? }))
-            .map_err(|e| e.to_string())
+        serde_json::to_string(
+            &json!({ CLIPBOARD_KEY: CLIPBOARD_VERSION, "nodes": self.fragment(ids)? }),
+        )
+        .map_err(|e| e.to_string())
     }
     /// Every node with a material reference (fractals), in document order.
     pub fn material_consumers(&self) -> Vec<NodeId> {
@@ -2017,7 +2187,11 @@ impl WorldDocument {
                 for (component, value) in values.iter().enumerate() {
                     let mut attr = parent.clone();
                     attr.path = format!("{}/{}", parent.path, component);
-                    attr.default = parent.default.as_ref().and_then(|d| d.get(component)).cloned();
+                    attr.default = parent
+                        .default
+                        .as_ref()
+                        .and_then(|d| d.get(component))
+                        .cloned();
                     attr.label = format!(
                         "{} / {}",
                         parent.label,
@@ -2239,12 +2413,21 @@ impl WorldDocument {
             };
             let tans: Vec<Tan> = a
                 .anim(path)
-                .map(|anim| anim.channels.iter().map(|c| key_tan(c, frame, kind)).collect())
+                .map(|anim| {
+                    anim.channels
+                        .iter()
+                        .map(|c| key_tan(c, frame, kind))
+                        .collect()
+                })
                 .unwrap_or_default();
             a.add_key(path, frame, &attr);
             if let Some(anim) = a.anim_mut(path) {
                 for (i, channel) in anim.channels.iter_mut().enumerate() {
-                    let tan = if discrete { Tan::Constant } else { tans.get(i).copied().unwrap_or(kind) };
+                    let tan = if discrete {
+                        Tan::Constant
+                    } else {
+                        tans.get(i).copied().unwrap_or(kind)
+                    };
                     channel.set_tan(frame, tan);
                 }
             }
@@ -2265,7 +2448,7 @@ impl WorldDocument {
         }
         self.store_attrs(id, &a)
     }
-    fn assert_unlocked(&self, id: NodeId) -> Result<(), String> {
+    pub(crate) fn assert_unlocked(&self, id: NodeId) -> Result<(), String> {
         let mut current = Some(id);
         let mut seen = HashSet::new();
         while let Some(id) = current {
@@ -2329,13 +2512,14 @@ impl WorldDocument {
         }
         Ok(v)
     }
-    fn camera_navigation_pose(
+    pub(crate) fn camera_navigation_pose(
         &self,
         id: NodeId,
         after: &Scene,
         frame: f64,
     ) -> Result<Vec<(&'static str, Value)>, String> {
         use glam::{Mat3, Mat4, Quat, Vec3};
+        after.camera.validate_lens()?;
         if !frame.is_finite() || !after.camera.distance.is_finite() || after.camera.distance <= 0.0
         {
             return Err("Invalid camera navigation pose".into());
@@ -2425,7 +2609,7 @@ impl WorldDocument {
                 json!(after.camera.distance / back_scale),
             ),
             ("/camera/fov_y_degrees", json!(after.camera.fov_y_degrees)),
-            ("/camera/aperture", json!(after.camera.aperture)),
+            ("/camera/f_number", json!(after.camera.f_number)),
             ("/camera/focus_distance", json!(after.camera.focus_distance)),
         ])
     }
@@ -2461,7 +2645,7 @@ impl WorldDocument {
                     | "/transform/rotation_degrees"
                     | "/camera/distance"
                     | "/camera/fov_y_degrees"
-                    | "/camera/aperture"
+                    | "/camera/f_number"
                     | "/camera/focus_distance"
             )
         {
@@ -2775,6 +2959,13 @@ impl WorldDocument {
     }
 
     pub fn snapshot(&self, frame: f64) -> Result<Scene, String> {
+        if self.graph.format_version != playa_graph::SUBNET_FORMAT_VERSION {
+            return Err(format!(
+                "Unsupported world graph version {} (expected {})",
+                self.graph.format_version,
+                playa_graph::SUBNET_FORMAT_VERSION
+            ));
+        }
         if !frame.is_finite() {
             return Err("Invalid frame".into());
         }
@@ -2952,6 +3143,7 @@ impl WorldDocument {
             scene.trap_axis = first.trap_axis;
             scene.trap_scale = first.trap_scale;
         }
+        scene.camera.validate_lens()?;
         Ok(scene)
     }
 }

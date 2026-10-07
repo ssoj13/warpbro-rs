@@ -1,18 +1,17 @@
 //! Object panels. Widgets report intents; WorldEditor owns all document changes.
-use egui_attr_grid::{AnimIntent, AnimState, AttrMetrics, ChannelExpansion};
 use crate::world::{NodeId, WorldAttribute, WorldCommand, WorldEditor, WorldKind, WorldNodeInfo};
 use curves::Tan;
 use egui::{Color32, Pos2, Rect, Sense, Vec2};
+use egui_attr_grid::{AnimIntent, AnimState, ChannelExpansion};
 use egui_attr_grid::{AttrField, AttrGridHooks, AttrValue as GridValue, render_grid_with_config};
 use egui_outliner::{ContextItem, OutlinerAction, OutlinerConfig, OutlinerModel, TreeNode};
-use egui_phosphor::regular as ph;
 use egui_track_timeline::{
     Clip, KeyPos, Keyframe, PropLane, TimelineAction, TimelineConfig, TimelineModel, TimelineView,
     Track, TrackTimeline, WorkArea,
 };
-use egui_widgets_config::attr_layout::{
-    ValueEditorLayout, cell_ui, square_icon,
-};
+use egui_widgets_config::AttrMetrics;
+use egui_widgets_config::attr_layout::{ValueEditorLayout, cell_ui, square_icon};
+use egui_widgets_config::icons as ph;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -171,10 +170,12 @@ struct GridSectionCache {
 /// Settings, Preferences) and of the timeline rows aligned with them: the metrics' geometry plus
 /// the value actions WarpBro offers (reset, copy, paste). The timeline projects its rows from the
 /// same config, so the action buttons cannot shift its columns.
-pub(crate) fn grid_config(metrics: egui_attr_grid::AttrMetrics) -> egui_attr_grid::AttrGridConfig {
+pub(crate) fn grid_config(
+    metrics: egui_widgets_config::AttrMetrics,
+) -> egui_attr_grid::AttrGridConfig {
     egui_attr_grid::AttrGridConfig {
         actions: egui_attr_grid::ValueActions::BASIC,
-        ..metrics.grid_config()
+        ..egui_attr_grid::grid_config(metrics)
     }
 }
 
@@ -286,10 +287,10 @@ fn kind_label(k: WorldKind) -> &'static str {
 }
 fn kind_icon(k: WorldKind) -> &'static str {
     match k {
-        WorldKind::Fractal => ph::CUBE,
+        WorldKind::Fractal => ph::FRACTAL,
         WorldKind::Camera => ph::CAMERA,
-        WorldKind::DirectionalLight => ph::SUN,
-        WorldKind::Environment => ph::GLOBE,
+        WorldKind::DirectionalLight => ph::LIGHT,
+        WorldKind::Environment => ph::ENVIRONMENT,
         WorldKind::Group => ph::FOLDER,
         WorldKind::Material => ph::PALETTE,
     }
@@ -465,16 +466,30 @@ impl WorldUi {
         // B / N move one end of the work area to the time cursor, pushing the other along.
         let cursor = self.playhead;
         if pressed(Hotkey::SetStart) {
-            let range = WorldCommand::SetTimeRange { first: cursor, last: last.max(cursor), fps };
+            let range = WorldCommand::SetTimeRange {
+                first: cursor,
+                last: last.max(cursor),
+                fps,
+            };
             self.command(e, range);
         }
         if pressed(Hotkey::SetEnd) {
-            let range = WorldCommand::SetTimeRange { first: first.min(cursor), last: cursor, fps };
+            let range = WorldCommand::SetTimeRange {
+                first: first.min(cursor),
+                last: cursor,
+                fps,
+            };
             self.command(e, range);
         }
         for slot in 0..10 {
             if pressed(Hotkey::SetMark(slot)) {
-                self.command(e, WorldCommand::SetMark { slot, frame: Some(cursor) });
+                self.command(
+                    e,
+                    WorldCommand::SetMark {
+                        slot,
+                        frame: Some(cursor),
+                    },
+                );
             }
             if pressed(Hotkey::Mark(slot))
                 && let Some(&frame) = e.document.marks.get(&slot)
@@ -609,7 +624,7 @@ impl WorldUi {
     }
     pub fn outliner(&mut self, ui: &mut egui::Ui, e: &mut WorldEditor) {
         ui.horizontal(|ui| {
-            ui.menu_button(format!("{} Add", ph::PLUS), |ui| {
+            ui.menu_button(format!("{} Add", ph::ADD), |ui| {
                 for kind in [
                     WorldKind::Fractal,
                     WorldKind::Camera,
@@ -909,7 +924,8 @@ impl WorldUi {
     ) {
         let field = |attr: &WorldAttribute| {
             let value = grid_value(&attr.value);
-            let mut field = AttrField::new(&attr.path, value.clone()).with_ui_options(grid_hints(attr));
+            let mut field =
+                AttrField::new(&attr.path, value.clone()).with_ui_options(grid_hints(attr));
             // Reset restores the fresh-world value (the grid refuses a default of another type).
             if let Some(default) = attr.default.as_ref().map(grid_value)
                 && std::mem::discriminant(&default) == std::mem::discriminant(&value)
@@ -963,13 +979,10 @@ impl WorldUi {
             section.revision = revision;
             section.frame = frame;
         } else if section.frame != frame {
-            let rows = section
-                .fields
-                .iter_mut()
-                .flat_map(|field| {
-                    let (parent, channels) = (&mut field.value, &mut field.channels);
-                    std::iter::once(parent).chain(channels.iter_mut().map(|c| &mut c.value))
-                });
+            let rows = section.fields.iter_mut().flat_map(|field| {
+                let (parent, channels) = (&mut field.value, &mut field.channels);
+                std::iter::once(parent).chain(channels.iter_mut().map(|c| &mut c.value))
+            });
             for ((grid, value), &index) in rows.zip(&mut section.values).zip(&section.indices) {
                 *grid = grid_value(&attrs[index].value);
                 value.clone_from(&attrs[index].value);
@@ -983,17 +996,24 @@ impl WorldUi {
     fn components_open(&self, id: NodeId, path: &str, attrs: &[WorldAttribute]) -> bool {
         let animated = attrs.iter().any(|a| {
             a.component.is_some()
-                && a.path.rsplit_once('/').is_some_and(|(parent, _)| parent == path)
+                && a.path
+                    .rsplit_once('/')
+                    .is_some_and(|(parent, _)| parent == path)
                 && !a.frames.is_empty()
         });
-        self.channels.get(&id).map_or(animated, |e| e.is_open(path, animated))
+        self.channels
+            .get(&id)
+            .map_or(animated, |e| e.is_open(path, animated))
     }
     /// Show `attr` of node `id` in the timeline: expand the layer (no property filter), its
     /// attribute group and, for a vector component, the component channels; the next timeline
     /// draw scrolls the lane into view.
     fn reveal_in_timeline(&mut self, id: NodeId, attr: &WorldAttribute) {
         let parent = match attr.component {
-            Some(_) => attr.path.rsplit_once('/').map_or(attr.path.as_str(), |(p, _)| p),
+            Some(_) => attr
+                .path
+                .rsplit_once('/')
+                .map_or(attr.path.as_str(), |(p, _)| p),
             None => attr.path.as_str(),
         };
         self.expanded.insert(id);
@@ -1201,7 +1221,9 @@ impl WorldUi {
             end: e.document.last as i64 + 1,
         });
         model.markers.clear();
-        model.markers.extend(e.document.marks.values().map(|&f| i64::from(f)));
+        model
+            .markers
+            .extend(e.document.marks.values().map(|&f| i64::from(f)));
         let cfg = TimelineConfig {
             row_height: self.attribute_metrics.row_height(),
             lane_height: self.attribute_metrics.row_height(),
@@ -1441,7 +1463,11 @@ impl WorldUi {
             if square_icon(
                 ui,
                 next(),
-                if expanded { ph::CARET_DOWN } else { ph::CARET_RIGHT },
+                if expanded {
+                    ph::CARET_DOWN
+                } else {
+                    ph::CARET_RIGHT
+                },
                 true,
             )
             .on_hover_text("Expand layer properties")
@@ -1457,13 +1483,19 @@ impl WorldUi {
                 }
             }
             for (path, state, on, off, tip) in [
-                ("/visible", n.visible, ph::EYE, ph::EYE_SLASH, "Visibility"),
-                ("/locked", n.locked, ph::LOCK, ph::LOCK_OPEN, "Lock"),
+                ("/visible", n.visible, ph::VISIBLE, ph::HIDDEN, "Visibility"),
+                ("/locked", n.locked, ph::LOCK, ph::UNLOCK, "Lock"),
                 ("/solo", n.solo, "S", "s", "Solo"),
             ] {
-                if egui_widgets_config::icon_toggle(ui, next(), if state { on } else { off }, state, true)
-                    .on_hover_text(tip)
-                    .clicked()
+                if egui_widgets_config::icon_toggle(
+                    ui,
+                    next(),
+                    if state { on } else { off },
+                    state,
+                    true,
+                )
+                .on_hover_text(tip)
+                .clicked()
                 {
                     self.command(
                         e,
@@ -1700,7 +1732,11 @@ impl WorldUi {
                         },
                     );
                 }
-            } else if lane.attr.as_ref().is_some_and(|a| a.color && a.component.is_none()) {
+            } else if lane
+                .attr
+                .as_ref()
+                .is_some_and(|a| a.color && a.component.is_none())
+            {
                 let mut rgba = std::array::from_fn::<_, 4, _>(|i| {
                     lane.value.get(i).and_then(Value::as_f64).unwrap_or(1.0) as f32
                 });
@@ -1942,7 +1978,7 @@ impl WorldUi {
             }
             if transport_icon(
                 ui,
-                ph::ARROWS_CLOCKWISE,
+                ph::LOOP,
                 self.looping,
                 self.attribute_metrics,
             )
@@ -2229,6 +2265,24 @@ impl WorldUi {
             .unwrap_or_default();
         let revision = cache.revision;
         let frame = cache.frame;
+        for group in ATTRIBUTE_GROUPS {
+            if attrs
+                .iter()
+                .any(|a| a.component.is_none() && category(&a.path) == group)
+            {
+                let section = cache.sections.entry((id, group)).or_default();
+                self.prepare_section(section, attrs, group, revision, frame);
+            }
+        }
+        let box_width = egui_attr_grid::value_box_width(
+            ui,
+            cache
+                .sections
+                .iter()
+                .filter(|((node, _), _)| *node == id)
+                .flat_map(|(_, section)| section.fields.iter()),
+            self.attribute_metrics.numeric_width,
+        );
         egui::ScrollArea::vertical()
             .id_salt(("world_inspector", wid(id)))
             .auto_shrink([false, false])
@@ -2245,13 +2299,15 @@ impl WorldUi {
                         .get(&id)
                         .is_some_and(|sections| sections.contains(group));
                     let section = cache.sections.entry((id, group)).or_default();
-                    self.prepare_section(section, attrs, group, revision, frame);
                     let response = egui_titlebar::CollapsingSection::new(group)
                         .id_salt((wid(id), group))
                         .open(open)
                         .tint(section_color(group), 0.16)
                         .show(ui, |ui| {
-                            let config = grid_config(self.attribute_metrics);
+                            let config = egui_attr_grid::AttrGridConfig {
+                                value_box_width: Some(box_width),
+                                ..grid_config(self.attribute_metrics)
+                            };
                             section.state.table.widths.resize(1, 0.0);
                             section.state.table.widths[0] = self.attribute_label_width;
                             let mut commands = Vec::new();
@@ -2390,7 +2446,8 @@ impl AttrGridHooks for WorldGridHooks<'_> {
     fn anim_intent(&mut self, field: &AttrField, intent: AnimIntent) {
         if let Some(index) = self.index(field) {
             let attr = &self.attrs[self.indices[index]];
-            self.commands.push(anim_command(self.id, attr, self.frame, intent));
+            self.commands
+                .push(anim_command(self.id, attr, self.frame, intent));
         }
     }
     /// One expansion per node, shared with the timeline's lanes.
@@ -2531,7 +2588,11 @@ fn grid_hints(attr: &WorldAttribute) -> Vec<String> {
     if !attr.value.is_number() {
         return Vec::new();
     }
-    crate::world::slider_options(attr.slider, attr.range, attr.value.is_u64() || attr.value.is_i64())
+    crate::world::slider_options(
+        attr.slider,
+        attr.range,
+        attr.value.is_u64() || attr.value.is_i64(),
+    )
 }
 fn grid_value(value: &Value) -> GridValue {
     match value {
@@ -3036,18 +3097,33 @@ mod tests {
         let e = editor();
         let object = e.selection.unwrap();
         let attrs = e.document.attributes(object, 0.0).unwrap();
-        let channel = attrs.iter().find(|a| a.path == "/transform/position/1").unwrap();
+        let channel = attrs
+            .iter()
+            .find(|a| a.path == "/transform/position/1")
+            .unwrap();
         let mut state = WorldUi::default();
-        state.property_filters.insert(object, PropertyFilter(PropertyFilter::KEYED));
+        state
+            .property_filters
+            .insert(object, PropertyFilter(PropertyFilter::KEYED));
         state.reveal_in_timeline(object, channel);
         assert!(state.expanded.contains(&object));
-        assert!(!state.property_filters.contains_key(&object), "no filter hides it");
+        assert!(
+            !state.property_filters.contains_key(&object),
+            "no filter hides it"
+        );
         assert!(state.groups.contains(&(object, "@Transform".to_owned())));
         assert!(state.components_open(object, "/transform/position", &attrs));
         let lanes = state.lanes(object, &attrs);
-        assert!(lanes.iter().any(|l| l.path.as_deref() == Some("/transform/position/1")));
+        assert!(
+            lanes
+                .iter()
+                .any(|l| l.path.as_deref() == Some("/transform/position/1"))
+        );
         assert!(state.take_timeline_request() && !state.take_timeline_request());
-        assert_eq!(state.reveal, Some((object, "/transform/position/1".to_owned())));
+        assert_eq!(
+            state.reveal,
+            Some((object, "/transform/position/1".to_owned()))
+        );
     }
     #[test]
     fn time_cursor_work_area_and_marks_follow_after_effects_keys() {
@@ -3056,8 +3132,17 @@ mod tests {
         let mut state = WorldUi::default();
         // Hover the timeline so it owns the keyboard.
         let inside = Pos2::new(80.0, 80.0);
-        shortcut_frame(&ctx, &mut state, &mut e, vec![egui::Event::PointerMoved(inside)]);
-        let range = WorldCommand::SetTimeRange { first: 10, last: 90, fps: e.document.fps };
+        shortcut_frame(
+            &ctx,
+            &mut state,
+            &mut e,
+            vec![egui::Event::PointerMoved(inside)],
+        );
+        let range = WorldCommand::SetTimeRange {
+            first: 10,
+            last: 90,
+            fps: e.document.fps,
+        };
         e.execute(range).unwrap();
         // Press and release: egui reports a second press without a release as a repeat.
         let press = |state: &mut WorldUi, e: &mut WorldEditor, event: egui::Event| {
@@ -3065,7 +3150,12 @@ mod tests {
             if let egui::Event::Key { pressed, .. } = &mut release {
                 *pressed = false;
             }
-            shortcut_frame(&ctx, state, e, vec![egui::Event::PointerMoved(inside), event, release]);
+            shortcut_frame(
+                &ctx,
+                state,
+                e,
+                vec![egui::Event::PointerMoved(inside), event, release],
+            );
         };
         press(&mut state, &mut e, shortcut_key(egui::Key::End, false));
         assert_eq!(state.playhead, 90, "End: work area end");
@@ -3076,10 +3166,18 @@ mod tests {
         press(&mut state, &mut e, shortcut_key(egui::Key::B, false));
         state.seek(60);
         press(&mut state, &mut e, shortcut_key(egui::Key::N, false));
-        assert_eq!((e.document.first, e.document.last), (30, 60), "B / N at the cursor");
+        assert_eq!(
+            (e.document.first, e.document.last),
+            (30, 60),
+            "B / N at the cursor"
+        );
         state.seek(75);
         press(&mut state, &mut e, shortcut_key(egui::Key::B, false));
-        assert_eq!((e.document.first, e.document.last), (75, 75), "B past the end pushes it");
+        assert_eq!(
+            (e.document.first, e.document.last),
+            (75, 75),
+            "B past the end pushes it"
+        );
 
         // Shift+3 as a keyboard really sends it: the character differs, the key position not.
         state.seek(42);
@@ -3101,23 +3199,48 @@ mod tests {
         press(&mut state, &mut e, shortcut_key(egui::Key::Num5, false));
         assert_eq!(state.playhead, 42, "an empty slot leaves the cursor");
         assert!(e.undo());
-        assert!(e.document.marks.is_empty(), "setting a mark is one undo step");
+        assert!(
+            e.document.marks.is_empty(),
+            "setting a mark is one undo step"
+        );
     }
     #[test]
     fn all_digit_slots_can_share_a_frame_and_jump_independently() {
         let mut e = editor();
         let ctx = egui::Context::default();
         let mut state = WorldUi::default();
-        let keys = [egui::Key::Num0, egui::Key::Num1, egui::Key::Num2, egui::Key::Num3, egui::Key::Num4,
-            egui::Key::Num5, egui::Key::Num6, egui::Key::Num7, egui::Key::Num8, egui::Key::Num9];
+        let keys = [
+            egui::Key::Num0,
+            egui::Key::Num1,
+            egui::Key::Num2,
+            egui::Key::Num3,
+            egui::Key::Num4,
+            egui::Key::Num5,
+            egui::Key::Num6,
+            egui::Key::Num7,
+            egui::Key::Num8,
+            egui::Key::Num9,
+        ];
         let inside = Pos2::new(80.0, 80.0);
-        shortcut_frame(&ctx, &mut state, &mut e, vec![egui::Event::PointerMoved(inside)]);
+        shortcut_frame(
+            &ctx,
+            &mut state,
+            &mut e,
+            vec![egui::Event::PointerMoved(inside)],
+        );
         for (slot, key) in keys.iter().copied().enumerate() {
             state.seek(42);
-            let event = egui::Event::Key { key: egui::Key::Exclamationmark, physical_key: Some(key),
-                pressed: true, repeat: false, modifiers: egui::Modifiers::SHIFT };
+            let event = egui::Event::Key {
+                key: egui::Key::Exclamationmark,
+                physical_key: Some(key),
+                pressed: true,
+                repeat: false,
+                modifiers: egui::Modifiers::SHIFT,
+            };
             let mut release = event.clone();
-            if let egui::Event::Key { pressed, .. } = &mut release { *pressed = false; }
+            if let egui::Event::Key { pressed, .. } = &mut release {
+                *pressed = false;
+            }
             shortcut_frame(&ctx, &mut state, &mut e, vec![event, release]);
             assert_eq!(e.document.marks.len(), slot + 1);
         }
@@ -3125,7 +3248,9 @@ mod tests {
             state.seek(0);
             let event = shortcut_key(key, false);
             let mut release = event.clone();
-            if let egui::Event::Key { pressed, .. } = &mut release { *pressed = false; }
+            if let egui::Event::Key { pressed, .. } = &mut release {
+                *pressed = false;
+            }
             shortcut_frame(&ctx, &mut state, &mut e, vec![event, release]);
             assert_eq!(state.playhead, 42);
         }
@@ -3139,23 +3264,38 @@ mod tests {
         let ctx = egui::Context::default();
         let mut state = WorldUi::default();
         let inside = Pos2::new(80.0, 80.0);
-        shortcut_frame(&ctx, &mut state, &mut e, vec![egui::Event::PointerMoved(inside)]);
+        shortcut_frame(
+            &ctx,
+            &mut state,
+            &mut e,
+            vec![egui::Event::PointerMoved(inside)],
+        );
         let u = || {
             let mut release = shortcut_key(egui::Key::U, false);
             if let egui::Event::Key { pressed, .. } = &mut release {
                 *pressed = false;
             }
-            vec![egui::Event::PointerMoved(inside), shortcut_key(egui::Key::U, false), release]
+            vec![
+                egui::Event::PointerMoved(inside),
+                shortcut_key(egui::Key::U, false),
+                release,
+            ]
         };
         shortcut_frame(&ctx, &mut state, &mut e, u());
         let attrs = e.document.attributes(object, 0.0).unwrap();
-        assert!(attrs.iter().all(|a| a.frames.is_empty()), "fixture has no keys");
+        assert!(
+            attrs.iter().all(|a| a.frames.is_empty()),
+            "fixture has no keys"
+        );
         assert!(
             state.lanes(object, &attrs).is_empty(),
             "U on an unkeyed layer shows nothing, so its track is not expanded"
         );
         shortcut_frame(&ctx, &mut state, &mut e, u());
-        assert!(!state.expanded.contains(&object), "U again collapses the layer");
+        assert!(
+            !state.expanded.contains(&object),
+            "U again collapses the layer"
+        );
         assert!(!state.property_filters.contains_key(&object));
     }
     #[test]
@@ -3201,10 +3341,16 @@ mod tests {
                 egui::Event::PointerMoved(outside),
             ],
         );
-        assert_eq!(crate::hotkeys::active(&ctx), Some(crate::hotkeys::Scope::Timeline));
+        assert_eq!(
+            crate::hotkeys::active(&ctx),
+            Some(crate::hotkeys::Scope::Timeline)
+        );
         for _ in 0..3 {
             shortcut_frame(&ctx, &mut state, &mut e, vec![]);
-            assert_eq!(crate::hotkeys::active(&ctx), Some(crate::hotkeys::Scope::Timeline));
+            assert_eq!(
+                crate::hotkeys::active(&ctx),
+                Some(crate::hotkeys::Scope::Timeline)
+            );
         }
         shortcut_frame(
             &ctx,
@@ -3269,7 +3415,12 @@ mod tests {
                 .iter()
                 .any(|lane| lane.path.as_deref() == Some("/transform/scale"))
         );
-        shortcut_frame(&ctx, &mut state, &mut e, vec![shortcut_key(egui::Key::R, true)]);
+        shortcut_frame(
+            &ctx,
+            &mut state,
+            &mut e,
+            vec![shortcut_key(egui::Key::R, true)],
+        );
         assert_eq!(
             state.property_filters[&object].0,
             PropertyFilter::POSITION | PropertyFilter::ROTATION
@@ -4725,7 +4876,11 @@ mod tests {
                 .iter()
                 .any(|l| l.path.as_deref() == Some("/transform/position/0"))
         );
-        state.channels.entry(id).or_default().set("/transform/position", false);
+        state
+            .channels
+            .entry(id)
+            .or_default()
+            .set("/transform/position", false);
         assert!(!state.components_open(id, "/transform/position", &attrs));
     }
 
@@ -4783,7 +4938,8 @@ mod tests {
         let ctx = egui::Context::default();
         let mut wide = Vec::new();
         let _ = ctx.run_ui(Default::default(), |ui| {
-            let font = egui::TextStyle::Body.resolve(ui.style());
+            state.attribute_metrics.apply(ui);
+            let font = ui.style().override_font_id.clone().unwrap();
             for family in 0..=crate::params::FAMILY_WORLD {
                 let e = WorldEditor::new(WorldDocument::from_scene(&Scene::preset(family)));
                 for node in e.document.nodes() {
@@ -4804,5 +4960,97 @@ mod tests {
         wide.sort();
         wide.dedup();
         assert!(wide.is_empty(), "labels wider than the column: {wide:#?}");
+    }
+
+    #[test]
+    fn context_menu_reset_authors_enum_default_and_is_undoable() {
+        let mut e = editor();
+        let id = e
+            .document
+            .nodes()
+            .iter()
+            .find(|n| n.kind == WorldKind::Material)
+            .unwrap()
+            .id;
+        let path = "/material/color_source";
+        e.execute(WorldCommand::SetAttribute {
+            id,
+            path: path.into(),
+            value: json!("Material"),
+            frame: 0.0,
+        })
+        .unwrap();
+        let changed = e.document.clone();
+        let attrs = e.document.attributes(id, 0.0).unwrap();
+        let index = attrs.iter().position(|a| a.path == path).unwrap();
+        let indices = vec![index];
+        let labels = vec![crate::world::attribute_label(path)];
+        let mut values = vec![attrs[index].value.clone()];
+        let field = AttrField::new(path, grid_value(&values[0]));
+        let nodes = e.document.nodes();
+        let mut state = WorldUi::default();
+        let mut commands = Vec::new();
+        let mut value_commands = Vec::new();
+        let ctx = egui::Context::default();
+        let mut draw = |events| {
+            ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        WorldGridHooks {
+                            ui_state: &mut state,
+                            id,
+                            frame: 0.0,
+                            attrs: &attrs,
+                            indices: &indices,
+                            labels: &labels,
+                            values: &mut values,
+                            materials: &nodes,
+                            commands: &mut commands,
+                            value_commands: &mut value_commands,
+                        }
+                        .context_menu(ui, &field);
+                    });
+                },
+            )
+        };
+        let output = draw(vec![]);
+        let position = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::epaint::Shape::Text(text) if text.galley.text() == "Reset to default" => {
+                    Some(text.pos + text.galley.size() * 0.5)
+                }
+                _ => None,
+            })
+            .expect("a host-edited enum must offer Reset to default");
+        draw(vec![
+            egui::Event::PointerMoved(position),
+            egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]);
+        draw(vec![egui::Event::PointerButton {
+            pos: position,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        }]);
+        drop(draw);
+        assert_eq!(commands.len(), 1);
+        e.execute(commands.remove(0)).unwrap();
+        assert_eq!(
+            e.document.attribute_value(id, path, 0.0).unwrap(),
+            attrs[index].default.clone().unwrap()
+        );
+        assert!(e.undo());
+        assert_eq!(e.document, changed);
     }
 }

@@ -63,75 +63,96 @@ fn glass_node_transmission_is_keyable_shared_and_roundtrips() {
 }
 
 #[test]
-fn old_material_schema_gains_glass_controls_without_losing_existing_keys() {
-    fn strip_transmission(value: &mut Value) {
-        match value {
-            Value::Object(map) => {
-                map.retain(|key, _| {
-                    !key.starts_with("/material/transmission") && !key.starts_with("transmission")
-                });
-                for value in map.values_mut() {
-                    strip_transmission(value);
-                }
-            }
-            Value::Array(values) => {
-                for value in values {
-                    strip_transmission(value);
-                }
-            }
-            _ => {}
-        }
-    }
+fn incomplete_material_payload_is_rejected_without_schema_repair() {
     let mut e = editor();
     let id = find(&e, WorldKind::Material);
-    e.document
-        .set_attribute(
-            id,
-            "/material/specular_roughness",
-            json!(0.2),
-            0.0,
-            true,
-            Tan::Linear,
-        )
-        .unwrap();
-    e.document
-        .set_attribute(
-            id,
-            "/material/specular_roughness",
-            json!(0.8),
-            20.0,
-            true,
-            Tan::Linear,
-        )
-        .unwrap();
-    let expected = e.document.material(id, 10.0).unwrap();
-    let mut old = serde_json::to_value(&e.document).unwrap();
-    strip_transmission(&mut old);
-    let old: WorldDocument = serde_json::from_value(old).unwrap();
-    assert!(
-        old.attrs(id)
-            .unwrap()
-            .get("/material/transmission")
-            .is_none()
-    );
-    let upgraded = WorldEditor::new(old);
-    assert_eq!(upgraded.document.material(id, 10.0).unwrap(), expected);
-    let attrs = upgraded.document.attributes(id, 10.0).unwrap();
-    assert!(
-        attrs
-            .iter()
-            .any(|a| a.path == "/material/transmission_depth")
-    );
+    let node = e.document.node_mut(id).unwrap();
+    node["gpu"]["material"]
+        .as_object_mut()
+        .unwrap()
+        .remove("transmission");
+    let document = e.document.clone();
+    let loaded = WorldEditor::new(document.clone());
+    assert_eq!(loaded.document, document);
+    assert!(loaded.document.material(id, 0.0).is_err());
+}
+
+#[test]
+fn camera_recording_replaces_interval_preserves_outside_keys_and_undoes_atomically() {
+    use crate::camera_recorder::{Options, Recording, Timing};
+    let mut e = editor();
+    let id = find(&e, WorldKind::Camera);
+    for (frame, value) in [(0.0, 40.0), (20.0, 80.0), (100.0, 60.0)] {
+        e.document
+            .set_attribute(
+                id,
+                "/camera/fov_y_degrees",
+                json!(value),
+                frame,
+                true,
+                Tan::Linear,
+            )
+            .unwrap();
+    }
+    let original = e.document.clone();
+    let scene = e.document.snapshot(10.0).unwrap();
+    let options = Options {
+        transform: false,
+        focus: false,
+        f_number: false,
+        zoom: true,
+        timing: Timing::KeepSpeed,
+        ..Options::default()
+    };
+    let mut recording = Recording::new(&e.document, e.revision(), 10.0, &scene, options).unwrap();
+    let mut camera = scene.camera;
+    camera.fov_y_degrees = 44.0;
+    recording.capture(1.0, camera).unwrap();
+    e.record_camera(&recording).unwrap();
+    let channel = &e
+        .document
+        .attrs(id)
+        .unwrap()
+        .anim("/camera/fov_y_degrees")
+        .unwrap()
+        .channels[0]
+        .clone();
     assert_eq!(
-        attrs
-            .iter()
-            .find(|a| a.path == "/material/specular_roughness")
-            .unwrap()
-            .frames,
-        vec![0.0, 20.0]
+        channel.keys().iter().map(|k| k.t()).collect::<Vec<_>>(),
+        vec![0.0, 10.0, 34.0, 100.0]
     );
-    let once = upgraded.document.clone();
-    assert_eq!(WorldEditor::new(once.clone()).document, once);
+    assert_eq!(channel.sample_at(34.0), 44.0);
+    assert_eq!(channel.sample_at(0.0), 40.0);
+    assert_eq!(channel.sample_at(100.0), 60.0);
+    assert!(e.undo());
+    assert_eq!(e.document, original);
+    assert!(
+        !e.undo(),
+        "the complete capture creates exactly one undo entry"
+    );
+    let serialized = serde_json::to_string(&e.document).unwrap();
+    assert_eq!(
+        serde_json::from_str::<WorldDocument>(&serialized).unwrap(),
+        original
+    );
+}
+
+#[test]
+fn camera_recording_rejects_locked_and_changed_documents_without_partial_edits() {
+    use crate::camera_recorder::{Options, Recording};
+    let mut e = editor();
+    let scene = e.document.snapshot(0.0).unwrap();
+    let mut recording =
+        Recording::new(&e.document, e.revision(), 0.0, &scene, Options::default()).unwrap();
+    recording.capture(1.0, scene.camera).unwrap();
+    let id = recording.camera;
+    e.execute(WorldCommand::SetLocked { id, locked: true })
+        .unwrap();
+    let locked = e.document.clone();
+    assert!(e.record_camera(&recording).is_err());
+    assert_eq!(e.document, locked);
+    assert!(Recording::new(&e.document, e.revision(), 0.0, &scene, Options::default()).is_err());
+    assert_eq!(e.document, locked);
 }
 
 #[test]
@@ -602,7 +623,7 @@ fn camera_navigation_auto_key_compensates_existing_offsets_and_keys_changed_comp
 }
 
 #[test]
-fn legacy_snapshot_bridge_never_generates_camera_keys_and_navigation_noop_is_clean() {
+fn snapshot_bridge_never_generates_camera_keys_and_navigation_noop_is_clean() {
     let mut e = editor();
     let original = e.document.clone();
     let revision = e.revision();
@@ -618,7 +639,7 @@ fn legacy_snapshot_bridge_never_generates_camera_keys_and_navigation_noop_is_cle
 }
 
 #[test]
-fn camera_orbit_defaults_preserve_old_documents_and_camera_pose() {
+fn camera_orbit_defaults_are_authored_at_creation_and_preserve_camera_pose() {
     let scene = Scene::preset(0);
     let e = editor();
     let id = find(&e, WorldKind::Camera);
@@ -1026,7 +1047,7 @@ fn set(e: &mut WorldEditor, id: NodeId, path: &str, value: Value, frame: f64) {
     .unwrap();
 }
 #[test]
-fn migrates_all_formula_families_without_dropping_parameters() {
+fn constructs_all_formula_families_without_dropping_parameters() {
     for family in 0..8 {
         let s = Scene::preset(family);
         let world = WorldDocument::from_scene(&s);
@@ -1604,7 +1625,13 @@ fn render_schema_filters_fractal_controls_but_keeps_world_settings_keys() {
                 frame,
             })
             .unwrap();
-        set(&mut editor, settings, "/render/exposure_stops", json!(value), frame);
+        set(
+            &mut editor,
+            settings,
+            "/render/exposure_stops",
+            json!(value),
+            frame,
+        );
     }
     let world = editor.document;
     let fractal = world
@@ -1646,16 +1673,28 @@ fn clipboard_copy_paste_and_duplicate_remap_ids_in_one_undo_step() {
     let mut e = editor();
     let fractal = find(&e, WorldKind::Fractal);
     let material = find(&e, WorldKind::Material);
-    e.execute(WorldCommand::AssignMaterial { id: fractal, material: Some(material) }).unwrap();
+    e.execute(WorldCommand::AssignMaterial {
+        id: fractal,
+        material: Some(material),
+    })
+    .unwrap();
     let count = e.document.nodes().len();
 
     // Ctrl+D on two nodes: both copied, one undo step, copies selected.
-    e.execute(WorldCommand::Duplicate(vec![fractal, material])).unwrap();
+    e.execute(WorldCommand::Duplicate(vec![fractal, material]))
+        .unwrap();
     assert_eq!(e.document.nodes().len(), count + 2);
     assert_eq!(e.selected.len(), 2);
-    let copy = *e.selected.iter().find(|id| e.document.supports_material(**id)).unwrap();
+    let copy = *e
+        .selected
+        .iter()
+        .find(|id| e.document.supports_material(**id))
+        .unwrap();
     let copied_material = e.document.assigned_material(copy).unwrap().unwrap();
-    assert_ne!(copied_material, material, "a reference inside the fragment follows the remap");
+    assert_ne!(
+        copied_material, material,
+        "a reference inside the fragment follows the remap"
+    );
     assert!(e.selected.contains(&copied_material));
     assert!(e.undo());
     assert_eq!(e.document.nodes().len(), count);
@@ -1666,7 +1705,10 @@ fn clipboard_copy_paste_and_duplicate_remap_ids_in_one_undo_step() {
     e.execute(WorldCommand::Paste(text.clone())).unwrap();
     let pasted = e.selection.unwrap();
     assert_ne!(pasted, fractal, "paste never reuses the source UUID");
-    assert_eq!(e.document.assigned_material(pasted).unwrap(), Some(material));
+    assert_eq!(
+        e.document.assigned_material(pasted).unwrap(),
+        Some(material)
+    );
     e.execute(WorldCommand::Paste(text)).unwrap();
     assert_ne!(e.selection.unwrap(), pasted, "every paste is a new node");
 
@@ -1678,12 +1720,18 @@ fn clipboard_copy_paste_and_duplicate_remap_ids_in_one_undo_step() {
     e.execute(WorldCommand::Delete(material)).unwrap();
     assert_eq!(e.document.unresolved_references(&nodes).len(), 1);
     e.execute(WorldCommand::Paste(text)).unwrap();
-    assert_eq!(e.document.assigned_material(e.selection.unwrap()).unwrap(), None);
+    assert_eq!(
+        e.document.assigned_material(e.selection.unwrap()).unwrap(),
+        None
+    );
 
     // Foreign clipboard text is not WarpBro nodes and changes nothing.
     assert!(parse_clipboard("hello").is_none());
     let before = e.document.nodes().len();
-    assert!(e.execute(WorldCommand::Paste("{\"nodes\":{}}".into())).is_err());
+    assert!(
+        e.execute(WorldCommand::Paste("{\"nodes\":{}}".into()))
+            .is_err()
+    );
     assert_eq!(e.document.nodes().len(), before);
 }
 
@@ -1692,9 +1740,18 @@ fn fractal_slider_endpoints_pack_finite_and_hybrid_spans_match_standalone() {
     for family in 0..8 {
         let scene = crate::scene::Scene::preset(family);
         let document = WorldDocument::from_scene(&scene);
-        let id = document.nodes().into_iter().find(|n| n.kind == WorldKind::Fractal).unwrap().id;
+        let id = document
+            .nodes()
+            .into_iter()
+            .find(|n| n.kind == WorldKind::Fractal)
+            .unwrap()
+            .id;
         for attr in document.attributes(id, 0.0).unwrap() {
-            if attr.component.is_some() || !(attr.path.starts_with("/formula/") || attr.path == "/julia" || attr.path == "/render/iterations") {
+            if attr.component.is_some()
+                || !(attr.path.starts_with("/formula/")
+                    || attr.path == "/julia"
+                    || attr.path == "/render/iterations")
+            {
                 continue;
             }
             let Some(slider) = attr.slider else { continue };
@@ -1711,16 +1768,27 @@ fn fractal_slider_endpoints_pack_finite_and_hybrid_spans_match_standalone() {
                 let mut e = WorldEditor::new(document.clone());
                 set(&mut e, id, &attr.path, value, 0.0);
                 let evaluated = e.document.node_scene(id, 0.0).unwrap();
-                assert!(evaluated.pack(128, 128).iter().all(|v| v.is_finite()), "family {family}: {} = {endpoint}", attr.path);
+                assert!(
+                    evaluated.pack(128, 128).iter().all(|v| v.is_finite()),
+                    "family {family}: {} = {endpoint}",
+                    attr.path
+                );
             }
         }
     }
-    for (nested, standalone) in [("bulb", "Mandelbulb"), ("mandelbox", "Mandelbox"), ("kifs", "Kifs")] {
+    for (nested, standalone) in [
+        ("bulb", "Mandelbulb"),
+        ("mandelbox", "Mandelbox"),
+        ("kifs", "Kifs"),
+    ] {
         let prefix = format!("/formula/Hybrid/{nested}/");
         for param in ["power", "scale", "bailout", "offset", "rotation_degrees"] {
             let a = attribute_slider(&format!("{prefix}{param}"));
             let b = attribute_slider(&format!("/formula/{standalone}/{param}"));
-            assert_eq!(a.map(|s| (s.min, s.max, s.log)), b.map(|s| (s.min, s.max, s.log)));
+            assert_eq!(
+                a.map(|s| (s.min, s.max, s.log)),
+                b.map(|s| (s.min, s.max, s.log))
+            );
         }
     }
 }
@@ -1733,11 +1801,17 @@ fn every_numeric_parameter_has_a_slider_and_hard_limits_hold_in_the_document() {
         for node in doc.nodes() {
             for a in doc.attributes(node.id, 0.0).unwrap() {
                 let numeric = a.value.is_number()
-                    || a.value.as_array().is_some_and(|v| v.iter().all(|x| x.is_number()));
+                    || a.value
+                        .as_array()
+                        .is_some_and(|v| v.iter().all(|x| x.is_number()));
                 if numeric && a.choices.is_empty() {
                     assert!(a.slider.is_some(), "{} has no slider span", a.path);
                     if let (Some(s), Some((min, max))) = (a.slider, a.range) {
-                        assert!(min <= s.min && s.max <= max, "{}: slider outside its hard limits", a.path);
+                        assert!(
+                            min <= s.min && s.max <= max,
+                            "{}: slider outside its hard limits",
+                            a.path
+                        );
                     }
                 }
                 if a.color && a.component.is_none() {
@@ -1765,22 +1839,42 @@ fn every_numeric_parameter_has_a_slider_and_hard_limits_hold_in_the_document() {
         frame: 0.0,
     })
     .unwrap();
-    let value = e.document.attribute_value(material, "/material/transmission", 0.0).unwrap();
-    assert_eq!(value.as_f64(), Some(1.0), "hard limit [0, 1] clamps any editor's value");
+    let value = e
+        .document
+        .attribute_value(material, "/material/transmission", 0.0)
+        .unwrap();
+    assert_eq!(
+        value.as_f64(),
+        Some(1.0),
+        "hard limit [0, 1] clamps any editor's value"
+    );
 }
 
 #[test]
 fn inactive_parameters_follow_what_the_kernel_reads() {
     use serde_json::json;
     let doc = |formula: Value, coloring: &str| {
-        let values = [("/formula".to_owned(), formula), ("/coloring".to_owned(), json!(coloring))];
-        move |path: &str| inactive_reason(path, |p| values.iter().find(|(k, _)| k == p).map(|(_, v)| v))
+        let values = [
+            ("/formula".to_owned(), formula),
+            ("/coloring".to_owned(), json!(coloring)),
+        ];
+        move |path: &str| {
+            inactive_reason(path, |p| {
+                values.iter().find(|(k, _)| k == p).map(|(_, v)| v)
+            })
+        }
     };
     let bulb = doc(json!({"Mandelbulb": {}}), "Radius");
     assert!(bulb("/julia").is_none());
-    assert!(bulb("/trap_scale").is_some() && bulb("/trap_point/1").is_some(), "Radius reads no trap");
+    assert!(
+        bulb("/trap_scale").is_some() && bulb("/trap_point/1").is_some(),
+        "Radius reads no trap"
+    );
     let kifs = doc(json!({"Kifs": {}}), "TrapPoint");
-    assert_eq!(kifs("/julia").as_deref(), Some("The Kifs formula has no Julia mode"));
+    assert_eq!(
+        kifs("/julia").as_deref(),
+        Some("The Kifs formula has no Julia mode")
+    );
     assert!(kifs("/trap_point").is_none() && kifs("/trap_scale").is_none());
     assert!(kifs("/trap_axis").is_some(), "a point trap has no axis");
     let origin = doc(json!({"Kifs": {}}), "TrapOrigin");
@@ -1788,15 +1882,27 @@ fn inactive_parameters_follow_what_the_kernel_reads() {
     let plane = doc(json!({"Kifs": {}}), "TrapPlane");
     assert!(plane("/trap_axis").is_none() && plane("/trap_point/0").is_none());
 
-    let hybrid = doc(json!({"Hybrid": {"steps": ["Mandelbox", "Off", "Off", "Off"]}}), "Radius");
+    let hybrid = doc(
+        json!({"Hybrid": {"steps": ["Mandelbox", "Off", "Off", "Off"]}}),
+        "Radius",
+    );
     assert!(hybrid("/formula/Hybrid/mandelbox/scale").is_none());
     assert!(hybrid("/formula/Hybrid/kifs/scale").is_some());
     assert!(hybrid("/formula/Hybrid/bulb/power").is_some());
-    assert!(hybrid("/formula/Hybrid/bulb/rotation_degrees/2").is_none(), "turns the whole hybrid");
+    assert!(
+        hybrid("/formula/Hybrid/bulb/rotation_degrees/2").is_none(),
+        "turns the whole hybrid"
+    );
     assert!(hybrid("/formula/Hybrid/apollonian_scale").is_some());
     assert!(hybrid("/formula/Hybrid/bailout").is_none());
-    let idle = doc(json!({"Hybrid": {"steps": ["Off", "Off", "Off", "Off"]}}), "Radius");
-    assert!(idle("/formula/Hybrid/bulb/power").is_none(), "no step on runs a Mandelbulb step");
+    let idle = doc(
+        json!({"Hybrid": {"steps": ["Off", "Off", "Off", "Off"]}}),
+        "Radius",
+    );
+    assert!(
+        idle("/formula/Hybrid/bulb/power").is_none(),
+        "no step on runs a Mandelbulb step"
+    );
 }
 
 #[test]
@@ -1809,10 +1915,17 @@ fn hybrid_marks_unpacked_sub_formula_parameters_and_limits_keep_their_floor() {
         "/formula/Hybrid/kifs/rotation_degrees",
         "/formula/Hybrid/bulb/bailout",
     ] {
-        assert!(inactive_reason(path, value).is_some(), "{path} is never packed");
+        assert!(
+            inactive_reason(path, value).is_some(),
+            "{path} is never packed"
+        );
     }
     assert!(inactive_reason("/formula/Hybrid/mandelbox/scale", value).is_none());
-    assert_eq!(numeric_like(&json!(0), 0.0005), json!(0.0005), "a float floor never rounds away");
+    assert_eq!(
+        numeric_like(&json!(0), 0.0005),
+        json!(0.0005),
+        "a float floor never rounds away"
+    );
     assert_eq!(numeric_like(&json!(9), 2.0), json!(2));
 }
 
@@ -1842,7 +1955,10 @@ fn every_attribute_has_a_hover_hint() {
     }
     assert!(missing.is_empty(), "attributes without a hint: {missing:?}");
     // A channel row explains its vector; the Hybrid's sub-formulas share their family's text.
-    assert_eq!(attribute_hint("/camera/target/1"), attribute_hint("/camera/target"));
+    assert_eq!(
+        attribute_hint("/camera/target/1"),
+        attribute_hint("/camera/target")
+    );
     assert_eq!(
         attribute_hint("/formula/Hybrid/bulb/power"),
         attribute_hint("/formula/Mandelbulb/power")
@@ -1872,7 +1988,122 @@ fn attributes_carry_the_fresh_world_value_as_their_reset_default() {
     assert_eq!(distance.value, json!(7.5));
     assert_eq!(distance.default, Some(fresh));
     // A component's default is its element of the vector's default.
-    assert_eq!(pick(&e, "/camera/target/0").default, Some(target[0].clone()));
+    assert_eq!(
+        pick(&e, "/camera/target/0").default,
+        Some(target[0].clone())
+    );
     // Locks and time range are not resettable parameters.
     assert_eq!(pick(&e, "/locked").default, None);
+}
+
+#[test]
+fn camera_recording_replays_visible_pose_with_animated_nonuniform_camera_scale() {
+    use crate::camera_recorder::{Options, Recording};
+    let mut e = editor();
+    let id = find(&e, WorldKind::Camera);
+    for (frame, scale) in [(0.0, [1.0, 1.0, 1.0]), (24.0, [2.0, 0.8, 1.4])] {
+        e.document
+            .set_attribute(
+                id,
+                "/transform/scale",
+                json!(scale),
+                frame,
+                true,
+                Tan::Linear,
+            )
+            .unwrap();
+    }
+    let start = e.document.snapshot(0.0).unwrap();
+    let mut recording =
+        Recording::new(&e.document, e.revision(), 0.0, &start, Options::default()).unwrap();
+    let mut expected = vec![(0.0, start.camera)];
+    for index in 1..=4 {
+        let seconds = f64::from(index) / 4.0;
+        let mut camera = start.camera;
+        camera.target[0] += index as f32 * 0.05;
+        camera.yaw_degrees += index as f32 * 2.0;
+        recording.capture(seconds, camera).unwrap();
+        expected.push((seconds * e.document.fps, camera));
+    }
+    e.record_camera(&recording).unwrap();
+    for (frame, expected) in expected {
+        let actual = e.document.snapshot(frame).unwrap().camera;
+        let position_error =
+            (glam::Vec3::from(actual.target) - glam::Vec3::from(expected.target)).length();
+        assert!(
+            position_error < 0.001,
+            "frame {frame}: target error {position_error}"
+        );
+        assert!(
+            (actual.distance - expected.distance).abs() < 0.001,
+            "frame {frame}: distance"
+        );
+        assert!(
+            actual.orientation().dot(expected.orientation()).abs() > 0.99999,
+            "frame {frame}: orientation"
+        );
+    }
+}
+
+#[test]
+fn snapshot_and_gpu_upload_reject_invalid_lens_payload_without_repair() {
+    let mut e = editor();
+    let camera = find(&e, WorldKind::Camera);
+    // Malformed persisted authoring values must reach the evaluated lens boundary.
+    // The gpu template is overridden by these authoritative host attributes.
+    let mut attrs = e.document.attrs(camera).unwrap();
+    attrs.set("/camera/sensor_height", AttrValue::Float(-0.024));
+    e.document.store_attrs(camera, &attrs).unwrap();
+    let before = e.document.clone();
+    assert!(
+        e.document
+            .snapshot(0.0)
+            .unwrap_err()
+            .contains("sensor height")
+    );
+    assert_eq!(e.document, before);
+    let mut scene = Scene::preset(0);
+    scene.world_render = true;
+    scene.camera.f_number = -1.0;
+    assert!(
+        crate::render::validate_world(&scene)
+            .unwrap_err()
+            .contains("f-number")
+    );
+}
+
+#[test]
+fn current_world_format_roundtrips_but_old_and_future_graph_versions_are_rejected() {
+    let mut scene = Scene::preset(0);
+    scene.animation = crate::animation::Animation {
+        first: 17,
+        last: 91,
+        fps: 24000.0 / 1001.0,
+    };
+    let original = WorldDocument::from_scene(&scene);
+    let json = serde_json::to_string(&original).unwrap();
+    let decoded = crate::io_service::decode_scene(&json).unwrap();
+    assert_eq!(decoded.animation, scene.animation);
+    let loaded: WorldDocument = serde_json::from_str(&json).unwrap();
+    assert_eq!(loaded, original);
+    assert!(loaded.graph.bus_slots["world"].get("animation").is_none());
+    assert_eq!(loaded.snapshot(37.5).unwrap().animation, Default::default());
+    for version in [
+        0,
+        playa_graph::SUBNET_FORMAT_VERSION - 1,
+        playa_graph::SUBNET_FORMAT_VERSION + 1,
+    ] {
+        let mut document = original.clone();
+        document.graph.format_version = version;
+        let serialized = serde_json::to_string(&document).unwrap();
+        assert!(
+            crate::io_service::decode_scene(&serialized)
+                .unwrap_err()
+                .contains("Unsupported world graph version")
+        );
+        assert_eq!(
+            document.graph.format_version, version,
+            "decoding never repairs a document"
+        );
+    }
 }

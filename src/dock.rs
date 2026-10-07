@@ -47,43 +47,35 @@ impl Panel {
 
 pub(super) fn default_layout() -> DockState<Panel> {
     let mut state = DockState::new(vec![Panel::Viewport]);
-    let [workspace, left] = state.main_surface_mut().split_left(
-        NodeIndex::root(), 0.25, vec![Panel::Outliner],
-    );
-    let [_, materials] = state.main_surface_mut().split_below(
-        left, 0.30960023, vec![Panel::Materials],
-    );
-    state.main_surface_mut().split_below(materials, 0.5, vec![Panel::Timeline]);
+    let [workspace, left] =
+        state
+            .main_surface_mut()
+            .split_left(NodeIndex::root(), 0.25, vec![Panel::Outliner]);
+    let [_, materials] =
+        state
+            .main_surface_mut()
+            .split_below(left, 0.30960023, vec![Panel::Materials]);
+    state
+        .main_surface_mut()
+        .split_below(materials, 0.5, vec![Panel::Timeline]);
     let [_, right] = state.main_surface_mut().split_right(
-        workspace, 0.7039749, vec![Panel::Inspector, Panel::Gallery],
+        workspace,
+        0.7039749,
+        vec![Panel::Inspector, Panel::Gallery],
     );
-    let [_, settings] = state.main_surface_mut().split_below(
-        right, 0.50315166, vec![Panel::Settings],
-    );
-    state.main_surface_mut().split_below(settings, 0.39916557, vec![Panel::Export]);
+    let [_, settings] =
+        state
+            .main_surface_mut()
+            .split_below(right, 0.50315166, vec![Panel::Settings]);
+    state
+        .main_surface_mut()
+        .split_below(settings, 0.39916557, vec![Panel::Export]);
     state
 }
 
 pub(super) fn valid_layout(state: &DockState<Panel>) -> bool {
     let mut seen = std::collections::HashSet::new();
     state.iter_all_tabs().all(|(_, tab)| seen.insert(*tab)) && seen.contains(&Panel::Viewport)
-}
-
-/// One-time upgrade preserves the user's existing panes and floating tools.
-pub(super) fn add_timeline(state: &mut DockState<Panel>) {
-    if state.find_tab(&Panel::Timeline).is_none() {
-        if let Some(path) = state.find_tab(&Panel::Viewport) {
-            state[path.surface].split_below(path.node, 0.74, vec![Panel::Timeline]);
-        }
-    }
-}
-
-pub(super) fn add_outliner(state: &mut DockState<Panel>) {
-    if state.find_tab(&Panel::Outliner).is_none() {
-        if let Some(path) = state.find_tab(&Panel::Viewport) {
-            state[path.surface].split_left(path.node, 0.22, vec![Panel::Outliner]);
-        }
-    }
 }
 
 // egui_dock 0.21 does not update WindowState::screen_rect. Preserve each
@@ -426,7 +418,7 @@ impl App {
             ..Default::default()
         }
         .show(ui, rect, &mut state, |ui| {
-            use egui_phosphor::regular as ph;
+            use egui_widgets_config::icons as ph;
             egui_viewport_toolbar::exposure_control(
                 ui,
                 &mut self.scene.render.exposure_stops,
@@ -438,7 +430,7 @@ impl App {
             let changed = self.colour.quick_view_ui(ui);
             self.apply_colour_change(changed);
             if ui
-                .button(ph::GEAR_SIX)
+                .button(ph::GEAR)
                 .on_hover_text("Colour management settings")
                 .clicked()
             {
@@ -474,7 +466,7 @@ impl App {
             let denoising = self.scene.render.denoise.enabled;
             let mut shown = denoising && !self.raw_view;
             if ui
-                .add_enabled(denoising, egui::Button::selectable(shown, ph::SPARKLE))
+                .add_enabled(denoising, egui::Button::selectable(shown, ph::PATH_TRACE))
                 .on_hover_text("Viewport: denoised / raw samples")
                 .on_disabled_hover_text("Denoising is off in World Settings")
                 .clicked()
@@ -483,7 +475,7 @@ impl App {
                 self.raw_view = !shown;
             }
             if ui
-                .selectable_label(self.scene.camera.free_flight, ph::AIRPLANE)
+                .selectable_label(self.scene.camera.free_flight, ph::FLIGHT)
                 .on_hover_text("Free flight / horizon lock · RMB + WASD, R / Space up, C down, Q/E")
                 .clicked()
             {
@@ -500,10 +492,11 @@ impl App {
             snapshot.context_menu(|ui| self.snapshot_menu(ui));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(ui.spacing().item_spacing.x);
-                match self
-                    .camera_slots
-                    .ui(ui, &mut self.scene.camera, self.controls.swap_slot_buttons)
-                {
+                match self.camera_slots.ui(
+                    ui,
+                    &mut self.scene.camera,
+                    self.controls.swap_slot_buttons,
+                ) {
                     Some(crate::camera_slots::SlotAction::Stored(i)) => {
                         self.status = format!("Camera {} stored", i + 1);
                     }
@@ -527,7 +520,7 @@ impl App {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
+
 pub(super) struct Fonts {
     pub face: String,
     pub body: f32,
@@ -602,7 +595,7 @@ impl App {
                 .or_default()
                 .insert(0, self.fonts.face.clone());
         }
-        egui_phosphor::add_to_fonts(&mut definitions, egui_phosphor::Variant::Regular);
+        egui_widgets_config::add_icon_font(&mut definitions);
         ctx.set_fonts(definitions);
         ctx.set_zoom_factor(self.fonts.zoom);
         ctx.all_styles_mut(|style| {
@@ -751,12 +744,21 @@ mod tests {
     }
 
     #[test]
-    fn named_layout_preserves_floating_export_and_legacy_workspaces() {
+    fn named_layout_preserves_floating_export_and_default_workspaces() {
         let ctx = egui::Context::default();
-        let legacy = layout_blob(&DockState::new(vec![
-            Panel::Viewport, Panel::Timeline, Panel::Outliner, Panel::Gallery,
-            Panel::Bookmarks, Panel::Materials, Panel::Inspector,
-        ]), &ctx).unwrap();
+        let default_blob = layout_blob(
+            &DockState::new(vec![
+                Panel::Viewport,
+                Panel::Timeline,
+                Panel::Outliner,
+                Panel::Gallery,
+                Panel::Bookmarks,
+                Panel::Materials,
+                Panel::Inspector,
+            ]),
+            &ctx,
+        )
+        .unwrap();
         let mut state = DockState::new(vec![Panel::Viewport]);
         open_panel(&mut state, Panel::Settings);
         open_panel(&mut state, Panel::Export);
@@ -765,7 +767,7 @@ mod tests {
         window.set_position(egui::pos2(125.0, 80.0));
         window.set_size(egui::vec2(700.0, 500.0));
         let mut store = LayoutStore::new();
-        store.save("Default", legacy);
+        store.save("Default", default_blob);
         store.save("Render", layout_blob(&state, &ctx).unwrap());
         assert!(store.rename("Render", "Export workspace"));
         let json = serde_json::to_string(&store).unwrap();
@@ -784,38 +786,10 @@ mod tests {
             geometry["next_position"],
             serde_json::to_value(egui::pos2(125.0, 80.0)).unwrap()
         );
-        let legacy_restored = restore_layout(&restored_store.select("Default").unwrap()).unwrap();
-        assert_eq!(legacy_restored.iter_all_tabs().count(), 7);
+        let default_restored = restore_layout(&restored_store.select("Default").unwrap()).unwrap();
+        assert_eq!(default_restored.iter_all_tabs().count(), 7);
         assert!(restored_store.delete("Export workspace"));
         assert_eq!(restored_store.len(), 1);
-    }
-
-    #[test]
-    fn timeline_upgrade_preserves_existing_panels_and_is_idempotent() {
-        let mut state = DockState::new(vec![Panel::Viewport, Panel::Inspector]);
-        add_timeline(&mut state);
-        add_timeline(&mut state);
-        assert!(valid_layout(&state));
-        assert_eq!(state.iter_all_tabs().count(), 3);
-        for panel in [Panel::Viewport, Panel::Inspector, Panel::Timeline] {
-            assert!(state.find_tab(&panel).is_some());
-        }
-    }
-    #[test]
-    fn world_upgrade_preserves_existing_panels_and_is_idempotent() {
-        let mut state = DockState::new(vec![Panel::Viewport, Panel::Inspector, Panel::Timeline]);
-        add_outliner(&mut state);
-        add_outliner(&mut state);
-        assert!(valid_layout(&state));
-        assert_eq!(state.iter_all_tabs().count(), 4);
-        for panel in [
-            Panel::Viewport,
-            Panel::Inspector,
-            Panel::Timeline,
-            Panel::Outliner,
-        ] {
-            assert!(state.find_tab(&panel).is_some());
-        }
     }
 
     #[test]

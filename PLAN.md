@@ -5,6 +5,7 @@ items (details go to CHANGELOG.md), add new requests, keep open work sorted by p
 Russian; code, comments and files in English. Reusable UI goes into egui-widgets-rs.
 
 ## Rules that bite
+
 - Plan first; wait for approval before non-trivial changes.
 - Never `git reset` / checkout-rollback; restore a file with `git show <rev>:<path> > <path>`.
 - No `Co-Authored-By` lines. Commit only your own files: parallel sessions and WIP auto-commits
@@ -16,6 +17,10 @@ Russian; code, comments and files in English. Reusable UI goes into egui-widgets
 - References: D:\Projects\vfx.ref.
 
 ## State (2026-10-06)
+
+This table is the previous shift's snapshot. The authorized continuation and current gates are
+recorded below; do not use the old branch names as the current publication state.
+
 | Repo | HEAD | In flight |
 |---|---|---|
 | warpbro-rs | a707c9b | - |
@@ -23,6 +28,202 @@ Russian; code, comments and files in English. Reusable UI goes into egui-widgets
 | playa | ba49d14 | `feat/render-settings` (tier cache, background gate, templates, progressive viewer); `feat/nested-effects-menu` d1e8236 (awaits a visual check) |
 | ofx-rs | bce0b90 | - |
 | render-rs | 207473e | - |
+
+## Authorized continuation (2026-10-06)
+
+### Latest gates and order — 2026-10-07
+
+The older receipts below remain historical; use this checkpoint for current publication and
+unfinished gates. No extra approval is needed for the already authorized scope.
+
+- [x] Publish GitNexus `ec11c6a2ad54eee9b27f477c531b6b9625ec18aa`: six Git + 87 MCP
+  tests, native GUI/CLI build (42m38s), two actual help exit-0 calls and post-commit reindex
+  passed. The foreign installed MCP was not replaced.
+- [ ] Publish current shared toolbar/output policy after its pending gate. Solid toolbar/
+  mandatory ToolbarState source passed 15 ordinary tests on Rust 1.96; the actual 44px
+  natural-button/font fixture is corrected. Pure OutputKind/view resolver in the existing
+  egui-display export module shares actual WarpBro policy; one producer review closed with
+  no findings. Six policy tests did not execute in `21437`: disk-full regex-syntax IO stopped
+  compilation. No files were deleted; about 45 GB became free. Coherent-8c4-lock run `82388`
+  is active, not passed. The producer is not yet published.
+- [ ] Consume that SHA and verify SquareBob FrozenRenderSession. Nine files plus ColorPipeline
+  now own the frozen DirEntry/camera/quality/options, own color pipeline and existing 3D/2D
+  renderer resources moved from author fields. Author time/flags are not mutated; GPU error
+  causes survive worker failure/final readback drain. 3D SDR uses RGBA16F float, strict config/
+  LUT failures. Eight ordinary + one ignored GPU tests are source-only: no compile/test/reindex
+  receipt yet. No zero-copy encoder claim; full EXR metadata remains open.
+- [ ] Finish SquareBob toolbar/CamClip/preset acceptance. Foundation 24 UI + one GPU tests
+  passed and seven screenshots were generated. Root visual inspection found narrow overlap/
+  floating-bar and fade-fixture issues; source fixes await regenerated accepted screenshots.
+  Five mandatory nullable LMB-recall/RMB-store camera slots and named preset buttons remain
+  incomplete WarpBro OCIO/proxy/denoise/snapshot/full-toolbar parity.
+- [ ] Finish WarpBro verification and shared view/cache migration. Schema gate recorded 256
+  passed / one failed / nine ignored; its remaining lens fixture was fixed and four targeted
+  lens tests passed. Actual OIDN HDR/all-quality, PNG-video PQ HEVC/PQ ProRes/HLG HEVC/SDR
+  ProRes tags+CLL, and Vulkan partial exact `24000/1001` each passed one gate. Specialized
+  Fast one-object radiance still fails at max_abs `5.9247017e-5`; Fast two-object and
+  StandardSurface one/two-object radiance/albedo/normals are exact. Trace the shared field
+  boundary before any tolerance/kernel change. Pending shared view-policy/cache migration
+  must correct the actual current-input/look omission in the display/view key.
+- [ ] Finish the native app queue: COLMAP `75655` is active on 8c4; its 7406-byte B fixture
+  has 48 frames / stride 3 / expected 16 and has not yet run. EXV/RV wait for the new widgets
+  SHA. SquareBob floating Git refs were checked against actual remotes; the explicit fscan
+  pin was updated `5f57` → `94dd173`.
+
+All videos remain under `C:/Temp/bob`; exact retained folders/dimensions are in
+[HANDOFF.md](HANDOFF.md). Twelve SquareBob technical three-frame 64x64 clips are distinct
+from the actual WarpBro Kvazaar/Vulkan motion and fractional/HDR fixtures. Old screenshots
+in `ui-20261007` do not establish narrow acceptance.
+
+Scoped graph receipts: owned SquareBob mirror full-force `54164` passed (5861 nodes / 13403
+relationships), then serialized `94939` and five-file reindex passed; original canonical DB
+remains foreign-locked/unfresh. Shared ec11 CLI one-file reindex predates the new policy helper;
+reindex again after that source change. WarpBro isolated registry has 3556 nodes / 9918
+relationships; combined expected detect scope, 503 symbols / 42 files, was CRITICAL and
+inspected successfully. No global/original graph freshness claim.
+
+The operator authorized systematic completion of [HANDOFF.md](HANDOFF.md): update the whole
+dependency chain, verify every claimed result, fix architecture and shared ownership, and use
+the references in `D:\Projects\vfx.ref` when they cover the behavior. No further approval is
+needed for the formerly deferred av-player feature fix. The earlier rule requiring two reviewers
+is superseded by ONE independent review per finished branch plus native screenshot inspection;
+do not repeat reviews for every small correction. WarpBro build/test commands remain cuda-oxide.
+
+- [x] Publish shared curve-domain geometry and phosphor vocabulary: egui-widgets-rs main
+  `c2bae44`; 28 config/icon tests including docs and 12 ramp tests plus docs passed. Independent
+  review found no defects; generated ramp screenshots were inspected and passed.
+  Application native screenshots are still a separate open gate.
+  Final shared vocabulary is published in main `a6090f0`, including `920f71d` COLMAP/WarpBro
+  icons and application controls; its config gate passed 28 tests. Final widgets main
+  `9d459d2` passed the attr-grid gate: 50 passed, one ignored.
+  Shared export is now published in `3443b6f46a2a72526c9542b1e7d8e528c88142bc`:
+  recorded source gates passed 31 tests (measured cLLI, real FFmpeg/ffprobe six SDR/PQ/HLG
+  HEVC+ProRes combinations, cancellation) and strict release all-target clippy `-D warnings`.
+  Consumer compilation/acceptance remains open.
+- [x] Publish audio-rs `76b66b0`: remove obsolete av-decode SIMD feature request; audio-decode
+  checked against ffmpeg-rs main `a6676574`. Video evidence belongs to the Playa native IO gate below.
+- [x] Publish FFmpeg canonical metadata checkpoint `8c4`: `bt709_limited` and checked
+  nclx passed six release tests. Application launch/source/UI gates remain separate.
+- [x] Publish ofx-host-egui main `9377dce` (following `402e90a` / `0a3149e`), including `EffectStack`, common numeric-column width, live `AttrMetrics`,
+  responsive curves, and background coordinates from the widget's data-domain callback rect.
+  Latest host-egui release suite passed: 52 unit + four instance + one param_interacts + one
+  doctest. The old fixed 260x150 assumption and the adapter's second inset are corrected
+  and verified by the real parametric-interact gate. Widget owns
+  inner geometry; host consumes the callback rect directly and owns parameter/stack edits.
+  Consumer/native integration remains pending under the Playa and screenshot gates below.
+  All-numeric OFX descriptor-span audit and final 23 GPU screenshots passed and were
+  visually inspected. Backend-hint overlap, RGB R/G/B labels, and status wrapping
+  are verified; the final follow-up is published. Native application acceptance remains open.
+  `9377dce` changes fixtures/lock/changelog only; production is unchanged from `402e90a`.
+  Final widgets `9d459d2` gate passed 58 tests (52 + four + one + one).
+- [x] Publish Playa foundation `8fa38c4d0483945613fc1ca5b6428344b7225df9`; use the published ofx contracts,
+  shared `EffectStack`, and one measured numeric column across ordinary and OFX sections.
+  347 engine/entities tests passed, seven GPU tests ignored. Independent review findings
+  for nonfinite matrices/scalars, empty typed arrays, and non-EXR export validation were
+  fixed. Native IO passed 46/46 after canonical ffmpeg CFR and AAC time-base fixes;
+  earlier app 82 and UI 125 gates passed, and the actual native binary gate passed.
+  App all-target check and fractional-rate encoded-file regression at 29.97 fps passed.
+  Existing accessibility regression passed on widgets `9d459d2`. Final native IO, 347 engine/entities,
+  82 app, 125 UI and nine cache gates plus native/build now passed and are published.
+  Measured sysinfo memory-query cost improved from 106s to 0.56ms. Native UI/AE acceptance
+  and Output/Queue remain open. PQ-tag tests do not certify 10-bit precision.
+- [ ] Finish WarpBro old-data removal, physical f-number lens model, and camera recorder;
+  check all targets and run targeted oxide tests plus production release/native gates.
+  Current working-tree code is not yet a verified publication.
+  The rejected GPU architecture refactor was restored only in its owner's eight files
+  and new display file; parent MaterialSource, codec and dependency edits were preserved.
+  Diff check passed; this restoration does not establish build or HDR acceptance.
+  Coherent lock is updated to published USD `eb92860f9c55281c67bcee6985dce622f649f81e`
+  (fallible compound creation/all seven sample admissions; four native gates passed,
+  clippy zero errors) and latest Alembic `7538a727`. Shared-source all-target check passed
+  in 12.73s (session `31284`) after precise curves accessor / `sample_at` consumer fixes.
+  Actual oxide native CFR baseline `74654` passed one test (52m45s reported). Updated
+  canonical `8c4` CFR/coded-metadata all-target `57365` passed in 2m55s, zero warnings.
+  Full ordinary oxide `71257` is active, not passed. Remaining behavior/build/native gates stay open.
+- [ ] Finish apps: Watermark `c4040f0` is published; latest release passed in 9m59s and
+  three icon tests passed, with native UI still open. Colmap's av_graph video port/native
+  gates are active under its application owner; no completed-app claim. GitNexus's supported
+  SDK rename xtask `39631` passed five tests (23m33s build / 10.08s runtime). Latest integrity
+  gates passed six Git + 87 MCP tests; sole focused review closed with no findings. Default
+  native GUI + CLI build `39070` is active. Canonical SquareBob MCP graph remains locked.
+  Concurrent reanalysis of the owned SHA-verified mirror encountered a duplicate File key;
+  overlapping writers are a plausible, unproven cause. Serialized full analysis `54164` is
+  active. Preserve foreign processes/caches; do not treat the unfinished run as a fresh index.
+  Squarebob's first production bootstrap passed in 59m21s (115390976-byte artifact),
+  earlier all-target locked check passed in 4m50s, and 15 pt-mats tests passed.
+  Three remaining glyphs are fixed and full `cargo update` passed with widgets `9d459d2`;
+  SquareBob CFR repair passed four video tests/six encoder variants and final production
+  build passed in 5m57s, before HDR changes. New float capture/output color-white/strict
+  DisplayLight/HDR PNG-video adapter/decode-back source consumes shared SHA
+  `3443b6f46a2a72526c9542b1e7d8e528c88142bc`. Rust 1.96 production `73811` passed
+  (24m49s bootstrap / 24m34s Cargo); canonical `8c4` metadata library `57163` passed
+  19 tests in 7m, excluding newest launch/test changes. Later library/native gates passed
+  21 + four tests. Latest four native gates passed in 2.51s (alpha, six SDR variants,
+  four PQ/HLG HEVC/ProRes variants, unsupported settings); twelve retained files in
+  `C:/Temp/bob/delivery-20261007-0615` include two ProRes-alpha clips. These three-frame
+  technical fixtures do not certify real application motion. Source-error/extent transactional
+  gate `98764` passed three tests, three ignored, in 3m20s.
+  New immutable post-edit EncodeLaunchRequest/event, FrameSourceResult errors/Cancelled,
+  explicit extent rejection, best-effort post-commit completion and typed SDR conversion
+  are covered only by their scoped file/source receipts. Named Settings presets use the existing HashMap SSOT, buttons/
+  New/RMB Save-Rename-Delete and atomic av-util-core writer; raw-pointer/persistence/GPU-shot
+  tests are unrun, and the direct dependency was added after the compile closed.
+  Actual canvas is RGBA16Float extended-sRGB Rec.709 display light, not raw PT/AP1;
+  frozen output color and SDR still-view independent of the monitor remain open.
+  Latest request adds WarpBro-style viewport toolbar/CamClip and retains all videos in
+  `C:/Temp/bob`. Current UI source has five nullable full OrbitCamera/PhysicalCamera/DoF
+  slots, primary recall/secondary copy/empty no-op, shared Top toolbar geometry, 2D/PBR/PT,
+  physical EV, spp, Settings event/focus, existing primary SDR PNG capture and context Export
+  settings. New required persistence fields have no old-JSON fallback. App gate `1177` is
+  compiling; new UI tests and GPU screenshots have not passed. Full WarpBro OCIO/proxy/
+  denoise/snapshot-format parity and full renderer freeze remain open. WarpBro oxide `71257`
+  is still building; its new-video destination is the unique owned
+  `C:/Temp/bob/warpbro-8c4-a9623942eb974620a00de18fd1bbc4e2`, routed before writes through
+  a previously nonexistent TEMP junction; no completed new-video gate is claimed.
+  RV full dependency refresh includes `8fa` / `73a` / `9d`, native gate pending.
+  EXIF producer `77c56ae` (after `6960603`) publishes canonical EXR/JPG/JPH identity with
+  the same SHAs. EXV actual
+  executable `--help` passed in 3m57s after the library-only pass; own view tests are pending.
+  OTIO main `73a074f` is published: final demo release passed in 29.24s and 21 tests passed.
+  No final-lock refresh remains active. Native application acceptance remains open for every app.
+- [ ] Inspect AE/screenshots against WarpBro at narrow widths and 100/150% scale. Confirm
+  aligned rails/value boxes, channels, reset/key gutters, defaults, labels, and dropdowns.
+  Native Computer Use is unavailable: initialization succeeded, then two `sky.list_apps()`
+  calls failed on the native pipe (Windows os error 2); exact evidence is in oh-my-harness
+  `BUG3.md`, 2026-10-06. Continue GPU kittest screenshots and supported release builds;
+  keep native acceptance open. No custom helper or PowerShell UI automation was used.
+- [ ] Remove curves legacy API only after Playa and WarpBro consume the new APIs successfully.
+- [ ] Continue render settings phases 3-5 (Output Module templates, Viewer / Output nodes,
+  Render Queue) and the remaining render/export backlog below.
+
+The earlier unchecked items below remain historical context until their corresponding gate
+passes. Dependency updates and source edits alone do not complete build or native verification.
+
+Render-profile proposal: [docs/render-profiles.md](docs/render-profiles.md) is a Russian
+DRAFT for review, covering canonical nodes, AttributeEditor flows, Viewport policy,
+WorldDirect, and Output independence. No implementation-start gate has passed;
+this proposal does not replace or complete the current backlog.
+
+Overall order: published shared contracts → Playa foundation → WarpBro verification →
+apps / AE acceptance → curves legacy removal after consumer checks → proposed nodes /
+UI preview → WorldDirect benchmarks → Playa Output / Queue. The node design is not implemented.
+
+Latest explicit priority: full SquareBob Encoder/HDR/Display parity by reusing actual existing
+WarpBro export/color/display code deduplicated into one SSOT in the existing egui-display
+export module, with thin application source adapters. The user rejected
+the proposed common DisplayColorPass, shared NativeEncoder migration and new encoding/interop
+architecture. Those plans are superseded; they are not active implementation authorization.
+[Revised directive and preserved audit](../squarebob-rs/docs/hdr-encoder-display.md) keep the
+full format/codec, precision, crop/resize, cancellation/publication, persistence and decode-back
+requirements. Extraction source (PngEncoding/DisplayLight/HdrScale/HdrLevels, scale/PNG/
+PngVideo/FFmpeg, view-peak measurement and BT.1886 math) is published as
+`3443b6f46a2a72526c9542b1e7d8e528c88142bc`, with recorded 31-test and strict clippy gates.
+Preserve alpha, atomic publication and true 16-bit PNG. SquareBob production/metadata library
+receipts exclude newest UI changes; scoped native file/source gates passed, app/UI gates remain pending.
+WarpBro updated all-target and actual native CFR passed; ordinary oxide is active. Full render
+freeze and monitor-independent SDR view remain open. Native SDR source uses canonical BT.1886.
+No duplicate math, new raw GPU target or GPU interop. The render-node
+proposal remains a draft, and the existing backlog remains open.
 
 ## After the 2026-10-06 merge of feat/keys-track (verify first)
 
@@ -44,6 +245,7 @@ Merged with a stopped agent's WIP and WITHOUT a full build (usage limit): first 
   work area; overrides existing keys; fitter simplification).
 
 ## Open work (priority order)
+
 1. **Attribute Editor parity** (in progress). The old attr-table rows (fill-width sliders, aligned
    value boxes, reset / copy / paste / random, segmented strips) were lost in 13b1caa / 9416673 /
    f2c73ab. egui-widgets-rs `feat/one-attr-editor` restores them in egui-attr-grid (attr-table,
@@ -97,6 +299,7 @@ Merged with a stopped agent's WIP and WITHOUT a full build (usage limit): first 
 19. Deferred: HDR environment blending, area lights (operator decision; low).
 
 ## Gotchas
+
 - egui: nested `ui.input` inside `hotkeys::active` deadlocks; read `active` first.
 - Hotkeys need exact modifier matching. egui tests: send key releases (a second press is a repeat).
 - render-rs: fetch before committing (local main was once behind origin).
@@ -104,11 +307,13 @@ Merged with a stopped agent's WIP and WITHOUT a full build (usage limit): first 
   `--features ofx`; debug builds overflow the main stack at start - run release.
 
 ## Key files
+
 - WarpBro: src/world_ui.rs (AE), src/render.rs, src/gpu.rs, src/export.rs, src/render_service.rs,
   docs/color.md.
 - render-rs BSDF: crates/render-engine-pt/standard-surface-bsdf/src/{microfacet.rs,sample.rs,wgsl/microfacet.wgsl}.
 
 ## Findings worth keeping (BUG1, 2026-10-05; scene: copper-turbine-kifs, frame 27)
+
 - **Normals**: tiny gradients lost their direction (fixed 4f66e83: scale by the max component,
   retry smaller steps). The 4-probe tetrahedral normal was biased; now 6 central probes at eps/4.
   On converged hits (4096 steps, 19 311 stable neighbourhoods): old tetra median 0.45 deg / p90

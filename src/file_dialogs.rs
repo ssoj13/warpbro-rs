@@ -13,7 +13,7 @@ pub const ENVIRONMENT: &str = "environment.path";
 pub const OCIO: &str = "colour.config";
 
 #[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
+
 pub struct History {
     pub directories: HashMap<String, PathBuf>,
     /// Missing key uses the control's default; explicit None means All files.
@@ -130,12 +130,6 @@ mod tests {
             first.config_mut().default_file_filter.as_deref(),
             Some("HDR / EXR")
         );
-        assert_eq!(
-            serde_json::from_str::<History>("{}")
-                .unwrap()
-                .directories
-                .len(),
-            0
-        );
+        assert!(serde_json::from_str::<History>("{}").is_err());
     }
 }

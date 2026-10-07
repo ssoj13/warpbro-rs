@@ -10,6 +10,7 @@
 mod animation;
 mod app;
 mod camera_orbit;
+mod camera_recorder;
 mod camera_slots;
 mod color;
 mod denoise;
@@ -29,6 +30,8 @@ mod materials;
 mod ocio;
 mod palette;
 mod params;
+#[allow(dead_code)] // Integrated into CUDA after the unchanged-policy baseline is captured.
+mod path_convergence;
 mod path_sampling;
 mod presets;
 mod preview;
@@ -37,9 +40,11 @@ mod render_bench;
 mod render_service;
 mod sampler;
 mod scene;
+mod templates;
+#[cfg(test)]
+mod test_gpu;
 mod transfer;
 mod transmission;
-mod templates;
 mod window;
 mod world;
 mod world_ui;
@@ -76,14 +81,21 @@ pub fn new_out_dir(root: &std::path::Path) -> Result<std::path::PathBuf, String>
     let stamp = jiff::Zoned::now().strftime("%Y-%m-%d_%H-%M-%S").to_string();
     // Two outputs within one second get -2, -3, ...: `create_dir` is the atomic claim.
     for n in 1..1000 {
-        let dir = root.join(if n == 1 { stamp.clone() } else { format!("{stamp}-{n}") });
+        let dir = root.join(if n == 1 {
+            stamp.clone()
+        } else {
+            format!("{stamp}-{n}")
+        });
         match std::fs::create_dir(&dir) {
             Ok(()) => return Ok(dir),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(e) => return Err(format!("{}: {e}", dir.display())),
         }
     }
-    Err(format!("{}: no free folder name for {stamp}", root.display()))
+    Err(format!(
+        "{}: no free folder name for {stamp}",
+        root.display()
+    ))
 }
 
 /// Render (or only time) every gallery preset offscreen.
@@ -123,7 +135,8 @@ fn headless(out: Option<&str>, w: usize, h: usize, spp: u32, hdr: bool, display_
             let dir = std::path::Path::new(dir);
             let stem = fs_name::stem(&scene.name);
             let path = dir.join(fs_name::frame_file(&stem, None, encoding.suffix()));
-            t.save_png(&path, encoding, crate::color::BT2408_SDR_WHITE_NITS, true).expect("save png");
+            t.save_png(&path, encoding, crate::color::BT2408_SDR_WHITE_NITS, true)
+                .expect("save png");
             if display_exr {
                 let exr = crate::render_service::FrameFile::DisplayExr.suffix();
                 t.save_display_exr(&dir.join(fs_name::frame_file(&stem, None, exr)))
@@ -163,7 +176,11 @@ fn animated_fixtures(
         let output = std::path::Path::new(dir).join(fs_name::stem(descriptor.name));
         std::fs::create_dir_all(&output)?;
         serde_json::to_writer_pretty(
-            std::fs::File::create(output.join(fs_name::frame_file("scene", None, fs_name::SCENE_SUFFIX)))?,
+            std::fs::File::create(output.join(fs_name::frame_file(
+                "scene",
+                None,
+                fs_name::SCENE_SUFFIX,
+            )))?,
             document,
         )?;
         let frames: Vec<u32> = if all_frames {

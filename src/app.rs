@@ -10,11 +10,10 @@ use egui::{self, Color32, ColorImage, RichText, Sense, TextureHandle, TextureOpt
 use crate::render_service::{Command, Frame, RenderEvent, RenderService, ViewportRequest};
 use crate::scene::*;
 use crate::world::WorldDocument;
-use std::sync::Arc;
+use egui_attr_grid::{AttrField, AttrGridHooks, AttrGridState, AttrValue, render_grid_with_config};
+use egui_widgets_config::AttrMetrics;
 use std::collections::HashSet;
-use egui_attr_grid::{
-    AttrField, AttrGridHooks, AttrGridState, AttrMetrics, AttrValue, render_grid_with_config,
-};
+use std::sync::Arc;
 
 #[path = "dock.rs"]
 mod dock;
@@ -122,6 +121,8 @@ pub(crate) struct App {
     pub display: egui_display::DisplayPrefs,
     colour: crate::ocio::State,
     prefs: egui_prefs2::PrefsPanelState,
+    recorder_options: crate::camera_recorder::Options,
+    camera_recording: Option<(Instant, crate::camera_recorder::Recording)>,
     /// Splitter state of the three Settings > Controls grids.
     prefs_grids: [AttrGridState; 3],
     dock: egui_dock::DockState<dock::Panel>,
@@ -142,11 +143,11 @@ pub(crate) struct App {
     templates_pending: bool,
     persisted_settings: Option<Settings>,
     persisted_layout_revision: u64,
-    legacy_before: Option<Scene>,
+    snapshot_before: Option<Scene>,
     #[cfg(test)]
     settings_serializations: usize,
     #[cfg(test)]
-    legacy_snapshots: usize,
+    snapshot_clones: usize,
     status_layout: egui_statusbar::StatusBarLayout,
     status_resizable: bool,
     render_editor: crate::inspector::RenderEditor,
@@ -203,7 +204,6 @@ fn now_stamp() -> u64 {
         .unwrap_or(0)
 }
 
-
 fn load_bookmarks() -> Vec<Entry> {
     let dir = crate::warpbro_dir().join("bookmarks");
     let mut v: Vec<(PathBuf, Scene)> = std::fs::read_dir(&dir)
@@ -214,14 +214,7 @@ fn load_bookmarks() -> Vec<Entry> {
         .filter(|p| p.extension().is_some_and(|x| x == "json"))
         .filter_map(|p| {
             let s = std::fs::read_to_string(&p).ok()?;
-            let scene =
-                if let Ok(document) = serde_json::from_str::<crate::world::WorldDocument>(&s) {
-                    let mut snapshot = document.snapshot(f64::from(document.first)).ok()?;
-                    snapshot.document = Some(Box::new(document));
-                    snapshot
-                } else {
-                    serde_json::from_str::<Scene>(&s).ok()?
-                };
+            let scene = crate::io_service::decode_scene(&s).ok()?;
             Some((p, scene))
         })
         .collect();
@@ -256,7 +249,8 @@ pub(crate) struct Monitor {
 }
 impl Monitor {
     pub(crate) fn read(ctx: &egui::Context) -> Self {
-        let state = ctx.data(|d| d.get_temp::<egui_display::DisplayState>(egui_display::state_id()));
+        let state =
+            ctx.data(|d| d.get_temp::<egui_display::DisplayState>(egui_display::state_id()));
         Self {
             hdr: state.as_ref().is_some_and(|s| s.output.is_hdr()),
             white_nits: state.as_ref().map_or(100.0, |s| s.target.white),
@@ -309,23 +303,28 @@ pub(crate) enum SettingsPage {
     Controls,
     Fonts,
     Animation,
+    CameraRecorder,
 }
 impl SettingsPage {
-    const ALL: [Self; 5] = [
+    const ALL: [Self; 6] = [
         Self::Display,
         Self::Color,
         Self::Controls,
         Self::Fonts,
         Self::Animation,
+        Self::CameraRecorder,
     ];
     fn category(self) -> egui_prefs2::Category<'static> {
-        use egui_phosphor::regular as ph;
+        use egui_widgets_config::icons as ph;
         match self {
             Self::Display => egui_prefs2::Category::new(ph::MONITOR, "Display"),
             Self::Color => egui_prefs2::Category::new(ph::MONITOR, "Color"),
             Self::Controls => egui_prefs2::Category::new(ph::MONITOR, "Controls"),
-            Self::Fonts => egui_prefs2::Category::new(ph::TEXT_T, "Fonts"),
-            Self::Animation => egui_prefs2::Category::new(ph::FILM_STRIP, "Animation"),
+            Self::Fonts => egui_prefs2::Category::new(ph::TEXT, "Fonts"),
+            Self::Animation => egui_prefs2::Category::new(ph::MEDIA, "Animation"),
+            Self::CameraRecorder => {
+                egui_prefs2::Category::new(egui_widgets_config::icons::RECORD, "Camera recorder")
+            }
         }
     }
     /// The page named `name` (case-insensitive tab label).
@@ -340,7 +339,7 @@ impl SettingsPage {
 /// shared `cam_controls` flight settings, the one place WarpBro configures the flight rig) and
 /// the mouse mapping of the slot strips.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields)]
 struct Controls {
     look_sensitivity: f32,
     fly_speed: f32,
@@ -418,13 +417,14 @@ impl Controls {
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields)]
 struct Settings {
     display: egui_display::DisplayPrefs,
     colour: crate::ocio::Sel,
     colour_presets: crate::ocio::ColourPresets,
     panel: egui_prefs2::PrefsPanelState,
     controls: Controls,
+    recorder: crate::camera_recorder::Options,
     fonts: dock::Fonts,
     layout: Option<String>,
     toolbar: egui_viewport_toolbar::ToolbarState,
@@ -434,15 +434,11 @@ struct Settings {
     gui_fps: u32,
     status_layout: egui_statusbar::StatusBarLayout,
     status_resizable: bool,
-    attribute_metrics: egui_attr_grid::AttrMetrics,
+    attribute_metrics: egui_widgets_config::AttrMetrics,
     auto_key: bool,
     new_key: curves::Tan,
     timeline_outline_width: f32,
     file_dialogs: crate::file_dialogs::History,
-    #[serde(default)]
-    timeline_initialized: bool,
-    #[serde(default)]
-    world_layout_initialized: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -452,6 +448,7 @@ impl Default for Settings {
             colour_presets: Default::default(),
             panel: Default::default(),
             controls: Default::default(),
+            recorder: Default::default(),
             fonts: Default::default(),
             layout: None,
             toolbar: Default::default(),
@@ -466,8 +463,6 @@ impl Default for Settings {
             new_key: curves::Tan::Smooth,
             timeline_outline_width: 340.0,
             file_dialogs: Default::default(),
-            timeline_initialized: true,
-            world_layout_initialized: true,
         }
     }
 }
@@ -495,7 +490,7 @@ fn prefs_grid(
     let metrics = metrics.normalized();
     // Preferences are scalar rows with no animation controls: the editor needs one field, not the
     // attribute grid's three, and the label column keeps the room (a label never collapses to "...").
-    let config = egui_attr_grid::AttrGridConfig {
+    let mut config = egui_attr_grid::AttrGridConfig {
         prefix_width: 0.0,
         action_width: 0.0,
         min_editor_width: metrics.numeric_width + metrics.component_gap + metrics.field_height,
@@ -503,9 +498,18 @@ fn prefs_grid(
     };
     ui.scope(|ui| {
         metrics.apply(ui);
+        config.value_box_width = Some(egui_attr_grid::value_box_width(
+            ui,
+            &rows,
+            metrics.numeric_width,
+        ));
         // The label column starts at the old table's width, scaled with the body font.
         if state.table.widths.is_empty() {
-            let body = ui.style().text_styles.get(&egui::TextStyle::Body).map_or(13.0, |f| f.size);
+            let body = ui
+                .style()
+                .text_styles
+                .get(&egui::TextStyle::Body)
+                .map_or(13.0, |f| f.size);
             state.table.widths.push(130.0 * (body / 13.0).max(1.0));
         }
         for (label, value) in
@@ -575,6 +579,8 @@ impl App {
             display: Default::default(),
             colour: crate::ocio::State::new(scene.colour.clone()),
             prefs: Default::default(),
+            recorder_options: Default::default(),
+            camera_recording: None,
             prefs_grids: Default::default(),
             dock: dock::default_layout(),
             panels_to_open: Vec::new(),
@@ -594,11 +600,11 @@ impl App {
             templates_pending: false,
             persisted_settings: None,
             persisted_layout_revision: 0,
-            legacy_before: None,
+            snapshot_before: None,
             #[cfg(test)]
             settings_serializations: 0,
             #[cfg(test)]
-            legacy_snapshots: 0,
+            snapshot_clones: 0,
             status_layout: Default::default(),
             status_resizable: true,
             render_editor: Default::default(),
@@ -644,6 +650,7 @@ impl App {
             self.display = settings.display;
             self.prefs = settings.panel;
             self.controls = settings.controls;
+            self.recorder_options = settings.recorder;
             self.toolbar = settings.toolbar;
             self.camera_slots = settings.camera_slots;
             self.layouts.store = settings.layouts;
@@ -665,12 +672,6 @@ impl App {
                     _ => self.status = "Saved layout could not be restored; using default".into(),
                 }
             }
-            if !settings.timeline_initialized {
-                dock::add_timeline(&mut self.dock);
-            }
-            if !settings.world_layout_initialized {
-                dock::add_outliner(&mut self.dock);
-            }
             self.colour = crate::ocio::State::new(settings.colour.clone());
             self.colour.presets = settings.colour_presets;
             self.scene.colour = settings.colour;
@@ -683,7 +684,8 @@ impl App {
                 } else {
                     dock::Panel::Settings
                 });
-            self.prefs.selected = SettingsPage::named(&category).unwrap_or(SettingsPage::Display) as usize;
+            self.prefs.selected =
+                SettingsPage::named(&category).unwrap_or(SettingsPage::Display) as usize;
         }
         if let Ok(before) = self
             .world
@@ -748,6 +750,7 @@ impl App {
                         changed = self.colour.ui(ui, &mut browse, self.controls.swap_slot_buttons);
                     }
                     SettingsPage::Fonts => self.fonts_ui(ui),
+                    SettingsPage::CameraRecorder => self.camera_recorder_ui(ui),
                     SettingsPage::Animation => {
                         egui_prefs2::section_header(ui, "Keys");
                         ui.horizontal(|ui| {
@@ -831,6 +834,8 @@ impl App {
                 changed = true;
             } else if category == 3 {
                 self.fonts = Default::default();
+            } else if category == SettingsPage::CameraRecorder as usize {
+                self.recorder_options = Default::default();
             } else if category == SettingsPage::Animation as usize {
                 self.world_ui.new_key = curves::Tan::Smooth;
             } else {
@@ -852,6 +857,123 @@ impl App {
             self.config_picker.pick_file();
         }
         self.apply_colour_change(changed);
+    }
+
+    fn camera_recorder_ui(&mut self, ui: &mut egui::Ui) {
+        use crate::camera_recorder::{Recording, Timing};
+        egui_prefs2::section_header(ui, "Capture channels");
+        ui.add_enabled_ui(self.camera_recording.is_none(), |ui| {
+            ui.checkbox(
+                &mut self.recorder_options.transform,
+                "Translate / Rotate / Scale",
+            );
+            ui.checkbox(&mut self.recorder_options.focus, "Focus");
+            ui.checkbox(&mut self.recorder_options.zoom, "Zoom");
+            ui.checkbox(&mut self.recorder_options.f_number, "f-number");
+            egui_prefs2::section_header(ui, "Timing");
+            ui.radio_value(
+                &mut self.recorder_options.timing,
+                Timing::KeepSpeed,
+                "Keep speed - extend work area",
+            );
+            ui.radio_value(
+                &mut self.recorder_options.timing,
+                Timing::FitWorkArea,
+                "Fit to work area",
+            );
+            ui.horizontal(|ui| {
+                ui.label("Reduction error");
+                ui.add(
+                    egui::DragValue::new(&mut self.recorder_options.tolerance)
+                        .range(0.0..=1.0)
+                        .speed(0.0001),
+                );
+            })
+            .response
+            .on_hover_text(
+                "Maximum absolute error at captured samples, in each channel's authored units.",
+            );
+        });
+        if let Some((start, recording)) = &self.camera_recording {
+            ui.label(format!(
+                "Recording {:.1} s - {} samples",
+                start.elapsed().as_secs_f64(),
+                recording.samples.len()
+            ));
+            ui.horizontal(|ui| {
+                ui.label("Focus");
+                ui.add(
+                    egui::DragValue::new(&mut self.scene.camera.focus_distance)
+                        .range(0.0..=f32::MAX)
+                        .speed(0.01),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label("Vertical FOV, degrees");
+                ui.add(
+                    egui::DragValue::new(&mut self.scene.camera.fov_y_degrees).range(1.0..=179.0),
+                );
+            });
+            ui.horizontal(|ui| {
+                ui.label("f-number (0 = pinhole)");
+                ui.add(
+                    egui::DragValue::new(&mut self.scene.camera.f_number)
+                        .range(0.0..=64.0)
+                        .speed(0.1),
+                );
+            });
+            if ui.button("Stop and apply").clicked() {
+                let (start, mut recording) = self.camera_recording.take().unwrap();
+                let result = recording
+                    .capture(start.elapsed().as_secs_f64(), self.scene.camera)
+                    .and_then(|_| self.world.record_camera(&recording));
+                self.status = match result {
+                    Ok((samples, keys, error, last)) => {
+                        self.world_ui.seek(last);
+                        format!(
+                            "Camera recorded: {samples} samples -> {keys} keys (sample error {error:.6})"
+                        )
+                    }
+                    Err(error) => format!("Camera recording failed: {error}"),
+                };
+                self.fly = None;
+                self.orbit = Default::default();
+                self.orbit_written = None;
+                self.evaluated_world = None;
+            }
+            if ui.button("Cancel recording").clicked() {
+                self.camera_recording = None;
+                self.fly = None;
+                self.orbit = Default::default();
+                self.orbit_written = None;
+                self.evaluated_world = None;
+                self.status = "Camera recording cancelled".into();
+            }
+        } else if ui.button("Start recording").clicked() {
+            self.preview.cancel();
+            self.preview_key = None;
+            self.world_ui.playing = false;
+            self.world.finish_edit();
+            self.evaluated_world = None;
+            if let Err(error) = self.refresh_scene() {
+                self.status = error;
+                return;
+            }
+            match Recording::new(
+                &self.world.document,
+                self.world.revision(),
+                f64::from(self.world_ui.playhead),
+                &self.scene,
+                self.recorder_options,
+            ) {
+                Ok(recording) => {
+                    self.camera_recording = Some((Instant::now(), recording));
+                    self.status = "Recording camera navigation".into();
+                }
+                Err(error) => self.status = error,
+            }
+        }
+        ui.label("Selected channels replace keys in the captured interval; keys outside it remain. One undo restores the capture.");
     }
 
     fn apply_colour_change(&mut self, changed: bool) {
@@ -903,6 +1025,7 @@ impl App {
             && saved.colour_presets == self.colour.presets
             && saved.panel == self.prefs
             && saved.controls == self.controls
+            && saved.recorder == self.recorder_options
             && saved.toolbar == self.toolbar
             && saved.camera_slots == self.camera_slots
             && saved.fonts == self.fonts
@@ -939,6 +1062,7 @@ impl App {
             colour_presets: self.colour.presets.clone(),
             panel: self.prefs.clone(),
             controls: self.controls,
+            recorder: self.recorder_options,
             layout,
             toolbar: self.toolbar,
             camera_slots: self.camera_slots,
@@ -953,8 +1077,6 @@ impl App {
             new_key: self.world_ui.new_key,
             file_dialogs: self.world_ui.file_dialogs.clone(),
             timeline_outline_width: self.world_ui.timeline_outline_width,
-            timeline_initialized: true,
-            world_layout_initialized: true,
         };
         let json = serde_json::to_string_pretty(&settings).map_err(|error| error.to_string())?;
         #[cfg(test)]
@@ -1144,6 +1266,7 @@ impl App {
     }
 
     fn load(&mut self, mut scene: Scene) {
+        self.camera_recording = None;
         self.preview.cancel();
         self.preview_key = None;
         self.scene_file_path = None;
@@ -1321,7 +1444,11 @@ impl App {
     }
 
     /// Assign a work-area Material node: one Batch, one undo step.
-    fn assign_gallery_material(&mut self, material: crate::world::NodeId, to: AssignTo) -> Result<(), String> {
+    fn assign_gallery_material(
+        &mut self,
+        material: crate::world::NodeId,
+        to: AssignTo,
+    ) -> Result<(), String> {
         let commands = self
             .assign_targets(to)
             .into_iter()
@@ -1345,11 +1472,12 @@ impl App {
         preset.apply(&mut material);
         let targets = self.assign_targets(to);
         self.world.finish_edit();
-        self.world.execute(crate::world::WorldCommand::CreateMaterialFor {
-            material,
-            name: preset.name().into(),
-            targets,
-        })?;
+        self.world
+            .execute(crate::world::WorldCommand::CreateMaterialFor {
+                material,
+                name: preset.name().into(),
+                targets,
+            })?;
         self.material_gallery.invalidate();
         Ok(())
     }
@@ -1357,10 +1485,16 @@ impl App {
     /// "Assign to selected" / "Assign to all fractals": the shared context-menu items.
     fn assign_menu(ui: &mut egui::Ui, selected: bool, fractals: bool) -> Option<AssignTo> {
         let mut picked = None;
-        if ui.add_enabled(selected, egui::Button::new("Assign to selected")).clicked() {
+        if ui
+            .add_enabled(selected, egui::Button::new("Assign to selected"))
+            .clicked()
+        {
             picked = Some(AssignTo::Selected);
         }
-        if ui.add_enabled(fractals, egui::Button::new("Assign to all fractals")).clicked() {
+        if ui
+            .add_enabled(fractals, egui::Button::new("Assign to all fractals"))
+            .clicked()
+        {
             picked = Some(AssignTo::AllFractals);
         }
         if picked.is_some() {
@@ -1474,7 +1608,9 @@ impl App {
                                 response.clone().on_hover_text(error);
                             }
                             response.context_menu(|ui| {
-                                if let Some(to) = Self::assign_menu(ui, selected_targets, any_fractal) {
+                                if let Some(to) =
+                                    Self::assign_menu(ui, selected_targets, any_fractal)
+                                {
                                     assign = Some((entry.id, to));
                                 }
                                 if ui.button("Select / Edit").clicked() {
@@ -1657,7 +1793,9 @@ impl App {
                                                 ui.close();
                                             }
                                             ui.separator();
-                                            if let Some(to) = Self::assign_menu(ui, selected_targets, any_fractal) {
+                                            if let Some(to) =
+                                                Self::assign_menu(ui, selected_targets, any_fractal)
+                                            {
                                                 assign = Some((index, to));
                                             }
                                         });
@@ -1729,7 +1867,11 @@ impl App {
                 "16-bit PQ / BT.2020 with cICP: what an HDR monitor shows for this view (an SDR view's white at the monitor's, else BT.2408's 203 nits); needs an HDR-aware viewer",
                 Some(FrameFile::Png(PngEncoding::Hdr10)),
             ),
-            ("Save display EXR", "Linear display light, float, display primaries", Some(FrameFile::DisplayExr)),
+            (
+                "Save display EXR",
+                "Linear display light, float, display primaries",
+                Some(FrameFile::DisplayExr),
+            ),
         ];
         for (label, hint, file) in items {
             if ui.button(label).on_hover_text(hint).clicked() {
@@ -1743,7 +1885,11 @@ impl App {
     /// an HDR10 PNG when the monitor shows HDR (relative light at the monitor's SDR white, so
     /// the file is as bright as the screen), an SDR PNG otherwise. One path for the File menu
     /// and the toolbar.
-    pub(super) fn save_frame(&mut self, monitor: Monitor, file: Option<crate::render_service::FrameFile>) {
+    pub(super) fn save_frame(
+        &mut self,
+        monitor: Monitor,
+        file: Option<crate::render_service::FrameFile>,
+    ) {
         use crate::render_service::{FrameFile, PngEncoding};
         let Some(frame) = self.frame.clone() else {
             self.status = "Nothing rendered yet".into();
@@ -1757,12 +1903,22 @@ impl App {
                 return;
             }
         };
-        let path = dir.join(crate::fs_name::frame_file(&crate::fs_name::stem(&self.scene.name), None, file.suffix()));
-        let sdr_white_nits = if monitor.hdr { monitor.white_nits } else { crate::color::BT2408_SDR_WHITE_NITS };
-        self.status = match self
-            .io
-            .send(crate::io_service::Command::SaveFrame { frame, path, file, sdr_white_nits })
-        {
+        let path = dir.join(crate::fs_name::frame_file(
+            &crate::fs_name::stem(&self.scene.name),
+            None,
+            file.suffix(),
+        ));
+        let sdr_white_nits = if monitor.hdr {
+            monitor.white_nits
+        } else {
+            crate::color::BT2408_SDR_WHITE_NITS
+        };
+        self.status = match self.io.send(crate::io_service::Command::SaveFrame {
+            frame,
+            path,
+            file,
+            sdr_white_nits,
+        }) {
             Ok(()) => "Saving image…".into(),
             Err(e) => e,
         };
@@ -1942,7 +2098,10 @@ impl App {
         if hotkeys::consume(ctx, Scope::Global, Hotkey::Duplicate) && !selected.is_empty() {
             self.world.finish_edit();
             let count = selected.len();
-            self.status = match self.world.execute(crate::world::WorldCommand::Duplicate(selected.clone())) {
+            self.status = match self
+                .world
+                .execute(crate::world::WorldCommand::Duplicate(selected.clone()))
+            {
                 Ok(()) => format!("Duplicated {count} node(s)"),
                 Err(error) => error,
             };
@@ -1956,15 +2115,22 @@ impl App {
                 Err(error) => error,
             };
         }
-        if let Some(text) = hotkeys::take_paste(ctx, |text| crate::world::parse_clipboard(text).is_some()) {
+        if let Some(text) =
+            hotkeys::take_paste(ctx, |text| crate::world::parse_clipboard(text).is_some())
+        {
             let unresolved = crate::world::parse_clipboard(&text)
                 .map(|nodes| self.world.document.unresolved_references(&nodes))
                 .unwrap_or_default();
             self.world.finish_edit();
             self.status = match self.world.execute(crate::world::WorldCommand::Paste(text)) {
-                Ok(()) if unresolved.is_empty() => format!("Pasted {} node(s)", self.world.selected.len()),
+                Ok(()) if unresolved.is_empty() => {
+                    format!("Pasted {} node(s)", self.world.selected.len())
+                }
                 Ok(()) => {
-                    let materials = unresolved.iter().filter(|(_, field)| *field == "material").count();
+                    let materials = unresolved
+                        .iter()
+                        .filter(|(_, field)| *field == "material")
+                        .count();
                     let parents = unresolved.len() - materials;
                     format!(
                         "Pasted {} node(s); not in this scene, cleared: {materials} material and {parents} parent reference(s)",
@@ -1986,10 +2152,17 @@ impl App {
         let scene = &self.scene;
         let world = &mut self.world;
         let ocio = self.colour.config().ok();
-        self.export.ui(ui, timeline, &self.renderer, ocio, &self.scene.colour, || {
-            world.finish_edit();
-            freeze_world_scene(scene, &world.document)
-        });
+        self.export.ui(
+            ui,
+            timeline,
+            &self.renderer,
+            ocio,
+            &self.scene.colour,
+            || {
+                world.finish_edit();
+                freeze_world_scene(scene, &world.document)
+            },
+        );
     }
 
     /// Unreal-style flight: hold RMB in the viewport, mouse looks, WASD moves, R/Space up, C down,
@@ -2074,7 +2247,11 @@ impl App {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
             for intent in [
-                CameraIntent::Thrust { forward: 0.0, right: 0.0, up: 0.0 },
+                CameraIntent::Thrust {
+                    forward: 0.0,
+                    right: 0.0,
+                    up: 0.0,
+                },
                 CameraIntent::Roll { d: 0.0 },
                 CameraIntent::SpeedScale(1.0),
             ] {
@@ -2313,9 +2490,11 @@ impl App {
                             crate::templates::Source::File(path) => path.display().to_string(),
                         };
                         let hint = match entry.description {
-                            Some(description) => format!("{description}
+                            Some(description) => format!(
+                                "{description}
 
-{origin}"),
+{origin}"
+                            ),
                             None => origin,
                         };
                         if ui.button(&entry.name).on_hover_text(hint).clicked() {
@@ -2324,15 +2503,20 @@ impl App {
                         }
                     }
                     match picked {
-                        Some(crate::templates::Source::Builtin(index)) => match crate::presets::scene(index) {
-                            Ok(scene) => {
-                                self.status = format!("Opened template {}", scene.name);
-                                self.load(scene);
+                        Some(crate::templates::Source::Builtin(index)) => {
+                            match crate::presets::scene(index) {
+                                Ok(scene) => {
+                                    self.status = format!("Opened template {}", scene.name);
+                                    self.load(scene);
+                                }
+                                Err(error) => self.status = error,
                             }
-                            Err(error) => self.status = error,
-                        },
+                        }
                         Some(crate::templates::Source::File(path)) => {
-                            self.submit_scene_action(path, crate::templates::FileAction::OpenTemplate);
+                            self.submit_scene_action(
+                                path,
+                                crate::templates::FileAction::OpenTemplate,
+                            );
                         }
                         None => {}
                     }
@@ -2586,8 +2770,9 @@ impl App {
     fn resizable_status_bar(&mut self, ui: &mut egui::Ui) {
         // Fixed section identity/count: transient frame and OIDN states never
         // move widths onto another indicator. Rendering uses only mailbox data.
-        const WIDTHS: [f32; 10] =
-            [200.0, 95.0, 95.0, 220.0, 130.0, 100.0, 170.0, 80.0, 150.0, 0.0];
+        const WIDTHS: [f32; 10] = [
+            200.0, 95.0, 95.0, 220.0, 130.0, 100.0, 170.0, 80.0, 150.0, 0.0,
+        ];
         let frame = self.frame.as_deref();
         let preview = self.showing_preview;
         let target_spp = self.target_spp;
@@ -3022,6 +3207,11 @@ impl App {
     }
 
     fn process_preview_intent(&mut self, ctx: &egui::Context) {
+        if self.camera_recording.is_some() {
+            self.world_ui.playing = false;
+            self.world_ui.take_preview_action();
+            return;
+        }
         match self.world_ui.take_preview_action() {
             Some(action) => self.begin_preview(action.first, action.last, action.mode, ctx),
             None if self.preview.position().is_none() && self.world_ui.playing => {
@@ -3040,6 +3230,19 @@ impl App {
     }
 
     fn refresh_scene(&mut self) -> Result<(), String> {
+        if let Some((_, recording)) = &self.camera_recording {
+            if self.world.revision() == recording.revision
+                && self.world.document.graph.id == recording.document.graph.id
+            {
+                return Ok(());
+            }
+            self.camera_recording = None;
+            self.fly = None;
+            self.orbit = Default::default();
+            self.orbit_written = None;
+            self.evaluated_world = None;
+            self.status = "Camera recording cancelled because the document changed".into();
+        }
         // Cached playback presents worker-owned frames; keep the frozen scene instead
         // of rebuilding serialized world data on every clock tick. An edit or paused
         // navigation evaluates the current pose before any authoring takes place.
@@ -3060,16 +3263,17 @@ impl App {
         if self.evaluated_world != Some(key) {
             self.scene = self.world.document.snapshot(frame)?;
             self.evaluated_world = Some(key);
-            self.legacy_before = Some(self.scene.clone());
+            self.snapshot_before = Some(self.scene.clone());
             #[cfg(test)]
             {
-                self.legacy_snapshots += 1;
+                self.snapshot_clones += 1;
             }
         }
         Ok(())
     }
     pub(crate) fn ui(&mut self, root: &mut egui::Ui) {
         let ctx = root.ctx().clone();
+        let recording_frame = self.camera_recording.is_some();
         self.apply_fonts(&ctx);
         self.update_scene_picker(&ctx);
         self.colour.poll();
@@ -3100,7 +3304,7 @@ impl App {
         if let Err(error) = self.refresh_scene() {
             self.status = error;
         }
-        let before = self.legacy_before.take();
+        let before = self.snapshot_before.take();
         let thumbs_pending = self.render_one_thumbnail(&ctx);
         self.poll_events(&ctx);
         self.export.update(&self.renderer);
@@ -3135,6 +3339,8 @@ impl App {
             });
         if let Some(before) = before.as_ref()
             && self.load_revision == edit_origin
+            && !recording_frame
+            && self.camera_recording.is_none()
             && (self.scene.camera != before.camera
                 || self.scene.render != before.render
                 || self.scene.colour != before.colour)
@@ -3175,7 +3381,16 @@ impl App {
                 self.status = error;
             }
         }
-        self.legacy_before = before;
+        self.snapshot_before = before;
+        if let Some((start, recording)) = &mut self.camera_recording {
+            if let Err(error) = recording.capture(start.elapsed().as_secs_f64(), self.scene.camera)
+            {
+                self.status = error;
+                self.camera_recording = None;
+                self.evaluated_world = None;
+            }
+            ctx.request_repaint();
+        }
         self.remember_material_targets();
         self.process_preview_intent(&ctx);
         self.world
@@ -3205,6 +3420,7 @@ mod tests {
 
     #[test]
     fn library_preset_assigns_to_all_fractals_in_one_undo_step() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
         app.world
             .execute(crate::world::WorldCommand::Create {
@@ -3215,20 +3431,37 @@ mod tests {
             .unwrap();
         let fractals = app.world.document.material_consumers();
         assert!(fractals.len() >= 2, "a world holds several fractal nodes");
-        let before: Vec<_> = fractals.iter().map(|id| app.world.document.assigned_material(*id).unwrap()).collect();
+        let before: Vec<_> = fractals
+            .iter()
+            .map(|id| app.world.document.assigned_material(*id).unwrap())
+            .collect();
         let materials = app.world.document.nodes().len();
-        app.assign_library_material(0, AssignTo::AllFractals).unwrap();
-        let assigned: Vec<_> = fractals.iter().map(|id| app.world.document.assigned_material(*id).unwrap()).collect();
-        assert!(assigned.iter().all(|m| m.is_some() && *m == assigned[0]), "one new material on every fractal");
+        app.assign_library_material(0, AssignTo::AllFractals)
+            .unwrap();
+        let assigned: Vec<_> = fractals
+            .iter()
+            .map(|id| app.world.document.assigned_material(*id).unwrap())
+            .collect();
+        assert!(
+            assigned.iter().all(|m| m.is_some() && *m == assigned[0]),
+            "one new material on every fractal"
+        );
         assert_eq!(app.world.document.nodes().len(), materials + 1);
         assert!(app.world.undo());
-        let undone: Vec<_> = fractals.iter().map(|id| app.world.document.assigned_material(*id).unwrap()).collect();
-        assert_eq!(undone, before, "one undo removes the material and every assignment");
+        let undone: Vec<_> = fractals
+            .iter()
+            .map(|id| app.world.document.assigned_material(*id).unwrap())
+            .collect();
+        assert_eq!(
+            undone, before,
+            "one undo removes the material and every assignment"
+        );
         assert_eq!(app.world.document.nodes().len(), materials);
     }
 
     #[test]
     fn library_is_read_only_until_explicit_creation_and_never_assigns_objects() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
         let before = serde_json::to_string(&app.world.document).unwrap();
         let object = app.world.selection.unwrap();
@@ -3267,6 +3500,7 @@ mod tests {
 
     #[test]
     fn material_library_adapts_columns_to_available_panel_width() {
+        let _gpu_test = crate::test_gpu::lock();
         fn labels(shape: &egui::epaint::Shape, found: &mut Vec<(String, egui::Pos2)>) {
             match shape {
                 egui::epaint::Shape::Text(text) => {
@@ -3353,6 +3587,7 @@ mod tests {
 
     #[test]
     fn scene_gallery_cards_reflow_to_multiple_columns() {
+        let _gpu_test = crate::test_gpu::lock();
         for (width, columns) in [(200.0, 1), (600.0, 3)] {
             let mut app = App::new();
             app.tab = Tab::Gallery;
@@ -3400,6 +3635,7 @@ mod tests {
 
     #[test]
     fn material_card_selects_existing_attribute_editor_without_assignment() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
         let object = app.world.selection.unwrap();
         let assignment = app.world.document.assigned_material(object).unwrap();
@@ -3463,6 +3699,7 @@ mod tests {
 
     #[test]
     fn material_editor_apply_uses_remembered_consumers_and_one_undo() {
+        let _gpu_test = crate::test_gpu::lock();
         use crate::world::{WorldCommand, WorldKind};
         let mut app = App::new();
         let object = app.world.selection.unwrap();
@@ -3480,7 +3717,8 @@ mod tests {
         assert_eq!(app.material_assignment_targets(), &[object]);
         assert!(app.world.document.supports_material(object));
         assert!(!app.world.document.supports_material(material));
-        app.assign_gallery_material(material, AssignTo::Selected).unwrap();
+        app.assign_gallery_material(material, AssignTo::Selected)
+            .unwrap();
         assert_eq!(
             app.world.selection,
             Some(material),
@@ -3507,11 +3745,15 @@ mod tests {
         app.world.selected = vec![camera];
         app.remember_material_targets();
         assert!(app.material_assignment_targets().is_empty());
-        assert!(app.assign_gallery_material(material, AssignTo::Selected).is_err());
+        assert!(
+            app.assign_gallery_material(material, AssignTo::Selected)
+                .is_err()
+        );
     }
 
     #[test]
     fn viewport_cache_accepts_only_final_current_authoring_frames() {
+        let _gpu_test = crate::test_gpu::lock();
         let ctx = egui::Context::default();
         let mut app = App::new();
         app.target_spp = 8;
@@ -3567,6 +3809,7 @@ mod tests {
 
     #[test]
     fn gallery_assignment_and_object_material_field_share_uuid_and_undo() {
+        let _gpu_test = crate::test_gpu::lock();
         use crate::world::WorldCommand;
         let mut app = App::new();
         let object = app.world.selection.unwrap();
@@ -3581,7 +3824,8 @@ mod tests {
         app.world.selection = Some(object);
         app.world.selected = vec![object];
         let old = app.world.document.assigned_material(object).unwrap();
-        app.assign_gallery_material(material, AssignTo::Selected).unwrap();
+        app.assign_gallery_material(material, AssignTo::Selected)
+            .unwrap();
         assert_eq!(
             app.world.document.assigned_material(object).unwrap(),
             Some(material)
@@ -3607,9 +3851,11 @@ mod tests {
 
     #[test]
     fn auto_key_preference_serializes_once_and_defaults_off() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
         let ctx = egui::Context::default();
-        assert!(!serde_json::from_str::<Settings>("{}").unwrap().auto_key);
+        assert!(!Settings::default().auto_key);
+        assert!(serde_json::from_str::<Settings>("{}").is_err());
         app.changed_settings_json(&ctx).unwrap();
         app.world_ui.auto_key = true;
         let json = app.changed_settings_json(&ctx).unwrap().unwrap();
@@ -3621,12 +3867,13 @@ mod tests {
 
     #[test]
     fn cached_preview_skips_world_evaluation_until_pause() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
         let ctx = egui::Context::default();
         app.refresh_scene().unwrap();
         let key = app.evaluated_world;
         let objects = app.scene.objects.as_ptr();
-        let snapshots = app.legacy_snapshots;
+        let snapshots = app.snapshot_clones;
         assert!(app.request.is_none());
         app.begin_preview(0, 10, crate::preview::PreviewMode::Play, &ctx);
         for frame in 1..=10 {
@@ -3634,7 +3881,7 @@ mod tests {
             app.refresh_scene().unwrap();
             assert_eq!(app.evaluated_world, key);
             assert_eq!(app.scene.objects.as_ptr(), objects);
-            assert_eq!(app.legacy_snapshots, snapshots);
+            assert_eq!(app.snapshot_clones, snapshots);
         }
         app.preview.pause();
         app.world_ui.playing = false;
@@ -3644,6 +3891,7 @@ mod tests {
 
     #[test]
     fn file_load_completion_preserves_document_and_discards_stale_requests() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
         let mut scene = Scene::preset(crate::params::FAMILY_BOX);
         let document = crate::world::WorldDocument::from_scene(&scene);
@@ -3662,10 +3910,10 @@ mod tests {
         );
         app.refresh_scene().unwrap();
         let revision = app.world.revision();
-        let clones = app.legacy_snapshots;
+        let clones = app.snapshot_clones;
         app.refresh_scene().unwrap();
         assert_eq!(app.world.revision(), revision);
-        assert_eq!(app.legacy_snapshots, clones);
+        assert_eq!(app.snapshot_clones, clones);
         app.scene_file_pending = Some((8, app.load_revision, crate::templates::FileAction::Open));
         app.load(Scene::preset(crate::params::FAMILY_BULB));
         app.scene_file_event(crate::io_service::SceneEvent {
@@ -3682,6 +3930,7 @@ mod tests {
 
     #[test]
     fn export_panel_does_not_freeze_scene_during_idle_or_playback() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
         let ctx = egui::Context::default();
         for frame in 0..32 {
@@ -3702,25 +3951,26 @@ mod tests {
 
     #[test]
     fn settings_and_layouts_serialize_only_after_actual_changes() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
         let ctx = egui::Context::default();
         app.refresh_scene().unwrap();
         assert!(app.changed_settings_json(&ctx).unwrap().is_some());
         let serializations = app.settings_serializations;
         let dock_serializations = app.layouts.cache.serializations;
-        let baseline = app.legacy_before.as_ref().unwrap().objects.as_ptr();
-        let snapshots = app.legacy_snapshots;
+        let baseline = app.snapshot_before.as_ref().unwrap().objects.as_ptr();
+        let snapshots = app.snapshot_clones;
         for _ in 0..32 {
             app.refresh_scene().unwrap();
             assert!(app.changed_settings_json(&ctx).unwrap().is_none());
             assert_eq!(
-                app.legacy_before.as_ref().unwrap().objects.as_ptr(),
+                app.snapshot_before.as_ref().unwrap().objects.as_ptr(),
                 baseline
             );
         }
         assert_eq!(app.settings_serializations, serializations);
         assert_eq!(app.layouts.cache.serializations, dock_serializations);
-        assert_eq!(app.legacy_snapshots, snapshots);
+        assert_eq!(app.snapshot_clones, snapshots);
         app.world_ui.attribute_metrics.numeric_width = 64.0;
         app.fonts.face = "Custom face".into();
         app.status_layout.widths = vec![210.0, 100.0];
@@ -3745,8 +3995,7 @@ mod tests {
         assert_eq!(saved.colour_presets, app.colour.presets);
         assert_eq!(saved.colour_presets.slots[1].name, "Custom colour");
         assert!(app.changed_settings_json(&ctx).unwrap().is_none());
-        let old: Settings = serde_json::from_str("{}").unwrap();
-        assert_eq!(old.colour_presets, crate::ocio::ColourPresets::default());
+        assert!(serde_json::from_str::<Settings>("{}").is_err());
         app.layouts.store.save(
             "Edited workspace",
             app.layouts.cache.blob.as_ref().unwrap().clone(),
@@ -3759,6 +4008,7 @@ mod tests {
 
     #[test]
     fn cached_scene_reuses_idle_vectors_and_invalidates_edit_seek_undo_and_load() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
         app.refresh_scene().unwrap();
         let objects = app.scene.objects.as_ptr();
@@ -3814,6 +4064,7 @@ mod tests {
 
     #[test]
     fn status_text_never_changes_workspace_height() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
         let ctx = egui::Context::default();
         for width in [320.0, 800.0, 1600.0] {
@@ -3848,6 +4099,7 @@ mod tests {
 
     #[test]
     fn settings_pages_are_one_list_in_tab_order() {
+        let _gpu_test = crate::test_gpu::lock();
         for (index, page) in SettingsPage::ALL.into_iter().enumerate() {
             assert_eq!(page as usize, index, "the tab index is the discriminant");
             assert_eq!(SettingsPage::named(page.category().label), Some(page));
@@ -3857,6 +4109,7 @@ mod tests {
     }
     #[test]
     fn orbit_tumbles_coasts_to_rest_and_pans_with_the_cursor_under_roll() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
         let ctx = egui::Context::default();
         let mut time = 0.0;
@@ -3885,15 +4138,24 @@ mod tests {
         };
         let mut pos = egui::pos2(300.0, 200.0);
         frame(&mut app, vec![egui::Event::PointerMoved(pos)]);
-        frame(&mut app, vec![button(egui::PointerButton::Primary, true, pos)]);
+        frame(
+            &mut app,
+            vec![button(egui::PointerButton::Primary, true, pos)],
+        );
         let yaw = app.scene.camera.yaw_degrees;
         for _ in 0..6 {
             pos.x += 10.0;
             frame(&mut app, vec![egui::Event::PointerMoved(pos)]);
         }
         let dragged = app.scene.camera.yaw_degrees;
-        assert!(dragged < yaw - 1.0, "dragging right turns the view: {yaw} -> {dragged}");
-        frame(&mut app, vec![button(egui::PointerButton::Primary, false, pos)]);
+        assert!(
+            dragged < yaw - 1.0,
+            "dragging right turns the view: {yaw} -> {dragged}"
+        );
+        frame(
+            &mut app,
+            vec![button(egui::PointerButton::Primary, false, pos)],
+        );
         let released = app.scene.camera.yaw_degrees;
         frame(&mut app, Vec::new());
         assert!(
@@ -3906,7 +4168,10 @@ mod tests {
         assert!(!app.orbit.rig.has_inertia(), "the coast decays to rest");
         let rest = app.scene.camera;
         frame(&mut app, Vec::new());
-        assert_eq!(app.scene.camera, rest, "a resting orbit leaves the camera alone");
+        assert_eq!(
+            app.scene.camera, rest,
+            "a resting orbit leaves the camera alone"
+        );
 
         // MMB pan with the camera rolled 90 degrees: the target moves against the
         // cursor along the rolled screen axis, the roll itself stays.
@@ -3914,14 +4179,23 @@ mod tests {
         let orientation = app.scene.camera.orientation();
         let (right, up) = (orientation * glam::Vec3::X, orientation * glam::Vec3::Y);
         let target = glam::Vec3::from_array(app.scene.camera.target);
-        frame(&mut app, vec![button(egui::PointerButton::Middle, true, pos)]);
+        frame(
+            &mut app,
+            vec![button(egui::PointerButton::Middle, true, pos)],
+        );
         for _ in 0..6 {
             pos.x += 10.0;
             frame(&mut app, vec![egui::Event::PointerMoved(pos)]);
         }
-        frame(&mut app, vec![button(egui::PointerButton::Middle, false, pos)]);
+        frame(
+            &mut app,
+            vec![button(egui::PointerButton::Middle, false, pos)],
+        );
         let moved = glam::Vec3::from_array(app.scene.camera.target) - target;
-        assert!(moved.dot(right) < 0.0, "pan follows the rolled cursor axis: {moved}");
+        assert!(
+            moved.dot(right) < 0.0,
+            "pan follows the rolled cursor axis: {moved}"
+        );
         assert!(
             moved.dot(up).abs() < 1e-3 * moved.length(),
             "no drift across the rolled axis: {moved}"
@@ -3932,17 +4206,34 @@ mod tests {
         app.scene.camera.roll_degrees = 0.0;
         app.scene.camera.yaw_degrees = 20.0;
         app.scene.camera.pitch_degrees = 10.0;
-        frame(&mut app, vec![egui::Event::ModifiersChanged(egui::Modifiers::SHIFT),
-            egui::Event::PointerButton { pos, button: egui::PointerButton::Primary,
-                pressed: true, modifiers: egui::Modifiers::SHIFT }]);
+        frame(
+            &mut app,
+            vec![
+                egui::Event::ModifiersChanged(egui::Modifiers::SHIFT),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::SHIFT,
+                },
+            ],
+        );
         for _ in 0..4 {
             pos.x += 2.0;
             frame(&mut app, vec![egui::Event::PointerMoved(pos)]);
         }
         assert!(app.scene.camera.pitch_degrees.abs() < 1e-3);
-        assert!(app.scene.camera.yaw_degrees.abs() > 1.0, "plane orbit must not snap yaw to an axis");
-        frame(&mut app, vec![button(egui::PointerButton::Primary, false, pos),
-            egui::Event::ModifiersChanged(egui::Modifiers::NONE)]);
+        assert!(
+            app.scene.camera.yaw_degrees.abs() > 1.0,
+            "plane orbit must not snap yaw to an axis"
+        );
+        frame(
+            &mut app,
+            vec![
+                button(egui::PointerButton::Primary, false, pos),
+                egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            ],
+        );
         assert!(!app.orbit.rig.has_inertia());
 
         // Ctrl + Shift + LMB: the view snaps parallel to the nearest world axis; dragging up far
@@ -3952,28 +4243,63 @@ mod tests {
         app.scene.camera.yaw_degrees = 20.0;
         app.scene.camera.pitch_degrees = 10.0;
         let shift = egui::Modifiers::CTRL.plus(egui::Modifiers::SHIFT);
-        let shifted = |button, pressed, pos| egui::Event::PointerButton { pos, button, pressed, modifiers: shift };
-        frame(&mut app, vec![egui::Event::ModifiersChanged(shift), shifted(egui::PointerButton::Primary, true, pos)]);
+        let shifted = |button, pressed, pos| egui::Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: shift,
+        };
+        frame(
+            &mut app,
+            vec![
+                egui::Event::ModifiersChanged(shift),
+                shifted(egui::PointerButton::Primary, true, pos),
+            ],
+        );
         for _ in 0..4 {
             pos.x += 2.0;
             frame(&mut app, vec![egui::Event::PointerMoved(pos)]);
         }
         let cam = app.scene.camera;
-        assert_eq!((cam.yaw_degrees.round(), cam.pitch_degrees.round()), (0.0, 0.0), "snapped to -Z");
+        assert_eq!(
+            (cam.yaw_degrees.round(), cam.pitch_degrees.round()),
+            (0.0, 0.0),
+            "snapped to -Z"
+        );
         // 1 degree per point keeps the 120 degree drag inside the window.
         app.controls.look_sensitivity = 10.0;
         for _ in 0..12 {
             pos.y += 10.0;
             frame(&mut app, vec![egui::Event::PointerMoved(pos)]);
         }
-        frame(&mut app, vec![shifted(egui::PointerButton::Primary, false, pos), egui::Event::ModifiersChanged(egui::Modifiers::NONE)]);
+        frame(
+            &mut app,
+            vec![
+                shifted(egui::PointerButton::Primary, false, pos),
+                egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            ],
+        );
         let top = app.scene.camera;
-        assert!((top.pitch_degrees - 90.0).abs() < 1e-3, "top view: pitch {}", top.pitch_degrees);
-        assert!((top.yaw_degrees.rem_euclid(90.0)).min(90.0 - top.yaw_degrees.rem_euclid(90.0)) < 1e-3, "square yaw {}", top.yaw_degrees);
-        frame(&mut app, vec![button(egui::PointerButton::Primary, true, pos)]);
+        assert!(
+            (top.pitch_degrees - 90.0).abs() < 1e-3,
+            "top view: pitch {}",
+            top.pitch_degrees
+        );
+        assert!(
+            (top.yaw_degrees.rem_euclid(90.0)).min(90.0 - top.yaw_degrees.rem_euclid(90.0)) < 1e-3,
+            "square yaw {}",
+            top.yaw_degrees
+        );
+        frame(
+            &mut app,
+            vec![button(egui::PointerButton::Primary, true, pos)],
+        );
         pos.y -= 10.0;
         frame(&mut app, vec![egui::Event::PointerMoved(pos)]);
-        frame(&mut app, vec![button(egui::PointerButton::Primary, false, pos)]);
+        frame(
+            &mut app,
+            vec![button(egui::PointerButton::Primary, false, pos)],
+        );
         assert!(
             (app.scene.camera.yaw_degrees - top.yaw_degrees).abs() < 1e-2,
             "leaving the top view keeps the heading: {} -> {}",
@@ -3984,34 +4310,59 @@ mod tests {
 
     #[test]
     fn camclip_toolbar_has_a_label_and_keeps_the_last_button_inset() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
         let ctx = egui::Context::default();
         for width in [1000.0, 800.0] {
             for _ in 0..3 {
                 let mut toolbar_rect = egui::Rect::NOTHING;
                 let mut gap = 0.0;
-                let mut output = ctx.run_ui(egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 400.0))),
-                    ..Default::default()
-                }, |root| {
-                    egui::CentralPanel::default().show(root, |ui| {
-                        gap = ui.spacing().item_spacing.x;
-                        toolbar_rect = app.viewport_toolbar(ui, ui.max_rect()).rect;
-                    });
-                });
-                let text_rect = |wanted: &str| output.shapes.iter().find_map(|shape| {
-                    if let egui::epaint::Shape::Text(text) = &shape.shape {
-                        (text.galley.job.text == wanted).then(|| text.galley.rect.translate(text.pos.to_vec2()))
-                    } else { None }
-                });
-                if let (Some(label), Some(first), Some(last)) = (text_rect("CamClip:"), text_rect("1"), text_rect("5")) {
-                    assert!(label.right() < first.left(), "label must precede the camera slots");
-                    assert!(first.left() < last.left(), "slot order must remain 1 through 5");
-                    assert!(last.right() <= toolbar_rect.right() - gap, "last slot must stay inset from the toolbar end");
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(width, 400.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |root| {
+                        egui::CentralPanel::default().show(root, |ui| {
+                            gap = ui.spacing().item_spacing.x;
+                            toolbar_rect = app.viewport_toolbar(ui, ui.max_rect()).rect;
+                        });
+                    },
+                );
+                let text_rect = |wanted: &str| {
+                    output.shapes.iter().find_map(|shape| {
+                        if let egui::epaint::Shape::Text(text) = &shape.shape {
+                            (text.galley.job.text == wanted)
+                                .then(|| text.galley.rect.translate(text.pos.to_vec2()))
+                        } else {
+                            None
+                        }
+                    })
+                };
+                if let (Some(label), Some(first), Some(last)) =
+                    (text_rect("CamClip:"), text_rect("1"), text_rect("5"))
+                {
+                    assert!(
+                        label.right() < first.left(),
+                        "label must precede the camera slots"
+                    );
+                    assert!(
+                        first.left() < last.left(),
+                        "slot order must remain 1 through 5"
+                    );
+                    assert!(
+                        last.right() <= toolbar_rect.right() - gap,
+                        "last slot must stay inset from the toolbar end"
+                    );
                 } else {
                     assert!(!output.shapes.is_empty());
                     // The Area needs its sizing pass before content shapes are emitted.
-                    if ctx.cumulative_frame_nr() > 1 { panic!("CamClip label or buttons are missing"); }
+                    if ctx.cumulative_frame_nr() > 1 {
+                        panic!("CamClip label or buttons are missing");
+                    }
                 }
                 output.textures_delta.clear();
             }
@@ -4020,6 +4371,7 @@ mod tests {
 
     #[test]
     fn viewport_toolbar_preserves_rmb_flight_and_continuous_camera_updates() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
         let ctx = egui::Context::default();
         let mut time = 0.0;
@@ -4098,6 +4450,7 @@ mod tests {
 
     #[test]
     fn duplicate_bookmark_thumbnails_fill_the_next_empty_entry() {
+        let _gpu_test = crate::test_gpu::lock();
         let scene = Scene::preset(crate::params::FAMILY_BULB);
         let mut rendered = scene.clone();
         rendered.render.max_bounces = rendered.render.max_bounces.min(3);
@@ -4126,6 +4479,7 @@ mod tests {
 
     #[test]
     fn right_button_enters_flight_moves_and_releases_capture() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
         let ctx = egui::Context::default();
         let mut time = 0.0;
@@ -4402,6 +4756,7 @@ mod tests {
 
     #[test]
     fn frame_bounds_fit_transformed_fractal_and_fallback_in_both_aspects() {
+        let _gpu_test = crate::test_gpu::lock();
         use glam::Vec3;
         let mut app = App::new();
         for formula in [
@@ -4457,8 +4812,7 @@ mod tests {
                 }
             }
         }
-        let legacy: Settings = serde_json::from_str("{}").unwrap();
-        assert_eq!(legacy.controls.look_sensitivity, 1.0);
+        assert_eq!(Settings::default().controls.look_sensitivity, 1.0);
         app.controls.look_sensitivity = 0.4;
         app.controls.fly_speed = 3.0;
         let loaded: Controls =
@@ -4469,6 +4823,7 @@ mod tests {
 
     #[test]
     fn shared_flight_inertia_coasts_and_stops_on_all_six_axes() {
+        let _gpu_test = crate::test_gpu::lock();
         use cam_controls::{CameraIntent, SpaceFlight};
         let cases = [
             (
@@ -4562,8 +4917,6 @@ mod tests {
             .unwrap()
             .remove("roll_degrees");
         old["camera"].as_object_mut().unwrap().remove("free_flight");
-        let loaded: Scene = serde_json::from_value(old).unwrap();
-        assert!(!loaded.camera.free_flight);
-        assert_eq!(loaded.camera.roll_degrees, 0.0);
+        assert!(serde_json::from_value::<Scene>(old).is_err());
     }
 }

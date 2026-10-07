@@ -1,6 +1,8 @@
 //! Event-driven export coordinator and bounded CPU writer. CUDA never runs on the UI thread.
 use crate::{
-    render_service::{Command, Frame, HdrLevels, PngEncoding, RenderEvent, RenderPort, RenderService},
+    render_service::{
+        Command, Frame, HdrLevels, PngEncoding, RenderEvent, RenderPort, RenderService,
+    },
     scene::Scene,
 };
 use serde::{Deserialize, Serialize};
@@ -18,7 +20,6 @@ use std::{
 const HIGH_QUALITY_QP: u8 = 18;
 /// The HDR PNG export's default target peak (`ExportSettings::png_peak_nits`).
 const DEFAULT_PNG_PEAK_NITS: f32 = 1000.0;
-const HIGH_QUALITY_PRESET: usize = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExportFormat {
@@ -39,9 +40,15 @@ impl ExportFormat {
     /// What a file of this format holds, under its options.
     fn hint(self) -> &'static str {
         match self {
-            Self::Exr => "Scene-linear ACEScg (AP1-tagged); no display transform or exposure baked in.",
-            Self::Png => "The monitor rendering baked in: SDR 8-bit sRGB / BT.709, or HDR10 / HLG 16-bit BT.2020 with cICP. An HDR view keeps its nits and its measured peak (mDCV); pick one for HDR highlights. Video: the finished sequence also encoded by ffmpeg.",
-            Self::Hevc => "HEVC 8-bit BT.709 SDR, encoded for a BT.1886 (gamma 2.4) video display; display transform baked in. Cancel saves completed frames.",
+            Self::Exr => {
+                "Scene-linear ACEScg (AP1-tagged); no display transform or exposure baked in."
+            }
+            Self::Png => {
+                "The monitor rendering baked in: SDR 8-bit sRGB / BT.709, or HDR10 / HLG 16-bit BT.2020 with cICP. An HDR view keeps its nits and its measured peak (mDCV); pick one for HDR highlights. Video: the finished sequence also encoded by ffmpeg."
+            }
+            Self::Hevc => {
+                "HEVC 8-bit BT.709 SDR, encoded for a BT.1886 (gamma 2.4) video display; display transform baked in. Cancel saves completed frames."
+            }
         }
     }
     pub fn extension(self) -> &'static str {
@@ -67,73 +74,11 @@ impl VideoEncoder {
     }
 }
 
-/// A video a PNG export also encodes from its finished sequence, through an external `ffmpeg`
-/// on PATH. A stopgap until ffmpeg-rs encodes HDR in-process (`ffmpeg-rs/BUG3.md`); then these
-/// become formats of the Video export and this goes.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PngVideo {
-    #[default]
-    Off,
-    /// ProRes 4444 XQ, 10-bit 4:4:4 `.mov` (the most `prores_ks` takes): a master for editing
-    /// and grading.
-    ProRes,
-    /// HEVC Main10 4:2:0 `.mp4` (libx265, CRF = Quality); HDR10 metadata for PQ.
-    Hevc,
-}
-impl PngVideo {
-    pub const ALL: [Self; 3] = [Self::Off, Self::ProRes, Self::Hevc];
-    fn label(self) -> &'static str {
-        match self {
-            Self::Off => "Off",
-            Self::ProRes => "ProRes 4444 XQ · .mov",
-            Self::Hevc => "HEVC 10-bit · .mp4",
-        }
-    }
-    fn extension(self) -> Option<&'static str> {
-        match self {
-            Self::Off => None,
-            Self::ProRes => Some("mov"),
-            Self::Hevc => Some("mp4"),
-        }
-    }
-}
-
-/// The H.273 colour description of a PNG encoding, in ffmpeg's names: primaries, transfer,
-/// matrix (the YUV a video derives from the PNG's RGB).
-fn video_tags(png: PngEncoding) -> [&'static str; 3] {
-    match png {
-        // Video codes, not the PNGs' sRGB ones: `sdr_to_video` re-encodes them for BT.1886.
-        PngEncoding::Sdr8 => ["bt709", "bt709", "bt709"],
-        PngEncoding::Hdr10 => ["bt2020", "smpte2084", "bt2020nc"],
-        PngEncoding::Hlg => ["bt2020", "arib-std-b67", "bt2020nc"],
-    }
-}
-
-/// The ffmpeg filters that turn an SDR PNG's sRGB codes into SDR video codes: sRGB's EOTF to
-/// relative display light, then `color::bt1886_code` (`L^(1/2.4)`), at 16 bits (`lutrgb`
-/// tabulates every code). Ends with a `,` for the filters that follow.
-fn sdr_to_video() -> String {
-    // Quoted, so the expression's commas stay inside it.
-    let light = "if(lte(val/maxval,0.04045),val/maxval/12.92,pow((val/maxval+0.055)/1.055,2.4))";
-    let code = format!("pow({light},1/{})*maxval", crate::color::BT1886_GAMMA);
-    format!("format=rgb48le,lutrgb=r='{code}':g='{code}':b='{code}',")
-}
-
-/// The `ffmpeg` on PATH, looked up once per process.
-fn ffmpeg() -> Result<&'static Path, String> {
-    static FOUND: std::sync::LazyLock<Option<PathBuf>> = std::sync::LazyLock::new(|| {
-        let exe = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
-        // Absolute entries only: an empty one (`a;;b`) would search the current directory.
-        std::env::split_paths(&std::env::var_os("PATH")?)
-            .filter(|dir| dir.is_absolute())
-            .map(|dir| dir.join(exe))
-            .find(|p| p.is_file())
-    });
-    FOUND.as_deref().ok_or_else(|| "ffmpeg is not on PATH: the PNG export's video needs it".into())
-}
+pub use egui_display::export::PngVideo;
+use egui_display::export::ffmpeg;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct ExportSettings {
     pub format: ExportFormat,
     pub encoder: VideoEncoder,
@@ -151,8 +96,6 @@ pub struct ExportSettings {
     pub fps_num: u32,
     pub fps_den: u32,
     pub qp: u8,
-    /// Retained for reading older settings. Unsafe inter presets are disabled.
-    pub preset: usize,
     pub overwrite: bool,
     /// Override world cadence for offline renders: OIDN runs once at the final sample.
     pub denoise_at_completion: bool,
@@ -187,7 +130,6 @@ impl Default for ExportSettings {
             fps_num: 24,
             fps_den: 1,
             qp: HIGH_QUALITY_QP,
-            preset: HIGH_QUALITY_PRESET,
             overwrite: false,
             denoise_at_completion: false,
             png: PngEncoding::Sdr8,
@@ -251,7 +193,11 @@ impl ExportSettings {
     /// The output transform from ACEScg for this format, independent of the viewport: the
     /// override when set, else `Ocio::output_transform`. An SDR output with OCIO off keeps the
     /// built-in display (None); HDR always needs an OCIO HDR view.
-    pub fn resolve_transform(&self, ocio: &crate::ocio::Ocio, current: &crate::ocio::Sel) -> Result<Option<(String, String)>, String> {
+    pub fn resolve_transform(
+        &self,
+        ocio: &crate::ocio::Ocio,
+        current: &crate::ocio::Sel,
+    ) -> Result<Option<(String, String)>, String> {
         let Some(kind) = self.output_kind() else {
             return Ok(None);
         };
@@ -264,7 +210,9 @@ impl ExportSettings {
                 view: self.output_view.clone(),
                 ..current.clone()
             };
-            let names = ocio.resolve(&picked, kind != crate::ocio::OutputKind::Sdr).map_err(|e| e.to_string())?;
+            let names = ocio
+                .resolve(&picked, kind != crate::ocio::OutputKind::Sdr)
+                .map_err(|e| e.to_string())?;
             return Ok(Some((names.display, names.view)));
         }
         ocio.output_transform(current, kind, self.png_peak_nits)
@@ -297,80 +245,61 @@ impl ExportSettings {
     }
     /// The file of a single frame or a video: `dir/<name>.<suffix>` (`fs_name::frame_file`).
     pub fn output(&self) -> PathBuf {
-        self.dir.join(crate::fs_name::frame_file(self.name.trim(), None, self.suffix()))
+        self.dir.join(crate::fs_name::frame_file(
+            self.name.trim(),
+            None,
+            self.suffix(),
+        ))
     }
     /// The PNG export's video: `dir/<name>.<transfer>.<ext>` (`name.pq.mov`), named like its
     /// frames so its transfer is visible. None when it encodes none.
     pub fn video_output(&self) -> Option<PathBuf> {
-        let ext = (self.format == ExportFormat::Png).then_some(self.png_video.extension()).flatten()?;
+        let ext = (self.format == ExportFormat::Png)
+            .then_some(self.png_video.extension())
+            .flatten()?;
         let transfer = self.png.suffix().strip_suffix("png").unwrap_or("");
-        Some(self.dir.join(crate::fs_name::frame_file(self.name.trim(), None, &format!("{transfer}{ext}"))))
+        Some(self.dir.join(crate::fs_name::frame_file(
+            self.name.trim(),
+            None,
+            &format!("{transfer}{ext}"),
+        )))
     }
-    /// The ffmpeg arguments that encode the finished PNG sequence into `output` (a temporary
-    /// sibling of `video_output`). The colour tags are the PNGs' own (`video_tags`); an HDR10
-    /// HEVC carries the mastering display (BT.2020, as the PNGs' `mDCV`) and the content light
-    /// level of the whole clip, `levels`.
-    fn ffmpeg_args(&self, levels: Option<HdrLevels>, output: &Path) -> Result<Vec<String>, String> {
-        let [primaries, transfer, matrix] = video_tags(self.png);
-        let rate = format!("{}/{}", self.fps_num, self.fps_den);
-        let mut args: Vec<String> = ["-hide_banner", "-nostdin", "-nostats", "-loglevel", "error", "-progress", "pipe:1", "-y", "-framerate", &rate, "-f", "image2"]
-            .map(str::to_owned)
-            .to_vec();
-        // The demuxer is named: a lone `.png` would otherwise open as `png_pipe`, which takes no
-        // `-start_number`. A single frame is its file as it is; a sequence is `%`-escaped.
+    /// The literal single-frame file or the escaped sequence pattern.
+    fn video_input(&self) -> PathBuf {
         if self.first == self.last {
-            args.extend(["-pattern_type".into(), "none".into(), "-i".into(), self.frame_path(self.first).display().to_string()]);
+            self.frame_path(self.first)
         } else {
-            let pattern = crate::fs_name::sequence_pattern(&self.dir, self.name.trim(), self.png.suffix());
-            args.extend(["-pattern_type".into(), "sequence".into(), "-start_number".into(), self.first.to_string(), "-i".into(), pattern]);
+            PathBuf::from(crate::fs_name::sequence_pattern(
+                &self.dir,
+                self.name.trim(),
+                self.png.suffix(),
+            ))
         }
-        // The encoders take the colour description from the filtered frames, so `setparams`
-        // states it (output CLI flags would not; a PNG's cICP only would, where ffmpeg reads it).
-        // ffmpeg would also lift the FIRST PNG's cLLI into the container's `clli`, contradicting
-        // the clip's MaxCLL / MaxFALL: it is dropped, the clip's goes into the HEVC SEI.
-        // An SDR PNG holds sRGB codes; its video holds BT.1886 ones (`color::bt1886_code`).
-        let recode = if self.png == PngEncoding::Sdr8 { sdr_to_video() } else { String::new() };
-        let filters = format!(
-            "sidedata=mode=delete:type=CONTENT_LIGHT_LEVEL,{recode}\
-             scale=out_color_matrix={matrix}:out_range=tv:flags=accurate_rnd+full_chroma_int,\
-             setparams=color_primaries={primaries}:color_trc={transfer}:colorspace={matrix}:range=tv"
-        );
-        args.extend(["-vf".to_owned(), filters]);
-        match self.png_video {
-            PngVideo::Off => return Err("The PNG export encodes no video".into()),
-            PngVideo::ProRes => args.extend(
-                ["-c:v", "prores_ks", "-profile:v", "4444xq", "-pix_fmt", "yuv444p10le", "-vendor", "apl0", "-f", "mov"]
-                    .map(str::to_owned),
-            ),
-            PngVideo::Hevc => {
-                let mut x265 = format!("colorprim={primaries}:transfer={transfer}:colormatrix={matrix}:range=limited");
-                if self.png == PngEncoding::Hdr10 {
-                    let levels = levels.ok_or("An HDR10 video needs the frames' light levels")?;
-                    let content = levels.content.ok_or("An HDR10 video needs the frames' content light level")?;
-                    // x265 order: G, B, R, white in 0.00002; luminance in 0.0001 nits; CLL in nits.
-                    let [r, g, b, w] = egui_display::screenshot::Primaries::Bt2020.xy();
-                    let xy = |[x, y]: [f32; 2]| format!("({},{})", (x / 0.00002).round(), (y / 0.00002).round());
-                    x265 += &format!(
-                        ":hdr10=1:hdr10-opt=1:repeat-headers=1:master-display=G{}B{}R{}WP{}L({},1):max-cll={},{}",
-                        xy(g),
-                        xy(b),
-                        xy(r),
-                        xy(w),
-                        (levels.peak_nits * 10_000.0).round(),
-                        content.max_cll.ceil(),
-                        content.max_fall.ceil(),
-                    );
-                }
-                let crf = self.qp.to_string();
-                args.extend(
-                    ["-c:v", "libx265", "-preset", "slow", "-crf", &crf, "-pix_fmt", "yuv420p10le", "-tag:v", "hvc1", "-x265-params", &x265, "-f", "mp4"]
-                        .map(str::to_owned),
-                );
-            }
+    }
+    /// Thin settings adapter to the shared PNG-video exporter.
+    fn video_options<'a>(&self, input: &'a Path) -> egui_display::export::PngVideoOptions<'a> {
+        egui_display::export::PngVideoOptions {
+            codec: self.png_video,
+            encoding: self.png,
+            input,
+            start_number: self.first,
+            frame_count: self.frame_count(),
+            fps_num: self.fps_num,
+            fps_den: self.fps_den,
+            qp: self.qp as u32,
         }
-        args.extend(["-movflags", "+write_colr"].map(str::to_owned));
-        args.push(output.display().to_string());
-        Ok(args)
+    }
+    /// Inspect the host settings adapter through the existing argument oracles.
+    #[cfg(test)]
+    fn ffmpeg_args(&self, levels: Option<HdrLevels>, output: &Path) -> Result<Vec<String>, String> {
+        let input = self.video_input();
+        egui_display::export::ffmpeg_args(&self.video_options(&input), levels, output)?
+            .into_iter()
+            .map(|arg| {
+                arg.into_string()
+                    .map_err(|_| "Non-Unicode argument in export fixture".into())
+            })
+            .collect()
     }
     pub fn validate(&self) -> Result<(), String> {
         crate::fs_name::check(self.name.trim())?;
@@ -403,7 +332,8 @@ impl ExportSettings {
             return Err("Invalid encoder quality".into());
         }
         // The suffix follows the format (`suffix`), so only the encoder's own limits remain.
-        let hevc = self.format == ExportFormat::Hevc || (self.format == ExportFormat::Png && self.png_video == PngVideo::Hevc);
+        let hevc = self.format == ExportFormat::Hevc
+            || (self.format == ExportFormat::Png && self.png_video == PngVideo::Hevc);
         if hevc && (!self.width.is_multiple_of(2) || !self.height.is_multiple_of(2)) {
             return Err("HEVC 4:2:0 requires even width and height".into());
         }
@@ -421,7 +351,11 @@ impl ExportSettings {
         if self.first == self.last {
             return self.output();
         }
-        self.dir.join(crate::fs_name::frame_file(self.name.trim(), Some(number), self.suffix()))
+        self.dir.join(crate::fs_name::frame_file(
+            self.name.trim(),
+            Some(number),
+            self.suffix(),
+        ))
     }
 }
 
@@ -514,7 +448,8 @@ impl ExportController {
         settings.validate()?;
         settings.transform = match settings.output_kind() {
             Some(_) => {
-                let ocio = crate::ocio::Ocio::load(&crate::ocio::source(&scene.colour.config)).map_err(|e| e.to_string())?;
+                let ocio = crate::ocio::Ocio::load(&crate::ocio::source(&scene.colour.config))
+                    .map_err(|e| e.to_string())?;
                 settings.resolve_transform(&ocio, &scene.colour)?
             }
             None => None,
@@ -537,21 +472,31 @@ impl ExportController {
             .name("frac-export-coordinator".into())
             .spawn(move || {
                 // Ok(Some(status)): complete; Ok(None): cancelled before every frame was written.
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Option<String>, String> {
-                    if !coordinate_export(&config, &scene, &port, id, &shared, &stop)? {
-                        return Ok(None);
-                    }
-                    let folder = config.dir.display();
-                    let Some(video) = config.video_output() else {
-                        return Ok(Some(format!("Export complete: {folder}")));
-                    };
-                    let levels = shared.lock().unwrap_or_else(|e| e.into_inner()).levels;
-                    Ok(Some(match encode_video(&config, levels, &video, &shared, &stop) {
-                        Ok(true) => format!("Export complete: {folder}; video {}", video.display()),
-                        Ok(false) => format!("Video cancelled; the PNG sequence is in {folder}"),
-                        Err(error) => format!("Video failed: {error}; the PNG sequence is in {folder}"),
-                    }))
-                }));
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                    || -> Result<Option<String>, String> {
+                        if !coordinate_export(&config, &scene, &port, id, &shared, &stop)? {
+                            return Ok(None);
+                        }
+                        let folder = config.dir.display();
+                        let Some(video) = config.video_output() else {
+                            return Ok(Some(format!("Export complete: {folder}")));
+                        };
+                        let levels = shared.lock().unwrap_or_else(|e| e.into_inner()).levels;
+                        Ok(Some(
+                            match encode_video(&config, levels, &video, &shared, &stop) {
+                                Ok(true) => {
+                                    format!("Export complete: {folder}; video {}", video.display())
+                                }
+                                Ok(false) => {
+                                    format!("Video cancelled; the PNG sequence is in {folder}")
+                                }
+                                Err(error) => format!(
+                                    "Video failed: {error}; the PNG sequence is in {folder}"
+                                ),
+                            },
+                        ))
+                    },
+                ));
                 let status = match result {
                     Ok(Ok(Some(status))) => status,
                     Ok(Ok(None)) => {
@@ -715,31 +660,53 @@ impl ExportController {
     }
     /// The "FPS" grid row of every video (the Video format, a PNG export's video).
     fn fps_row(&mut self, ui: &mut egui::Ui) {
-        ui.label("FPS"); ui.horizontal(|ui| {
+        ui.label("FPS");
+        ui.horizontal(|ui| {
             let mut fps = self.settings.fps();
-            if ui.add(egui::DragValue::new(&mut fps).speed(0.1).range(1.0..=240.0).max_decimals(3)).changed() {
+            if ui
+                .add(
+                    egui::DragValue::new(&mut fps)
+                        .speed(0.1)
+                        .range(1.0..=240.0)
+                        .max_decimals(3),
+                )
+                .changed()
+            {
                 self.settings.set_fps(fps);
             }
-            egui::ComboBox::from_id_salt("export_fps_presets").selected_text("Presets").show_ui(ui, |ui| {
-                for rate in [23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0, 120.0] {
-                    if ui.selectable_label((self.settings.fps() - rate).abs() < 0.001, rate.to_string()).clicked() {
-                        self.settings.set_fps(rate); ui.close();
+            egui::ComboBox::from_id_salt("export_fps_presets")
+                .selected_text("Presets")
+                .show_ui(ui, |ui| {
+                    for rate in [23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0, 120.0] {
+                        if ui
+                            .selectable_label(
+                                (self.settings.fps() - rate).abs() < 0.001,
+                                rate.to_string(),
+                            )
+                            .clicked()
+                        {
+                            self.settings.set_fps(rate);
+                            ui.close();
+                        }
                     }
-                }
-            });
-        }); ui.end_row();
+                });
+        });
+        ui.end_row();
     }
     /// The "Quality" grid row of an HEVC: `qp` as the built-in encoder's QP or libx265's CRF
     /// (`unit`), the same 0-51 scale.
     fn quality_row(&mut self, ui: &mut egui::Ui, unit: &str) {
-        ui.label("Quality"); ui.horizontal(|ui| {
+        ui.label("Quality");
+        ui.horizontal(|ui| {
             ui.add(egui::Slider::new(&mut self.settings.qp, 0..=51).text(unit))
-                .on_hover_text(format!("Lower {unit} preserves more detail and produces larger files."));
+                .on_hover_text(format!(
+                    "Lower {unit} preserves more detail and produces larger files."
+                ));
             if ui.button("High quality").clicked() {
                 self.settings.qp = HIGH_QUALITY_QP;
-                self.settings.preset = HIGH_QUALITY_PRESET;
             }
-        }); ui.end_row();
+        });
+        ui.end_row();
     }
     /// "Output transform": what this export renders through from ACEScg, automatic by default.
     fn output_transform_ui(
@@ -762,14 +729,30 @@ impl ExportController {
             };
             ui.horizontal(|ui| {
                 let owned = |v: Vec<&str>| v.into_iter().map(str::to_owned).collect::<Vec<_>>();
-                let displays = owned(ocio.displays(hdr).into_iter().filter(|d| ocio.display_is(d, kind)).collect());
+                let displays = owned(
+                    ocio.displays(hdr)
+                        .into_iter()
+                        .filter(|d| ocio.display_is(d, kind))
+                        .collect(),
+                );
                 let before = self.settings.output_display.clone();
-                crate::ocio::combo(ui, "export.output_display", &mut self.settings.output_display, &displays, "auto");
+                crate::ocio::combo(
+                    ui,
+                    "export.output_display",
+                    &mut self.settings.output_display,
+                    &displays,
+                    "auto",
+                );
                 if self.settings.output_display != before {
                     self.settings.output_view.clear();
                 }
                 let display = if self.settings.output_display.is_empty() {
-                    resolved.as_ref().ok().and_then(Option::as_ref).map(|(d, _)| d.clone()).unwrap_or_default()
+                    resolved
+                        .as_ref()
+                        .ok()
+                        .and_then(Option::as_ref)
+                        .map(|(d, _)| d.clone())
+                        .unwrap_or_default()
                 } else {
                     self.settings.output_display.clone()
                 };
@@ -780,7 +763,13 @@ impl ExportController {
                         .collect(),
                 );
                 ui.add_enabled_ui(!self.settings.output_display.is_empty(), |ui| {
-                    crate::ocio::combo(ui, "export.output_view", &mut self.settings.output_view, &views, "first");
+                    crate::ocio::combo(
+                        ui,
+                        "export.output_view",
+                        &mut self.settings.output_view,
+                        &views,
+                        "first",
+                    );
                 });
             });
         });
@@ -978,75 +967,26 @@ fn encode_video(
     progress: &Mutex<Progress>,
     cancel: &AtomicBool,
 ) -> Result<bool, String> {
-    use std::io::{BufRead, Read};
-    let mut out = av_util_core::outfile::AtomicOut::create(video, settings.overwrite).map_err(|e| format!("{}: {e}", video.display()))?;
-    // ffmpeg opens the temp itself; Windows renames only a file nobody holds.
-    drop(out.take_file().map_err(|e| e.to_string())?);
-    let args = settings.ffmpeg_args(levels, out.tmp_path())?;
-    let name = video.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let input = settings.video_input();
+    let options = settings.video_options(&input);
+    let name = video
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let total = settings.frame_count();
-    progress.lock().unwrap_or_else(|e| e.into_inner()).status = format!("Encoding {name} with ffmpeg");
-    let mut child = std::process::Command::new(ffmpeg()?)
-        .args(&args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("ffmpeg did not start: {e}"))?;
-    let stdout = child.stdout.take().ok_or("ffmpeg has no stdout")?;
-    let mut stderr = child.stderr.take().ok_or("ffmpeg has no stderr")?;
-    let (ended, errors) = std::thread::scope(|scope| {
-        // `-progress pipe:1` writes key=value lines; `frame=` counts the encoded frames. Read as
-        // bytes to the end, so the pipe never fills and stalls ffmpeg.
-        scope.spawn(|| {
-            for line in std::io::BufReader::new(stdout).split(b'\n').map_while(Result::ok) {
-                if let Some(done) = line.strip_prefix(b"frame=") {
-                    progress.lock().unwrap_or_else(|e| e.into_inner()).status =
-                        format!("Encoding {name}: frame {} / {total}", String::from_utf8_lossy(done).trim());
-                }
-            }
-        });
-        let errors = scope.spawn(move || {
-            let mut text = Vec::new();
-            match stderr.read_to_end(&mut text) {
-                Ok(_) => String::from_utf8_lossy(&text).into_owned(),
-                Err(e) => format!("unreadable ffmpeg output: {e}"),
-            }
-        });
-        // Cancel, or ffmpeg can no longer be watched: stop it, so the readers see EOF.
-        let stop = |child: &mut std::process::Child| {
-            if let Err(e) = child.kill() {
-                log::warn!("ffmpeg did not stop: {e}");
-            }
-            if let Err(e) = child.wait() {
-                log::warn!("ffmpeg did not end: {e}");
-            }
-        };
-        let ended = loop {
-            if cancel.load(Ordering::Acquire) {
-                stop(&mut child);
-                break Ok(None);
-            }
-            match child.try_wait() {
-                Ok(Some(status)) => break Ok(Some(status)),
-                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-                Err(e) => {
-                    stop(&mut child);
-                    break Err(e);
-                }
-            }
-        };
-        (ended, errors.join().unwrap_or_else(|_| "ffmpeg output reader panicked".into()))
-    });
-    match ended {
-        Ok(Some(status)) if status.success() => out.commit().map(|()| true).map_err(|e| format!("{}: {e}", video.display())),
-        Ok(Some(status)) => {
-            let last = errors.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("no message");
-            Err(format!("ffmpeg {status}: {last}"))
-        }
-        Ok(None) => Ok(false),
-        Err(e) => Err(format!("ffmpeg: {e}")),
-    }
+    progress.lock().unwrap_or_else(|e| e.into_inner()).status =
+        format!("Encoding {name} with ffmpeg");
+    egui_display::export::encode_video(
+        &options,
+        levels,
+        video,
+        settings.overwrite,
+        cancel,
+        |done| {
+            progress.lock().unwrap_or_else(|e| e.into_inner()).status =
+                format!("Encoding {name}: frame {done} / {total}");
+        },
+    )
 }
 
 enum WriteEvent {
@@ -1105,14 +1045,23 @@ impl ExportWriter {
                         }
                         let path = settings.frame_path(number);
                         match settings.format {
-                            ExportFormat::Hevc => hevc.as_mut().ok_or("HEVC sink missing")?.write(&frame)?,
+                            ExportFormat::Hevc => {
+                                hevc.as_mut().ok_or("HEVC sink missing")?.write(&frame)?
+                            }
                             ExportFormat::Exr => write_exr(&path, &frame, settings.overwrite)?,
                             // The mastering peak is the rendered view's measured one (`hdr_scale`);
                             // an OCIO export never has relative light (Reinhard is off), so the
                             // SDR white argument only matters for an SDR file.
                             ExportFormat::Png => {
-                                if let Some(frame_levels) = frame.save_png(&path, settings.png, crate::color::BT2408_SDR_WHITE_NITS, settings.overwrite)? {
-                                    levels = Some(levels.map_or(frame_levels, |l| l.merge(frame_levels)));
+                                if let Some(frame_levels) = frame.save_png(
+                                    &path,
+                                    settings.png,
+                                    crate::color::BT2408_SDR_WHITE_NITS,
+                                    settings.overwrite,
+                                )? {
+                                    levels = Some(
+                                        levels.map_or(frame_levels, |l| l.merge(frame_levels)),
+                                    );
                                 }
                             }
                         }
@@ -1152,7 +1101,15 @@ fn write_exr(path: &Path, frame: &Frame, overwrite: bool) -> Result<(), String> 
     if frame.radiance.len() != frame.width * frame.height {
         return Err("Scene-linear radiance is missing".into());
     }
-    crate::exr_io::write_rgb(path, frame.width, frame.height, &frame.radiance, &crate::color::WORKING_PRIMS, None, overwrite)
+    crate::exr_io::write_rgb(
+        path,
+        frame.width,
+        frame.height,
+        &frame.radiance,
+        &crate::color::WORKING_PRIMS,
+        None,
+        overwrite,
+    )
 }
 
 struct HevcSink {
@@ -1241,10 +1198,9 @@ impl HevcSink {
         ctx.width = settings.width as i32;
         ctx.height = settings.height as i32;
         ctx.pix_fmt = if hardware { P::VULKAN } else { sw_format };
-        ctx.time_base.num =
-            i32::try_from(settings.fps_den).map_err(|_| "FPS denominator overflow")?;
-        ctx.time_base.den =
-            i32::try_from(settings.fps_num).map_err(|_| "FPS numerator overflow")?;
+        ctx.set_cfr_timing(settings.fps_num, settings.fps_den)
+            .map_err(av_error)?;
+        ctx.set_color_metadata(av_codec_core::AVCodecColorMetadata::bt709_limited());
         if hardware {
             ctx.hw_frames_ctx = Some(av_hwaccel_vulkan::hevc_vulkan_alloc_src_frames(
                 ctx.width, ctx.height, 4, sw_format,
@@ -1285,11 +1241,9 @@ impl HevcSink {
         } else {
             None
         };
-        let mut output = av_util_core::outfile::AtomicOut::create(
-            &settings.output(),
-            settings.overwrite,
-        )
-        .map_err(|e| e.to_string())?;
+        let mut output =
+            av_util_core::outfile::AtomicOut::create(&settings.output(), settings.overwrite)
+                .map_err(|e| e.to_string())?;
         let writer =
             av_format_movenc::MovWriter::new(output.take_file().map_err(|e| e.to_string())?)
                 .map_err(av_error)?;
@@ -1335,9 +1289,8 @@ impl HevcSink {
             .map_err(av_error)?;
         // BT.709 primaries, BT.709 transfer (BT.1886 codes, `color::bt1886_code`), BT.709
         // matrix, limited YUV: the one SDR video description, as the PNG export's video.
-        writer
-            .set_video_colr(&[b'n', b'c', b'l', b'x', 0, 1, 0, 1, 0, 1, 0])
-            .map_err(av_error)?;
+        let colr = av_format::video_colr_nclx(self.ctx.color_metadata()).map_err(av_error)?;
+        writer.set_video_colr(&colr).map_err(av_error)?;
         self.header = true;
         Ok(())
     }
@@ -1368,8 +1321,9 @@ impl HevcSink {
         }
         let dst = &mut self.yuv;
         av_swscale::sws_scale_frame(&self.sws, dst, src).map_err(av_error)?;
-        dst.pts = self.frames * i64::from(self.fps.1);
-        dst.duration = i64::from(self.fps.1);
+        dst.pts = self.ctx.cfr_pts(self.frames);
+        dst.duration = self.ctx.cfr_duration();
+        self.ctx.color_metadata().apply_to_frame(dst);
         if self.hardware {
             let pool = self
                 .ctx
@@ -1383,9 +1337,11 @@ impl HevcSink {
                 dst,
             )
             .map_err(av_error)?;
+            self.ctx.color_metadata().apply_to_frame(nv);
             let mut hw = av_hwaccel_vulkan::hwupload_frame(pool, nv).map_err(av_error)?;
             hw.pts = dst.pts;
             hw.duration = dst.duration;
+            self.ctx.color_metadata().apply_to_frame(&mut hw);
             self.ctx.avcodec_send_frame(Some(&hw)).map_err(av_error)?;
         } else {
             self.ctx.avcodec_send_frame(Some(dst)).map_err(av_error)?;
@@ -1401,15 +1357,15 @@ impl HevcSink {
                     if !self.header {
                         self.header(packet.data())?;
                     }
-                    self.timing
-                        .record(packet.pts, packet.dts, packet.duration)?;
-                    if packet.duration != i64::from(self.fps.1) {
+                    let pts = self.ctx.to_media_ticks(packet.pts);
+                    let dts = self.ctx.to_media_ticks(packet.dts);
+                    let duration = self.ctx.to_media_ticks(packet.duration);
+                    self.timing.record(pts, dts, duration)?;
+                    if duration != i64::from(self.fps.1) {
                         return Err("Unexpected HEVC packet duration".into());
                     }
                     let delta = i32::try_from(
-                        packet
-                            .pts
-                            .checked_sub(packet.dts)
+                        pts.checked_sub(dts)
                             .ok_or("HEVC composition timestamp overflow")?,
                     )
                     .map_err(|_| "HEVC composition timestamp exceeds i32")?;
@@ -1469,6 +1425,7 @@ impl HevcSink {
 mod tests {
     #[test]
     fn fps_ui_values_preserve_broadcast_timing_and_reduce_integer_rates() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut settings = super::ExportSettings::default();
         for (fps, exact) in [
             (24.0, (24, 1)),
@@ -1487,6 +1444,7 @@ mod tests {
     }
     #[test]
     fn final_denoise_override_runs_once_and_preserves_world_settings() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut world = crate::scene::Scene::preset(crate::params::FAMILY_BULB);
         world.render.denoise.interval = 8;
         world.render.denoise.enabled = false;
@@ -1543,20 +1501,47 @@ mod tests {
     #[test]
     #[ignore = "runs ffmpeg and ffprobe from PATH"]
     fn png_video_is_tagged_like_its_pngs() {
-        let dir = std::env::temp_dir().join(format!("frac-png-video-{}", std::process::id()));
+        let _gpu_test = crate::test_gpu::lock();
+        let dir = temp_dir("png-video");
         let probe = |path: &Path, what: &str| {
             let out = std::process::Command::new("ffprobe")
-                .args(["-v", "error", "-select_streams", "v:0", what, "-read_intervals", "%+#1", "-of", "default=nw=1"])
+                .args([
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    what,
+                    "-read_intervals",
+                    "%+#1",
+                    "-of",
+                    "default=nw=1",
+                ])
                 .arg(path)
                 .output()
                 .unwrap();
             String::from_utf8_lossy(&out.stdout).into_owned()
         };
         for (png, video, tags) in [
-            (PngEncoding::Hdr10, PngVideo::Hevc, ["bt2020", "smpte2084", "bt2020nc"]),
-            (PngEncoding::Hdr10, PngVideo::ProRes, ["bt2020", "smpte2084", "bt2020nc"]),
-            (PngEncoding::Hlg, PngVideo::Hevc, ["bt2020", "arib-std-b67", "bt2020nc"]),
-            (PngEncoding::Sdr8, PngVideo::ProRes, ["bt709", "bt709", "bt709"]),
+            (
+                PngEncoding::Hdr10,
+                PngVideo::Hevc,
+                ["bt2020", "smpte2084", "bt2020nc"],
+            ),
+            (
+                PngEncoding::Hdr10,
+                PngVideo::ProRes,
+                ["bt2020", "smpte2084", "bt2020nc"],
+            ),
+            (
+                PngEncoding::Hlg,
+                PngVideo::Hevc,
+                ["bt2020", "arib-std-b67", "bt2020nc"],
+            ),
+            (
+                PngEncoding::Sdr8,
+                PngVideo::ProRes,
+                ["bt709", "bt709", "bt709"],
+            ),
         ] {
             let settings = ExportSettings {
                 format: ExportFormat::Png,
@@ -1578,7 +1563,12 @@ mod tests {
                 f.light = vec![[2.0 * number as f32, 1.0, 0.5, 1.0]; 16 * 16];
                 f.light_kind = crate::color::DisplayLight::Absolute { peak_nits: 1000.0 };
                 f.sdr_bytes = Arc::new(vec![128; 16 * 16 * 4]);
-                writer.frames.as_ref().unwrap().send((number, Arc::new(f))).unwrap();
+                writer
+                    .frames
+                    .as_ref()
+                    .unwrap()
+                    .send((number, Arc::new(f)))
+                    .unwrap();
             }
             let levels = loop {
                 match writer.events.recv_timeout(Duration::from_secs(30)).unwrap() {
@@ -1590,12 +1580,29 @@ mod tests {
             };
             let output = settings.video_output().unwrap();
             let progress = Mutex::new(Progress::default());
-            assert!(encode_video(&settings, levels, &output, &progress, &AtomicBool::new(false)).unwrap());
+            assert!(
+                encode_video(
+                    &settings,
+                    levels,
+                    &output,
+                    &progress,
+                    &AtomicBool::new(false)
+                )
+                .unwrap()
+            );
 
             let stream = probe(&output, "-show_streams");
             let [primaries, transfer, matrix] = tags;
-            for tag in [format!("color_primaries={primaries}"), format!("color_transfer={transfer}"), format!("color_space={matrix}"), "color_range=tv".into()] {
-                assert!(stream.contains(&tag), "{png:?} {video:?} lacks {tag}:\n{stream}");
+            for tag in [
+                format!("color_primaries={primaries}"),
+                format!("color_transfer={transfer}"),
+                format!("color_space={matrix}"),
+                "color_range=tv".into(),
+            ] {
+                assert!(
+                    stream.contains(&tag),
+                    "{png:?} {video:?} lacks {tag}:\n{stream}"
+                );
             }
             if video == PngVideo::ProRes {
                 assert!(stream.contains("profile=XQ"), "{stream}");
@@ -1605,7 +1612,15 @@ mod tests {
                 let decoded = std::process::Command::new("ffmpeg")
                     .args(["-v", "error", "-i"])
                     .arg(&output)
-                    .args(["-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "rgb48le", "-"])
+                    .args([
+                        "-frames:v",
+                        "1",
+                        "-f",
+                        "rawvideo",
+                        "-pix_fmt",
+                        "rgb48le",
+                        "-",
+                    ])
                     .output()
                     .unwrap()
                     .stdout;
@@ -1613,30 +1628,53 @@ mod tests {
                 let srgb = 128.0f32 / 255.0;
                 let light = ((srgb + 0.055) / 1.055).powf(2.4);
                 let expected = crate::color::bt1886_code(light);
-                assert!((code - expected).abs() < 0.004, "{code} vs BT.1886 {expected} (sRGB {srgb})");
+                assert!(
+                    (code - expected).abs() < 0.004,
+                    "{code} vs BT.1886 {expected} (sRGB {srgb})"
+                );
             }
             // The container never carries a first-frame CLL; an HDR10 HEVC's bitstream carries
             // the clip's (the brighter second frame's) and the mastering peak.
-            assert!(!stream.contains("max_content="), "{png:?} {video:?} container CLL:\n{stream}");
+            assert!(
+                !stream.contains("max_content="),
+                "{png:?} {video:?} container CLL:\n{stream}"
+            );
             if (png, video) == (PngEncoding::Hdr10, PngVideo::Hevc) {
                 let content = levels.and_then(|l| l.content).unwrap();
-                let brightest = egui_display::rec2020_nits([4.0, 1.0, 0.5], 100.0).into_iter().fold(0.0f32, f32::max);
-                assert!((content.max_cll as f32 - brightest).abs() < brightest * 0.01, "{content:?} vs {brightest}");
+                let brightest = egui_display::rec2020_nits([4.0, 1.0, 0.5], 100.0)
+                    .into_iter()
+                    .fold(0.0f32, f32::max);
+                assert!(
+                    (content.max_cll as f32 - brightest).abs() < brightest * 0.01,
+                    "{content:?} vs {brightest}"
+                );
                 let frames = probe(&output, "-show_frames");
                 assert!(stream.contains("pix_fmt=yuv420p10le"), "{stream}");
-                for tag in ["max_luminance=10000000/10000".to_owned(), format!("max_content={}", content.max_cll.ceil())] {
+                for tag in [
+                    "max_luminance=10000000/10000".to_owned(),
+                    format!("max_content={}", content.max_cll.ceil()),
+                ] {
                     assert!(frames.contains(&tag), "SEI lacks {tag}:\n{frames}");
                 }
             }
         }
-        std::fs::remove_dir_all(&dir).unwrap();
+        finish_fixture(dir);
     }
 
     /// The ffmpeg command of every PNG encoding tags the video like its PNGs, and only an HDR10
     /// HEVC asks for HDR10 metadata (which then needs the clip's levels).
     #[test]
     fn png_video_arguments_follow_the_png_encoding() {
-        let mut s = ExportSettings { format: ExportFormat::Png, png_video: PngVideo::Hevc, name: "shot".into(), first: 3, last: 9, dir: PathBuf::from("out"), ..Default::default() };
+        let _gpu_test = crate::test_gpu::lock();
+        let mut s = ExportSettings {
+            format: ExportFormat::Png,
+            png_video: PngVideo::Hevc,
+            name: "shot".into(),
+            first: 3,
+            last: 9,
+            dir: PathBuf::from("out"),
+            ..Default::default()
+        };
         let out = Path::new("out/shot.mp4.part");
         for (png, tags) in [
             (PngEncoding::Sdr8, ["bt709", "bt709", "bt709"]),
@@ -1644,15 +1682,30 @@ mod tests {
         ] {
             s.png = png;
             let args = s.ffmpeg_args(None, out).unwrap().join(" ");
-            assert!(args.contains(&format!("setparams=color_primaries={}:color_trc={}:colorspace={}:range=tv", tags[0], tags[1], tags[2])), "{args}");
-            assert!(args.contains("sidedata=mode=delete:type=CONTENT_LIGHT_LEVEL"), "{args}");
+            assert!(
+                args.contains(&format!(
+                    "setparams=color_primaries={}:color_trc={}:colorspace={}:range=tv",
+                    tags[0], tags[1], tags[2]
+                )),
+                "{args}"
+            );
+            assert!(
+                args.contains("sidedata=mode=delete:type=CONTENT_LIGHT_LEVEL"),
+                "{args}"
+            );
             assert!(!args.contains("master-display"), "{args}");
         }
         s.png = PngEncoding::Hdr10;
-        assert!(s.ffmpeg_args(None, out).is_err(), "HDR10 metadata needs the measured levels");
+        assert!(
+            s.ffmpeg_args(None, out).is_err(),
+            "HDR10 metadata needs the measured levels"
+        );
         let levels = HdrLevels {
             peak_nits: 500.0,
-            content: Some(egui_display::screenshot::ContentLight { max_cll: 480.2, max_fall: 61.5 }),
+            content: Some(egui_display::screenshot::ContentLight {
+                max_cll: 480.2,
+                max_fall: 61.5,
+            }),
         };
         let args = s.ffmpeg_args(Some(levels), out).unwrap().join(" ");
         assert!(args.contains("-start_number 3 -i out"), "{args}");
@@ -1665,9 +1718,16 @@ mod tests {
         s.last = 5;
         s.name = "50% grey".into();
         let args = s.ffmpeg_args(Some(levels), out).unwrap();
-        let input = args.iter().position(|a| a == "-i").map(|i| args[i + 1].clone()).unwrap();
+        let input = args
+            .iter()
+            .position(|a| a == "-i")
+            .map(|i| args[i + 1].clone())
+            .unwrap();
         assert_eq!(Path::new(&input), Path::new("out").join("50% grey.pq.png"));
-        assert!(args.windows(2).any(|w| w == ["-pattern_type", "none"]), "{args:?}");
+        assert!(
+            args.windows(2).any(|w| w == ["-pattern_type", "none"]),
+            "{args:?}"
+        );
         assert!(!args.iter().any(|a| a == "-start_number"), "{args:?}");
     }
 
@@ -1675,16 +1735,36 @@ mod tests {
     /// clip's MaxCLL / MaxFALL (CTA-861.3: maxima over the frames); an SDR export has none.
     #[test]
     fn png_writer_reports_the_clips_light_levels() {
+        let _gpu_test = crate::test_gpu::lock();
         let dir = std::env::temp_dir().join(format!("frac-png-levels-{}", std::process::id()));
         for png in [PngEncoding::Hdr10, PngEncoding::Sdr8] {
-            let settings = ExportSettings { format: ExportFormat::Png, png, width: 4, height: 4, samples: 4, first: 1, last: 2, overwrite: true, dir: dir.join(format!("{png:?}")), ..Default::default() };
+            let settings = ExportSettings {
+                format: ExportFormat::Png,
+                png,
+                width: 4,
+                height: 4,
+                samples: 4,
+                first: 1,
+                last: 2,
+                overwrite: true,
+                dir: dir.join(format!("{png:?}")),
+                ..Default::default()
+            };
             let writer = ExportWriter::spawn(settings).unwrap();
-            for (number, (light, peak)) in [(1, ([4.0, 1.0, 0.5], 1000.0)), (2, ([1.0, 1.0, 1.0], 500.0))] {
+            for (number, (light, peak)) in [
+                (1, ([4.0, 1.0, 0.5], 1000.0)),
+                (2, ([1.0, 1.0, 1.0], 500.0)),
+            ] {
                 let mut f = frame(4, 4);
                 f.light = vec![[light[0], light[1], light[2], 1.0]; 16];
                 f.light_kind = crate::color::DisplayLight::Absolute { peak_nits: peak };
                 f.sdr_bytes = Arc::new(vec![128; 16 * 4]);
-                writer.frames.as_ref().unwrap().send((number, Arc::new(f))).unwrap();
+                writer
+                    .frames
+                    .as_ref()
+                    .unwrap()
+                    .send((number, Arc::new(f)))
+                    .unwrap();
             }
             let levels = loop {
                 match writer.events.recv_timeout(Duration::from_secs(30)).unwrap() {
@@ -1699,27 +1779,37 @@ mod tests {
                 continue;
             }
             let levels = levels.expect("HDR PNGs record their levels");
-            assert_eq!(levels.peak_nits, 1000.0, "the brighter frame's mastering peak");
+            assert_eq!(
+                levels.peak_nits, 1000.0,
+                "the brighter frame's mastering peak"
+            );
             let content = levels.content.unwrap();
-            let max = |rgb: [f32; 3]| egui_display::rec2020_nits(rgb, 100.0).into_iter().fold(0.0f32, f32::max);
+            let max = |rgb: [f32; 3]| {
+                egui_display::rec2020_nits(rgb, 100.0)
+                    .into_iter()
+                    .fold(0.0f32, f32::max)
+            };
             let (bright, white) = (max([4.0, 1.0, 0.5]), max([1.0, 1.0, 1.0]));
-            assert!((content.max_cll as f32 - bright).abs() < bright * 0.01, "{content:?} vs {bright}");
+            assert!(
+                (content.max_cll as f32 - bright).abs() < bright * 0.01,
+                "{content:?} vs {bright}"
+            );
             // Every pixel of a frame alike: its average is its brightest channel; the clip's MaxFALL
             // is the brighter frame's, not the mean of both.
-            assert!((content.max_fall as f32 - bright).abs() < bright * 0.01, "{content:?}");
+            assert!(
+                (content.max_fall as f32 - bright).abs() < bright * 0.01,
+                "{content:?}"
+            );
             assert!(bright > white * 2.0);
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Vulkan Video sessions are a per-device hardware resource: two tests opening one at once
-    /// fail with `Vulkan Video unavailable`. Tests that may use the GPU encoder hold this.
-    fn vulkan_video() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: Mutex<()> = Mutex::new(());
-        LOCK.lock().unwrap_or_else(|e| e.into_inner())
-    }
     fn temp_dir(name: &str) -> PathBuf {
-        let path = std::env::temp_dir().join(format!(
+        let root = std::env::var_os("WARP_BRO_VIDEO_FIXTURE")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let path = root.join(format!(
             "frac-export-{name}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
@@ -1730,8 +1820,16 @@ mod tests {
         std::fs::create_dir_all(&path).unwrap();
         path
     }
+    fn finish_fixture(path: PathBuf) {
+        if std::env::var_os("WARP_BRO_VIDEO_FIXTURE").is_some() {
+            eprintln!("Retained export fixture: {}", path.display());
+        } else {
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
     #[test]
     fn exr_sequence_writer_preserves_float_radiance() {
+        let _gpu_test = crate::test_gpu::lock();
         let dir = temp_dir("exr");
         let mut settings = ExportSettings::default();
         settings.name = "seq".into();
@@ -1762,11 +1860,11 @@ mod tests {
         let (_, _, pixels, _) = crate::exr_io::read_rgb(&settings.frame_path(7)).unwrap();
         assert_eq!(pixels[0], [2., 0.5, 0.125]);
         assert!(settings.frame_path(8).exists());
-        std::fs::remove_dir_all(dir).unwrap();
+        finish_fixture(dir);
     }
     #[test]
     fn hevc_mux_finishes_and_abort_never_publishes() {
-        let _video = vulkan_video();
+        let _gpu_test = crate::test_gpu::lock();
         let dir = temp_dir("hevc");
         let mut settings = ExportSettings::default();
         settings.format = ExportFormat::Hevc;
@@ -1775,7 +1873,6 @@ mod tests {
         settings.dir = dir.clone();
         settings.width = 64;
         settings.height = 64;
-        settings.preset = 0;
         let mut sink = HevcSink::new(&settings).unwrap();
         sink.write(&frame(64, 64)).unwrap();
         sink.write(&frame(64, 64)).unwrap();
@@ -1790,11 +1887,12 @@ mod tests {
         sink.finish(&AtomicBool::new(true)).unwrap();
         assert!(!settings.output().exists());
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
-        std::fs::remove_dir_all(dir).unwrap();
+        finish_fixture(dir);
     }
 
     #[test]
     fn graceful_video_stop_drains_queued_frames_and_flushes_delayed_packets() {
+        let _gpu_test = crate::test_gpu::lock();
         let dir = temp_dir("partial-hevc");
         for count in [0, 1, 9] {
             let settings = ExportSettings {
@@ -1809,7 +1907,6 @@ mod tests {
                 last: 100,
                 fps_num: 24000,
                 fps_den: 1001,
-                preset: HIGH_QUALITY_PRESET,
                 ..Default::default()
             };
             let mut writer = ExportWriter::spawn(settings.clone()).unwrap();
@@ -1846,13 +1943,13 @@ mod tests {
             }
         }
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
-        std::fs::remove_dir_all(dir).unwrap();
+        finish_fixture(dir);
     }
 
     #[test]
     #[ignore = "requires Vulkan Video HEVC hardware encode"]
     fn vulkan_hevc_partial_export_flushes_and_has_exact_timing() {
-        let _video = vulkan_video();
+        let _gpu_test = crate::test_gpu::lock();
         let dir = temp_dir("vulkan-partial");
         let settings = ExportSettings {
             format: ExportFormat::Hevc,
@@ -1907,7 +2004,7 @@ mod tests {
         assert_eq!(demux.start_time(), 0);
         assert_eq!(demux.presented_frame_count().unwrap(), 9);
         assert_eq!(demux.presented_duration().unwrap(), 9 * 1001);
-        std::fs::remove_dir_all(dir).unwrap();
+        finish_fixture(dir);
     }
 
     /// Moving, detailed frames exercise inter prediction; constant swatches cannot
@@ -1915,7 +2012,7 @@ mod tests {
     /// and movies for an independent decoder comparison.
     #[test]
     fn hevc_motion_fixture_encodes_every_source_frame() {
-        let _video = vulkan_video();
+        let _gpu_test = crate::test_gpu::lock();
         use std::io::Write;
         let retained = std::env::var_os("WARP_BRO_VIDEO_FIXTURE");
         let dir = retained
@@ -1933,7 +2030,6 @@ mod tests {
                     format: ExportFormat::Hevc,
                     width: 256,
                     height: 256,
-                    preset: HIGH_QUALITY_PRESET,
                     name: format!("motion-{encoder:?}"),
                     dir: dir.clone(),
                     ..Default::default()
@@ -1970,24 +2066,24 @@ mod tests {
             assert_eq!(demux.presented_frame_count().unwrap(), 51);
         }
         if retained.is_none() {
-            std::fs::remove_dir_all(dir).unwrap();
+            finish_fixture(dir);
         }
     }
 
     #[test]
     fn reordered_hevc_clips_start_at_zero_with_exact_rational_frame_timing() {
+        let _gpu_test = crate::test_gpu::lock();
         let dir = temp_dir("hevc-timing");
-        for preset in [1, HIGH_QUALITY_PRESET] {
+        for rate in [(24000, 1001), (25, 1)] {
             let settings = ExportSettings {
                 format: ExportFormat::Hevc,
                 encoder: VideoEncoder::Kvazaar,
-                name: format!("clip-{preset}"),
+                name: format!("clip-{}-{}", rate.0, rate.1),
                 dir: dir.clone(),
                 width: 66,
                 height: 50,
-                preset,
-                fps_num: 24000,
-                fps_den: 1001,
+                fps_num: rate.0,
+                fps_den: rate.1,
                 ..ExportSettings::default()
             };
             let mut sink = HevcSink::new(&settings).unwrap();
@@ -1995,22 +2091,96 @@ mod tests {
                 sink.write(&frame(66, 50)).unwrap();
             }
             sink.finish(&AtomicBool::new(false)).unwrap();
-            let demux = av_format_mov::Demuxer::open(settings.output()).unwrap();
+            let mut demux = av_format_mov::Demuxer::open(settings.output()).unwrap();
             assert_eq!(demux.sample_count(), 32);
-            assert_eq!(demux.timescale(), 24000);
+            assert_eq!(demux.timescale(), rate.0);
             assert_eq!(demux.start_time(), 0);
-            assert_eq!(demux.presented_duration().unwrap(), 32 * 1001);
+            assert_eq!(demux.presented_duration().unwrap(), 32 * u64::from(rate.1));
             assert_eq!(demux.presented_frame_count().unwrap(), 32);
             assert!(demux.edit_list().iter().all(|e| e.media_time >= 0));
             let mut pts: Vec<_> = (0..32).map(|i| demux.display_pts(i).unwrap()).collect();
             pts.sort_unstable();
-            assert_eq!(pts, (0..32).map(|n| n * 1001).collect::<Vec<_>>());
+            assert_eq!(
+                pts,
+                (0..32).map(|n| n * i64::from(rate.1)).collect::<Vec<_>>()
+            );
+            let colr = demux.color_info().expect("encoded MOV colour description");
+            assert_eq!(
+                (colr.primaries, colr.transfer, colr.matrix, colr.full_range),
+                (1, 1, 1, Some(false)),
+                "BT.709 limited container signalling"
+            );
+            // Decode without seeding colour from the container: the elementary
+            // stream must carry the same description, not merely an outer tag.
+            let mut decoder = av_codec_core::avcodec_alloc_context3();
+            decoder.width = settings.width as i32;
+            decoder.height = settings.height as i32;
+            av_codec::avcodec_open_decoder(
+                &mut decoder,
+                av_codec_core::AVCodecID::Hevc,
+                Some("none"),
+                &demux.parameter_sets_annexb(),
+            )
+            .unwrap();
+            let colour = av_codec_core::AVCodecColorMetadata::bt709_limited();
+            let mut decoded_pts = Vec::new();
+            let mut output = av_util_frame::av_frame_alloc();
+            let mut receive = |decoder: &mut av_codec_core::AVCodecContext| loop {
+                match decoder.avcodec_receive_frame(&mut output) {
+                    Ok(()) => {
+                        assert_eq!((output.width, output.height), (66, 50));
+                        assert_eq!(output.format, av_util_pixfmt::AVPixelFormat::YUV420P as i32);
+                        assert_eq!(
+                            (
+                                output.color_primaries,
+                                output.color_trc,
+                                output.colorspace,
+                                output.color_range
+                            ),
+                            (
+                                colour.primaries,
+                                colour.transfer,
+                                colour.matrix,
+                                colour.range
+                            ),
+                            "native decoded colour description"
+                        );
+                        let luma = output.data[0].as_ref().expect("decoded luma plane").data();
+                        let extent = 49 * output.linesize[0] as usize + 66;
+                        assert!(luma.len() >= extent);
+                        decoded_pts.push(output.pts);
+                    }
+                    Err(av_util_core::AvError::Posix(11)) | Err(av_util_core::AvError::Eof) => {
+                        break;
+                    }
+                    Err(error) => panic!("native HEVC decode failed: {error:?}"),
+                }
+            };
+            let mut packet = av_codec_core::AVPacket::new();
+            for index in 0..32 {
+                demux
+                    .read_sample_into(index, &mut packet, index == 0)
+                    .unwrap();
+                packet.pts = demux.display_pts(index).unwrap();
+                packet.duration = i64::from(rate.1);
+                decoder.avcodec_send_packet(&packet).unwrap();
+                receive(&mut decoder);
+            }
+            decoder
+                .avcodec_send_packet(&av_codec_core::AVPacket::new())
+                .unwrap();
+            receive(&mut decoder);
+            assert_eq!(
+                decoded_pts, pts,
+                "every encoded frame decodes at its exact PTS"
+            );
         }
-        std::fs::remove_dir_all(dir).unwrap();
+        finish_fixture(dir);
     }
 
     #[test]
     fn cuda_export_coordinator_samples_animation_and_writes_each_frame_once() {
+        let _gpu_test = crate::test_gpu::lock();
         let dir = temp_dir("cuda");
         let service = RenderService::spawn();
         let mut controller = ExportController::default();
@@ -2026,7 +2196,8 @@ mod tests {
         scene.lighting.sun_intensity = 0.0;
         scene.lighting.sky_intensity = 0.0;
         // Sky intensity 0 at frame 3, 2 at frame 4, keyed on the environment node.
-        let mut editor = crate::world::WorldEditor::new(crate::world::WorldDocument::from_scene(&scene));
+        let mut editor =
+            crate::world::WorldEditor::new(crate::world::WorldDocument::from_scene(&scene));
         let environment = editor
             .document
             .nodes()
@@ -2037,7 +2208,11 @@ mod tests {
         for (frame, value) in [(3.0, 0.0), (4.0, 2.0)] {
             let path = "/lighting/sky_intensity".to_string();
             editor
-                .execute(crate::world::WorldCommand::Key { id: environment, path: path.clone(), frame })
+                .execute(crate::world::WorldCommand::Key {
+                    id: environment,
+                    path: path.clone(),
+                    frame,
+                })
                 .unwrap();
             editor
                 .execute(crate::world::WorldCommand::SetAttribute {
@@ -2070,23 +2245,39 @@ mod tests {
         controller.update(&service);
         assert!(!controller.is_running());
         assert_eq!(controller.completed, 2, "{}", controller.status);
-        assert!(controller.status.starts_with("Export complete"), "{}", controller.status);
+        assert!(
+            controller.status.starts_with("Export complete"),
+            "{}",
+            controller.status
+        );
         let written = controller.last.clone().unwrap();
-        assert!(written.frame_path(3).starts_with(&dir), "exports land in a folder under the output root");
+        assert!(
+            written.frame_path(3).starts_with(&dir),
+            "exports land in a folder under the output root"
+        );
         assert!(written.frame_path(3).exists());
         assert!(written.frame_path(4).exists());
-        let pixel = |number| crate::exr_io::read_rgb(&written.frame_path(number)).unwrap().2[0];
+        let pixel = |number| {
+            crate::exr_io::read_rgb(&written.frame_path(number))
+                .unwrap()
+                .2[0]
+        };
         assert_eq!(pixel(3)[0], 0.0);
         assert!(
             pixel(4)[0] > 0.0,
             "Each exported frame must evaluate its animation"
         );
-        assert_eq!(std::fs::read_dir(written.frame_path(3).parent().unwrap()).unwrap().count(), 2);
-        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(
+            std::fs::read_dir(written.frame_path(3).parent().unwrap())
+                .unwrap()
+                .count(),
+            2
+        );
+        finish_fixture(dir);
     }
     #[test]
     fn cancel_controller_publishes_completed_movie_without_gui_waiting() {
-        let _video = vulkan_video();
+        let _gpu_test = crate::test_gpu::lock();
         let dir = temp_dir("controller-cancel");
         let service = RenderService::spawn();
         let mut controller = ExportController::default();
@@ -2124,28 +2315,45 @@ mod tests {
             "{}",
             controller.status
         );
-        let demux = av_format_mov::Demuxer::open(&controller.last.clone().unwrap().output()).unwrap();
+        let demux =
+            av_format_mov::Demuxer::open(&controller.last.clone().unwrap().output()).unwrap();
         assert_eq!(
             demux.presented_frame_count().unwrap(),
             controller.completed as usize
         );
         assert!(controller.completed > 0 && controller.completed < 10001);
-        std::fs::remove_dir_all(dir).unwrap();
+        finish_fixture(dir);
     }
 
     #[test]
     fn each_format_renders_through_its_own_output_transform() {
+        let _gpu_test = crate::test_gpu::lock();
         use crate::ocio::{Ocio, OutputKind};
         let ocio = Ocio::load("ocio://studio-config-latest").unwrap();
         let scene = crate::color::default_selection(); // SDR sRGB view in the viewport
-        let mut s = ExportSettings { format: ExportFormat::Png, ..Default::default() };
+        let mut s = ExportSettings {
+            format: ExportFormat::Png,
+            ..Default::default()
+        };
         let sdr = s.resolve_transform(&ocio, &scene).unwrap().unwrap();
-        assert_eq!((sdr.0.as_str(), sdr.1.as_str()), (scene.display.as_str(), scene.view.as_str()));
+        assert_eq!(
+            (sdr.0.as_str(), sdr.1.as_str()),
+            (scene.display.as_str(), scene.view.as_str())
+        );
         s.png = PngEncoding::Hdr10;
         let (display, view) = s.resolve_transform(&ocio, &scene).unwrap().unwrap();
-        assert!(ocio.display_is(&display, OutputKind::Pq) && view.contains("1000 nits"), "{display} / {view}");
+        assert!(
+            ocio.display_is(&display, OutputKind::Pq) && view.contains("1000 nits"),
+            "{display} / {view}"
+        );
         s.png_peak_nits = 500.0;
-        assert!(s.resolve_transform(&ocio, &scene).unwrap().unwrap().1.contains("500 nits"));
+        assert!(
+            s.resolve_transform(&ocio, &scene)
+                .unwrap()
+                .unwrap()
+                .1
+                .contains("500 nits")
+        );
         s.png = PngEncoding::Hlg;
         let (display, _) = s.resolve_transform(&ocio, &scene).unwrap().unwrap();
         assert!(display.contains("HLG"), "{display}");
@@ -2153,7 +2361,10 @@ mod tests {
         s.format = ExportFormat::Exr;
         assert_eq!(s.resolve_transform(&ocio, &scene).unwrap(), None);
         s.format = ExportFormat::Hevc;
-        let off = crate::ocio::Sel { on: false, ..scene.clone() };
+        let off = crate::ocio::Sel {
+            on: false,
+            ..scene.clone()
+        };
         assert_eq!(s.resolve_transform(&ocio, &off).unwrap(), None);
         // The frame scene gets the resolved display / view.
         s.transform = Some((display.clone(), "view".into()));
@@ -2164,13 +2375,17 @@ mod tests {
     }
     #[test]
     fn sequence_paths_and_validation() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut s = ExportSettings::default();
         s.name = "image".into();
         s.resolve(Path::new("some folder"));
         s.first = 7;
         s.last = 9;
         assert_eq!(s.frame_count(), 3);
-        assert_eq!(s.frame_path(8), Path::new("some folder").join("image.000008.exr"));
+        assert_eq!(
+            s.frame_path(8),
+            Path::new("some folder").join("image.000008.exr")
+        );
         assert!(s.validate().is_ok());
         // An HDR PNG sequence numbers before the whole suffix (`fs_name::frame_file`).
         s.format = ExportFormat::Png;

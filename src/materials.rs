@@ -50,19 +50,26 @@ mod tests {
     }
 
     #[test]
-    fn glass_old_scene_fields_default_to_opaque_and_white_without_rewriting_authoring() {
+    fn current_material_roundtrips_and_incomplete_payloads_are_rejected() {
         let original = Material::default();
-        let mut old = serde_json::to_value(&original).unwrap();
+        let current = serde_json::to_value(&original).unwrap();
+        assert_eq!(
+            serde_json::from_value::<Material>(current.clone()).unwrap(),
+            original
+        );
         for key in [
             "transmission",
             "transmission_color",
             "transmission_depth",
             "transmission_extra_roughness",
         ] {
-            old.as_object_mut().unwrap().remove(key);
+            let mut incomplete = current.clone();
+            incomplete.as_object_mut().unwrap().remove(key);
+            assert!(
+                serde_json::from_value::<Material>(incomplete).is_err(),
+                "{key}"
+            );
         }
-        let loaded: Material = serde_json::from_value(old).unwrap();
-        assert_eq!(loaded, original);
     }
 
     #[test]
