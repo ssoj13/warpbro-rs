@@ -335,7 +335,7 @@ checksum = "628d228f918ac3b82fe590352cc719d30664a0c13ca3a60266fe02c7132d480a"
 [[package]]
 name = "audio-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/audio-rs.git?branch=main#76b66b033e3f0f02003a1d57d31bf60d55932ed8"
+source = "git+ssh://git@github.com/ssoj13/audio-rs.git?branch=main#79f14b2278c4f4d889f99e7ac7e7e00f8a870b4b"
 dependencies = [
  "ebur128",
 ]
@@ -343,7 +343,7 @@ dependencies = [
 [[package]]
 name = "audio-decode"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/audio-rs.git?branch=main#76b66b033e3f0f02003a1d57d31bf60d55932ed8"
+source = "git+ssh://git@github.com/ssoj13/audio-rs.git?branch=main#79f14b2278c4f4d889f99e7ac7e7e00f8a870b4b"
 dependencies = [
  "audio-core",
  "av-decode",
@@ -362,7 +362,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "av-codec"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-codec-aac",
  "av-codec-aac-enc",
@@ -384,7 +384,7 @@ dependencies = [
 [[package]]
 name = "av-codec-aac"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -398,7 +398,7 @@ dependencies = [
 [[package]]
 name = "av-codec-aac-enc"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-codec-aac",
  "av-codec-core",
@@ -414,7 +414,7 @@ dependencies = [
 [[package]]
 name = "av-codec-av1-enc"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -429,7 +429,7 @@ dependencies = [
 [[package]]
 name = "av-codec-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-util-core",
  "av-util-data",
@@ -445,7 +445,7 @@ dependencies = [
 [[package]]
 name = "av-codec-h265"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-codec-core",
  "av-codec-h26x",
@@ -461,7 +461,7 @@ dependencies = [
 [[package]]
 name = "av-codec-h265-enc"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -479,7 +479,7 @@ dependencies = [
 [[package]]
 name = "av-codec-h26x"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -495,7 +495,7 @@ dependencies = [
 [[package]]
 name = "av-codec-mp3"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -508,7 +508,7 @@ dependencies = [
 [[package]]
 name = "av-codec-pcm"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -521,7 +521,7 @@ dependencies = [
 [[package]]
 name = "av-codec-prores"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -536,7 +536,7 @@ dependencies = [
 [[package]]
 name = "av-codec-raw"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -549,7 +549,7 @@ dependencies = [
 [[package]]
 name = "av-decode"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-codec",
  "av-codec-core",
@@ -569,7 +569,7 @@ dependencies = [
 [[package]]
 name = "av-format"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-codec-core",
  "av-format-core",
@@ -586,9 +586,11 @@ dependencies = [
 [[package]]
 name = "av-format-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-codec-core",
+ "av-util-core",
+ "av-util-math",
  "av-util-samplefmt",
  "log",
  "thiserror 2.0.21",
@@ -597,19 +599,23 @@ dependencies = [
 [[package]]
 name = "av-format-mov"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
+ "av-codec",
  "av-codec-core",
  "av-codec-h265",
  "av-format-core",
+ "av-util-core",
+ "av-util-frame",
  "av-util-math",
+ "av-util-samplefmt",
  "log",
 ]
 
 [[package]]
 name = "av-format-movenc"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-format-core",
  "av-util-math",
@@ -619,7 +625,7 @@ dependencies = [
 [[package]]
 name = "av-format-mp3"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-codec-core",
  "av-codec-mp3",
@@ -630,7 +636,7 @@ dependencies = [
 [[package]]
 name = "av-format-wav"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-codec-core",
  "av-format-core",
@@ -639,7 +645,7 @@ dependencies = [
 [[package]]
 name = "av-frame-io"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-swscale",
  "av-util-core",
@@ -654,7 +660,7 @@ dependencies = [
 [[package]]
 name = "av-hwaccel-vulkan"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "ash",
  "av-codec-core",
@@ -674,7 +680,7 @@ dependencies = [
 [[package]]
 name = "av-player"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-codec",
  "av-codec-core",
@@ -717,7 +723,7 @@ dependencies = [
 [[package]]
 name = "av-swresample"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-util-core",
  "av-util-cpu",
@@ -730,7 +736,7 @@ dependencies = [
 [[package]]
 name = "av-swscale"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-util-core",
  "av-util-cpu",
@@ -743,7 +749,7 @@ dependencies = [
 [[package]]
 name = "av-sync"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-decode",
  "av-util-samplefmt",
@@ -752,7 +758,7 @@ dependencies = [
 [[package]]
 name = "av-util-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "bytemuck",
  "log",
@@ -762,7 +768,7 @@ dependencies = [
 [[package]]
 name = "av-util-cpu"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-util-core",
  "num-traits",
@@ -771,7 +777,7 @@ dependencies = [
 [[package]]
 name = "av-util-data"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-util-core",
  "av-util-math",
@@ -781,7 +787,7 @@ dependencies = [
 [[package]]
 name = "av-util-frame"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-util-core",
  "av-util-data",
@@ -794,7 +800,7 @@ dependencies = [
 [[package]]
 name = "av-util-hwcontext"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-util-core",
  "av-util-frame",
@@ -805,7 +811,7 @@ dependencies = [
 [[package]]
 name = "av-util-math"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-util-core",
  "num-traits",
@@ -814,7 +820,7 @@ dependencies = [
 [[package]]
 name = "av-util-pixfmt"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-util-core",
  "av-util-math",
@@ -825,7 +831,7 @@ dependencies = [
 [[package]]
 name = "av-util-samplefmt"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-util-core",
  "av-util-str",
@@ -834,7 +840,7 @@ dependencies = [
 [[package]]
 name = "av-util-str"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-util-core",
 ]
@@ -842,7 +848,7 @@ dependencies = [
 [[package]]
 name = "av-util-tx"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#8c4f5fd18b548c9ea6c341874aa5ac967c1a5efc"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#e5c7f220b3740876bc2c93d5b21758ed6a3e4093"
 dependencies = [
  "av-util-core",
  "av-util-cpu",
@@ -1587,7 +1593,7 @@ dependencies = [
 [[package]]
 name = "cam-controls"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/gitnexus-rs.git?branch=main#d500651ce62a7b50a13e2da4571e2037a75d17b5"
+source = "git+ssh://git@github.com/ssoj13/gitnexus-rs.git?branch=main#0aa9f32587c703825ee0aa7023872ba1a6a342e2"
 dependencies = [
  "cam-viewport",
  "glam",
@@ -1597,7 +1603,7 @@ dependencies = [
 [[package]]
 name = "cam-controls-egui"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/gitnexus-rs.git?branch=main#d500651ce62a7b50a13e2da4571e2037a75d17b5"
+source = "git+ssh://git@github.com/ssoj13/gitnexus-rs.git?branch=main#0aa9f32587c703825ee0aa7023872ba1a6a342e2"
 dependencies = [
  "cam-controls",
  "cam-viewport",
@@ -1607,7 +1613,7 @@ dependencies = [
 [[package]]
 name = "cam-viewport"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/gitnexus-rs.git?branch=main#d500651ce62a7b50a13e2da4571e2037a75d17b5"
+source = "git+ssh://git@github.com/ssoj13/gitnexus-rs.git?branch=main#0aa9f32587c703825ee0aa7023872ba1a6a342e2"
 dependencies = [
  "glam",
 ]
@@ -1791,7 +1797,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2862,7 +2868,7 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 [[package]]
 name = "deflate-rs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#3b4b719c067eb06bb6c84be6dec9841f97a26bc0"
+source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#3de88265fd866fd25fabf111e3c6dd1ac43f871c"
 
 [[package]]
 name = "deflate64"
@@ -3147,7 +3153,7 @@ dependencies = [
 [[package]]
 name = "egui-attr-grid"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#693b0b3e01250cf7bf49045c79a82a12a8aa344f"
 dependencies = [
  "egui",
  "egui-colorpicker",
@@ -3163,7 +3169,7 @@ dependencies = [
 [[package]]
 name = "egui-colorpicker"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#693b0b3e01250cf7bf49045c79a82a12a8aa344f"
 dependencies = [
  "egui",
  "egui-widgets-config",
@@ -3173,7 +3179,7 @@ dependencies = [
 [[package]]
 name = "egui-display"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#693b0b3e01250cf7bf49045c79a82a12a8aa344f"
 dependencies = [
  "av-util-core",
  "bytemuck",
@@ -3195,7 +3201,7 @@ dependencies = [
 [[package]]
 name = "egui-dock-layout"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#693b0b3e01250cf7bf49045c79a82a12a8aa344f"
 dependencies = [
  "egui",
  "egui-layout-manager",
@@ -3220,7 +3226,7 @@ dependencies = [
 [[package]]
 name = "egui-file-field"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#693b0b3e01250cf7bf49045c79a82a12a8aa344f"
 dependencies = [
  "egui",
  "egui-widgets-config",
@@ -3230,7 +3236,7 @@ dependencies = [
 [[package]]
 name = "egui-font-picker"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#693b0b3e01250cf7bf49045c79a82a12a8aa344f"
 dependencies = [
  "egui",
 ]
@@ -3238,7 +3244,7 @@ dependencies = [
 [[package]]
 name = "egui-hdr-view"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#693b0b3e01250cf7bf49045c79a82a12a8aa344f"
 dependencies = [
  "bytemuck",
  "egui",
@@ -3249,7 +3255,7 @@ dependencies = [
 [[package]]
 name = "egui-layout-manager"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#693b0b3e01250cf7bf49045c79a82a12a8aa344f"
 dependencies = [
  "egui",
  "egui-widgets-config",
@@ -3260,7 +3266,7 @@ dependencies = [
 [[package]]
 name = "egui-outliner"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#693b0b3e01250cf7bf49045c79a82a12a8aa344f"
 dependencies = [
  "egui",
  "egui-widgets-config",
@@ -3269,7 +3275,7 @@ dependencies = [
 [[package]]
 name = "egui-pattern"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#693b0b3e01250cf7bf49045c79a82a12a8aa344f"
 dependencies = [
  "egui",
  "log",
@@ -3286,7 +3292,7 @@ dependencies = [
 [[package]]
 name = "egui-prefs2"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#693b0b3e01250cf7bf49045c79a82a12a8aa344f"
 dependencies = [
  "box-rs",
  "egui",
@@ -3298,7 +3304,7 @@ dependencies = [
 [[package]]
 name = "egui-preset"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#693b0b3e01250cf7bf49045c79a82a12a8aa344f"
 dependencies = [
  "egui",
  "egui-widgets-config",
@@ -3308,15 +3314,16 @@ dependencies = [
 [[package]]
 name = "egui-slider"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#693b0b3e01250cf7bf49045c79a82a12a8aa344f"
 dependencies = [
  "egui",
+ "egui-widgets-config",
 ]
 
 [[package]]
 name = "egui-splitter-table"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#693b0b3e01250cf7bf49045c79a82a12a8aa344f"
 dependencies = [
  "egui",
  "egui-widgets-config",
@@ -3326,7 +3333,7 @@ dependencies = [
 [[package]]
 name = "egui-statusbar"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#693b0b3e01250cf7bf49045c79a82a12a8aa344f"
 dependencies = [
  "egui",
  "egui-widgets-config",
@@ -3336,7 +3343,7 @@ dependencies = [
 [[package]]
 name = "egui-titlebar"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#693b0b3e01250cf7bf49045c79a82a12a8aa344f"
 dependencies = [
  "egui",
  "egui-widgets-config",
@@ -3345,7 +3352,7 @@ dependencies = [
 [[package]]
 name = "egui-track-timeline"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#693b0b3e01250cf7bf49045c79a82a12a8aa344f"
 dependencies = [
  "egui",
  "egui-pattern",
@@ -3356,7 +3363,7 @@ dependencies = [
 [[package]]
 name = "egui-viewport-toolbar"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#693b0b3e01250cf7bf49045c79a82a12a8aa344f"
 dependencies = [
  "egui",
  "egui-colorpicker",
@@ -3386,7 +3393,7 @@ dependencies = [
 [[package]]
 name = "egui-widgets-config"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#d4117f50a58c459c6ec627bcfe2ed089ba4fa66b"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#693b0b3e01250cf7bf49045c79a82a12a8aa344f"
 dependencies = [
  "egui",
  "egui-phosphor",
@@ -3659,7 +3666,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3727,7 +3734,7 @@ dependencies = [
 [[package]]
 name = "exr-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#3b4b719c067eb06bb6c84be6dec9841f97a26bc0"
+source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#3de88265fd866fd25fabf111e3c6dd1ac43f871c"
 dependencies = [
  "codec-simd",
  "deflate-rs",
@@ -4263,7 +4270,7 @@ dependencies = [
 [[package]]
 name = "gpu-info-rs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/gpu-info-rs.git?branch=main#35a81c9963d0a65d6c32246dd2acef25e77428ce"
+source = "git+ssh://git@github.com/ssoj13/gpu-info-rs.git?branch=main#b1780cdff32abad339128062cf3b795adb668c01"
 dependencies = [
  "ash",
  "bytemuck",
@@ -4798,7 +4805,7 @@ dependencies = [
 [[package]]
 name = "imath-rs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#3b4b719c067eb06bb6c84be6dec9841f97a26bc0"
+source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#3de88265fd866fd25fabf111e3c6dd1ac43f871c"
 
 [[package]]
 name = "imgref"
@@ -6356,7 +6363,7 @@ dependencies = [
 [[package]]
 name = "otio-time"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/otio-rs.git?branch=main#73a074f51e6008625c4101cc806c0691cd101432"
+source = "git+ssh://git@github.com/ssoj13/otio-rs.git?branch=main#229dfb41b446dfe0ae7e959504aace3892a37749"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
@@ -6532,7 +6539,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 [[package]]
 name = "playa-coord"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#42e1d676c4ca58de6aa4ca15b635e13872acce78"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#0abda7bf54df47fb81da894ff39e9ba906749860"
 dependencies = [
  "glam",
 ]
@@ -6540,7 +6547,7 @@ dependencies = [
 [[package]]
 name = "playa-engine"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#42e1d676c4ca58de6aa4ca15b635e13872acce78"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#0abda7bf54df47fb81da894ff39e9ba906749860"
 dependencies = [
  "alembic-rs",
  "anyhow",
@@ -6590,7 +6597,7 @@ dependencies = [
 [[package]]
 name = "playa-events"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#42e1d676c4ca58de6aa4ca15b635e13872acce78"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#0abda7bf54df47fb81da894ff39e9ba906749860"
 dependencies = [
  "log",
  "serde",
@@ -6601,7 +6608,7 @@ dependencies = [
 [[package]]
 name = "playa-graph"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#42e1d676c4ca58de6aa4ca15b635e13872acce78"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#0abda7bf54df47fb81da894ff39e9ba906749860"
 dependencies = [
  "box-rs",
  "flex-geom",
@@ -6618,7 +6625,7 @@ dependencies = [
 [[package]]
 name = "playa-io"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#42e1d676c4ca58de6aa4ca15b635e13872acce78"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#0abda7bf54df47fb81da894ff39e9ba906749860"
 dependencies = [
  "audio-decode",
  "av-format-core",
@@ -6639,7 +6646,7 @@ dependencies = [
 [[package]]
 name = "playa-player"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#42e1d676c4ca58de6aa4ca15b635e13872acce78"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#0abda7bf54df47fb81da894ff39e9ba906749860"
 dependencies = [
  "log",
  "lru",
@@ -6650,7 +6657,7 @@ dependencies = [
 [[package]]
 name = "playa-templates"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#42e1d676c4ca58de6aa4ca15b635e13872acce78"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#0abda7bf54df47fb81da894ff39e9ba906749860"
 dependencies = [
  "serde",
  "serde_json",
@@ -6659,7 +6666,7 @@ dependencies = [
 [[package]]
 name = "playa-time"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#42e1d676c4ca58de6aa4ca15b635e13872acce78"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#0abda7bf54df47fb81da894ff39e9ba906749860"
 dependencies = [
  "glam",
  "serde",
@@ -6987,7 +6994,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7507,7 +7514,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -8064,7 +8071,7 @@ version = "0.2.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c2499c2d826531388872b2268718aed907a39bd785ab0dcfe57fab26283f92e"
 dependencies = [
- "skrifa 0.40.0",
+ "skrifa 0.44.0",
  "yazi",
  "zeno",
 ]
@@ -8220,7 +8227,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9914,7 +9921,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

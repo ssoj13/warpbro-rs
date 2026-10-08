@@ -1288,7 +1288,7 @@ impl HevcSink {
         let config =
             av_codec::hvcc_from_au(au).map_err(|e| format!("HEVC configuration: {e:?}"))?;
         let writer = self.writer.as_mut().ok_or("HEVC writer is closed")?;
-        writer
+        let track = writer
             .add_video(
                 av_format_core::Codec::Hevc,
                 &config,
@@ -1301,7 +1301,7 @@ impl HevcSink {
         // BT.709 primaries, BT.709 transfer (BT.1886 codes, `color::bt1886_code`), BT.709
         // matrix, limited YUV: the one SDR video description, as the PNG export's video.
         let colr = av_format::video_colr_nclx(self.ctx.color_metadata()).map_err(av_error)?;
-        writer.set_video_colr(&colr).map_err(av_error)?;
+        writer.set_video_colr_for(track, &colr).map_err(av_error)?;
         self.header = true;
         Ok(())
     }
@@ -2103,18 +2103,24 @@ mod tests {
             }
             sink.finish(&AtomicBool::new(false)).unwrap();
             let mut demux = av_format_mov::Demuxer::open(settings.output()).unwrap();
+            // movenc doubles a video track's timescale until it reaches 10000 when no
+            // `video_track_timescale` is set (FFmpeg `movenc.c`, ffmpeg-rs `TrackClock::video`):
+            // 24000/1001 keeps 24000, 25/1 becomes 12800. Frame timing stays exact, in ticks of
+            // `scale` per source tick.
+            let mut scale = 1u32;
+            while rate.0 * scale < 10_000 {
+                scale *= 2;
+            }
+            let tick = u64::from(rate.1) * u64::from(scale);
             assert_eq!(demux.sample_count(), 32);
-            assert_eq!(demux.timescale(), rate.0);
+            assert_eq!(demux.timescale(), rate.0 * scale);
             assert_eq!(demux.start_time(), 0);
-            assert_eq!(demux.presented_duration().unwrap(), 32 * u64::from(rate.1));
+            assert_eq!(demux.presented_duration().unwrap(), 32 * tick);
             assert_eq!(demux.presented_frame_count().unwrap(), 32);
             assert!(demux.edit_list().iter().all(|e| e.media_time >= 0));
             let mut pts: Vec<_> = (0..32).map(|i| demux.display_pts(i).unwrap()).collect();
             pts.sort_unstable();
-            assert_eq!(
-                pts,
-                (0..32).map(|n| n * i64::from(rate.1)).collect::<Vec<_>>()
-            );
+            assert_eq!(pts, (0..32).map(|n| n * tick as i64).collect::<Vec<_>>());
             let colr = demux.color_info().expect("encoded MOV colour description");
             assert_eq!(
                 (colr.primaries, colr.transfer, colr.matrix, colr.full_range),
