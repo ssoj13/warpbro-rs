@@ -29,9 +29,10 @@ egui-widgets-rs. Topic docs (how things work) live in docs/; this file only trac
   OutputSettings (the export recipe), with Profile / Template catalogs; preferences keep only the
   export job (name, range, cadence). Viewport routing has one producer (`App::step_viewport` ->
   `ViewportRender`) and the toolbar shows the active binding. Details: docs/render-profiles.md.
-- **cuda-oxide fork** `ssoj13/cuda-rust-windows` `81ea1f8` (renamed from cuda-oxide-windows,
+- **cuda-oxide fork** `ssoj13/cuda-rust-windows` `314033b` (renamed from cuda-oxide-windows,
   synced with the NVIDIA/cuda-rust monorepo via ansidium) carries every `#[inline]` intent to LLVM
-  (`noinline` included). cuda-core, cuda-host and cuda-device all come from it; the lock,
+  (`noinline` included) and pins release codegen in the Cargo profile instead of rustflags, so
+  `test -- --release` then `build` compiles 1 crate instead of ~680 (CI built everything twice). cuda-core, cuda-host and cuda-device all come from it; the lock,
   bootstrap's cargo-oxide pin and the installed tool match it. `.cargo/cuda-oxide.toml` fixes
   `default-arch = "sm_75"` for every build and test.
 - **DE boundary** narrowed to `inverse_affine`: fast-metal +27.5%, exact routes bit-identical.
@@ -43,9 +44,9 @@ egui-widgets-rs. Topic docs (how things work) live in docs/; this file only trac
 
 ## Open work (priority order)
 
-1. **CI finish**: push the staged ci.yml edits (trimmed Windows LLVM cache; fork pull requests
-   skipped), confirm the Linux and Windows Rust caches plus LLVM fit the 10 GB repo cache limit
-   (Windows Rust cache 6.2 GB; the Linux one was evicted when both existed), merge into main.
+1. **CI finish**: with the profile-pin fork (one compile of the graph per job) confirm both Rust
+   caches plus the trimmed LLVM cache fit the 10 GB repo limit (before: Windows 5.8 + Linux 5.1 GB
+   holding two variants of every crate), then merge into main.
 2. **First launch of a release build JIT-compiles ~9 MB of sm_75 PTX** (minutes on a cold driver
    cache; README tells users to run `WarpBro --warmup-cuda` once). Fix: shipping cubins needs the
    cuda-oxide constant-memory contract (see Findings: cubin) fixed in the fork, then CI
