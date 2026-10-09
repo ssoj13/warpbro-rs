@@ -47,6 +47,15 @@ enum NameOperation {
         id: NodeId,
         target: Option<NodeId>,
     },
+    CreateOutput {
+        source: Option<NodeId>,
+        role: CatalogRole,
+        assign: bool,
+    },
+    InstantiateOutput {
+        id: NodeId,
+        assign: bool,
+    },
     Rename(NodeId),
 }
 #[derive(Clone)]
@@ -108,6 +117,23 @@ fn name_command(dialog: &NameDialog) -> Result<WorldCommand, String> {
                 target,
             }
         }
+        NameOperation::CreateOutput {
+            source,
+            role,
+            assign,
+        } => WorldCommand::CreateOutputSettings {
+            name: name.into(),
+            role,
+            source,
+            assign,
+        },
+        NameOperation::InstantiateOutput { id, assign } => {
+            WorldCommand::InstantiateOutputTemplate {
+                id,
+                name: name.into(),
+                assign,
+            }
+        }
         NameOperation::Rename(id) => WorldCommand::Rename {
             id,
             name: name.into(),
@@ -130,9 +156,9 @@ fn dialogs(ui: &egui::Ui, world: &mut WorldEditor) -> Actions {
     let mut cancelled = false;
     egui::Window::new(match dialog.operation {
         NameOperation::Rename(_) => "Rename settings",
-        NameOperation::Instantiate { .. } | NameOperation::InstantiateQuality { .. } => {
-            "Apply independent copy"
-        }
+        NameOperation::Instantiate { .. }
+        | NameOperation::InstantiateQuality { .. }
+        | NameOperation::InstantiateOutput { .. } => "Apply independent copy",
         NameOperation::Create {
             role: CatalogRole::Template,
             ..
@@ -143,6 +169,11 @@ fn dialogs(ui: &egui::Ui, world: &mut WorldEditor) -> Actions {
             ..
         } => "Save quality template",
         NameOperation::CreateQuality { .. } => "New quality profile",
+        NameOperation::CreateOutput {
+            role: CatalogRole::Template,
+            ..
+        } => "Save output template",
+        NameOperation::CreateOutput { .. } => "New output profile",
     })
     .id(id.with("window"))
     .collapsible(false)
@@ -210,30 +241,44 @@ fn target_name(target: ProfileTarget) -> &'static str {
         ProfileTarget::Output => "Output",
     }
 }
-fn profile_selector(
+/// How one settings catalog names its operations in one context. Selectors, menus and button
+/// rows of every catalog (render, quality, output) are built from it, so they share one UI.
+struct CatalogOps<'a> {
+    /// A copy of `source` with `role`; None copies the catalog's default source (the
+    /// assigned Output render, its quality, or the assigned output recipe).
+    create: &'a dyn Fn(Option<NodeId>, CatalogRole) -> NameOperation,
+    /// An independent profile instantiated from template `id`.
+    instantiate: &'a dyn Fn(NodeId) -> NameOperation,
+}
+/// One binding row: `label`, the bound profile's combo (picking executes `bind`), the
+/// Attribute Editor gear and the create / copy / template menu of `kind`'s catalog.
+fn catalog_selector(
     ui: &mut egui::Ui,
     world: &mut WorldEditor,
-    viewport: NodeId,
-    target: ProfileTarget,
+    label: &str,
+    kind: WorldKind,
     selected: NodeId,
-    nodes: &[WorldNodeInfo],
-    frame: f64,
+    bind: &dyn Fn(NodeId) -> WorldCommand,
+    ops: &CatalogOps,
 ) -> Actions {
     let mut actions = Actions::default();
-    ui.push_id(("profile_binding", target_name(target)), |ui| {
+    let nodes = world
+        .document
+        .settings_nodes(kind, Some(CatalogRole::Profile));
+    ui.push_id(("profile_binding", label), |ui| {
         ui.horizontal_wrapped(|ui| {
-            ui.label(target_name(target));
+            ui.label(label);
             let mut candidate = selected;
             egui::ComboBox::from_id_salt("profile")
                 .width(160.0)
-                .selected_text(profile_name(nodes, selected))
+                .selected_text(profile_name(&nodes, selected))
                 .show_ui(ui, |ui| {
-                    for node in nodes {
+                    for node in &nodes {
                         ui.selectable_value(&mut candidate, node.id, &node.name);
                     }
                 });
             if candidate != selected {
-                actions.execute(world, binding_command(viewport, target, candidate, frame));
+                actions.execute(world, bind(candidate));
             }
             if ui
                 .button(ph::GEAR)
@@ -247,12 +292,8 @@ fn profile_selector(
                     request_name(
                         ui,
                         world,
-                        NameOperation::Create {
-                            source: None,
-                            role: CatalogRole::Profile,
-                            target: Some(target),
-                        },
-                        format!("{} profile", target_name(target)),
+                        (ops.create)(None, CatalogRole::Profile),
+                        format!("{label} profile"),
                     );
                     ui.close();
                 }
@@ -260,30 +301,20 @@ fn profile_selector(
                     request_name(
                         ui,
                         world,
-                        NameOperation::Create {
-                            source: Some(candidate),
-                            role: CatalogRole::Profile,
-                            target: Some(target),
-                        },
-                        format!("{} copy", profile_name(nodes, candidate)),
+                        (ops.create)(Some(candidate), CatalogRole::Profile),
+                        format!("{} copy", profile_name(&nodes, candidate)),
                     );
                     ui.close();
                 }
-                let templates = world.document.render_profiles(Some(CatalogRole::Template));
+                let templates = world
+                    .document
+                    .settings_nodes(kind, Some(CatalogRole::Template));
                 if !templates.is_empty() {
                     ui.separator();
                     ui.label("Apply template as independent copy");
                     for template in templates {
                         if ui.button(&template.name).clicked() {
-                            request_name(
-                                ui,
-                                world,
-                                NameOperation::Instantiate {
-                                    id: template.id,
-                                    target,
-                                },
-                                template.name,
-                            );
+                            request_name(ui, world, (ops.instantiate)(template.id), template.name);
                             ui.close();
                         }
                     }
@@ -291,6 +322,78 @@ fn profile_selector(
             });
         });
     });
+    actions
+}
+/// A render-profile binding (Moving / Still / Manual / Output); copies made here are bound.
+fn profile_selector(
+    ui: &mut egui::Ui,
+    world: &mut WorldEditor,
+    viewport: NodeId,
+    target: ProfileTarget,
+    selected: NodeId,
+    frame: f64,
+) -> Actions {
+    catalog_selector(
+        ui,
+        world,
+        target_name(target),
+        WorldKind::RenderSettings,
+        selected,
+        &|id| binding_command(viewport, target, id, frame),
+        &CatalogOps {
+            create: &|source, role| NameOperation::Create {
+                source,
+                role,
+                target: Some(target),
+            },
+            instantiate: &|id| NameOperation::Instantiate { id, target },
+        },
+    )
+}
+/// The export bindings for the Render / Encode panel: `output_rows` plus the name dialog,
+/// which every top-level entry draws once, after all its rows could request it.
+pub(crate) fn output_bindings(ui: &mut egui::Ui, world: &mut WorldEditor, frame: f64) -> Actions {
+    let mut actions = output_rows(ui, world, frame);
+    actions.merge(dialogs(ui, world));
+    actions
+}
+/// The Output render profile and the OutputSettings recipe rows, shared by the Render /
+/// Encode panel and Settings → Render & Viewport.
+fn output_rows(ui: &mut egui::Ui, world: &mut WorldEditor, frame: f64) -> Actions {
+    let mut actions = Actions::default();
+    match (
+        world.document.viewport_settings_id(),
+        world.document.output_render_profile(),
+    ) {
+        (Ok(viewport), Ok(output)) => actions.merge(profile_selector(
+            ui,
+            world,
+            viewport,
+            ProfileTarget::Output,
+            output,
+            frame,
+        )),
+        (Err(error), _) | (_, Err(error)) => actions.error = Some(error),
+    }
+    match world.document.output_settings_id() {
+        Ok(recipe) => actions.merge(catalog_selector(
+            ui,
+            world,
+            "Output file",
+            WorldKind::OutputSettings,
+            recipe,
+            &WorldCommand::SetOutputSettings,
+            &CatalogOps {
+                create: &|source, role| NameOperation::CreateOutput {
+                    source,
+                    role,
+                    assign: true,
+                },
+                instantiate: &|id| NameOperation::InstantiateOutput { id, assign: true },
+            },
+        )),
+        Err(error) => actions.error = Some(error),
+    }
     actions
 }
 fn binding_controls(
@@ -314,29 +417,17 @@ fn binding_controls(
             return actions;
         }
     };
-    let nodes = world.document.render_profiles(Some(CatalogRole::Profile));
     for (target, selected) in [
         (ProfileTarget::Moving, policy.moving_id),
         (ProfileTarget::Still, policy.still_id),
         (ProfileTarget::Manual, policy.manual_id),
     ] {
         actions.merge(profile_selector(
-            ui, world, viewport, target, selected, &nodes, frame,
+            ui, world, viewport, target, selected, frame,
         ));
     }
     if include_output {
-        match world.document.output_render_profile() {
-            Ok(output) => actions.merge(profile_selector(
-                ui,
-                world,
-                viewport,
-                ProfileTarget::Output,
-                output,
-                &nodes,
-                frame,
-            )),
-            Err(error) => actions.error = Some(error),
-        }
+        actions.merge(output_rows(ui, world, frame));
     }
     actions
 }
@@ -546,6 +637,111 @@ fn recall_quality(
     }
 }
 
+fn recall_output(
+    ui: &egui::Ui,
+    world: &mut WorldEditor,
+    node: &WorldNodeInfo,
+    actions: &mut Actions,
+) {
+    match world.document.catalog_role(node.id) {
+        Ok(Some(CatalogRole::Template)) => request_name(
+            ui,
+            world,
+            NameOperation::InstantiateOutput {
+                id: node.id,
+                assign: true,
+            },
+            node.name.clone(),
+        ),
+        Ok(_) => {
+            actions.execute(world, WorldCommand::SetOutputSettings(node.id));
+        }
+        Err(error) => actions.error = Some(error),
+    }
+}
+/// An unbound copy of `source` (None: the catalog's default source) in `kind`'s catalog.
+fn copy_operation(
+    kind: WorldKind,
+    source: Option<NodeId>,
+    role: CatalogRole,
+) -> Option<NameOperation> {
+    Some(match kind {
+        WorldKind::RenderSettings => NameOperation::Create {
+            source,
+            role,
+            target: None,
+        },
+        WorldKind::QualitySettings => NameOperation::CreateQuality {
+            source,
+            role,
+            target: None,
+        },
+        WorldKind::OutputSettings => NameOperation::CreateOutput {
+            source,
+            role,
+            assign: false,
+        },
+        _ => return None,
+    })
+}
+/// "New … profile / template" buttons of one catalog (`noun` names it, "" for render).
+fn catalog_new_buttons(
+    ui: &mut egui::Ui,
+    world: &WorldEditor,
+    kind: WorldKind,
+    noun: &str,
+    default_name: &str,
+) {
+    ui.horizontal_wrapped(|ui| {
+        for (role, label) in [
+            (CatalogRole::Profile, format!("New {noun}profile…")),
+            (CatalogRole::Template, format!("New {noun}template…")),
+        ] {
+            if ui.button(label).clicked()
+                && let Some(operation) = copy_operation(kind, None, role)
+            {
+                request_name(ui, world, operation, default_name.into());
+            }
+        }
+    });
+}
+/// One catalog's named buttons, sorted by name: LMB `recall`s, RMB opens `settings_menu`.
+/// A template carries the file icon.
+fn catalog_buttons(
+    ui: &mut egui::Ui,
+    world: &mut WorldEditor,
+    kind: WorldKind,
+    hover: &str,
+    recall: &mut dyn FnMut(&egui::Ui, &mut WorldEditor, &WorldNodeInfo, &mut Actions),
+) -> Actions {
+    let mut actions = Actions::default();
+    let mut nodes = world.document.settings_nodes(kind, None);
+    nodes.sort_by(|a, b| {
+        a.name
+            .cmp(&b.name)
+            .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
+    });
+    ui.horizontal_wrapped(|ui| {
+        for node in nodes {
+            let template =
+                world.document.catalog_role(node.id).ok().flatten() == Some(CatalogRole::Template);
+            let label = if template {
+                format!("{} {}", ph::FILE, node.name)
+            } else {
+                node.name.clone()
+            };
+            let response = ui.button(label).on_hover_text(hover);
+            if response.clicked() {
+                recall(ui, world, &node, &mut actions);
+            }
+            response.context_menu(|ui| {
+                actions.merge(settings_menu(ui, world, node.id, kind, &node.name))
+            });
+        }
+    });
+    actions
+}
+
 /// Viewport policy and profile parameters use the existing node Attribute Editor.
 pub(crate) fn settings(
     ui: &mut egui::Ui,
@@ -559,103 +755,54 @@ pub(crate) fn settings(
     ui.weak(
         "Profiles are shared live. Applying a template creates an independent render/quality pair.",
     );
-    ui.horizontal_wrapped(|ui| {
-        for (role, label) in [
-            (CatalogRole::Profile, "New profile…"),
-            (CatalogRole::Template, "New template…"),
-        ] {
-            if ui.button(label).clicked() {
-                request_name(
-                    ui,
-                    world,
-                    NameOperation::Create {
-                        source: None,
-                        role,
-                        target: None,
-                    },
-                    "Render settings".into(),
-                );
-            }
-        }
-    });
+    catalog_new_buttons(ui, world, WorldKind::RenderSettings, "", "Render settings");
     let render_target = render_catalog_target(ui, world);
-    let mut nodes = world.document.render_profiles(None);
-    nodes.sort_by(|a, b| {
-        a.name
-            .cmp(&b.name)
-            .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
-    });
-    ui.horizontal_wrapped(|ui| {
-        for node in nodes {
-            let role = world.document.catalog_role(node.id).ok().flatten();
-            let label = if role == Some(CatalogRole::Template) {
-                format!("{} {}", ph::FILE, node.name)
-            } else {
-                node.name.clone()
-            };
-            let response = ui.button(label).on_hover_text(
-                "Recall to the selected target; right-click to edit or save settings",
-            );
-            if response.clicked() {
-                recall_render(ui, world, &node, render_target, frame, &mut actions);
-            }
-            response.context_menu(|ui| actions.merge(node_menu(ui, world, node.id, &node.name)));
-        }
-    });
+    actions.merge(catalog_buttons(
+        ui,
+        world,
+        WorldKind::RenderSettings,
+        "Recall to the selected target; right-click to edit or save settings",
+        &mut |ui, world, node, actions| {
+            recall_render(ui, world, node, render_target, frame, actions)
+        },
+    ));
     ui.separator();
     ui.label("Quality profiles and templates");
-    ui.horizontal_wrapped(|ui| {
-        for (role, label) in [
-            (CatalogRole::Profile, "New quality profile…"),
-            (CatalogRole::Template, "New quality template…"),
-        ] {
-            if ui.button(label).clicked() {
-                request_name(
-                    ui,
-                    world,
-                    NameOperation::CreateQuality {
-                        source: None,
-                        role,
-                        target: None,
-                    },
-                    "Quality settings".into(),
-                );
-            }
-        }
-    });
+    catalog_new_buttons(
+        ui,
+        world,
+        WorldKind::QualitySettings,
+        "quality ",
+        "Quality settings",
+    );
     let quality_target = quality_catalog_target(ui, world);
-    let mut qualities: Vec<_> = world
-        .document
-        .nodes()
-        .into_iter()
-        .filter(|node| node.kind == WorldKind::QualitySettings)
-        .collect();
-    qualities.sort_by(|a, b| {
-        a.name
-            .cmp(&b.name)
-            .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
-    });
-    ui.horizontal_wrapped(|ui| {
-        for node in qualities {
-            let template =
-                world.document.catalog_role(node.id).ok().flatten() == Some(CatalogRole::Template);
-            let label = if template {
-                format!("{} {}", ph::FILE, node.name)
-            } else {
-                node.name.clone()
-            };
-            let response = ui
-                .button(label)
-                .on_hover_text("Recall quality to the selected render profile; right-click to edit or save settings");
-            if response.clicked() {
-                match quality_target {
-                    Ok(target) => recall_quality(ui, world, &node, target, frame, &mut actions),
-                    Err(ref error) => actions.error = Some(error.clone()),
-                }
-            }
-            response.context_menu(|ui| actions.merge(quality_menu(ui, world, node.id, &node.name)));
-        }
-    });
+    actions.merge(catalog_buttons(
+        ui,
+        world,
+        WorldKind::QualitySettings,
+        "Recall quality to the selected render profile; right-click to edit or save settings",
+        &mut |ui, world, node, actions| match &quality_target {
+            Ok(target) => recall_quality(ui, world, node, *target, frame, actions),
+            Err(error) => actions.error = Some(error.clone()),
+        },
+    ));
+    ui.separator();
+    ui.label("Output file profiles and templates");
+    ui.weak("The recipe Render / Encode writes: format, codec, colour and size.");
+    catalog_new_buttons(
+        ui,
+        world,
+        WorldKind::OutputSettings,
+        "output ",
+        "Output settings",
+    );
+    actions.merge(catalog_buttons(
+        ui,
+        world,
+        WorldKind::OutputSettings,
+        "Use as the export recipe; right-click to edit or save settings",
+        &mut recall_output,
+    ));
     ui.separator();
     match world.document.viewport_settings_id() {
         Ok(viewport) => world_ui.attribute_editor(ui, world, viewport),
@@ -664,7 +811,15 @@ pub(crate) fn settings(
     actions.merge(dialogs(ui, world));
     actions
 }
-fn node_menu(ui: &mut egui::Ui, world: &mut WorldEditor, id: NodeId, name: &str) -> Actions {
+/// The right-click menu of a catalog settings node: edit, rename, save as profile / template
+/// and, for a template, the independent copies its catalog can apply.
+fn settings_menu(
+    ui: &mut egui::Ui,
+    world: &mut WorldEditor,
+    id: NodeId,
+    kind: WorldKind,
+    name: &str,
+) -> Actions {
     let mut actions = Actions::default();
     if ui.button("Edit in Attribute Editor").clicked() {
         actions.edit = Some(id);
@@ -678,100 +833,68 @@ fn node_menu(ui: &mut egui::Ui, world: &mut WorldEditor, id: NodeId, name: &str)
         (CatalogRole::Profile, "Save as profile…"),
         (CatalogRole::Template, "Save as template…"),
     ] {
-        if ui.button(label).clicked() {
-            request_name(
-                ui,
-                world,
-                NameOperation::Create {
-                    source: Some(id),
-                    role,
-                    target: None,
-                },
-                format!("{name} copy"),
-            );
+        if ui.button(label).clicked()
+            && let Some(operation) = copy_operation(kind, Some(id), role)
+        {
+            request_name(ui, world, operation, format!("{name} copy"));
             ui.close();
         }
     }
-    if world.document.catalog_role(id).ok().flatten() == Some(CatalogRole::Template) {
-        ui.separator();
-        for target in [
+    if world.document.catalog_role(id).ok().flatten() != Some(CatalogRole::Template) {
+        return actions;
+    }
+    let apply: Vec<(String, NameOperation)> = match kind {
+        WorldKind::RenderSettings => [
             ProfileTarget::Moving,
             ProfileTarget::Still,
             ProfileTarget::Manual,
             ProfileTarget::Output,
-        ] {
-            if ui
-                .button(format!("Apply independent copy to {}", target_name(target)))
-                .clicked()
-            {
-                request_name(
-                    ui,
-                    world,
-                    NameOperation::Instantiate { id, target },
-                    name.into(),
-                );
-                ui.close();
-            }
-        }
-    }
-    actions
-}
-
-fn quality_menu(ui: &mut egui::Ui, world: &mut WorldEditor, id: NodeId, name: &str) -> Actions {
-    let mut actions = Actions::default();
-    if ui.button("Edit in Attribute Editor").clicked() {
-        actions.edit = Some(id);
-        ui.close();
-    }
-    if ui.button("Rename…").clicked() {
-        request_name(ui, world, NameOperation::Rename(id), name.into());
-        ui.close();
-    }
-    for (role, label) in [
-        (CatalogRole::Profile, "Save as profile…"),
-        (CatalogRole::Template, "Save as template…"),
-    ] {
+        ]
+        .into_iter()
+        .map(|target| {
+            (
+                format!("Apply independent copy to {}", target_name(target)),
+                NameOperation::Instantiate { id, target },
+            )
+        })
+        .collect(),
+        WorldKind::QualitySettings => std::iter::once((
+            "Create independent quality profile…".to_owned(),
+            NameOperation::InstantiateQuality { id, target: None },
+        ))
+        .chain(
+            world
+                .document
+                .render_profiles(Some(CatalogRole::Profile))
+                .into_iter()
+                .map(|render| {
+                    (
+                        format!("Apply independent copy to {}", render.name),
+                        NameOperation::InstantiateQuality {
+                            id,
+                            target: Some(render.id),
+                        },
+                    )
+                }),
+        )
+        .collect(),
+        WorldKind::OutputSettings => vec![
+            (
+                "Create independent output profile…".to_owned(),
+                NameOperation::InstantiateOutput { id, assign: false },
+            ),
+            (
+                "Apply independent copy as the export recipe".to_owned(),
+                NameOperation::InstantiateOutput { id, assign: true },
+            ),
+        ],
+        _ => vec![],
+    };
+    ui.separator();
+    for (label, operation) in apply {
         if ui.button(label).clicked() {
-            request_name(
-                ui,
-                world,
-                NameOperation::CreateQuality {
-                    source: Some(id),
-                    role,
-                    target: None,
-                },
-                format!("{name} copy"),
-            );
+            request_name(ui, world, operation, name.into());
             ui.close();
-        }
-    }
-    if world.document.catalog_role(id).ok().flatten() == Some(CatalogRole::Template) {
-        ui.separator();
-        if ui.button("Create independent quality profile…").clicked() {
-            request_name(
-                ui,
-                world,
-                NameOperation::InstantiateQuality { id, target: None },
-                name.into(),
-            );
-            ui.close();
-        }
-        for render in world.document.render_profiles(Some(CatalogRole::Profile)) {
-            if ui
-                .button(format!("Apply independent copy to {}", render.name))
-                .clicked()
-            {
-                request_name(
-                    ui,
-                    world,
-                    NameOperation::InstantiateQuality {
-                        id,
-                        target: Some(render.id),
-                    },
-                    name.into(),
-                );
-                ui.close();
-            }
         }
     }
     actions
@@ -785,10 +908,7 @@ pub(crate) fn node_actions(
     kind: WorldKind,
 ) -> Actions {
     let mut actions = Actions::default();
-    if !matches!(
-        kind,
-        WorldKind::RenderSettings | WorldKind::QualitySettings | WorldKind::ViewportSettings
-    ) {
+    if !crate::render_profiles::setting_kind(kind) {
         return actions;
     }
     let before = world.document.catalog_role(id).ok().flatten();
@@ -804,24 +924,13 @@ pub(crate) fn node_actions(
                 ui.selectable_value(&mut role, Some(CatalogRole::Profile), "Profile");
                 ui.selectable_value(&mut role, Some(CatalogRole::Template), "Template");
             });
-        if kind == WorldKind::RenderSettings {
-            if let Ok(quality) = world.document.render_quality(id) {
-                if ui.button("Edit quality").clicked() {
-                    actions.edit = Some(quality);
-                }
-            }
-            let name = world
-                .document
-                .nodes()
-                .into_iter()
-                .find(|node| node.id == id)
-                .map(|node| node.name)
-                .unwrap_or_default();
-            ui.menu_button("Catalog actions", |ui| {
-                actions.merge(node_menu(ui, world, id, &name))
-            });
+        if kind == WorldKind::RenderSettings
+            && let Ok(quality) = world.document.render_quality(id)
+            && ui.button("Edit quality").clicked()
+        {
+            actions.edit = Some(quality);
         }
-        if kind == WorldKind::QualitySettings {
+        if kind != WorldKind::ViewportSettings {
             let name = world
                 .document
                 .nodes()
@@ -830,7 +939,7 @@ pub(crate) fn node_actions(
                 .map(|node| node.name)
                 .unwrap_or_default();
             ui.menu_button("Catalog actions", |ui| {
-                actions.merge(quality_menu(ui, world, id, &name))
+                actions.merge(settings_menu(ui, world, id, kind, &name))
             });
         }
     });

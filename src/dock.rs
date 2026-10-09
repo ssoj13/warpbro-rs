@@ -548,7 +548,7 @@ impl Default for Fonts {
     fn default() -> Self {
         Self {
             face: "Default".into(),
-            body: 13.0,
+            body: 11.0,
             small: 10.0,
             heading: 18.0,
             monospace: 13.0,

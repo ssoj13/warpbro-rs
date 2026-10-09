@@ -42,6 +42,8 @@ pub enum WorldKind {
     RenderSettings,
     QualitySettings,
     ViewportSettings,
+    /// Export encode recipe (`export::OutputSettings`): format, codec, colour, size.
+    OutputSettings,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -216,6 +218,21 @@ pub enum WorldCommand {
         role: crate::render_profiles::CatalogRole,
     },
     SetOutputRender(NodeId),
+    /// Copy an OutputSettings node (default: the assigned one) into a new profile or template;
+    /// `assign` also binds the new profile as the export recipe, in the same Undo step.
+    CreateOutputSettings {
+        name: String,
+        role: crate::render_profiles::CatalogRole,
+        source: Option<NodeId>,
+        assign: bool,
+    },
+    /// Instantiate an output template as an independent profile, optionally binding it.
+    InstantiateOutputTemplate {
+        id: NodeId,
+        name: String,
+        assign: bool,
+    },
+    SetOutputSettings(NodeId),
     SetActiveCamera(NodeId),
     SetActiveEnvironment(NodeId),
     ReloadEnvironment(NodeId),
@@ -907,6 +924,39 @@ impl WorldEditor {
                     .bus_slots
                     .insert("output_render".into(), json!(id));
             }
+            WorldCommand::CreateOutputSettings {
+                name,
+                role,
+                source,
+                assign,
+            } => {
+                let source = match source {
+                    Some(source) => source,
+                    None => self.document.output_settings_id()?,
+                };
+                self.create_output_settings(source, name, role, assign)?;
+            }
+            WorldCommand::InstantiateOutputTemplate { id, name, assign } => {
+                if self.document.catalog_role(id)?
+                    != Some(crate::render_profiles::CatalogRole::Template)
+                {
+                    return Err("The selected node is not an output template".into());
+                }
+                self.create_output_settings(
+                    id,
+                    name,
+                    crate::render_profiles::CatalogRole::Profile,
+                    assign,
+                )?;
+            }
+            WorldCommand::SetOutputSettings(id) => {
+                self.document
+                    .require_live_settings(id, WorldKind::OutputSettings)?;
+                self.document
+                    .graph
+                    .bus_slots
+                    .insert("output_settings".into(), json!(id));
+            }
             WorldCommand::SetActiveCamera(id) => {
                 if self.document.info(id)?.kind != WorldKind::Camera {
                     return Err("Select a camera".into());
@@ -1272,6 +1322,19 @@ fn attribute_choices(path: &str) -> Vec<Value> {
     if path == "/julia" {
         return vec![Value::Null, json!([0.0, 0.0, 0.0])];
     }
+    // Export enums list their own variants, so the choices follow the types.
+    fn variants<T: Serialize>(all: impl IntoIterator<Item = T>) -> Vec<Value> {
+        all.into_iter()
+            .filter_map(|v| serde_json::to_value(v).ok())
+            .collect()
+    }
+    match path {
+        "/output/format" => return variants(crate::export::ExportFormat::ALL),
+        "/output/encoder" => return variants(crate::export::VideoEncoder::ALL),
+        "/output/png" => return variants(egui_display::export::PngEncoding::ALL),
+        "/output/png_video" => return variants(egui_display::export::PngVideo::ALL),
+        _ => {}
+    }
     let values: &[&str] = match path {
         "/render/method" => &["Fast", "Full"],
         "/viewport/mode" => &["Auto", "Locked"],
@@ -1306,6 +1369,12 @@ pub(crate) fn attribute_range(path: &str) -> Option<(f64, f64)> {
         "/viewport/target_fps" => Some((1.0, 240.0)),
         "/viewport/settle_delay_ms" => Some((0.0, 10000.0)),
         "/viewport/batch_budget_ms" => Some((0.1, 1000.0)),
+        "/output/width" | "/output/height" => Some((1.0, crate::export::MAX_AXIS as f64)),
+        "/output/qp" => Some((0.0, f64::from(crate::export::MAX_QP))),
+        "/output/png_peak_nits" => Some((
+            f64::from(*crate::export::PEAK_NITS.start()),
+            f64::from(*crate::export::PEAK_NITS.end()),
+        )),
         "/camera/fov_y_degrees" => Some((1.0, 179.0)),
         "/camera/f_number" => Some((0.0, f32::MAX as f64)),
         "/camera/sensor_height" => Some((0.000001, f32::MAX as f64)),
@@ -1342,6 +1411,13 @@ pub(crate) fn attribute_label(path: &str) -> String {
         "/transform/position" => return "Translate".into(),
         "/transform/rotation" | "/transform/rotation_degrees" => return "Rotate".into(),
         "/transform/scale" => return "Scale".into(),
+        "/output/png" => return "PNG encoding".into(),
+        "/output/png_video" => return "PNG video".into(),
+        "/output/png_peak_nits" => return "HDR peak (nits)".into(),
+        "/output/qp" => return "QP / CRF".into(),
+        "/output/output_display" => return "Display override".into(),
+        "/output/output_view" => return "View override".into(),
+        "/output/denoise_at_completion" => return "Denoise at completion".into(),
         _ => {}
     }
     let parts: Vec<_> = path.trim_start_matches('/').split('/').collect();
@@ -1431,7 +1507,9 @@ fn attribute_slider(path: &str) -> Option<Slider> {
             _ => attribute_slider(&format!("/render/{tail}")),
         };
     }
-    if let Some((min, max)) = attribute_range(path).filter(|_| path.starts_with("/viewport/")) {
+    if let Some((min, max)) =
+        attribute_range(path).filter(|_| crate::render_profiles::static_branch(path))
+    {
         return Some(Slider {
             min,
             max,
@@ -1674,6 +1752,31 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
         }
         "/viewport/frozen" => {
             "Keep the currently displayed viewport image and stop new viewport batches; the image may no longer reflect scene edits."
+        }
+        "/output/format" => {
+            "EXR: scene-linear ACEScg sequence. PNG: the display rendering baked in (SDR, HDR10 or HLG). Video: HEVC BT.709 SDR."
+        }
+        "/output/encoder" => {
+            "The HEVC encoder of the Video format: Vulkan Video on the GPU or Kvazaar on the CPU."
+        }
+        "/output/width" | "/output/height" => {
+            "Base export size; the Output render profile's resolution scale applies once when the export starts."
+        }
+        "/output/qp" => {
+            "HEVC QP of the built-in encoder, or libx265 CRF of a PNG export's video. Lower keeps more detail in larger files."
+        }
+        "/output/denoise_at_completion" => {
+            "Run OIDN once after all samples of each exported frame, overriding the Output profile's denoise cadence."
+        }
+        "/output/png" => {
+            "How a PNG encodes display light: SDR 8-bit, HDR10 (PQ) or HLG, 16-bit BT.2020."
+        }
+        "/output/png_peak_nits" => {
+            "For an HDR PNG whose scene view is not an HDR view of that kind: the HDR view whose measured peak is nearest this."
+        }
+        "/output/png_video" => "A video ffmpeg also encodes from the finished PNG sequence.",
+        "/output/output_display" | "/output/output_view" => {
+            "OCIO display / view overriding the automatic output transform; empty is automatic."
         }
         "/formula" => "The fractal family and its parameters.",
         "/julia" => {
@@ -1987,6 +2090,7 @@ fn branches(kind: WorldKind) -> &'static [&'static str] {
         WorldKind::RenderSettings => &["render"],
         WorldKind::QualitySettings => &["quality"],
         WorldKind::ViewportSettings => &["viewport"],
+        WorldKind::OutputSettings => &["output"],
     }
 }
 fn discover(value: &Value, path: &str, attrs: &mut Attrs) {
@@ -2083,6 +2187,47 @@ fn set_pointer(root: &mut Value, path: &str, value: Value, create: bool) -> Resu
 }
 
 impl WorldEditor {
+    /// Copy one standalone settings node (Quality or Output) under a new UUID, name and role,
+    /// and select it. `assigned`: the copy is about to be bound, so it cannot be a template.
+    fn clone_settings(
+        &mut self,
+        kind: WorldKind,
+        source: NodeId,
+        name: String,
+        role: crate::render_profiles::CatalogRole,
+        assigned: bool,
+    ) -> Result<NodeId, String> {
+        if name.trim().is_empty() {
+            return Err("Profile name cannot be empty".into());
+        }
+        if role == crate::render_profiles::CatalogRole::Template && assigned {
+            return Err("Instantiate a template before assigning it".into());
+        }
+        self.document.require_settings(source, kind)?;
+        let mut data = self.document.node(source)?.clone();
+        data["parent"] = Value::Null;
+        data["children"] = json!([]);
+        let roots = self.insert_fragment(HashMap::from([(source.to_string(), data)]))?;
+        let id = *roots.first().ok_or("Cloned settings node missing")?;
+        self.document.node_mut(id)?["name"] = json!(name.trim());
+        self.document.node_mut(id)?["metadata"]["catalog_role"] = json!(role);
+        self.selection = Some(id);
+        self.selected = vec![id];
+        Ok(id)
+    }
+    fn create_output_settings(
+        &mut self,
+        source: NodeId,
+        name: String,
+        role: crate::render_profiles::CatalogRole,
+        assign: bool,
+    ) -> Result<(), String> {
+        let output = self.clone_settings(WorldKind::OutputSettings, source, name, role, assign)?;
+        if assign {
+            self.apply(WorldCommand::SetOutputSettings(output))?;
+        }
+        Ok(())
+    }
     fn create_quality_profile(
         &mut self,
         source: NodeId,
@@ -2090,23 +2235,13 @@ impl WorldEditor {
         role: crate::render_profiles::CatalogRole,
         target: Option<NodeId>,
     ) -> Result<(), String> {
-        if name.trim().is_empty() {
-            return Err("Profile name cannot be empty".into());
-        }
-        if role == crate::render_profiles::CatalogRole::Template && target.is_some() {
-            return Err("Instantiate a template before assigning it".into());
-        }
-        self.document
-            .require_settings(source, WorldKind::QualitySettings)?;
-        let mut data = self.document.node(source)?.clone();
-        data["parent"] = Value::Null;
-        data["children"] = json!([]);
-        let roots = self.insert_fragment(HashMap::from([(source.to_string(), data)]))?;
-        let quality = *roots.first().ok_or("Cloned quality missing")?;
-        self.document.node_mut(quality)?["name"] = json!(name.trim());
-        self.document.node_mut(quality)?["metadata"]["catalog_role"] = json!(role);
-        self.selection = Some(quality);
-        self.selected = vec![quality];
+        let quality = self.clone_settings(
+            WorldKind::QualitySettings,
+            source,
+            name,
+            role,
+            target.is_some(),
+        )?;
         if let Some(render) = target {
             self.document
                 .require_live_settings(render, WorldKind::RenderSettings)?;
@@ -2213,10 +2348,18 @@ impl WorldDocument {
         &self,
         role: Option<crate::render_profiles::CatalogRole>,
     ) -> Vec<WorldNodeInfo> {
+        self.settings_nodes(WorldKind::RenderSettings, role)
+    }
+    /// The catalog of one settings kind, optionally only Profiles or only Templates.
+    pub fn settings_nodes(
+        &self,
+        kind: WorldKind,
+        role: Option<crate::render_profiles::CatalogRole>,
+    ) -> Vec<WorldNodeInfo> {
         self.nodes()
             .into_iter()
             .filter(|node| {
-                node.kind == WorldKind::RenderSettings
+                node.kind == kind
                     && role
                         .is_none_or(|role| self.catalog_role(node.id).ok().flatten() == Some(role))
             })
@@ -2238,6 +2381,22 @@ impl WorldDocument {
     }
     pub fn output_render_profile(&self) -> Result<NodeId, String> {
         self.settings_bus_id("output_render", WorldKind::RenderSettings)
+    }
+    pub fn output_settings_id(&self) -> Result<NodeId, String> {
+        self.settings_bus_id("output_settings", WorldKind::OutputSettings)
+    }
+    /// The assigned export recipe (`output_settings_of`).
+    pub fn output_settings(&self) -> Result<crate::export::OutputSettings, String> {
+        self.output_settings_of(self.output_settings_id()?)
+    }
+    /// The recipe of any OutputSettings node: strictly typed, each field within its range.
+    /// Cross-field rules (HEVC needs even sizes) are export-start checks
+    /// (`OutputSettings::validate`), so an edit can pass through such a state in the form.
+    pub fn output_settings_of(&self, id: NodeId) -> Result<crate::export::OutputSettings, String> {
+        self.require_settings(id, WorldKind::OutputSettings)?;
+        // Static values: any time reads the same; the document start is a valid one.
+        let values = self.settings_values(id, "output", f64::from(self.first))?;
+        serde_json::from_value(values).map_err(|e| format!("Invalid OutputSettings {id}: {e}"))
     }
     fn static_settings_value(&self, id: NodeId, path: &str) -> Result<Value, String> {
         let attrs = self.attrs(id)?;
@@ -2306,10 +2465,14 @@ impl WorldDocument {
                     .id;
                 Ok(json!({"viewport":viewport_values(still, still)}))
             }
+            WorldKind::OutputSettings => Ok(json!({
+                "output": serde_json::to_value(crate::export::OutputSettings::default())
+                    .map_err(|e| e.to_string())?
+            })),
             _ => Err("Not a settings node".into()),
         }
     }
-    fn seed_render_profiles(&mut self, scene: &Scene) -> Result<(), String> {
+    fn seed_settings(&mut self, scene: &Scene) -> Result<(), String> {
         use crate::render_profiles::RenderMethod;
         let output_quality =
             self.insert(WorldKind::QualitySettings, "Output Quality", scene, None)?;
@@ -2383,6 +2546,10 @@ impl WorldDocument {
         self.graph
             .bus_slots
             .insert("viewport_settings".into(), json!(viewport));
+        let output_file = self.insert(WorldKind::OutputSettings, "Output File", scene, None)?;
+        self.graph
+            .bus_slots
+            .insert("output_settings".into(), json!(output_file));
         Ok(())
     }
     pub fn effective_render(
@@ -2555,8 +2722,7 @@ impl WorldDocument {
         for node in self.nodes() {
             let attrs = self.attrs(node.id)?;
             for (path, _) in attrs.iter() {
-                if (crate::render_profiles::reference_kind(path).is_some()
-                    || path.starts_with("/viewport/"))
+                if crate::render_profiles::static_path(path)
                     && (attrs.anim(path).is_some() || attrs.conn(path).is_some())
                 {
                     return Err(format!("Settings attribute {path} must be static"));
@@ -2564,6 +2730,7 @@ impl WorldDocument {
             }
         }
         self.output_render_profile()?;
+        self.output_settings()?;
         self.viewport_policy(frame)?;
         for node in self
             .nodes()
@@ -2616,13 +2783,16 @@ impl WorldDocument {
                     serde_json::from_value::<crate::scene::Adaptive>(values["adaptive"].clone())
                         .map_err(|e| e.to_string())?;
                 }
+                WorldKind::OutputSettings => {
+                    self.output_settings_of(node.id)?;
+                }
                 _ => {}
             }
         }
         Ok(())
     }
     fn guard_settings_delete(&self, remove: &HashSet<NodeId>) -> Result<(), String> {
-        for key in ["output_render", "viewport_settings"] {
+        for key in ["output_render", "viewport_settings", "output_settings"] {
             if self
                 .graph
                 .bus_slots
@@ -2705,7 +2875,7 @@ impl WorldDocument {
             marks: BTreeMap::new(),
         };
         document
-            .seed_render_profiles(scene)
+            .seed_settings(scene)
             .expect("Valid render settings");
         document
             .graph
@@ -2983,8 +3153,7 @@ impl WorldDocument {
                 continue;
             }
             let keyable = !matches!(path.as_str(), "/locked" | "/solo" | "/start" | "/end")
-                && crate::render_profiles::reference_kind(path).is_none()
-                && !path.starts_with("/viewport/");
+                && !crate::render_profiles::static_path(path);
             out.push(WorldAttribute {
                 path: path.clone(),
                 label: attribute_label(path),
@@ -3175,8 +3344,8 @@ impl WorldDocument {
         if !frame.is_finite() {
             return Err("Invalid key time".into());
         }
-        if key && path.starts_with("/viewport/") {
-            return Err("Viewport policy attributes cannot be animated".into());
+        if key && crate::render_profiles::static_branch(path) {
+            return Err("Viewport policy and output settings cannot be animated".into());
         }
         if let Some(expected) = crate::render_profiles::reference_kind(path) {
             if key {

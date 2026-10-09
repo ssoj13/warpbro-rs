@@ -20,6 +20,13 @@ use std::{
 const HIGH_QUALITY_QP: u8 = 18;
 /// The HDR PNG export's default target peak (`ExportSettings::png_peak_nits`).
 const DEFAULT_PNG_PEAK_NITS: f32 = 1000.0;
+/// Recipe limits, one source for `OutputSettings::validate`, the document's attribute ranges
+/// (`world::attribute_range`) and the Render / Encode widgets.
+pub const MAX_AXIS: usize = 16384;
+/// The renderer's 64 megapixel frame limit.
+const MAX_PIXELS: usize = 67_108_864;
+pub const MAX_QP: u8 = 51;
+pub const PEAK_NITS: std::ops::RangeInclusive<f32> = 100.0..=10000.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExportFormat {
@@ -66,6 +73,7 @@ pub enum VideoEncoder {
     Kvazaar,
 }
 impl VideoEncoder {
+    pub const ALL: [Self; 2] = [Self::Vulkan, Self::Kvazaar];
     fn label(self) -> &'static str {
         match self {
             Self::Vulkan => "GPU · Vulkan Video",
@@ -77,28 +85,19 @@ impl VideoEncoder {
 pub use egui_display::export::PngVideo;
 use egui_display::export::ffmpeg;
 
+/// The encode recipe of an export: the values of the document's `OutputSettings` node (branch
+/// `/output`), deserialized strictly. Its `Default` seeds that node in a fresh document, so the
+/// defaults exist once; `validate` is the one check for the node and for a starting export.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExportSettings {
+pub struct OutputSettings {
     pub format: ExportFormat,
     pub encoder: VideoEncoder,
-    /// File name stem; every export writes into a new `~/.warpbro/out/<timestamp>` folder.
-    pub name: String,
-    /// The folder this export writes into (`resolve`: a new dated one per export). The files are
-    /// derived from it, `name` and the format's suffix only (`output`, `frame_path`).
-    #[serde(skip)]
-    pub dir: PathBuf,
+    /// Base size; the Output render profile's resolution scale applies once when a job starts.
     pub width: usize,
     pub height: usize,
-    /// Resolved Output quality target for a frozen export job, never authored here.
-    #[serde(skip)]
-    pub samples: u32,
-    pub first: u32,
-    pub last: u32,
-    pub fps_num: u32,
-    pub fps_den: u32,
+    /// HEVC QP of the built-in encoder, or libx265 CRF for a PNG export's video (0-51).
     pub qp: u8,
-    pub overwrite: bool,
     /// Override world cadence for offline renders: OIDN runs once at the final sample.
     pub denoise_at_completion: bool,
     pub png: PngEncoding,
@@ -112,38 +111,175 @@ pub struct ExportSettings {
     /// OCIO display / view overriding the automatic output transform; empty = automatic.
     pub output_display: String,
     pub output_view: String,
-    /// The display / view this export renders through (`resolve_transform`); None = scene-linear
-    /// (EXR) or the scene's own built-in SDR display.
-    #[serde(skip)]
-    pub transform: Option<(String, String)>,
 }
-impl Default for ExportSettings {
+impl Default for OutputSettings {
     fn default() -> Self {
         Self {
             format: ExportFormat::Exr,
             encoder: VideoEncoder::Vulkan,
-            name: "frame".into(),
-            dir: PathBuf::new(),
             width: 1920,
             height: 1080,
-            samples: 256,
-            first: 1,
-            last: 1,
-            fps_num: 24,
-            fps_den: 1,
             qp: HIGH_QUALITY_QP,
-            overwrite: false,
             denoise_at_completion: false,
             png: PngEncoding::Sdr8,
             png_peak_nits: DEFAULT_PNG_PEAK_NITS,
             png_video: PngVideo::Off,
             output_display: String::new(),
             output_view: String::new(),
+        }
+    }
+}
+impl OutputSettings {
+    /// The recipe's limits, checked when an export starts and shown by the form. The document
+    /// enforces each field's range on edit; the cross-field rules live only here. The job adds
+    /// its name, range, folder and cadence checks (`ExportSettings::validate`).
+    pub fn validate(&self) -> Result<(), String> {
+        if !PEAK_NITS.contains(&self.png_peak_nits) {
+            return Err(format!(
+                "HDR peak must be {}–{} nits",
+                PEAK_NITS.start(),
+                PEAK_NITS.end()
+            ));
+        }
+        if self.width == 0 || self.height == 0 || self.width > MAX_AXIS || self.height > MAX_AXIS {
+            return Err(format!("Resolution must be 1–{MAX_AXIS} pixels per axis"));
+        }
+        if self
+            .width
+            .checked_mul(self.height)
+            .is_none_or(|n| n > MAX_PIXELS)
+        {
+            return Err("Resolution exceeds the 64 megapixel renderer limit".into());
+        }
+        if self.qp > MAX_QP {
+            return Err("Invalid encoder quality".into());
+        }
+        // The suffix follows the format (`suffix`), so only the encoder's own limits remain.
+        if self.hevc() && (!self.width.is_multiple_of(2) || !self.height.is_multiple_of(2)) {
+            return Err("HEVC 4:2:0 requires even width and height".into());
+        }
+        Ok(())
+    }
+    /// Whether any HEVC is written: the Video format, or a PNG export's HEVC video.
+    fn hevc(&self) -> bool {
+        self.format == ExportFormat::Hevc
+            || (self.format == ExportFormat::Png && self.png_video == PngVideo::Hevc)
+    }
+    /// The display a file of this format is encoded for; None for scene-linear EXR.
+    pub fn output_kind(&self) -> Option<crate::ocio::OutputKind> {
+        use crate::ocio::OutputKind;
+        match self.format {
+            ExportFormat::Exr => None,
+            ExportFormat::Hevc => Some(OutputKind::Sdr),
+            ExportFormat::Png => Some(match self.png {
+                PngEncoding::Sdr8 => OutputKind::Sdr,
+                PngEncoding::Hdr10 => OutputKind::Pq,
+                PngEncoding::Hlg => OutputKind::Hlg,
+            }),
+        }
+    }
+    /// The output transform from ACEScg for this format, independent of the viewport: the
+    /// override when set, else `Ocio::output_transform`. An SDR output with OCIO off keeps the
+    /// built-in display (None); HDR always needs an OCIO HDR view.
+    pub fn resolve_transform(
+        &self,
+        ocio: &crate::ocio::Ocio,
+        current: &crate::ocio::Sel,
+    ) -> Result<Option<(String, String)>, String> {
+        let Some(kind) = self.output_kind() else {
+            return Ok(None);
+        };
+        if kind == crate::ocio::OutputKind::Sdr && !current.on {
+            return Ok(None);
+        }
+        if !self.output_display.is_empty() {
+            let picked = crate::ocio::Sel {
+                display: self.output_display.clone(),
+                view: self.output_view.clone(),
+                ..current.clone()
+            };
+            let names = ocio
+                .resolve(&picked, kind != crate::ocio::OutputKind::Sdr)
+                .map_err(|e| e.to_string())?;
+            // The format can change without this override (Attribute Editor, a recalled
+            // profile): a display / view of another kind would encode the wrong transfer.
+            if !ocio.display_is(&names.display, kind)
+                || !ocio.view_is(&names.display, &names.view, kind)
+            {
+                return Err(format!(
+                    "Output transform override {} · {} does not encode {kind:?}; clear it or pick a {kind:?} display",
+                    names.display, names.view
+                ));
+            }
+            return Ok(Some((names.display, names.view)));
+        }
+        ocio.output_transform(current, kind, self.png_peak_nits)
+            .map(Some)
+            .map_err(|e| e.to_string())
+    }
+    /// An override names a display of one kind (SDR / PQ / HLG): a new kind starts automatic.
+    pub fn normalize_override(&mut self, kind_before: Option<crate::ocio::OutputKind>) {
+        if self.output_kind() != kind_before {
+            self.output_display.clear();
+            self.output_view.clear();
+        }
+    }
+}
+
+/// The per-run export choices kept in preferences: file stem, frame range and video cadence.
+/// A preset recipe never carries them (`OutputSettings` lives in the document).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExportJob {
+    /// File name stem; every export writes into a new `~/.warpbro/out/<timestamp>` folder.
+    pub name: String,
+    pub first: u32,
+    pub last: u32,
+    pub fps_num: u32,
+    pub fps_den: u32,
+    pub overwrite: bool,
+}
+impl Default for ExportJob {
+    fn default() -> Self {
+        Self {
+            name: "frame".into(),
+            first: 1,
+            last: 1,
+            fps_num: 24,
+            fps_den: 1,
+            overwrite: false,
+        }
+    }
+}
+
+/// One export: the preferences job, the document's recipe and the values fixed when it
+/// starts. Assembled at runtime, never persisted as a whole.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ExportSettings {
+    pub job: ExportJob,
+    /// The document's `OutputSettings` values (`App::export_ui`, `ExportController::start`).
+    pub output: OutputSettings,
+    /// The folder this export writes into (`resolve`: a new dated one per export). The files are
+    /// derived from it, `name` and the format's suffix only (`output`, `frame_path`).
+    pub dir: PathBuf,
+    /// Resolved Output quality target for a frozen export job, never authored here.
+    pub samples: u32,
+    /// The display / view this export renders through (`resolve_transform`); None = scene-linear
+    /// (EXR) or the scene's own built-in SDR display.
+    pub transform: Option<(String, String)>,
+}
+impl Default for ExportSettings {
+    fn default() -> Self {
+        Self {
+            job: ExportJob::default(),
+            output: OutputSettings::default(),
+            dir: PathBuf::new(),
+            samples: 256,
             transform: None,
         }
     }
 }
-impl ExportSettings {
+impl ExportJob {
     pub fn fps(&self) -> f64 {
         self.fps_num as f64 / self.fps_den.max(1) as f64
     }
@@ -170,56 +306,23 @@ impl ExportSettings {
         self.fps_num = num / a;
         self.fps_den = 1000 / a;
     }
-
+}
+impl ExportSettings {
+    /// Fix the Output quality for this job: its sample target, and the base size scaled once
+    /// by its resolution scale. `start` and the form's check both go through here, so the
+    /// form refuses exactly what a start would (an odd scaled HEVC size, for one).
+    pub fn apply_quality(&mut self, samples: u32, resolution_scale: f32) {
+        self.samples = samples;
+        let scale = |size: usize| ((size as f32 * resolution_scale).round() as usize).max(1);
+        self.output.width = scale(self.output.width);
+        self.output.height = scale(self.output.height);
+    }
     /// Apply after animation evaluation so authored denoise keys cannot restore periodic passes.
     pub fn apply_denoise_policy(&self, scene: &mut Scene) {
-        if self.denoise_at_completion {
+        if self.output.denoise_at_completion {
             scene.render.denoise.enabled = true;
             scene.render.denoise.interval = 0;
         }
-    }
-    /// The display a file of this format is encoded for; None for scene-linear EXR.
-    pub fn output_kind(&self) -> Option<crate::ocio::OutputKind> {
-        use crate::ocio::OutputKind;
-        match self.format {
-            ExportFormat::Exr => None,
-            ExportFormat::Hevc => Some(OutputKind::Sdr),
-            ExportFormat::Png => Some(match self.png {
-                PngEncoding::Sdr8 => OutputKind::Sdr,
-                PngEncoding::Hdr10 => OutputKind::Pq,
-                PngEncoding::Hlg => OutputKind::Hlg,
-            }),
-        }
-    }
-
-    /// The output transform from ACEScg for this format, independent of the viewport: the
-    /// override when set, else `Ocio::output_transform`. An SDR output with OCIO off keeps the
-    /// built-in display (None); HDR always needs an OCIO HDR view.
-    pub fn resolve_transform(
-        &self,
-        ocio: &crate::ocio::Ocio,
-        current: &crate::ocio::Sel,
-    ) -> Result<Option<(String, String)>, String> {
-        let Some(kind) = self.output_kind() else {
-            return Ok(None);
-        };
-        if kind == crate::ocio::OutputKind::Sdr && !current.on {
-            return Ok(None);
-        }
-        if !self.output_display.is_empty() {
-            let picked = crate::ocio::Sel {
-                display: self.output_display.clone(),
-                view: self.output_view.clone(),
-                ..current.clone()
-            };
-            let names = ocio
-                .resolve(&picked, kind != crate::ocio::OutputKind::Sdr)
-                .map_err(|e| e.to_string())?;
-            return Ok(Some((names.display, names.view)));
-        }
-        ocio.output_transform(current, kind, self.png_peak_nits)
-            .map(Some)
-            .map_err(|e| e.to_string())
     }
     /// The frame scene rendered through this export's output transform. An OCIO output replaces
     /// the legacy Reinhard curve, which would otherwise bypass OCIO (`ColorPipeline::apply`) and
@@ -236,8 +339,8 @@ impl ExportSettings {
     /// The suffix after the file stem: a PNG names its transfer (`PngEncoding::suffix`), so an
     /// HDR PNG is not taken for an SDR one.
     fn suffix(&self) -> &'static str {
-        match self.format {
-            ExportFormat::Png => self.png.suffix(),
+        match self.output.format {
+            ExportFormat::Png => self.output.png.suffix(),
             format => format.extension(),
         }
     }
@@ -248,7 +351,7 @@ impl ExportSettings {
     /// The file of a single frame or a video: `dir/<name>.<suffix>` (`fs_name::frame_file`).
     pub fn output(&self) -> PathBuf {
         self.dir.join(crate::fs_name::frame_file(
-            self.name.trim(),
+            self.job.name.trim(),
             None,
             self.suffix(),
         ))
@@ -256,39 +359,39 @@ impl ExportSettings {
     /// The PNG export's video: `dir/<name>.<transfer>.<ext>` (`name.pq.mov`), named like its
     /// frames so its transfer is visible. None when it encodes none.
     pub fn video_output(&self) -> Option<PathBuf> {
-        let ext = (self.format == ExportFormat::Png)
-            .then_some(self.png_video.extension())
+        let ext = (self.output.format == ExportFormat::Png)
+            .then_some(self.output.png_video.extension())
             .flatten()?;
-        let transfer = self.png.suffix().strip_suffix("png").unwrap_or("");
+        let transfer = self.output.png.suffix().strip_suffix("png").unwrap_or("");
         Some(self.dir.join(crate::fs_name::frame_file(
-            self.name.trim(),
+            self.job.name.trim(),
             None,
             &format!("{transfer}{ext}"),
         )))
     }
     /// The literal single-frame file or the escaped sequence pattern.
     fn video_input(&self) -> PathBuf {
-        if self.first == self.last {
-            self.frame_path(self.first)
+        if self.job.first == self.job.last {
+            self.frame_path(self.job.first)
         } else {
             PathBuf::from(crate::fs_name::sequence_pattern(
                 &self.dir,
-                self.name.trim(),
-                self.png.suffix(),
+                self.job.name.trim(),
+                self.output.png.suffix(),
             ))
         }
     }
     /// Thin settings adapter to the shared PNG-video exporter.
     fn video_options<'a>(&self, input: &'a Path) -> egui_display::export::PngVideoOptions<'a> {
         egui_display::export::PngVideoOptions {
-            codec: self.png_video,
-            encoding: self.png,
+            codec: self.output.png_video,
+            encoding: self.output.png,
             input,
-            start_number: self.first,
+            start_number: self.job.first,
             frame_count: self.frame_count(),
-            fps_num: self.fps_num,
-            fps_den: self.fps_den,
-            qp: self.qp as u32,
+            fps_num: self.job.fps_num,
+            fps_den: self.job.fps_den,
+            qp: self.output.qp as u32,
         }
     }
     /// Inspect the host settings adapter through the existing argument oracles.
@@ -304,40 +407,19 @@ impl ExportSettings {
             .collect()
     }
     pub fn validate(&self) -> Result<(), String> {
-        crate::fs_name::check(self.name.trim())?;
-        if !(100.0..=10000.0).contains(&self.png_peak_nits) {
-            return Err("HDR peak must be 100–10000 nits".into());
-        }
-        if self.width == 0 || self.height == 0 || self.width > 16384 || self.height > 16384 {
-            return Err("Resolution must be 1–16384 pixels per axis".into());
-        }
-        if self
-            .width
-            .checked_mul(self.height)
-            .is_none_or(|n| n > 67_108_864)
-        {
-            return Err("Resolution exceeds the 64 megapixel renderer limit".into());
-        }
+        crate::fs_name::check(self.job.name.trim())?;
+        self.output.validate()?;
         if self.samples == 0 || self.samples > 1_000_000 {
             return Err("Samples must be 1–1000000".into());
         }
-        if self.first > self.last || self.last - self.first > 100_000 {
+        if self.job.first > self.job.last || self.job.last - self.job.first > 100_000 {
             return Err("Frame range must be ordered and contain at most 100001 frames".into());
         }
         if self.dir.as_os_str().is_empty() {
             return Err("The output folder is not resolved".into());
         }
-        if self.fps_num == 0 || self.fps_den == 0 {
+        if self.job.fps_num == 0 || self.job.fps_den == 0 {
             return Err("FPS numerator and denominator must be positive".into());
-        }
-        if self.qp > 51 {
-            return Err("Invalid encoder quality".into());
-        }
-        // The suffix follows the format (`suffix`), so only the encoder's own limits remain.
-        let hevc = self.format == ExportFormat::Hevc
-            || (self.format == ExportFormat::Png && self.png_video == PngVideo::Hevc);
-        if hevc && (!self.width.is_multiple_of(2) || !self.height.is_multiple_of(2)) {
-            return Err("HEVC 4:2:0 requires even width and height".into());
         }
         if self.video_output().is_some() {
             ffmpeg()?;
@@ -345,16 +427,19 @@ impl ExportSettings {
         Ok(())
     }
     pub fn frame_count(&self) -> u32 {
-        self.last.saturating_sub(self.first).saturating_add(1)
+        self.job
+            .last
+            .saturating_sub(self.job.first)
+            .saturating_add(1)
     }
     /// The file of frame `number`: `output` for a single frame, else `name.000042.<suffix>` (the
     /// number before the whole suffix, as in every writer).
     pub fn frame_path(&self, number: u32) -> PathBuf {
-        if self.first == self.last {
+        if self.job.first == self.job.last {
             return self.output();
         }
         self.dir.join(crate::fs_name::frame_file(
-            self.name.trim(),
+            self.job.name.trim(),
             Some(number),
             self.suffix(),
         ))
@@ -372,6 +457,9 @@ pub struct ExportController {
     pub out_root: PathBuf,
     /// The resolved settings of the last started export: where its files went.
     pub last: Option<ExportSettings>,
+    /// The Output quality (samples, resolution scale) the host evaluated from the document
+    /// for the form's check; None when the Output render profile cannot be evaluated.
+    pub quality: Option<(u32, f32)>,
 }
 #[derive(Clone, Default)]
 struct Progress {
@@ -411,6 +499,7 @@ impl Default for ExportController {
             next_id: 100,
             out_root: crate::out_root(),
             last: None,
+            quality: None,
         }
     }
 }
@@ -418,8 +507,9 @@ impl ExportController {
     pub fn settings(&self) -> &ExportSettings {
         &self.settings
     }
-    pub fn restore(&mut self, settings: ExportSettings) {
-        self.settings = settings;
+    /// Restore the preferences part; the recipe always comes from the document.
+    pub fn restore(&mut self, job: ExportJob) {
+        self.settings.job = job;
     }
     pub fn is_running(&self) -> bool {
         self.run.is_some()
@@ -445,23 +535,25 @@ impl ExportController {
             return Err("An export is already running".into());
         }
         let mut settings = self.settings.clone();
-        if let Some(document) = &scene.document {
-            let effective = document
-                .effective_render(document.output_render_profile()?, f64::from(settings.first))?;
-            settings.samples = effective.samples;
-            settings.width =
-                ((settings.width as f32 * effective.resolution_scale).round() as usize).max(1);
-            settings.height =
-                ((settings.height as f32 * effective.resolution_scale).round() as usize).max(1);
-        }
+        // The frozen document is the only source of the recipe and the Output render profile.
+        let document = scene
+            .document
+            .as_deref()
+            .ok_or("Export needs the frozen world document")?;
+        settings.output = document.output_settings()?;
+        let effective = document.effective_render(
+            document.output_render_profile()?,
+            f64::from(settings.job.first),
+        )?;
+        settings.apply_quality(effective.samples, effective.resolution_scale);
         // Validate against the output root first so a rejected export leaves no empty folder.
         settings.resolve(&self.out_root);
         settings.validate()?;
-        settings.transform = match settings.output_kind() {
+        settings.transform = match settings.output.output_kind() {
             Some(_) => {
                 let ocio = crate::ocio::Ocio::load(&crate::ocio::source(&scene.colour.config))
                     .map_err(|e| e.to_string())?;
-                settings.resolve_transform(&ocio, &scene.colour)?
+                settings.output.resolve_transform(&ocio, &scene.colour)?
             }
             None => None,
         };
@@ -512,12 +604,12 @@ impl ExportController {
                     Ok(Ok(Some(status))) => status,
                     Ok(Ok(None)) => {
                         let completed = shared.lock().unwrap_or_else(|e| e.into_inner()).completed;
-                        if config.format == ExportFormat::Hevc && completed > 0 {
+                        if config.output.format == ExportFormat::Hevc && completed > 0 {
                             format!(
                                 "Export cancelled; saved {completed} frames to {}",
                                 config.output().display()
                             )
-                        } else if config.format == ExportFormat::Hevc {
+                        } else if config.output.format == ExportFormat::Hevc {
                             "Export cancelled before any complete frames".into()
                         } else {
                             format!("Export cancelled; {completed} frames retained")
@@ -549,7 +641,9 @@ impl ExportController {
             self.status = "Cancelling export…".into();
         }
     }
-    /// `timeline` is (first, last, fps, playhead) of the world document.
+    /// `timeline` is (first, last, fps, playhead) of the world document. The host fills
+    /// `settings.output` from the document's OutputSettings node before this call and authors
+    /// any change made here back to that node (`App::export_ui`).
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
@@ -559,9 +653,8 @@ impl ExportController {
         current: &crate::ocio::Sel,
         freeze: impl FnOnce() -> Scene,
     ) {
-        ui.heading("Render / Encode");
         let running = self.is_running();
-        let kind_before = self.settings.output_kind();
+        let kind_before = self.settings.output.output_kind();
         ui.add_enabled_ui(!running, |ui| {
             ui.weak(format!("Written to {}", self.out_root.join("<date_time>").display()));
             ui.weak("Animation is sampled at each frame. The scene and keys are frozen when export starts.");
@@ -569,84 +662,86 @@ impl ExportController {
             // once, then the format row (the tabs) and only that format's options under it.
             egui::Grid::new("render_encode").num_columns(2).show(ui, |ui| {
                 ui.label("Name"); ui.horizontal(|ui| {
-                    ui.text_edit_singleline(&mut self.settings.name);
+                    ui.text_edit_singleline(&mut self.settings.job.name);
                     ui.label(format!(".{}", self.settings.suffix()));
                 }); ui.end_row();
-                ui.label("Resolution"); ui.horizontal(|ui| { ui.add(egui::DragValue::new(&mut self.settings.width).range(1..=16384)); ui.label("×"); ui.add(egui::DragValue::new(&mut self.settings.height).range(1..=16384)); }); ui.end_row();
-                ui.label("Samples / frame"); ui.label(format!("{} · Output Quality", self.settings.samples)); ui.end_row();
-                ui.label("Denoise"); ui.checkbox(&mut self.settings.denoise_at_completion, "Once at completion").on_hover_text("Run OIDN once after all samples of each exported frame; override Output profile denoise cadence."); ui.end_row();
+                ui.label("Resolution"); ui.horizontal(|ui| { ui.add(egui::DragValue::new(&mut self.settings.output.width).range(1..=MAX_AXIS)); ui.label("×"); ui.add(egui::DragValue::new(&mut self.settings.output.height).range(1..=MAX_AXIS)); }); ui.end_row();
+                ui.label("Samples / frame"); ui.label(match self.quality {
+                    Some((samples, scale)) => format!("{samples} · Output Quality · {:.0}% resolution", scale * 100.0),
+                    None => "Output Quality unavailable".into(),
+                }); ui.end_row();
+                ui.label("Denoise"); ui.checkbox(&mut self.settings.output.denoise_at_completion, "Once at completion").on_hover_text("Run OIDN once after all samples of each exported frame; override Output profile denoise cadence."); ui.end_row();
                 ui.label("Frame range"); ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut self.settings.first).range(0..=u32::MAX)); ui.label("…"); ui.add(egui::DragValue::new(&mut self.settings.last).range(0..=u32::MAX));
+                    ui.add(egui::DragValue::new(&mut self.settings.job.first).range(0..=u32::MAX)); ui.label("…"); ui.add(egui::DragValue::new(&mut self.settings.job.last).range(0..=u32::MAX));
                     if ui.button("Current frame").on_hover_text("Render only the frame under the playhead.").clicked() {
-                        self.settings.first = timeline.3;
-                        self.settings.last = timeline.3;
+                        self.settings.job.first = timeline.3;
+                        self.settings.job.last = timeline.3;
                     }
                     if ui.button("Timeline").on_hover_text("The timeline's range, and its FPS for video.").clicked() {
-                        self.settings.first = timeline.0;
-                        self.settings.last = timeline.1;
-                        self.settings.set_fps(timeline.2);
+                        self.settings.job.first = timeline.0;
+                        self.settings.job.last = timeline.1;
+                        self.settings.job.set_fps(timeline.2);
                     }
                 }); ui.end_row();
                 ui.label("Format"); ui.horizontal(|ui| {
                     for format in ExportFormat::ALL {
-                        ui.selectable_value(&mut self.settings.format, format, format.label());
+                        ui.selectable_value(&mut self.settings.output.format, format, format.label());
                     }
                 }); ui.end_row();
-                if let (Some(kind), Some(ocio)) = (self.settings.output_kind(), ocio) {
+                if let (Some(kind), Some(ocio)) = (self.settings.output.output_kind(), ocio) {
                     self.output_transform_ui(ui, ocio, current, kind);
                 }
-                if self.settings.format == ExportFormat::Png {
+                if self.settings.output.format == ExportFormat::Png {
                     ui.label("Encoding");
-                    egui::ComboBox::from_id_salt("png_encoding").selected_text(self.settings.png.label()).show_ui(ui, |ui| {
+                    egui::ComboBox::from_id_salt("png_encoding").selected_text(self.settings.output.png.label()).show_ui(ui, |ui| {
                         for encoding in PngEncoding::ALL {
-                            ui.selectable_value(&mut self.settings.png, encoding, encoding.label());
+                            ui.selectable_value(&mut self.settings.output.png, encoding, encoding.label());
                         }
                     }); ui.end_row();
-                    if self.settings.png.hdr() {
+                    if self.settings.output.png.hdr() {
                         ui.label("HDR peak");
-                        ui.add(egui::DragValue::new(&mut self.settings.png_peak_nits).range(100.0..=10000.0).suffix(" nits"))
+                        ui.add(egui::DragValue::new(&mut self.settings.output.png_peak_nits).range(PEAK_NITS).suffix(" nits"))
                             .on_hover_text("When the scene's view is not an HDR view of this kind, the HDR view whose measured peak is nearest this. The file records the rendered view's measured peak (mDCV, HLG system gamma).");
                         ui.end_row();
                     }
                     ui.label("Video");
                     let found = ffmpeg().map(|p| format!("Also encode the finished sequence with {} into the PNGs' name with .mov / .mp4 (name.pq.mp4), tagged like the PNGs; an HDR10 HEVC carries the PNGs' mastering peak and the clip's MaxCLL / MaxFALL. A stopgap until the built-in encoder carries HDR.", p.display()));
-                    egui::ComboBox::from_id_salt("png_video").selected_text(self.settings.png_video.label()).show_ui(ui, |ui| {
+                    egui::ComboBox::from_id_salt("png_video").selected_text(self.settings.output.png_video.label()).show_ui(ui, |ui| {
                         for video in PngVideo::ALL {
-                            ui.selectable_value(&mut self.settings.png_video, video, video.label());
+                            ui.selectable_value(&mut self.settings.output.png_video, video, video.label());
                         }
                     }).response.on_hover_text(found.unwrap_or_else(|e| e)); ui.end_row();
-                    if self.settings.png_video != PngVideo::Off {
+                    if self.settings.output.png_video != PngVideo::Off {
                         self.fps_row(ui);
                     }
-                    if self.settings.png_video == PngVideo::Hevc {
+                    if self.settings.output.png_video == PngVideo::Hevc {
                         self.quality_row(ui, "CRF");
                     }
                 }
-                if self.settings.format == ExportFormat::Hevc {
+                if self.settings.output.format == ExportFormat::Hevc {
                     ui.label("Encoder");
-                    egui::ComboBox::from_id_salt("video_encoder").selected_text(self.settings.encoder.label()).show_ui(ui, |ui| {
-                        for encoder in [VideoEncoder::Vulkan, VideoEncoder::Kvazaar] {
-                            ui.selectable_value(&mut self.settings.encoder, encoder, encoder.label());
+                    egui::ComboBox::from_id_salt("video_encoder").selected_text(self.settings.output.encoder.label()).show_ui(ui, |ui| {
+                        for encoder in VideoEncoder::ALL {
+                            ui.selectable_value(&mut self.settings.output.encoder, encoder, encoder.label());
                         }
                     }); ui.end_row();
                     self.fps_row(ui);
                     self.quality_row(ui, "QP");
-                    if self.settings.encoder == VideoEncoder::Kvazaar {
+                    if self.settings.output.encoder == VideoEncoder::Kvazaar {
                         ui.label("Prediction"); ui.label("Independent I-frames"); ui.end_row();
                     }
                 }
             });
             // An override names a display of one kind (SDR / PQ / HLG): a new kind starts automatic.
-            if self.settings.output_kind() != kind_before {
-                self.settings.output_display.clear();
-                self.settings.output_view.clear();
-            }
-            ui.small(self.settings.format.hint());
-            let validation = {
+            self.settings.output.normalize_override(kind_before);
+            ui.small(self.settings.output.format.hint());
+            // The same quality, scaling and checks a start applies (`start`).
+            let validation = self.quality.ok_or_else(|| "The Output render profile cannot be evaluated".to_string()).and_then(|(samples, scale)| {
                 let mut preview = self.settings.clone();
+                preview.apply_quality(samples, scale);
                 preview.resolve(&self.out_root);
                 preview.validate()
-            };
+            });
             if let Err(error) = &validation { ui.colored_label(egui::Color32::LIGHT_RED,error); }
             if ui.add_enabled(validation.is_ok(),egui::Button::new("Start render")).clicked() {
                 let scene = freeze();
@@ -673,7 +768,7 @@ impl ExportController {
     fn fps_row(&mut self, ui: &mut egui::Ui) {
         ui.label("FPS");
         ui.horizontal(|ui| {
-            let mut fps = self.settings.fps();
+            let mut fps = self.settings.job.fps();
             if ui
                 .add(
                     egui::DragValue::new(&mut fps)
@@ -683,7 +778,7 @@ impl ExportController {
                 )
                 .changed()
             {
-                self.settings.set_fps(fps);
+                self.settings.job.set_fps(fps);
             }
             egui::ComboBox::from_id_salt("export_fps_presets")
                 .selected_text("Presets")
@@ -691,12 +786,12 @@ impl ExportController {
                     for rate in [23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0, 120.0] {
                         if ui
                             .selectable_label(
-                                (self.settings.fps() - rate).abs() < 0.001,
+                                (self.settings.job.fps() - rate).abs() < 0.001,
                                 rate.to_string(),
                             )
                             .clicked()
                         {
-                            self.settings.set_fps(rate);
+                            self.settings.job.set_fps(rate);
                             ui.close();
                         }
                     }
@@ -709,12 +804,12 @@ impl ExportController {
     fn quality_row(&mut self, ui: &mut egui::Ui, unit: &str) {
         ui.label("Quality");
         ui.horizontal(|ui| {
-            ui.add(egui::Slider::new(&mut self.settings.qp, 0..=51).text(unit))
+            ui.add(egui::Slider::new(&mut self.settings.output.qp, 0..=MAX_QP).text(unit))
                 .on_hover_text(format!(
                     "Lower {unit} preserves more detail and produces larger files."
                 ));
             if ui.button("High quality").clicked() {
-                self.settings.qp = HIGH_QUALITY_QP;
+                self.settings.output.qp = HIGH_QUALITY_QP;
             }
         });
         ui.end_row();
@@ -728,7 +823,7 @@ impl ExportController {
         kind: crate::ocio::OutputKind,
     ) {
         let hdr = kind != crate::ocio::OutputKind::Sdr;
-        let resolved = self.settings.resolve_transform(ocio, current);
+        let resolved = self.settings.output.resolve_transform(ocio, current);
         ui.label("Output transform").on_hover_text(
             "The OCIO display / view this file is rendered through from ACEScg, independent of the viewport. Automatic: the scene's own view when it fits the format, else the config's first fitting display (PQ / HLG by name) and, for HDR, the view whose measured peak is nearest the HDR peak.",
         );
@@ -746,18 +841,18 @@ impl ExportController {
                         .filter(|d| ocio.display_is(d, kind))
                         .collect(),
                 );
-                let before = self.settings.output_display.clone();
+                let before = self.settings.output.output_display.clone();
                 crate::ocio::combo(
                     ui,
                     "export.output_display",
-                    &mut self.settings.output_display,
+                    &mut self.settings.output.output_display,
                     &displays,
                     "auto",
                 );
-                if self.settings.output_display != before {
-                    self.settings.output_view.clear();
+                if self.settings.output.output_display != before {
+                    self.settings.output.output_view.clear();
                 }
-                let display = if self.settings.output_display.is_empty() {
+                let display = if self.settings.output.output_display.is_empty() {
                     resolved
                         .as_ref()
                         .ok()
@@ -765,7 +860,7 @@ impl ExportController {
                         .map(|(d, _)| d.clone())
                         .unwrap_or_default()
                 } else {
-                    self.settings.output_display.clone()
+                    self.settings.output.output_display.clone()
                 };
                 let views = owned(
                     ocio.views(&display, hdr)
@@ -773,11 +868,11 @@ impl ExportController {
                         .filter(|v| ocio.view_is(&display, v, kind))
                         .collect(),
                 );
-                ui.add_enabled_ui(!self.settings.output_display.is_empty(), |ui| {
+                ui.add_enabled_ui(!self.settings.output.output_display.is_empty(), |ui| {
                     crate::ocio::combo(
                         ui,
                         "export.output_view",
-                        &mut self.settings.output_view,
+                        &mut self.settings.output.output_view,
                         &views,
                         "first",
                     );
@@ -800,11 +895,11 @@ fn coordinate_export(
     let mut writer = ExportWriter::spawn(settings.clone())?;
     let (reply, events) = mpsc::sync_channel(16);
     let result = (|| -> Result<bool, String> {
-        for number in settings.first..=settings.last {
+        for number in settings.job.first..=settings.job.last {
             let mut frame_scene = scene.evaluated(f64::from(number))?;
             settings.apply_denoise_policy(&mut frame_scene);
             settings.apply_transform(&mut frame_scene);
-            let id = first_id + u64::from(number - settings.first);
+            let id = first_id + u64::from(number - settings.job.first);
             loop {
                 if cancel.load(Ordering::Acquire) {
                     return Ok(false);
@@ -812,8 +907,8 @@ fn coordinate_export(
                 match port.try_command(Command::RenderExport {
                     id,
                     scene: frame_scene.clone(),
-                    width: settings.width,
-                    height: settings.height,
+                    width: settings.output.width,
+                    height: settings.output.height,
                     spp: settings.samples,
                     reply: Some(reply.clone()),
                 }) {
@@ -833,7 +928,7 @@ fn coordinate_export(
                 }
                 match writer.events.try_recv() {
                     Ok(WriteEvent::Written(written)) => {
-                        acknowledge(progress, settings.first, written)?
+                        acknowledge(progress, settings.job.first, written)?
                     }
                     Ok(WriteEvent::Failed(error)) => return Err(error),
                     Ok(WriteEvent::Cancelled) => return Ok(false),
@@ -879,7 +974,7 @@ fn coordinate_export(
                         pending = frame;
                         match writer.events.try_recv() {
                             Ok(WriteEvent::Written(written)) => {
-                                acknowledge(progress, settings.first, written)?
+                                acknowledge(progress, settings.job.first, written)?
                             }
                             Ok(WriteEvent::Failed(error)) => return Err(error),
                             Ok(WriteEvent::Cancelled) => return Ok(false),
@@ -894,7 +989,7 @@ fn coordinate_export(
             }
             // CUDA starts the next frame while the CPU writer handles this one.
             // A single queued writer frame bounds memory and applies backpressure off the GUI.
-            if number != settings.last {
+            if number != settings.job.last {
                 continue;
             }
             loop {
@@ -903,7 +998,7 @@ fn coordinate_export(
                 }
                 match writer.events.recv_timeout(Duration::from_millis(20)) {
                     Ok(WriteEvent::Written(written)) => {
-                        acknowledge(progress, settings.first, written)?
+                        acknowledge(progress, settings.job.first, written)?
                     }
                     Ok(WriteEvent::Finished(levels)) => {
                         progress.lock().unwrap_or_else(|e| e.into_inner()).levels = levels;
@@ -930,7 +1025,9 @@ fn coordinate_export(
         writer.frames.take();
         loop {
             match writer.events.recv_timeout(Duration::from_millis(20)) {
-                Ok(WriteEvent::Written(written)) => acknowledge(progress, settings.first, written)?,
+                Ok(WriteEvent::Written(written)) => {
+                    acknowledge(progress, settings.job.first, written)?
+                }
                 Ok(WriteEvent::Finished(_)) => break,
                 Ok(WriteEvent::Failed(error)) => return Err(error),
                 Ok(WriteEvent::Cancelled) => {
@@ -991,7 +1088,7 @@ fn encode_video(
         &options,
         levels,
         video,
-        settings.overwrite,
+        settings.job.overwrite,
         cancel,
         |done| {
             progress.lock().unwrap_or_else(|e| e.into_inner()).status =
@@ -1023,7 +1120,7 @@ impl ExportWriter {
             .name("frac-export-writer".into())
             .spawn(move || {
                 let result = (|| -> Result<(), String> {
-                    let mut hevc = if settings.format == ExportFormat::Hevc {
+                    let mut hevc = if settings.output.format == ExportFormat::Hevc {
                         Some(HevcSink::new(&settings)?)
                     } else {
                         None
@@ -1051,24 +1148,26 @@ impl ExportWriter {
                                 frame.samples, settings.samples
                             ));
                         }
-                        if frame.width != settings.width || frame.height != settings.height {
+                        if frame.width != settings.output.width
+                            || frame.height != settings.output.height
+                        {
                             return Err("Export frame resolution changed".into());
                         }
                         let path = settings.frame_path(number);
-                        match settings.format {
+                        match settings.output.format {
                             ExportFormat::Hevc => {
                                 hevc.as_mut().ok_or("HEVC sink missing")?.write(&frame)?
                             }
-                            ExportFormat::Exr => write_exr(&path, &frame, settings.overwrite)?,
+                            ExportFormat::Exr => write_exr(&path, &frame, settings.job.overwrite)?,
                             // The mastering peak is the rendered view's measured one (`hdr_scale`);
                             // an OCIO export never has relative light (Reinhard is off), so the
                             // SDR white argument only matters for an SDR file.
                             ExportFormat::Png => {
                                 if let Some(frame_levels) = frame.save_png(
                                     &path,
-                                    settings.png,
+                                    settings.output.png,
                                     crate::color::BT2408_SDR_WHITE_NITS,
-                                    settings.overwrite,
+                                    settings.job.overwrite,
                                 )? {
                                     levels = Some(
                                         levels.map_or(frame_levels, |l| l.merge(frame_levels)),
@@ -1077,7 +1176,7 @@ impl ExportWriter {
                             }
                         }
                         let _ = tx.send(WriteEvent::Written(number));
-                        if number == settings.last {
+                        if number == settings.job.last {
                             if let Some(sink) = hevc {
                                 sink.finish(&stop)?;
                             }
@@ -1197,7 +1296,7 @@ fn video_buffer(
 impl HevcSink {
     fn new(settings: &ExportSettings) -> Result<Self, String> {
         use av_util_pixfmt::{AVColorSpace as C, AVPixelFormat as P};
-        let hardware = settings.encoder == VideoEncoder::Vulkan;
+        let hardware = settings.output.encoder == VideoEncoder::Vulkan;
         let entry = av_codec::avcodec_find_encoder_by_name(if hardware {
             "hevc_vulkan"
         } else {
@@ -1206,10 +1305,10 @@ impl HevcSink {
         .ok_or("Selected ffmpeg-rs HEVC encoder is not registered")?;
         let sw_format = if hardware { P::NV12 } else { P::YUV420P };
         let mut ctx = av_codec_core::avcodec_alloc_context3();
-        ctx.width = settings.width as i32;
-        ctx.height = settings.height as i32;
+        ctx.width = settings.output.width as i32;
+        ctx.height = settings.output.height as i32;
         ctx.pix_fmt = if hardware { P::VULKAN } else { sw_format };
-        ctx.set_cfr_timing(settings.fps_num, settings.fps_den)
+        ctx.set_cfr_timing(settings.job.fps_num, settings.job.fps_den)
             .map_err(av_error)?;
         ctx.set_color_metadata(av_codec_core::AVCodecColorMetadata::bt709_limited());
         if hardware {
@@ -1217,15 +1316,15 @@ impl HevcSink {
                 ctx.width, ctx.height, 4, sw_format,
             ).map_err(|error| format!("Vulkan Video unavailable: {error:?}. Select CPU · Kvazaar to use software encoding."))?.into());
             ctx.max_b_frames = 0;
-            ctx.gop_size = (settings.fps_num / settings.fps_den).max(1) as i32;
+            ctx.gop_size = (settings.job.fps_num / settings.job.fps_den).max(1) as i32;
         }
         ctx.flags |=
             av_codec_core::AV_CODEC_FLAG_GLOBAL_HEADER | av_codec_core::AV_CODEC_FLAG_QSCALE;
-        ctx.global_quality = i32::from(settings.qp) * av_codec_core::FF_QP2LAMBDA;
+        ctx.global_quality = i32::from(settings.output.qp) * av_codec_core::FF_QP2LAMBDA;
         if hardware {
-            let qp = settings.qp.to_string();
+            let qp = settings.output.qp.to_string();
             ctx.open_with_opts((entry.make)(), &[("qp", &qp), ("async_depth", "1")])
-                .map_err(|error| format!("Vulkan Video cannot encode {}×{}: {error:?}. Select CPU · Kvazaar for software encoding.", settings.width, settings.height))?;
+                .map_err(|error| format!("Vulkan Video cannot encode {}×{}: {error:?}. Select CPU · Kvazaar for software encoding.", settings.output.width, settings.output.height))?;
         } else {
             // The pinned Kvazaar inter path produces block displacement on
             // moving sources. Its no-preset route is bounded all-intra, with
@@ -1234,8 +1333,8 @@ impl HevcSink {
             ctx.open_with_opts((entry.make)(), &[]).map_err(av_error)?;
         }
         let mut sws = av_swscale::sws_alloc_context();
-        sws.set_src(settings.width, settings.height, P::RGB24);
-        sws.set_dst(settings.width, settings.height, P::YUV420P);
+        sws.set_src(settings.output.width, settings.output.height, P::RGB24);
+        sws.set_dst(settings.output.width, settings.output.height, P::YUV420P);
         sws.set_colorspace(C::AVCOL_SPC_BT709);
         sws.set_range(true, false);
         av_swscale::sws_init_context(&mut sws)
@@ -1244,8 +1343,8 @@ impl HevcSink {
         // once to planar 4:2:0, then only repack chroma for Vulkan upload.
         let upload_sws = if hardware {
             let mut packing = av_swscale::sws_alloc_context();
-            packing.set_src(settings.width, settings.height, P::YUV420P);
-            packing.set_dst(settings.width, settings.height, P::NV12);
+            packing.set_src(settings.output.width, settings.output.height, P::YUV420P);
+            packing.set_dst(settings.output.width, settings.output.height, P::NV12);
             packing.set_range(false, false);
             av_swscale::sws_init_context(&mut packing).map_err(av_error)?;
             Some(packing)
@@ -1253,7 +1352,7 @@ impl HevcSink {
             None
         };
         let mut output =
-            av_util_core::outfile::AtomicOut::create(&settings.output(), settings.overwrite)
+            av_util_core::outfile::AtomicOut::create(&settings.output(), settings.job.overwrite)
                 .map_err(|e| e.to_string())?;
         let writer =
             av_format_movenc::MovWriter::new(output.take_file().map_err(|e| e.to_string())?)
@@ -1262,19 +1361,23 @@ impl HevcSink {
             ctx,
             sws,
             upload_sws,
-            rgb: video_buffer(settings.width, settings.height, P::RGB24)?,
-            yuv: video_buffer(settings.width, settings.height, P::YUV420P)?,
+            rgb: video_buffer(settings.output.width, settings.output.height, P::RGB24)?,
+            yuv: video_buffer(settings.output.width, settings.output.height, P::YUV420P)?,
             nv12: if hardware {
-                Some(video_buffer(settings.width, settings.height, P::NV12)?)
+                Some(video_buffer(
+                    settings.output.width,
+                    settings.output.height,
+                    P::NV12,
+                )?)
             } else {
                 None
             },
             hardware,
             writer: Some(writer),
             output: Some(output),
-            width: settings.width,
-            height: settings.height,
-            fps: (settings.fps_num, settings.fps_den),
+            width: settings.output.width,
+            height: settings.output.height,
+            fps: (settings.job.fps_num, settings.job.fps_den),
             frames: 0,
             header: false,
             timing: VideoTiming::default(),
@@ -1446,12 +1549,12 @@ mod tests {
             (59.94, (60000, 1001)),
             (27.5, (55, 2)),
         ] {
-            settings.set_fps(fps);
-            assert_eq!((settings.fps_num, settings.fps_den), exact);
-            assert!((settings.fps() - fps).abs() < 0.0005);
+            settings.job.set_fps(fps);
+            assert_eq!((settings.job.fps_num, settings.job.fps_den), exact);
+            assert!((settings.job.fps() - fps).abs() < 0.0005);
         }
-        settings.set_fps(f64::NAN);
-        assert_eq!((settings.fps_num, settings.fps_den), (24, 1));
+        settings.job.set_fps(f64::NAN);
+        assert_eq!((settings.job.fps_num, settings.job.fps_den), (24, 1));
     }
     #[test]
     fn final_denoise_override_runs_once_and_preserves_world_settings() {
@@ -1461,7 +1564,10 @@ mod tests {
         world.render.denoise.enabled = false;
         let mut frame = world.clone();
         let settings = super::ExportSettings {
-            denoise_at_completion: true,
+            output: OutputSettings {
+                denoise_at_completion: true,
+                ..OutputSettings::default()
+            },
             ..Default::default()
         };
         settings.apply_denoise_policy(&mut frame);
@@ -1555,17 +1661,23 @@ mod tests {
             ),
         ] {
             let settings = ExportSettings {
-                format: ExportFormat::Png,
-                png,
-                png_video: video,
-                name: format!("clip-{png:?}-{video:?}"),
-                width: 16,
-                height: 16,
                 samples: 4,
-                first: 1,
-                last: 2,
-                overwrite: true,
                 dir: dir.clone(),
+                output: OutputSettings {
+                    format: ExportFormat::Png,
+                    png,
+                    png_video: video,
+                    width: 16,
+                    height: 16,
+                    ..OutputSettings::default()
+                },
+                job: ExportJob {
+                    name: format!("clip-{png:?}-{video:?}"),
+                    first: 1,
+                    last: 2,
+                    overwrite: true,
+                    ..ExportJob::default()
+                },
                 ..Default::default()
             };
             let writer = ExportWriter::spawn(settings.clone()).unwrap();
@@ -1678,12 +1790,18 @@ mod tests {
     fn png_video_arguments_follow_the_png_encoding() {
         let _gpu_test = crate::test_gpu::lock();
         let mut s = ExportSettings {
-            format: ExportFormat::Png,
-            png_video: PngVideo::Hevc,
-            name: "shot".into(),
-            first: 3,
-            last: 9,
             dir: PathBuf::from("out"),
+            output: OutputSettings {
+                format: ExportFormat::Png,
+                png_video: PngVideo::Hevc,
+                ..OutputSettings::default()
+            },
+            job: ExportJob {
+                name: "shot".into(),
+                first: 3,
+                last: 9,
+                ..ExportJob::default()
+            },
             ..Default::default()
         };
         let out = Path::new("out/shot.mp4.part");
@@ -1691,7 +1809,7 @@ mod tests {
             (PngEncoding::Sdr8, ["bt709", "bt709", "bt709"]),
             (PngEncoding::Hlg, ["bt2020", "arib-std-b67", "bt2020nc"]),
         ] {
-            s.png = png;
+            s.output.png = png;
             let args = s.ffmpeg_args(None, out).unwrap().join(" ");
             assert!(
                 args.contains(&format!(
@@ -1706,7 +1824,7 @@ mod tests {
             );
             assert!(!args.contains("master-display"), "{args}");
         }
-        s.png = PngEncoding::Hdr10;
+        s.output.png = PngEncoding::Hdr10;
         assert!(
             s.ffmpeg_args(None, out).is_err(),
             "HDR10 metadata needs the measured levels"
@@ -1725,9 +1843,9 @@ mod tests {
         assert_eq!(s.video_output(), Some(Path::new("out").join("shot.pq.mp4")));
 
         // A single frame is its file as it is: no pattern, no frame number, no `%` escaping.
-        s.first = 5;
-        s.last = 5;
-        s.name = "50% grey".into();
+        s.job.first = 5;
+        s.job.last = 5;
+        s.job.name = "50% grey".into();
         let args = s.ffmpeg_args(Some(levels), out).unwrap();
         let input = args
             .iter()
@@ -1750,15 +1868,21 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("frac-png-levels-{}", std::process::id()));
         for png in [PngEncoding::Hdr10, PngEncoding::Sdr8] {
             let settings = ExportSettings {
-                format: ExportFormat::Png,
-                png,
-                width: 4,
-                height: 4,
                 samples: 4,
-                first: 1,
-                last: 2,
-                overwrite: true,
                 dir: dir.join(format!("{png:?}")),
+                output: OutputSettings {
+                    format: ExportFormat::Png,
+                    png,
+                    width: 4,
+                    height: 4,
+                    ..OutputSettings::default()
+                },
+                job: ExportJob {
+                    first: 1,
+                    last: 2,
+                    overwrite: true,
+                    ..ExportJob::default()
+                },
                 ..Default::default()
             };
             let writer = ExportWriter::spawn(settings).unwrap();
@@ -1816,6 +1940,18 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// Bind recipe `output` in the document, through the same edits the Render / Encode panel
+    /// authors (`render_profiles::output_edits`).
+    fn set_recipe(editor: &mut crate::world::WorldEditor, output: &OutputSettings) {
+        let id = editor.document.output_settings_id().unwrap();
+        let before = editor.document.output_settings().unwrap();
+        editor
+            .execute(crate::world::WorldCommand::Batch(
+                crate::render_profiles::output_edits(id, &before, output).unwrap(),
+            ))
+            .unwrap();
+        assert_eq!(&editor.document.output_settings().unwrap(), output);
+    }
     fn temp_dir(name: &str) -> PathBuf {
         let root = std::env::var_os("WARP_BRO_VIDEO_FIXTURE")
             .map(PathBuf::from)
@@ -1843,13 +1979,13 @@ mod tests {
         let _gpu_test = crate::test_gpu::lock();
         let dir = temp_dir("exr");
         let mut settings = ExportSettings::default();
-        settings.name = "seq".into();
+        settings.job.name = "seq".into();
         settings.dir = dir.clone();
-        settings.width = 2;
-        settings.height = 2;
+        settings.output.width = 2;
+        settings.output.height = 2;
         settings.samples = 4;
-        settings.first = 7;
-        settings.last = 8;
+        settings.job.first = 7;
+        settings.job.last = 8;
         let writer = ExportWriter::spawn(settings.clone()).unwrap();
         for number in 7..=8 {
             writer
@@ -1878,12 +2014,12 @@ mod tests {
         let _gpu_test = crate::test_gpu::lock();
         let dir = temp_dir("hevc");
         let mut settings = ExportSettings::default();
-        settings.format = ExportFormat::Hevc;
-        settings.encoder = VideoEncoder::Kvazaar;
-        settings.name = "clip".into();
+        settings.output.format = ExportFormat::Hevc;
+        settings.output.encoder = VideoEncoder::Kvazaar;
+        settings.job.name = "clip".into();
         settings.dir = dir.clone();
-        settings.width = 64;
-        settings.height = 64;
+        settings.output.width = 64;
+        settings.output.height = 64;
         let mut sink = HevcSink::new(&settings).unwrap();
         sink.write(&frame(64, 64)).unwrap();
         sink.write(&frame(64, 64)).unwrap();
@@ -1892,7 +2028,7 @@ mod tests {
         for name in [b"ftyp", b"moov", b"hvcC", b"hvc1"] {
             assert!(bytes.windows(4).any(|b| b == name), "{:?}", name);
         }
-        settings.name = "cancelled".into();
+        settings.job.name = "cancelled".into();
         let mut sink = HevcSink::new(&settings).unwrap();
         sink.write(&frame(64, 64)).unwrap();
         sink.finish(&AtomicBool::new(true)).unwrap();
@@ -1907,17 +2043,23 @@ mod tests {
         let dir = temp_dir("partial-hevc");
         for count in [0, 1, 9] {
             let settings = ExportSettings {
-                format: ExportFormat::Hevc,
-                encoder: VideoEncoder::Kvazaar,
-                name: format!("partial-{count}"),
                 dir: dir.clone(),
-                width: 66,
-                height: 50,
                 samples: 4,
-                first: 17,
-                last: 100,
-                fps_num: 24000,
-                fps_den: 1001,
+                output: OutputSettings {
+                    format: ExportFormat::Hevc,
+                    encoder: VideoEncoder::Kvazaar,
+                    width: 66,
+                    height: 50,
+                    ..OutputSettings::default()
+                },
+                job: ExportJob {
+                    name: format!("partial-{count}"),
+                    first: 17,
+                    last: 100,
+                    fps_num: 24000,
+                    fps_den: 1001,
+                    ..ExportJob::default()
+                },
                 ..Default::default()
             };
             let mut writer = ExportWriter::spawn(settings.clone()).unwrap();
@@ -1963,17 +2105,23 @@ mod tests {
         let _gpu_test = crate::test_gpu::lock();
         let dir = temp_dir("vulkan-partial");
         let settings = ExportSettings {
-            format: ExportFormat::Hevc,
-            encoder: VideoEncoder::Vulkan,
-            name: "partial".into(),
             dir: dir.clone(),
-            width: 256,
-            height: 256,
             samples: 4,
-            first: 0,
-            last: 100,
-            fps_num: 24000,
-            fps_den: 1001,
+            output: OutputSettings {
+                format: ExportFormat::Hevc,
+                encoder: VideoEncoder::Vulkan,
+                width: 256,
+                height: 256,
+                ..OutputSettings::default()
+            },
+            job: ExportJob {
+                name: "partial".into(),
+                first: 0,
+                last: 100,
+                fps_num: 24000,
+                fps_den: 1001,
+                ..ExportJob::default()
+            },
             ..Default::default()
         };
         let mut writer = ExportWriter::spawn(settings.clone()).unwrap();
@@ -2037,12 +2185,18 @@ mod tests {
             .into_iter()
             .map(|encoder| {
                 let settings = ExportSettings {
-                    encoder,
-                    format: ExportFormat::Hevc,
-                    width: 256,
-                    height: 256,
-                    name: format!("motion-{encoder:?}"),
                     dir: dir.clone(),
+                    output: OutputSettings {
+                        encoder,
+                        format: ExportFormat::Hevc,
+                        width: 256,
+                        height: 256,
+                        ..OutputSettings::default()
+                    },
+                    job: ExportJob {
+                        name: format!("motion-{encoder:?}"),
+                        ..ExportJob::default()
+                    },
                     ..Default::default()
                 };
                 HevcSink::new(&settings).unwrap()
@@ -2087,14 +2241,20 @@ mod tests {
         let dir = temp_dir("hevc-timing");
         for rate in [(24000, 1001), (25, 1)] {
             let settings = ExportSettings {
-                format: ExportFormat::Hevc,
-                encoder: VideoEncoder::Kvazaar,
-                name: format!("clip-{}-{}", rate.0, rate.1),
                 dir: dir.clone(),
-                width: 66,
-                height: 50,
-                fps_num: rate.0,
-                fps_den: rate.1,
+                output: OutputSettings {
+                    format: ExportFormat::Hevc,
+                    encoder: VideoEncoder::Kvazaar,
+                    width: 66,
+                    height: 50,
+                    ..OutputSettings::default()
+                },
+                job: ExportJob {
+                    name: format!("clip-{}-{}", rate.0, rate.1),
+                    fps_num: rate.0,
+                    fps_den: rate.1,
+                    ..ExportJob::default()
+                },
                 ..ExportSettings::default()
             };
             let mut sink = HevcSink::new(&settings).unwrap();
@@ -2130,8 +2290,8 @@ mod tests {
             // Decode without seeding colour from the container: the elementary
             // stream must carry the same description, not merely an outer tag.
             let mut decoder = av_codec_core::avcodec_alloc_context3();
-            decoder.width = settings.width as i32;
-            decoder.height = settings.height as i32;
+            decoder.width = settings.output.width as i32;
+            decoder.height = settings.output.height as i32;
             av_codec::avcodec_open_decoder(
                 &mut decoder,
                 av_codec_core::AVCodecID::Hevc,
@@ -2202,11 +2362,9 @@ mod tests {
         let service = RenderService::spawn();
         let mut controller = ExportController::default();
         controller.out_root = dir.clone();
-        controller.settings.width = 16;
-        controller.settings.height = 16;
         controller.settings.samples = 2;
-        controller.settings.first = 3;
-        controller.settings.last = 4;
+        controller.settings.job.first = 3;
+        controller.settings.job.last = 4;
         let mut scene = Scene::preset(crate::params::FAMILY_KIFS);
         scene.render.denoise.enabled = false; // This test checks exact physical animation output.
         scene.camera.target = [1000.0; 3];
@@ -2250,6 +2408,14 @@ mod tests {
                 frame: 0.0,
             })
             .unwrap();
+        set_recipe(
+            &mut editor,
+            &OutputSettings {
+                width: 16,
+                height: 16,
+                ..OutputSettings::default()
+            },
+        );
         scene.document = Some(Box::new(editor.document));
         controller.start(&scene, &service).unwrap();
         let until = std::time::Instant::now() + Duration::from_secs(90);
@@ -2310,17 +2476,42 @@ mod tests {
         let mut controller = ExportController::default();
         controller.out_root = dir.clone();
         controller.settings = ExportSettings {
-            format: ExportFormat::Hevc,
-            encoder: VideoEncoder::Vulkan,
-            name: "partial".into(),
-            width: 256,
-            height: 256,
             samples: 1,
-            last: 10000,
+            job: ExportJob {
+                name: "partial".into(),
+                last: 10000,
+                ..ExportJob::default()
+            },
             ..Default::default()
         };
         let mut scene = Scene::preset(crate::params::FAMILY_KIFS);
         scene.render.denoise.enabled = false;
+        let mut editor =
+            crate::world::WorldEditor::new(crate::world::WorldDocument::from_scene(&scene));
+        // The job's sample target comes from the Output quality, as in the application.
+        let quality = editor
+            .document
+            .render_quality(editor.document.output_render_profile().unwrap())
+            .unwrap();
+        editor
+            .execute(crate::world::WorldCommand::SetAttribute {
+                id: quality,
+                path: "/quality/samples".into(),
+                value: serde_json::json!(1),
+                frame: 0.0,
+            })
+            .unwrap();
+        set_recipe(
+            &mut editor,
+            &OutputSettings {
+                format: ExportFormat::Hevc,
+                encoder: VideoEncoder::Vulkan,
+                width: 256,
+                height: 256,
+                ..OutputSettings::default()
+            },
+        );
+        scene.document = Some(Box::new(editor.document));
         controller.start(&scene, &service).unwrap();
         let deadline = std::time::Instant::now() + Duration::from_secs(90);
         while controller.completed == 0 {
@@ -2359,40 +2550,44 @@ mod tests {
         let ocio = Ocio::load("ocio://studio-config-latest").unwrap();
         let scene = crate::color::default_selection(); // SDR sRGB view in the viewport
         let mut s = ExportSettings {
-            format: ExportFormat::Png,
+            output: OutputSettings {
+                format: ExportFormat::Png,
+                ..OutputSettings::default()
+            },
             ..Default::default()
         };
-        let sdr = s.resolve_transform(&ocio, &scene).unwrap().unwrap();
+        let sdr = s.output.resolve_transform(&ocio, &scene).unwrap().unwrap();
         assert_eq!(
             (sdr.0.as_str(), sdr.1.as_str()),
             (scene.display.as_str(), scene.view.as_str())
         );
-        s.png = PngEncoding::Hdr10;
-        let (display, view) = s.resolve_transform(&ocio, &scene).unwrap().unwrap();
+        s.output.png = PngEncoding::Hdr10;
+        let (display, view) = s.output.resolve_transform(&ocio, &scene).unwrap().unwrap();
         assert!(
             ocio.display_is(&display, OutputKind::Pq) && view.contains("1000 nits"),
             "{display} / {view}"
         );
-        s.png_peak_nits = 500.0;
+        s.output.png_peak_nits = 500.0;
         assert!(
-            s.resolve_transform(&ocio, &scene)
+            s.output
+                .resolve_transform(&ocio, &scene)
                 .unwrap()
                 .unwrap()
                 .1
                 .contains("500 nits")
         );
-        s.png = PngEncoding::Hlg;
-        let (display, _) = s.resolve_transform(&ocio, &scene).unwrap().unwrap();
+        s.output.png = PngEncoding::Hlg;
+        let (display, _) = s.output.resolve_transform(&ocio, &scene).unwrap().unwrap();
         assert!(display.contains("HLG"), "{display}");
         // EXR is scene-linear; an SDR file with OCIO off keeps the built-in display.
-        s.format = ExportFormat::Exr;
-        assert_eq!(s.resolve_transform(&ocio, &scene).unwrap(), None);
-        s.format = ExportFormat::Hevc;
+        s.output.format = ExportFormat::Exr;
+        assert_eq!(s.output.resolve_transform(&ocio, &scene).unwrap(), None);
+        s.output.format = ExportFormat::Hevc;
         let off = crate::ocio::Sel {
             on: false,
             ..scene.clone()
         };
-        assert_eq!(s.resolve_transform(&ocio, &off).unwrap(), None);
+        assert_eq!(s.output.resolve_transform(&ocio, &off).unwrap(), None);
         // The frame scene gets the resolved display / view.
         s.transform = Some((display.clone(), "view".into()));
         let mut frame = Scene::preset(crate::params::FAMILY_BULB);
@@ -2404,10 +2599,10 @@ mod tests {
     fn sequence_paths_and_validation() {
         let _gpu_test = crate::test_gpu::lock();
         let mut s = ExportSettings::default();
-        s.name = "image".into();
+        s.job.name = "image".into();
         s.resolve(Path::new("some folder"));
-        s.first = 7;
-        s.last = 9;
+        s.job.first = 7;
+        s.job.last = 9;
         assert_eq!(s.frame_count(), 3);
         assert_eq!(
             s.frame_path(8),
@@ -2415,37 +2610,37 @@ mod tests {
         );
         assert!(s.validate().is_ok());
         // An HDR PNG sequence numbers before the whole suffix (`fs_name::frame_file`).
-        s.format = ExportFormat::Png;
-        s.png = PngEncoding::Hdr10;
-        s.name = "shot".into();
+        s.output.format = ExportFormat::Png;
+        s.output.png = PngEncoding::Hdr10;
+        s.job.name = "shot".into();
         s.resolve(Path::new("out"));
         assert_eq!(s.frame_path(8), Path::new("out").join("shot.000008.pq.png"));
-        s.png = PngEncoding::Sdr8;
+        s.output.png = PngEncoding::Sdr8;
         // A one-frame range is a still: the resolved file itself, no frame number.
-        s.format = ExportFormat::Png;
-        s.name = "still".into();
+        s.output.format = ExportFormat::Png;
+        s.job.name = "still".into();
         s.resolve(Path::new("out"));
-        s.first = 5;
-        s.last = 5;
+        s.job.first = 5;
+        s.job.last = 5;
         assert_eq!(s.frame_path(5), Path::new("out").join("still.png"));
         assert!(s.validate().is_ok());
-        s.png_peak_nits = 50.0;
+        s.output.png_peak_nits = 50.0;
         assert!(s.validate().unwrap_err().contains("peak"));
-        s.png_peak_nits = 1000.0;
-        s.name = "a/b".into();
+        s.output.png_peak_nits = 1000.0;
+        s.job.name = "a/b".into();
         assert!(s.validate().unwrap_err().contains("cannot hold"));
-        s.name = "CON".into();
+        s.job.name = "CON".into();
         assert!(s.validate().unwrap_err().contains("device"));
-        s.name = "frame".into();
-        s.first = 7;
-        s.last = 9;
-        s.format = ExportFormat::Hevc;
+        s.job.name = "frame".into();
+        s.job.first = 7;
+        s.job.last = 9;
+        s.output.format = ExportFormat::Hevc;
         s.dir = PathBuf::from("out");
-        s.width = 17;
+        s.output.width = 17;
         assert!(s.validate().unwrap_err().contains("even"));
-        s.width = 64;
-        s.height = 64;
-        s.last = 6;
+        s.output.width = 64;
+        s.output.height = 64;
+        s.job.last = 6;
         assert!(s.validate().is_err());
     }
 }

@@ -286,6 +286,7 @@ fn kind_label(k: WorldKind) -> &'static str {
         WorldKind::RenderSettings => "Render Settings",
         WorldKind::QualitySettings => "Quality Settings",
         WorldKind::ViewportSettings => "Viewport Settings",
+        WorldKind::OutputSettings => "Output Settings",
     }
 }
 fn kind_icon(k: WorldKind) -> &'static str {
@@ -298,6 +299,7 @@ fn kind_icon(k: WorldKind) -> &'static str {
         WorldKind::Material => ph::PALETTE,
         WorldKind::RenderSettings | WorldKind::QualitySettings => ph::GEAR,
         WorldKind::ViewportSettings => ph::MONITOR,
+        WorldKind::OutputSettings => ph::FILE,
     }
 }
 fn kind_color(k: WorldKind) -> Color32 {
@@ -311,6 +313,7 @@ fn kind_color(k: WorldKind) -> Color32 {
         WorldKind::RenderSettings => Color32::from_rgb(196, 96, 96),
         WorldKind::QualitySettings => Color32::from_rgb(145, 175, 105),
         WorldKind::ViewportSettings => Color32::from_rgb(100, 180, 210),
+        WorldKind::OutputSettings => Color32::from_rgb(210, 160, 90),
     }
 }
 /// Title tint of an Attribute Editor section: the node-kind colour where the section is that
@@ -327,6 +330,7 @@ pub(crate) fn section_color(group: &str) -> Color32 {
         "Render" => kind_color(WorldKind::RenderSettings),
         "Quality" => kind_color(WorldKind::QualitySettings),
         "Viewport" => kind_color(WorldKind::ViewportSettings),
+        "Output" => kind_color(WorldKind::OutputSettings),
         "Color" => Color32::from_rgb(100, 180, 210),
         _ => Color32::from_rgb(150, 150, 150),
     }
@@ -343,6 +347,7 @@ fn category(path: &str) -> &'static str {
         "render" => "Render",
         "quality" => "Quality",
         "viewport" => "Viewport",
+        "output" => "Output",
         "colour" | "color" => "Color",
         _ => "Custom",
     }
@@ -647,6 +652,7 @@ impl WorldUi {
                     WorldKind::RenderSettings,
                     WorldKind::QualitySettings,
                     WorldKind::ViewportSettings,
+                    WorldKind::OutputSettings,
                 ] {
                     if ui
                         .button(format!("{} {}", kind_icon(kind), kind_label(kind)))

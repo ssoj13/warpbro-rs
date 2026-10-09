@@ -2594,3 +2594,122 @@ fn viewport_policy_is_static_in_commands_and_persisted_graphs() {
     assert!(restored.snapshot(0.0).is_err());
     assert!(restored.viewport_policy(0.0).is_err());
 }
+
+#[test]
+fn output_settings_node_is_the_typed_static_export_recipe() {
+    use crate::export::{ExportFormat, OutputSettings};
+    use crate::render_profiles::CatalogRole;
+    let mut e = editor();
+    let recipe = e.document.output_settings_id().unwrap();
+    assert_eq!(
+        e.document.output_settings().unwrap(),
+        OutputSettings::default()
+    );
+    // Every field is a static row: no keys, enums as choices, numbers inside their limits.
+    let original = e.document.clone();
+    for attr in e
+        .document
+        .attributes(recipe, 0.0)
+        .unwrap()
+        .into_iter()
+        .filter(|attr| attr.path.starts_with("/output/"))
+    {
+        assert!(!attr.keyable, "{} must be static", attr.path);
+        assert!(
+            e.execute(WorldCommand::Key {
+                id: recipe,
+                path: attr.path.clone(),
+                frame: 5.0
+            })
+            .is_err()
+        );
+        if attr.path == "/output/format" {
+            assert_eq!(attr.choices.len(), ExportFormat::ALL.len());
+        }
+    }
+    assert_eq!(e.document, original);
+    // The panel's edits: one command per changed field, and the document reads them back.
+    let png = OutputSettings {
+        format: ExportFormat::Png,
+        png: egui_display::export::PngEncoding::Hdr10,
+        width: 640,
+        ..OutputSettings::default()
+    };
+    let edits =
+        crate::render_profiles::output_edits(recipe, &OutputSettings::default(), &png).unwrap();
+    assert_eq!(edits.len(), 3);
+    e.execute(WorldCommand::Batch(edits)).unwrap();
+    assert_eq!(e.document.output_settings().unwrap(), png);
+    // Hard limits hold on edit; a cross-field rule waits for the export start.
+    set(&mut e, recipe, "/output/width", json!(99999), 0.0);
+    assert_eq!(e.document.output_settings().unwrap().width, 16384);
+    set(&mut e, recipe, "/output/width", json!(17), 0.0);
+    set(
+        &mut e,
+        recipe,
+        "/output/format",
+        json!(ExportFormat::Hevc),
+        0.0,
+    );
+    let odd = e.document.output_settings().unwrap();
+    assert!(odd.validate().is_err(), "HEVC needs even sizes");
+    // Catalog: a bound copy is one Undo step with a new UUID; templates must be instantiated.
+    let before = e.document.clone();
+    e.execute(WorldCommand::CreateOutputSettings {
+        name: "Review".into(),
+        role: CatalogRole::Profile,
+        source: None,
+        assign: true,
+    })
+    .unwrap();
+    let copy = e.document.output_settings_id().unwrap();
+    assert_ne!(copy, recipe);
+    assert_eq!(e.document.output_settings().unwrap(), odd);
+    assert!(e.undo());
+    assert_eq!(e.document, before);
+    e.execute(WorldCommand::CreateOutputSettings {
+        name: "Delivery".into(),
+        role: CatalogRole::Template,
+        source: None,
+        assign: false,
+    })
+    .unwrap();
+    let template = e.selection.unwrap();
+    assert!(
+        e.execute(WorldCommand::SetOutputSettings(template))
+            .is_err()
+    );
+    assert!(
+        e.execute(WorldCommand::CreateOutputSettings {
+            name: "Bound template".into(),
+            role: CatalogRole::Template,
+            source: None,
+            assign: true,
+        })
+        .is_err()
+    );
+    e.execute(WorldCommand::InstantiateOutputTemplate {
+        id: template,
+        name: "Delivery shot".into(),
+        assign: true,
+    })
+    .unwrap();
+    let instance = e.document.output_settings_id().unwrap();
+    assert_ne!(instance, template);
+    assert_eq!(
+        e.document.catalog_role(instance).unwrap(),
+        Some(CatalogRole::Profile)
+    );
+    // The bound recipe cannot be deleted out from under the export.
+    assert!(e.execute(WorldCommand::Delete(instance)).is_err());
+    // A persisted animation on a recipe field is refused on load.
+    let mut animated = e.document.clone();
+    let mut attrs = animated.attrs(instance).unwrap();
+    let mut animation = Animation::with_arity(1);
+    animation.channels[0].upsert_key(Keyframe::with_tan(0.0, 18.0, Tan::Constant));
+    attrs.set_anim("/output/qp", Some(animation));
+    animated.store_attrs(instance, &attrs).unwrap();
+    let restored: WorldDocument =
+        serde_json::from_str(&serde_json::to_string(&animated).unwrap()).unwrap();
+    assert!(restored.snapshot(0.0).is_err());
+}

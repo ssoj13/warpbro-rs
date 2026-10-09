@@ -120,6 +120,30 @@ pub(crate) fn render_values(render: &Value, quality: NodeId) -> Value {
 pub(crate) fn viewport_values(moving: NodeId, still: NodeId) -> Value {
     json!({"mode":ViewportMode::Auto,"moving_id":moving,"still_id":still,"manual_id":still,"target_fps":30.0,"settle_delay_ms":180.0,"batch_budget_ms":8.0,"paused":false,"frozen":false})
 }
+/// The `/output/*` attribute edits that turn recipe `before` into `after` on OutputSettings
+/// node `id`: one command per changed field, so an edit touches only what the form changed.
+pub(crate) fn output_edits(
+    id: NodeId,
+    before: &crate::export::OutputSettings,
+    after: &crate::export::OutputSettings,
+) -> Result<Vec<crate::world::WorldCommand>, String> {
+    let fields = |output: &crate::export::OutputSettings| match serde_json::to_value(output) {
+        Ok(Value::Object(fields)) => Ok(fields),
+        Ok(_) => Err("OutputSettings must serialize to an object".to_string()),
+        Err(error) => Err(error.to_string()),
+    };
+    let before = fields(before)?;
+    Ok(fields(after)?
+        .into_iter()
+        .filter(|(key, value)| before.get(key) != Some(value))
+        .map(|(key, value)| crate::world::WorldCommand::SetAttribute {
+            id,
+            path: format!("/output/{key}"),
+            value,
+            frame: 0.0,
+        })
+        .collect())
+}
 pub(crate) fn reference_kind(path: &str) -> Option<crate::world::WorldKind> {
     use crate::world::WorldKind;
     match path {
@@ -130,11 +154,22 @@ pub(crate) fn reference_kind(path: &str) -> Option<crate::world::WorldKind> {
         _ => None,
     }
 }
+/// Document-level policy branches (viewport routing, export recipe): one choice for the whole
+/// document, never varying over time.
+pub(crate) fn static_branch(path: &str) -> bool {
+    path.starts_with("/viewport/") || path.starts_with("/output/")
+}
+/// Settings attributes that must stay static: typed references and the policy branches.
+/// Commands, loading and the Attribute Editor all ask this one predicate.
+pub(crate) fn static_path(path: &str) -> bool {
+    reference_kind(path).is_some() || static_branch(path)
+}
 pub(crate) fn setting_kind(kind: crate::world::WorldKind) -> bool {
     matches!(
         kind,
         crate::world::WorldKind::RenderSettings
             | crate::world::WorldKind::QualitySettings
             | crate::world::WorldKind::ViewportSettings
+            | crate::world::WorldKind::OutputSettings
     )
 }

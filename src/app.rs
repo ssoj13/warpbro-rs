@@ -432,7 +432,7 @@ struct Settings {
     toolbar: egui_viewport_toolbar::ToolbarState,
     camera_slots: crate::camera_slots::CameraSlots,
     layouts: egui_layout_manager::LayoutStore,
-    export: crate::export::ExportSettings,
+    export: crate::export::ExportJob,
     gui_fps: u32,
     status_layout: egui_statusbar::StatusBarLayout,
     status_resizable: bool,
@@ -645,9 +645,21 @@ impl App {
     }
 
     fn with_settings(mut self) -> Self {
-        if let Ok(data) = std::fs::read(settings_path())
-            && let Ok(settings) = serde_json::from_slice::<Settings>(&data)
-        {
+        // No file is a first start; an unreadable one is reported, since the defaults that
+        // replace it are saved over it at the next change.
+        let path = settings_path();
+        let settings = match std::fs::read(&path) {
+            Ok(data) => {
+                Some(serde_json::from_slice::<Settings>(&data).map_err(|error| error.to_string()))
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => Some(Err(error.to_string())),
+        };
+        if let Some(Err(error)) = &settings {
+            log::error!("Preferences {}: {error}", path.display());
+            self.status = format!("Preferences unreadable, defaults in use: {error}");
+        }
+        if let Some(Ok(settings)) = settings {
             self.display = settings.display;
             self.prefs = settings.panel;
             self.controls = settings.controls;
@@ -1051,7 +1063,7 @@ impl App {
     }
 
     fn settings_match(&self, saved: &Settings) -> bool {
-        let export = self.export.settings();
+        let export = &self.export.settings().job;
         let previous = &saved.export;
         saved.display == self.display
             && saved.colour == self.scene.colour
@@ -1101,7 +1113,7 @@ impl App {
             camera_slots: self.camera_slots,
             fonts: self.fonts.clone(),
             layouts: self.layouts.store.clone(),
-            export: self.export.settings().clone(),
+            export: self.export.settings().job.clone(),
             gui_fps: self.gui_fps,
             status_layout: self.status_layout.clone(),
             status_resizable: self.status_resizable,
@@ -2269,14 +2281,25 @@ impl App {
         }
     }
 
+    /// Render / Encode: the export bindings, then the job form. The form edits a copy of the
+    /// bound OutputSettings recipe; a change is authored back to that node as one undoable
+    /// edit per gesture, so the document stays the only store of the recipe.
     fn export_ui(&mut self, ui: &mut egui::Ui) {
-        match self.world.document.output_render_profile().and_then(|id| {
+        ui.heading("Render / Encode");
+        let frame = f64::from(self.world_ui.playhead);
+        let actions = crate::render_profiles_ui::output_bindings(ui, &mut self.world, frame);
+        self.profile_ui_actions(actions);
+        let quality = self.world.document.output_render_profile().and_then(|id| {
             self.world
                 .document
-                .effective_render(id, f64::from(self.export.settings.first))
-        }) {
+                .effective_render(id, f64::from(self.export.settings.job.first))
+        });
+        self.export.quality = quality
+            .as_ref()
+            .ok()
+            .map(|effective| (effective.samples, effective.resolution_scale));
+        match &quality {
             Ok(effective) => {
-                self.export.settings.samples = effective.samples;
                 if ui
                     .button("Edit Output quality in Attribute Editor")
                     .clicked()
@@ -2287,8 +2310,20 @@ impl App {
                     });
                 }
             }
+            Err(error) => self.status = error.clone(),
+        }
+        // An unreadable recipe still shows the form (its check fails, a running export keeps
+        // its progress and Cancel); only the authoring step needs the recipe.
+        let recipe = self
+            .world
+            .document
+            .output_settings_id()
+            .and_then(|id| Ok((id, self.world.document.output_settings_of(id)?)));
+        match &recipe {
+            Ok((_, output)) => self.export.settings.output = output.clone(),
             Err(error) => {
-                self.status = error;
+                ui.colored_label(egui::Color32::LIGHT_RED, error);
+                self.status = error.clone();
             }
         }
         let timeline = (
@@ -2311,8 +2346,24 @@ impl App {
                 freeze_world_scene(scene, &world.document)
             },
         );
+        let Ok((id, before)) = recipe else {
+            return;
+        };
+        let authored =
+            crate::render_profiles::output_edits(id, &before, &self.export.settings.output)
+                .and_then(|commands| {
+                    if commands.is_empty() {
+                        return Ok(());
+                    }
+                    self.world.execute_edit(
+                        crate::world::WorldCommand::Batch(commands),
+                        egui_attr_grid::edit_gesture(ui.ctx()),
+                    )
+                });
+        if let Err(error) = authored {
+            self.status = error;
+        }
     }
-
     /// Unreal-style flight: hold RMB in the viewport, mouse looks, WASD moves, R/Space up, C down,
     /// Q/E roll, Shift fast, Alt slow, the wheel scales the speed. Integrated by cam-controls `SpaceFlight` (thrust,
     /// inertia, damping); on release the orbit pivot is placed in front of the camera at the
@@ -4415,18 +4466,22 @@ mod tests {
         app.fonts.face = "Custom face".into();
         app.status_layout.widths = vec![210.0, 100.0];
         app.gui_fps = 144;
-        let mut export = app.export.settings().clone();
+        let mut export = app.export.settings().job.clone();
         export.name = "new".into();
-        export.qp = 19;
+        export.last = 19;
         app.export.restore(export);
         let json = app.changed_settings_json(&ctx).unwrap().unwrap();
+        assert!(
+            !json.contains("png_peak_nits"),
+            "the encode recipe lives in the document, not in preferences"
+        );
         let saved: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(saved.attribute_metrics.numeric_width, 64.0);
         assert_eq!(saved.fonts.face, "Custom face");
         assert_eq!(saved.status_layout.widths, [210.0, 100.0]);
         assert_eq!(saved.gui_fps, 144);
         assert_eq!(saved.export.name, "new");
-        assert_eq!(saved.export.qp, 19);
+        assert_eq!(saved.export.last, 19);
         assert!(app.changed_settings_json(&ctx).unwrap().is_none());
         let current = app.colour.sel.clone();
         assert!(app.colour.presets.store(1, "Custom colour", &current));

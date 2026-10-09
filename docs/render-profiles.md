@@ -6,8 +6,8 @@
 cuda-oxide build и фактическая CUDA readiness прошли. Единственная независимая
 проверка ветки закрыта с тремя исправленными P2 и регрессиями.
 Точные результаты и границы проверки записаны в [HANDOFF](../HANDOFF.md).
-WorldDirect, внешний каталог подграфов, OutputModule presets и перенос узловых
-профилей в SquareBob остаются планом.
+OutputSettings (рецепт файла экспорта) добавлен 2026-10-08. WorldDirect, внешний
+каталог подграфов и перенос узловых профилей в SquareBob остаются планом.
 
 ## Данные и связи
 
@@ -20,9 +20,10 @@ WorldDirect, внешний каталог подграфов, OutputModule pres
 | `RenderSettings` | Метод `Fast / Full`, exposure, saturation, Reinhard, OIDN denoise | `/render/quality_id → QualitySettings` |
 | `QualitySettings` | Samples, resolution scale, max steps, hit epsilon, step factor, max bounces, glass probes, adaptive sampling | Без обратной ссылки |
 | `ViewportSettings` | `Auto / Locked`, target FPS, settle delay, batch budget, pause, freeze | Moving, Still, Manual → RenderSettings |
+| `OutputSettings` | Формат (EXR / PNG / Video), encoder, ширина и высота, QP / CRF, denoise at completion, PNG encoding, HDR peak, видео из PNG, override OCIO display / view | Без ссылок |
 
-Слоты графа `viewport_settings` и `output_render` определяют текущий viewport
-и независимо назначенный выходной RenderSettings. Камера, геометрия, свет и
+Слоты графа `viewport_settings`, `output_render` и `output_settings` определяют текущий
+viewport, независимо назначенный выходной RenderSettings и рецепт файла экспорта. Камера, геометрия, свет и
 материал остаются в своих узлах. Преобразование OCIO и физический режим дисплея
 остаются в существующих настройках Display / Color.
 
@@ -163,12 +164,26 @@ HDR-окружением и несколькими объектами здесь
 Output назначается отдельно от Moving, Still и Manual. Движение мыши,
 Auto / Locked, pause и freeze viewport не меняют выбранный выходной профиль.
 
-Панель **Render / Encode** показывает samples из Output Quality и открывает
-его в Attribute Editor. Существующая форма по-прежнему задаёт формат,
-codec, color intent, размер и диапазон кадров. Самостоятельный канонический
-OutputModule и его именованные шаблоны ещё не реализованы.
+Панель **Render / Encode** начинается с двух привязок: **Output** (RenderSettings)
+и **Output file** (OutputSettings) — те же строки, что в Settings → Render & Viewport,
+с выбором, шестерёнкой Attribute Editor и меню New / Independent copy / шаблоны.
+Форма ниже редактирует копию назначенного OutputSettings; каждое изменение
+записывается обратно в узел командами `/output/*` (одна на изменённое поле,
+`render_profiles::output_edits`), один шаг Undo на жест. Рецепт хранится только
+в документе; preferences хранят лишь задание (`ExportJob`: имя файла, диапазон
+кадров, FPS) — его не несёт ни один пресет.
 
-При запуске экспорта WorldDocument фиксируется. Samples и resolution scale
+Поля OutputSettings статичны, как `/viewport/*`: ключи и сохранённые
+animation/connections отклоняются (`render_profiles::static_path`). Документ
+проверяет тип и диапазон каждого поля; межполевые правила (чётный размер для
+HEVC, лимит 64 Мпикс) проверяются при старте экспорта и показываются формой,
+чтобы правка могла пройти через промежуточное состояние. Каталог Output
+(**Settings → Output file profiles and templates**) работает как render/quality:
+ЛКМ назначает профиль или создаёт независимую копию шаблона, ПКМ — Edit,
+Rename, Save as profile / template.
+
+При запуске экспорта WorldDocument фиксируется; рецепт читается из зафиксированного
+документа (`ExportController::start`), а не из формы. Samples и resolution scale
 вычисляются по Output Quality на первом кадре задания и фиксируются для задания;
 заданный в панели размер масштабируется один раз. Остальные параметры сцены,
 включая render/quality-атрибуты, оцениваются из зафиксированного документа
@@ -186,7 +201,7 @@ Display / Color и существующий output-transform контракт о
 | --- | --- |
 | Проверенная реализация | Финальные ordinary tests, production cuda-oxide build/CUDA readiness и одна независимая проверка ветки прошли; receipts и ограничения — в HANDOFF |
 | Внешний каталог | Экспорт/импорт канонических подграфов с явным составом и remap; сейчас каталог локален документу |
-| OutputModule presets | Отдельный канонический узел формата/codec/color и шаблоны; сейчас параметры задаёт существующая форма Render / Encode |
+| OutputSettings | Сделано 2026-10-08: канонический узел рецепта, каталог, привязка в Render / Encode. Дальше — resize/crop (Playa Output Module) и очередь рендера с заданиями в документе |
 | Дополнительная адаптация | Динамическое изменение качества в явных границах; сейчас профиль задаёт фиксированные samples и resolution scale |
 | WorldDirect | Общая world-геометрия, object context, transforms, материалы и HDR-свет; затем измерения frame/input latency |
 | Playa / очередь | Адаптация подтверждённого узлового контракта, явная фиксация и обновление задания |
