@@ -23,6 +23,8 @@ env:
   PYTHONUTF8: '1'
   # Private ssh:// git dependencies are fetched by the git CLI through the rewrite below.
   CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+  # cuda-oxide needs llc >= 21 (bootstrap.py MIN_LLVM).
+  LLVM_VERSION: '21.1.8'
 
 jobs:
   build:
@@ -54,6 +56,17 @@ jobs:
           test -n "$DEPS_TOKEN" || { echo "::error::DEPS_TOKEN secret is missing"; exit 1; }
           git config --global url."https://x-access-token:${DEPS_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
 
+      # The full CUDA toolkit does not fit beside the image's preinstalled SDKs on the
+      # Ubuntu runner's root disk; drop the ones this build never uses.
+      - name: Free disk space
+        if: runner.os == 'Linux'
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup \
+            /opt/hostedtoolcache/CodeQL /usr/share/swift /usr/local/share/powershell
+          sudo docker image prune --all --force > /dev/null
+          df -h /
+
       - name: Install CUDA toolkit
         id: cuda
         uses: Jimver/cuda-toolkit@v0.2.36
@@ -62,26 +75,53 @@ jobs:
           method: network
           log-file-suffix: ${{ matrix.platform }}.txt
 
-      - name: Install LLVM (llc, clang, libclang)
-        uses: KyleMayes/install-llvm-action@v2.0.9
+      # cuda-oxide needs `llc`, which the Windows LLVM installer omits: the full
+      # clang+llvm archive has it. Cached by version (943 MB download).
+      - name: Cache LLVM (Windows)
+        if: runner.os == 'Windows'
+        id: llvm-cache
+        uses: actions/cache@v6.1.0
         with:
-          version: '21'
+          path: C:\llvm
+          key: llvm-${{ env.LLVM_VERSION }}-x86_64-pc-windows-msvc
 
-      - name: Linux system libraries
+      - name: Install LLVM (Windows)
+        if: runner.os == 'Windows' && steps.llvm-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="clang+llvm-${LLVM_VERSION}-x86_64-pc-windows-msvc"
+          curl -fsSL -o llvm.tar.xz \
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/${name}.tar.xz"
+          7z x llvm.tar.xz -so | 7z x -si -ttar -oC:/llvm-extract > /dev/null
+          mv "/c/llvm-extract/${name}" /c/llvm
+          rm llvm.tar.xz
+
+      - name: Install LLVM and system libraries (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install --no-install-recommends -y pkg-config libxkbcommon-dev \
-            libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libudev-dev \
-            libasound2-dev libvulkan-dev
+          major="${LLVM_VERSION%%.*}"
+          curl -fsSL https://apt.llvm.org/llvm.sh -o llvm.sh
+          sudo bash llvm.sh "$major"
+          sudo apt-get install --no-install-recommends -y "libclang-${major}-dev" pkg-config \
+            libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev \
+            libudev-dev libasound2-dev libvulkan-dev
 
       - name: Point the build at the toolkits
         shell: bash
         run: |
           echo "CUDA_HOME=${{ steps.cuda.outputs.CUDA_PATH }}" >> "$GITHUB_ENV"
           echo "CUDA_TOOLKIT_PATH=${{ steps.cuda.outputs.CUDA_PATH }}" >> "$GITHUB_ENV"
-          echo "CUDA_OXIDE_LLC=${LLVM_PATH}/bin/llc$([ "$RUNNER_OS" = Windows ] && echo .exe)" >> "$GITHUB_ENV"
-          echo "LIBCLANG_PATH=${LLVM_PATH}/$([ "$RUNNER_OS" = Windows ] && echo bin || echo lib)" >> "$GITHUB_ENV"
+          if [ "$RUNNER_OS" = Windows ]; then
+            echo 'C:\llvm\bin' >> "$GITHUB_PATH"
+            echo 'CUDA_OXIDE_LLC=C:\llvm\bin\llc.exe' >> "$GITHUB_ENV"
+            echo 'LIBCLANG_PATH=C:\llvm\bin' >> "$GITHUB_ENV"
+          else
+            major="${LLVM_VERSION%%.*}"
+            echo "CUDA_OXIDE_LLC=/usr/bin/llc-${major}" >> "$GITHUB_ENV"
+            echo "LIBCLANG_PATH=/usr/lib/llvm-${major}/lib" >> "$GITHUB_ENV"
+            echo "/usr/lib/llvm-${major}/bin" >> "$GITHUB_PATH"
+          fi
 
       - uses: Swatinem/rust-cache@v2.9.2
         with:
