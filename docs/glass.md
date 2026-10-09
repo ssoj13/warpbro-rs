@@ -29,11 +29,9 @@ With color `[0.12, 0.82, 0.25]` and depth 0.5, a 0.5-unit path retains those fra
 
 A material with positive Transmission uses Full Standard Surface kernels even if its stored model is Fast. Opaque Fast materials keep the existing fast path. Changing transmission or depth invalidates renderer preparation, accumulated samples, preview frames, and the material thumbnail through the existing render identities.
 
-## Retain existing scene authoring
+## Bounces
 
-Old scenes gain the new attributes on load without rewriting their previous values, animation channels, or material UUIDs. Missing transmission defaults to 0 and missing tint to white. Reapply a glass preset to an existing legacy glass material to opt into corrected transmission, or set the new attributes explicitly.
-
-Increase World Settings' bounce limit when rays need several interfaces or internal reflections. A very low interactive bounce cap can terminate glass paths before they reach the environment.
+Raise the quality profile's bounce limit when rays need several interfaces or internal reflections. A very low interactive bounce cap (the Moving profile's default is two) can terminate glass paths before they reach the environment.
 
 ## Understand the current geometry scope
 
@@ -43,14 +41,12 @@ Signed fields support interior stepping. Exterior-only fields use the entrance p
 
 The implementation reuses render-rs Standard Surface sampling for Fresnel reflection, Snell refraction, and total internal reflection. Squarebob's enter/exit and ray-offset handling informed the integration; its mesh intersection code cannot replace a fractal interior search.
 
-## Reproduce the checks
+## Tests
 
-The failing baseline test reproduced Glass selecting Fast and using the coat approximation. CUDA checks then passed for an unsigned Mandelbulb and a signed zero-iteration KIFS cube, in both legacy and World dispatch; an absorbing cube was compared with expected RGB transmittance. The CPU interior and Beer-Lambert tests also passed.
-
-Build the current release test executable with the project's configured CUDA toolchain:
+The glass tests cover an unsigned Mandelbulb and a signed zero-iteration KIFS cube in both the single-object and World dispatch, an absorbing cube against the expected RGB transmittance, and the CPU interior and Beer-Lambert math:
 
 ```powershell
-python -u -c "import bootstrap,sys; sys.exit(bootstrap.run(['cargo','oxide','test','--','--release','glass','--','--test-threads=1','--nocapture'])[0])"
+cargo oxide test -- --release -- glass
 ```
 
 The optional `cuda_glass_visual_probe` test writes checker-environment EXR and comparison PNGs under `target/glass-probe/`. Run that test explicitly with `--ignored --nocapture`. These diagnostic images are not bundled scene templates.

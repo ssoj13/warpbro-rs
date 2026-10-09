@@ -1,6 +1,42 @@
 # Changelog
 
-## Unreleased — 2026-10-04
+## Unreleased — 2026-10-09
+
+### Render settings as graph nodes
+
+- **RenderSettings / QualitySettings / ViewportSettings / OutputSettings** are document nodes
+  with Profile / Template catalogs (Settings → Render & Viewport), edited in the Attribute
+  Editor. Moving, Still, Manual and Output bind render profiles; Auto switches Moving / Still
+  on motion with a settle delay, Locked uses Manual; Pause and Freeze hold the viewport.
+- The viewport toolbar labels the profile menu with the binding it renders (Moving / Still /
+  Manual) and lists profile, method, samples and resolution in its tooltip.
+- **OutputSettings** holds the export recipe (format, encoder, size, QP / CRF, PNG encoding,
+  HDR peak, PNG video, OCIO override, denoise at completion); Render / Encode binds Output render
+  and Output file and authors its edits into the node with Undo. Preferences keep only the job
+  (file name, frame range, frame rate). An OCIO override of the wrong output kind is refused.
+- Details: [docs/render-profiles.md](docs/render-profiles.md).
+
+### Animation and authoring
+
+- Keys live on curves-rs Tracks (per-side tangents, a *New key type* setting); the camera orbit
+  integrates its animated speed exactly. Preferences moved onto the attribute grid; Reset to
+  default works for host-edited rows. Old-scene loaders and migrations were removed.
+- Camera recording (transform, focus, zoom, f-number) and five camera slots on the toolbar.
+
+### Renderer
+
+- Mandelbulb DE boundary narrowed to the world inverse affine: single-bulb scenes about 27%
+  faster (needs the cuda-oxide fork's `noinline` support, `be40bf2`); other routes unchanged.
+
+### Build and CI
+
+- `python bootstrap.py ci`: toolchain, `cargo fmt --check`, `clippy --all-targets -D warnings`,
+  tests without a GPU, a release build for sm_75 and `dist/warpbro-<version>-<platform>.zip`.
+  GitHub Actions runs it on Windows and Linux; a `v*` tag publishes both archives.
+- Tests that need a CUDA device are named `cuda_*`, other GPU APIs `gpu_*`.
+- A release archive needs one `WarpBro --warmup-cuda` after unpacking (README, *CUDA startup*).
+
+## 2026-10-04
 
 ### PNG export video (ffmpeg stopgap)
 
@@ -112,7 +148,7 @@
 
 ### Render startup
 
-- Exclude the eight unused OFX Direct CUDA entry points from default WarpBro builds with the opt-in `ofx-direct` feature; enable them with `cargo oxide build --features ofx-direct`. Preserve the separate OFX plugin sources and artifacts. See [CUDA startup](docs/cuda-startup.md#exclude-unused-ofx-direct-kernels) for scope and validation limits.
+- Exclude the eight unused OFX Direct CUDA entry points from default WarpBro builds with the opt-in `ofx-direct` feature; enable them with `cargo oxide build --features ofx-direct`. Preserve the separate OFX plugin sources and artifacts. See README, *CUDA startup*.
 - Verify both Direct feature variants: default PTX has 20 entries and no Direct entries; opt-in PTX has 28 entries with eight Direct entries. Isolated cold-cache loading fell from 215.7338802 s to 76.6563534 s in this run (about 2.8×); concurrent load differed, and cold startup remains above 5–10 seconds.
 - Warm the CUDA driver's JIT cache for the exact executable during bootstrap builds, before reporting success; add `--warmup-cuda` and a packaging opt-out.
 - Validate the constant-memory parameter block before reporting the CUDA worker ready. Initialization failures now fail the default bootstrap build.
@@ -141,6 +177,6 @@ The accepted production build and CUDA warmup passed. The following native launc
 
 ### Validation
 
-The production release build passed. The release test executable passed **199 tests, 0 failed, 7 ignored** on the final repeat (72.71 s). The first run had 198 passes and one 90-second export-cancellation timeout under load; its isolated repeat passed in 1.39 s. The seven ignored GPU tests were not rerun in this update. The rebuilt and retried 32×32 legacy headless checks completed successfully. Shared Timeline, attribute-grid, and layout/configuration tests passed after combining the toolkit branches. See [CUDA startup](docs/cuda-startup.md) for exact timings and load caveats. Earlier full-suite counts and native-check limits remain in the dated plans.
+The production release build passed. The release test executable passed **199 tests, 0 failed, 7 ignored** on the final repeat (72.71 s). The first run had 198 passes and one 90-second export-cancellation timeout under load; its isolated repeat passed in 1.39 s. The seven ignored GPU tests were not rerun in this update. The rebuilt and retried 32×32 legacy headless checks completed successfully. Shared Timeline, attribute-grid, and layout/configuration tests passed after combining the toolkit branches. See CUDA startup (README, *CUDA startup*) for exact timings and load caveats. Earlier full-suite counts and native-check limits remain in the dated plans.
 
 Disk preview caching, Curve Editor integration, and CUDA compiled-module caching remain open. The subsequent glass update is described above.
