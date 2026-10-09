@@ -4,6 +4,20 @@ Cross-repo state for the next session. Repos live in `C:\projects\projects.rust.
 Per-repo detail: WarpBro `PLAN.md` ("After the 2026-10-06 merge" section), Playa `todo.md`
 ("Open after the 2026-10-06 merge"), each repo's `CHANGELOG.md`.
 
+## Checkpoint 2026-10-09 (latest; supersedes the open items it names below)
+
+- Viewport profile routing has one producer (`App::step_viewport` -> `ViewportRender`); the
+  toolbar shows the active binding (Moving / Still / Manual). Test drives a camera move. `8435da8`.
+- `OutputSettings` node is the document's export recipe; preferences keep only `ExportJob`
+  (name, range, cadence). Catalog UI is one code path for render / quality / output. `b66b366`.
+  The operator's `~/.warpbro/settings.json` was converted once (backup `.pre-output-settings`).
+- cuda-oxide fork `be40bf2`: every `#[inline]` intent reaches LLVM (`noinline` included).
+  WarpBro lock, bootstrap pin and installed cargo-oxide match it. `d1fc826`.
+- DE boundary narrowed to `inverse_affine`: fast-metal +27.5%, exact routes bit-identical.
+  Receipts in PLAN.md. `e5e8999`.
+- Next: OutputSettings resize/crop and a document render queue (Playa Output Module parity);
+  WorldDirect; external catalog; SquareBob port of the settings nodes.
+
 ## Current continuation (2026-10-06, systematic update in progress)
 
 ### Render/quality nodes checkpoint — 2026-10-07, published source
