@@ -29,6 +29,9 @@ env:
 jobs:
   build:
     name: ${{ matrix.platform }}
+    # A pull request from a fork gets no secrets, so it cannot fetch the private
+    # dependencies: skip it instead of failing on the missing DEPS_TOKEN.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ matrix.os }}
     timeout-minutes: 180
     strategy:
@@ -79,14 +82,16 @@ jobs:
           log-file-suffix: ${{ matrix.platform }}.txt
 
       # cuda-oxide needs `llc`, which the Windows LLVM installer omits: the full
-      # clang+llvm archive has it. Cached by version (943 MB download).
+      # clang+llvm archive has it. Only what the build runs is kept (llc, opt and
+      # llvm-link for cuda-oxide; clang and libclang with its headers for bindgen), so the
+      # cache stays small beside the two Rust target caches in the 10 GB repo limit.
       - name: Cache LLVM (Windows)
         if: runner.os == 'Windows'
         id: llvm-cache
         uses: actions/cache@v6.1.0
         with:
           path: C:\llvm
-          key: llvm-${{ env.LLVM_VERSION }}-x86_64-pc-windows-msvc
+          key: llvm-${{ env.LLVM_VERSION }}-x86_64-pc-windows-msvc-tools
 
       - name: Install LLVM (Windows)
         if: runner.os == 'Windows' && steps.llvm-cache.outputs.cache-hit != 'true'
@@ -97,8 +102,14 @@ jobs:
           curl -fsSL -o llvm.tar.xz \
             "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/${name}.tar.xz"
           7z x llvm.tar.xz -so | 7z x -si -ttar -oC:/llvm-extract > /dev/null
-          mv "/c/llvm-extract/${name}" /c/llvm
-          rm llvm.tar.xz
+          src="/c/llvm-extract/${name}"
+          mkdir -p /c/llvm/bin /c/llvm/lib
+          for tool in llc.exe opt.exe llvm-link.exe clang.exe libclang.dll; do
+            cp "$src/bin/$tool" /c/llvm/bin/
+          done
+          cp -r "$src/lib/clang" /c/llvm/lib/
+          rm -rf llvm.tar.xz /c/llvm-extract
+          du -sh /c/llvm
 
       - name: Install LLVM and system libraries (Linux)
         if: runner.os == 'Linux'
