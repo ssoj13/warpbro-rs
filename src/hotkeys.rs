@@ -31,7 +31,11 @@ pub fn slot_click(response: &egui::Response, swap: bool) -> Option<SlotClick> {
 
 /// The hover line that names the mapping, e.g. "Left click: paste · Right click: copy".
 pub fn slot_hint(swap: bool, store: &str, recall: &str) -> String {
-    let (left, right) = if swap { (store, recall) } else { (recall, store) };
+    let (left, right) = if swap {
+        (store, recall)
+    } else {
+        (recall, store)
+    };
     format!("Left click: {left} · Right click: {right}")
 }
 
@@ -255,7 +259,8 @@ pub fn active(ctx: &Context) -> Option<Scope> {
             regions.iter().any(|region| {
                 region.viewport == viewport
                     && region.frame.saturating_add(1) >= frame
-                    && ctx.layer_transform_to_global(region.layer)
+                    && ctx
+                        .layer_transform_to_global(region.layer)
                         .map_or(region.rect, |transform| transform * region.rect)
                         .contains(pointer)
             })
@@ -425,37 +430,78 @@ mod tests {
             let ctx = Context::default();
             let draw = |events: Vec<egui::Event>, covered: bool| {
                 let mut fired = false;
-                let mut output = ctx.run_ui(egui::RawInput {
-                    screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
-                    events, ..Default::default()
-                }, |root| {
-                    egui::CentralPanel::default().show(root, |ui| {
-                        register(ui, Scope::Viewport, ui.max_rect());
-                        fired = consume(ui.ctx(), Scope::Viewport, Command::Fit);
-                    });
-                    if covered {
-                        egui::Area::new(Id::new("hotkey-overlay"))
-                            .order(egui::Order::Foreground)
-                            .fixed_pos(egui::pos2(40.0, 40.0))
-                            .show(&ctx, |ui| {
-                                let (rect, _) = ui.allocate_exact_size(egui::vec2(200.0, 200.0), egui::Sense::hover());
-                                if registered { register(ui, Scope::Settings, rect); }
-                            });
-                    }
-                });
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(800.0, 600.0),
+                        )),
+                        events,
+                        ..Default::default()
+                    },
+                    |root| {
+                        egui::CentralPanel::default().show(root, |ui| {
+                            register(ui, Scope::Viewport, ui.max_rect());
+                            fired = consume(ui.ctx(), Scope::Viewport, Command::Fit);
+                        });
+                        if covered {
+                            egui::Area::new(Id::new("hotkey-overlay"))
+                                .order(egui::Order::Foreground)
+                                .fixed_pos(egui::pos2(40.0, 40.0))
+                                .show(&ctx, |ui| {
+                                    let (rect, _) = ui.allocate_exact_size(
+                                        egui::vec2(200.0, 200.0),
+                                        egui::Sense::hover(),
+                                    );
+                                    if registered {
+                                        register(ui, Scope::Settings, rect);
+                                    }
+                                });
+                        }
+                    },
+                );
                 output.textures_delta.clear();
                 fired
             };
             let point = egui::pos2(80.0, 80.0);
             draw(vec![egui::Event::PointerMoved(point)], false);
-            draw(vec![egui::Event::PointerButton { pos: point, button: egui::PointerButton::Primary,
-                pressed: true, modifiers: Modifiers::NONE }], false);
-            draw(vec![egui::Event::PointerButton { pos: point, button: egui::PointerButton::Primary,
-                pressed: false, modifiers: Modifiers::NONE }], true);
+            draw(
+                vec![egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Modifiers::NONE,
+                }],
+                false,
+            );
+            draw(
+                vec![egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Modifiers::NONE,
+                }],
+                true,
+            );
             draw(vec![], true);
-            assert!(!draw(vec![egui::Event::Key { key: Key::F, physical_key: None,
-                pressed: true, repeat: false, modifiers: Modifiers::NONE }], true));
-            assert_eq!(active(&ctx), if registered { Some(Scope::Settings) } else { None });
+            assert!(!draw(
+                vec![egui::Event::Key {
+                    key: Key::F,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::NONE
+                }],
+                true
+            ));
+            assert_eq!(
+                active(&ctx),
+                if registered {
+                    Some(Scope::Settings)
+                } else {
+                    None
+                }
+            );
         }
     }
     #[test]

@@ -43,8 +43,14 @@ pub fn stem(name: &str) -> String {
         return "untitled".into();
     }
     // Truncation can end the stem on a separator.
-    let stem = truncate(&slug, MAX_STEM_UNITS).trim_end_matches('-').to_string();
-    if is_device(&stem) { format!("{stem}_") } else { stem }
+    let stem = truncate(&slug, MAX_STEM_UNITS)
+        .trim_end_matches('-')
+        .to_string();
+    if is_device(&stem) {
+        format!("{stem}_")
+    } else {
+        stem
+    }
 }
 
 /// Validate a typed file name (the export panel's Name) as it will be written: not empty, no
@@ -54,8 +60,13 @@ pub fn check(name: &str) -> Result<(), String> {
     if name.trim().is_empty() {
         return Err("The name is empty".into());
     }
-    if let Some(c) = name.chars().find(|&c| c.is_control() || r#"<>:"/\|?*"#.contains(c)) {
-        return Err(format!("The name contains {c:?}, which file names cannot hold"));
+    if let Some(c) = name
+        .chars()
+        .find(|&c| c.is_control() || r#"<>:"/\|?*"#.contains(c))
+    {
+        return Err(format!(
+            "The name contains {c:?}, which file names cannot hold"
+        ));
     }
     if name.ends_with(['.', ' ']) {
         return Err("The name cannot end with a dot or a space".into());
@@ -64,7 +75,9 @@ pub fn check(name: &str) -> Result<(), String> {
         return Err(format!("\"{name}\" is a Windows device name"));
     }
     if name.encode_utf16().count() > MAX_STEM_UNITS {
-        return Err(format!("The name is longer than {MAX_STEM_UNITS} characters"));
+        return Err(format!(
+            "The name is longer than {MAX_STEM_UNITS} characters"
+        ));
     }
     Ok(())
 }
@@ -87,7 +100,12 @@ pub fn sequence_pattern(dir: &std::path::Path, stem: &str, suffix: &str) -> Stri
 
 /// A device name, also with an extension (`con`, `CON.txt`, `com1`, `lpt¹`).
 fn is_device(name: &str) -> bool {
-    let base = name.split('.').next().unwrap_or(name).trim_end().to_lowercase();
+    let base = name
+        .split('.')
+        .next()
+        .unwrap_or(name)
+        .trim_end()
+        .to_lowercase();
     DEVICES.contains(&base.as_str())
         || NUMBERED_DEVICES.iter().any(|prefix| {
             base.strip_prefix(prefix).is_some_and(|rest| {
@@ -125,7 +143,10 @@ mod tests {
         assert_eq!(stem("console"), "console");
         assert_eq!(stem("  ** "), "untitled");
         assert_eq!(stem("Copper Turbine (KIFS)"), "copper-turbine-kifs");
-        assert_eq!(stem(&"я".repeat(300)).encode_utf16().count(), MAX_STEM_UNITS);
+        assert_eq!(
+            stem(&"я".repeat(300)).encode_utf16().count(),
+            MAX_STEM_UNITS
+        );
     }
 
     /// A typed name is refused for exactly what the filesystem would refuse.
@@ -133,7 +154,19 @@ mod tests {
     fn typed_names_are_checked_like_the_filesystem() {
         assert!(check("Медная турбина").is_ok());
         assert!(check("frame").is_ok());
-        for bad in ["", "  ", "a/b", "a:b", "tab\tname", "dot.", "space ", "NUL", "con.txt", "COM¹", "CONIN$"] {
+        for bad in [
+            "",
+            "  ",
+            "a/b",
+            "a:b",
+            "tab\tname",
+            "dot.",
+            "space ",
+            "NUL",
+            "con.txt",
+            "COM¹",
+            "CONIN$",
+        ] {
             assert!(check(bad).is_err(), "{bad:?}");
         }
         assert!(check(&"x".repeat(MAX_STEM_UNITS + 1)).is_err());
@@ -144,7 +177,10 @@ mod tests {
     fn sequences_number_before_the_suffix() {
         assert_eq!(frame_file("shot", None, "pq.png"), "shot.pq.png");
         assert_eq!(frame_file("shot", Some(42), "pq.png"), "shot.000042.pq.png");
-        assert_eq!(frame_file("shot", Some(7), "display.exr"), "shot.000007.display.exr");
+        assert_eq!(
+            frame_file("shot", Some(7), "display.exr"),
+            "shot.000007.display.exr"
+        );
         // Both the folder's and the name's `%` are literal; only the frame number is a field.
         let pattern = sequence_pattern(std::path::Path::new("50%"), "50% grey", "pq.png");
         assert_eq!(pattern.matches("%%").count(), 2, "{pattern}");

@@ -32,12 +32,7 @@ mod tests {
 
     #[test]
     fn speed_ramps_and_symmetric_eases_have_the_expected_area() {
-        for kind in [
-            Tan::Linear,
-            Tan::Smooth,
-            Tan::Flat,
-            Tan::CatmullRom,
-        ] {
+        for kind in [Tan::Linear, Tan::Smooth, Tan::Flat, Tan::CatmullRom] {
             let mut channel = Channel::new();
             channel.upsert_key(Keyframe::with_tan(0.0, 0.0, kind));
             // Both ends take the kind: a ramp is symmetric only when both sides of its segment match.

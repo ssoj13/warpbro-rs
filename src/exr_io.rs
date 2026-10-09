@@ -44,10 +44,16 @@ pub fn write_rgb(
             pixels.len()
         ));
     }
-    let max = |n: usize| i32::try_from(n - 1).map_err(|_| format!("EXR {}: size {width}x{height} too large", path.display()));
+    let max = |n: usize| {
+        i32::try_from(n - 1)
+            .map_err(|_| format!("EXR {}: size {width}x{height} too large", path.display()))
+    };
     let window = Box2i {
         min: V2i { x: 0, y: 0 },
-        max: V2i { x: max(width)?, y: max(height)? },
+        max: V2i {
+            x: max(width)?,
+            y: max(height)?,
+        },
     };
     let channel = |c: usize| ChannelData::Float(pixels.iter().map(|p| p[c]).collect());
     let mut image = Image::new(window)
@@ -56,7 +62,10 @@ pub fn write_rgb(
         .with_channel("B", channel(2));
     let attrs = image.attributes_mut();
     attrs
-        .insert("chromaticities", Box::new(ChromaticitiesAttribute::new(chroma(prims))))
+        .insert(
+            "chromaticities",
+            Box::new(ChromaticitiesAttribute::new(chroma(prims))),
+        )
         .map_err(|e| e.to_string())?;
     if let Some(nits) = white_nits {
         attrs
@@ -90,20 +99,34 @@ pub fn read_rgb(path: &Path) -> Result<(u32, u32, Vec<[f32; 3]>, Primaries), Str
     // Untagged is BT.709 by the OpenEXR spec; a "chromaticities" of another type is a broken file.
     let tag = match image.attributes().get("chromaticities") {
         None => Chromaticities::default(),
-        Some(_) => attr::<Chromaticities>(&image, "chromaticities")
-            .ok_or_else(|| format!("EXR {}: \"chromaticities\" has the wrong attribute type", path.display()))?,
+        Some(_) => attr::<Chromaticities>(&image, "chromaticities").ok_or_else(|| {
+            format!(
+                "EXR {}: \"chromaticities\" has the wrong attribute type",
+                path.display()
+            )
+        })?,
     };
     let plane = |name: &str| -> Result<Vec<f32>, String> {
         if image.sampling(name).is_some_and(|s| s != (1, 1)) {
-            return Err(format!("EXR {}: channel {name} is subsampled", path.display()));
+            return Err(format!(
+                "EXR {}: channel {name} is subsampled",
+                path.display()
+            ));
         }
-        image
-            .channel(name)
-            .map(ChannelData::to_f32)
-            .ok_or_else(|| format!("EXR {}: no {name} channel (an RGB image is required)", path.display()))
+        image.channel(name).map(ChannelData::to_f32).ok_or_else(|| {
+            format!(
+                "EXR {}: no {name} channel (an RGB image is required)",
+                path.display()
+            )
+        })
     };
     let (r, g, b) = (plane("R")?, plane("G")?, plane("B")?);
-    let pixels = r.iter().zip(&g).zip(&b).map(|((r, g), b)| [*r, *g, *b]).collect();
+    let pixels = r
+        .iter()
+        .zip(&g)
+        .zip(&b)
+        .map(|((r, g), b)| [*r, *g, *b])
+        .collect();
     // Bounded by the checks above, so the casts cannot truncate.
     Ok((w as u32, h as u32, pixels, primaries(&tag)))
 }
@@ -111,17 +134,30 @@ pub fn read_rgb(path: &Path) -> Result<(u32, u32, Vec<[f32; 3]>, Primaries), Str
 /// The EXR attribute for `p` (narrowed to the attribute's f32).
 fn chroma(p: &Primaries) -> Chromaticities {
     let xy = |v: [f64; 2]| v.map(|c| c as f32);
-    Chromaticities { red: xy(p.red), green: xy(p.grn), blue: xy(p.blu), white: xy(p.wht) }
+    Chromaticities {
+        red: xy(p.red),
+        green: xy(p.grn),
+        blue: xy(p.blu),
+        white: xy(p.wht),
+    }
 }
 /// The primaries an EXR attribute declares; validity is checked by the matrix builder.
 fn primaries(c: &Chromaticities) -> Primaries {
     let xy = |v: [f32; 2]| v.map(f64::from);
-    Primaries { red: xy(c.red), grn: xy(c.green), blu: xy(c.blue), wht: xy(c.white) }
+    Primaries {
+        red: xy(c.red),
+        grn: xy(c.green),
+        blu: xy(c.blue),
+        wht: xy(c.white),
+    }
 }
 
 /// One typed header attribute of `path` (tests: the tags the writer must stamp).
 #[cfg(test)]
-pub(crate) fn read_attr<T: exr_core::attr::AttrValue + Clone + 'static>(path: &Path, name: &str) -> Option<T> {
+pub(crate) fn read_attr<T: exr_core::attr::AttrValue + Clone + 'static>(
+    path: &Path,
+    name: &str,
+) -> Option<T> {
     attr(&Image::read_header_only(path).ok()?, name)
 }
 
@@ -149,14 +185,38 @@ mod tests {
         assert_eq!((w, h), (2, 1));
         assert_eq!(back, vec![[19.43, -0.25, 1e-6], [0.5, 2.0, 0.125]]);
         // BT.709 is OpenEXR's default attribute value; the f32 tag reads back within f32.
-        assert_eq!(read_attr::<Chromaticities>(&path, "chromaticities"), Some(Chromaticities::default()));
+        assert_eq!(
+            read_attr::<Chromaticities>(&path, "chromaticities"),
+            Some(Chromaticities::default())
+        );
         assert_eq!(chroma(&prims), chroma(display));
         assert_eq!(read_attr::<f32>(&path, "whiteLuminance"), Some(100.0));
-        write_rgb(&path, 2, 1, &pixels, &crate::color::WORKING_PRIMS, None, true).unwrap();
-        assert_eq!(read_attr::<Chromaticities>(&path, "chromaticities"), Some(chroma(&crate::color::WORKING_PRIMS)));
-        assert_eq!(read_rgb(&path).unwrap().3.wht, chroma(&crate::color::WORKING_PRIMS).white.map(f64::from));
-        assert!(write_rgb(&path, 2, 1, &pixels, display, None, false).is_err(), "existing file without overwrite");
-        assert!(write_rgb(&path, 3, 1, &pixels, display, None, true).is_err(), "size mismatch");
+        write_rgb(
+            &path,
+            2,
+            1,
+            &pixels,
+            &crate::color::WORKING_PRIMS,
+            None,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            read_attr::<Chromaticities>(&path, "chromaticities"),
+            Some(chroma(&crate::color::WORKING_PRIMS))
+        );
+        assert_eq!(
+            read_rgb(&path).unwrap().3.wht,
+            chroma(&crate::color::WORKING_PRIMS).white.map(f64::from)
+        );
+        assert!(
+            write_rgb(&path, 2, 1, &pixels, display, None, false).is_err(),
+            "existing file without overwrite"
+        );
+        assert!(
+            write_rgb(&path, 3, 1, &pixels, display, None, true).is_err(),
+            "size mismatch"
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -63,31 +63,31 @@ pub struct MaterialPreset {
 impl MaterialPreset {
     /// RGB metallic-workflow look, without claiming measured spectral optical constants.
     const fn metal(path: &'static str, tint: [f32; 3], roughness: f32) -> Self {
-        Self::plain(path, "Metal", tint, roughness, 1.0, 1.0, 1.5, [0.0; 3])
+        Self {
+            metallic: 1.0,
+            ..Self::new(path, "Metal", tint, roughness)
+        }
     }
-    /// Construct a plain (no-extension) preset. Keeps the [`PRESETS`] table terse
-    /// by defaulting `sheen` / `anisotropy` to `None`. `category` is the explicit
-    /// UI tag bucket (2nd arg, right after `path`).
-    const fn plain(
+    /// The fields every preset must name; the rest start as an opaque, non-emissive,
+    /// 1.5-IOR dielectric with no PT extensions. The [`PRESETS`] table names only what
+    /// differs, by struct update: `MaterialPreset { metallic: 1.0, ..MaterialPreset::new(..) }`.
+    /// `category` is the explicit UI tag bucket (2nd arg, right after `path`).
+    const fn new(
         path: &'static str,
         category: &'static str,
         diffuse: [f32; 3],
         roughness: f32,
-        metallic: f32,
-        opacity: f32,
-        ior: f32,
-        emissive: [f32; 3],
     ) -> Self {
         Self {
             path,
             category,
             diffuse,
             roughness,
-            metallic,
-            opacity,
-            ior,
+            metallic: 0.0,
+            opacity: 1.0,
+            ior: 1.5,
             transmission_depth: 0.0,
-            emissive,
+            emissive: [0.0; 3],
             sheen: None,
             anisotropy: None,
             facing: None,
@@ -108,305 +108,83 @@ impl MaterialPreset {
 pub const PRESETS: &[MaterialPreset] = &[
     // --- Back-compat canonical 5 (legacy names/paths — DO NOT reorder/rename) ---
     // Plastic: glossy red dielectric.
-    MaterialPreset::plain(
-        "Plastic",
-        "Plastic",
-        [0.80, 0.10, 0.10],
-        0.35,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
+    MaterialPreset::new("Plastic", "Plastic", [0.80, 0.10, 0.10], 0.35),
     // Metal: warm gold conductor (metallic workflow).
-    MaterialPreset::plain(
-        "Metal",
-        "Metal",
-        [0.94, 0.74, 0.34],
-        0.18,
-        1.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
+    MaterialPreset {
+        metallic: 1.0,
+        ..MaterialPreset::new("Metal", "Metal", [0.94, 0.74, 0.34], 0.18)
+    },
     // Paper: warm cream rough dielectric.
-    MaterialPreset::plain(
-        "Paper",
-        "Paper",
-        [0.90, 0.85, 0.70],
-        0.90,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
+    MaterialPreset::new("Paper", "Paper", [0.90, 0.85, 0.70], 0.90),
     // Glass: cyan-tinted low-opacity smooth dielectric.
-    MaterialPreset::plain(
-        "Glass",
-        "Glass",
-        [0.40, 0.70, 0.90],
-        0.05,
-        0.0,
-        0.1,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
+    MaterialPreset {
+        opacity: 0.1,
+        ..MaterialPreset::new("Glass", "Glass", [0.40, 0.70, 0.90], 0.05)
+    },
     // Emissive: dark base with a bright warm emissive colour (the ONE emissive).
-    MaterialPreset::plain(
-        "Emissive",
-        "Emissive",
-        [0.02, 0.02, 0.02],
-        0.50,
-        0.0,
-        1.0,
-        1.5,
-        [3.0, 2.4, 1.2],
-    ),
+    MaterialPreset {
+        emissive: [3.0, 2.4, 1.2],
+        ..MaterialPreset::new("Emissive", "Emissive", [0.02, 0.02, 0.02], 0.50)
+    },
     // --- Woods (warm diffuse + mid roughness; colour carries the species) ---
-    MaterialPreset::plain(
-        "WoodOak",
-        "Wood",
-        [0.62, 0.46, 0.28],
-        0.45,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "WoodWalnut",
-        "Wood",
-        [0.26, 0.16, 0.10],
-        0.50,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "WoodPine",
-        "Wood",
-        [0.80, 0.67, 0.40],
-        0.50,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "WoodMahogany",
-        "Wood",
-        [0.36, 0.16, 0.12],
-        0.48,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
+    MaterialPreset::new("WoodOak", "Wood", [0.62, 0.46, 0.28], 0.45),
+    MaterialPreset::new("WoodWalnut", "Wood", [0.26, 0.16, 0.10], 0.50),
+    MaterialPreset::new("WoodPine", "Wood", [0.80, 0.67, 0.40], 0.50),
+    MaterialPreset::new("WoodMahogany", "Wood", [0.36, 0.16, 0.12], 0.48),
     // --- Paper / card (very rough dielectric) ---
-    MaterialPreset::plain(
-        "PaperMatte",
-        "Paper",
-        [0.92, 0.90, 0.84],
-        0.90,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "Cardboard",
-        "Paper",
-        [0.66, 0.52, 0.34],
-        0.90,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
+    MaterialPreset::new("PaperMatte", "Paper", [0.92, 0.90, 0.84], 0.90),
+    MaterialPreset::new("Cardboard", "Paper", [0.66, 0.52, 0.34], 0.90),
     // --- Rubber (matte dielectric) ---
-    MaterialPreset::plain(
-        "RubberTyre",
-        "Rubber",
-        [0.04, 0.04, 0.04],
-        0.70,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "RubberRed",
-        "Rubber",
-        [0.55, 0.06, 0.06],
-        0.80,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
+    MaterialPreset::new("RubberTyre", "Rubber", [0.04, 0.04, 0.04], 0.70),
+    MaterialPreset::new("RubberRed", "Rubber", [0.55, 0.06, 0.06], 0.80),
     // --- Plastics (dielectric; roughness = gloss↔matte) ---
-    MaterialPreset::plain(
-        "PlasticGlossyBlue",
-        "Plastic",
-        [0.08, 0.22, 0.90],
-        0.10,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "PlasticGlossyGreen",
-        "Plastic",
-        [0.08, 0.66, 0.24],
-        0.18,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "PlasticMatteYellow",
-        "Plastic",
-        [0.93, 0.78, 0.12],
-        0.55,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "PlasticMatteOrange",
-        "Plastic",
-        [0.92, 0.38, 0.06],
-        0.55,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "PlasticIvory",
-        "Plastic",
-        [0.92, 0.88, 0.78],
-        0.30,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "PlasticCharcoal",
-        "Plastic",
-        [0.05, 0.05, 0.06],
-        0.33,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
+    MaterialPreset::new("PlasticGlossyBlue", "Plastic", [0.08, 0.22, 0.90], 0.10),
+    MaterialPreset::new("PlasticGlossyGreen", "Plastic", [0.08, 0.66, 0.24], 0.18),
+    MaterialPreset::new("PlasticMatteYellow", "Plastic", [0.93, 0.78, 0.12], 0.55),
+    MaterialPreset::new("PlasticMatteOrange", "Plastic", [0.92, 0.38, 0.06], 0.55),
+    MaterialPreset::new("PlasticIvory", "Plastic", [0.92, 0.88, 0.78], 0.30),
+    MaterialPreset::new("PlasticCharcoal", "Plastic", [0.05, 0.05, 0.06], 0.33),
     // --- Metals (conductor, metallic=1; `diffuse` = bright F0 tint; roughness = polish) ---
-    MaterialPreset::plain(
-        "MetalChrome",
-        "Metal",
-        [0.95, 0.95, 0.96],
-        0.04,
-        1.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "MetalGold",
-        "Metal",
-        [0.94, 0.74, 0.34],
-        0.14,
-        1.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "MetalCopper",
-        "Metal",
-        [0.95, 0.64, 0.54],
-        0.12,
-        1.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "MetalBrass",
-        "Metal",
-        [0.86, 0.72, 0.38],
-        0.18,
-        1.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "MetalAluminium",
-        "Metal",
-        [0.91, 0.92, 0.94],
-        0.30,
-        1.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "MetalSteel",
-        "Metal",
-        [0.62, 0.64, 0.66],
-        0.35,
-        1.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "MetalTitanium",
-        "Metal",
-        [0.62, 0.61, 0.63],
-        0.28,
-        1.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "MetalIron",
-        "Metal",
-        [0.56, 0.55, 0.54],
-        0.55,
-        1.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "MetalAnodizedBlue",
-        "Metal",
-        [0.16, 0.42, 0.88],
-        0.16,
-        1.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "MetalAnodizedRed",
-        "Metal",
-        [0.86, 0.14, 0.16],
-        0.16,
-        1.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
+    MaterialPreset {
+        metallic: 1.0,
+        ..MaterialPreset::new("MetalChrome", "Metal", [0.95, 0.95, 0.96], 0.04)
+    },
+    MaterialPreset {
+        metallic: 1.0,
+        ..MaterialPreset::new("MetalGold", "Metal", [0.94, 0.74, 0.34], 0.14)
+    },
+    MaterialPreset {
+        metallic: 1.0,
+        ..MaterialPreset::new("MetalCopper", "Metal", [0.95, 0.64, 0.54], 0.12)
+    },
+    MaterialPreset {
+        metallic: 1.0,
+        ..MaterialPreset::new("MetalBrass", "Metal", [0.86, 0.72, 0.38], 0.18)
+    },
+    MaterialPreset {
+        metallic: 1.0,
+        ..MaterialPreset::new("MetalAluminium", "Metal", [0.91, 0.92, 0.94], 0.30)
+    },
+    MaterialPreset {
+        metallic: 1.0,
+        ..MaterialPreset::new("MetalSteel", "Metal", [0.62, 0.64, 0.66], 0.35)
+    },
+    MaterialPreset {
+        metallic: 1.0,
+        ..MaterialPreset::new("MetalTitanium", "Metal", [0.62, 0.61, 0.63], 0.28)
+    },
+    MaterialPreset {
+        metallic: 1.0,
+        ..MaterialPreset::new("MetalIron", "Metal", [0.56, 0.55, 0.54], 0.55)
+    },
+    MaterialPreset {
+        metallic: 1.0,
+        ..MaterialPreset::new("MetalAnodizedBlue", "Metal", [0.16, 0.42, 0.88], 0.16)
+    },
+    MaterialPreset {
+        metallic: 1.0,
+        ..MaterialPreset::new("MetalAnodizedRed", "Metal", [0.86, 0.14, 0.16], 0.16)
+    },
     // Brushed metals: same conductor base, but carry anisotropy so the PT
     // renders the UV-free brushed-GGX lobe (amount 0.6, brush dir = object +X).
     MaterialPreset {
@@ -438,98 +216,17 @@ pub const PRESETS: &[MaterialPreset] = &[
         facing: None,
     },
     // --- Ceramic (glazed glossy / matte terracotta) ---
-    MaterialPreset::plain(
-        "CeramicWhite",
-        "Ceramic",
-        [0.92, 0.92, 0.90],
-        0.12,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "CeramicCobalt",
-        "Ceramic",
-        [0.10, 0.20, 0.66],
-        0.14,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "Terracotta",
-        "Ceramic",
-        [0.70, 0.33, 0.20],
-        0.60,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
+    MaterialPreset::new("CeramicWhite", "Ceramic", [0.92, 0.92, 0.90], 0.12),
+    MaterialPreset::new("CeramicCobalt", "Ceramic", [0.10, 0.20, 0.66], 0.14),
+    MaterialPreset::new("Terracotta", "Ceramic", [0.70, 0.33, 0.20], 0.60),
     // --- Leather (saturated warm/black, mid-high roughness) ---
-    MaterialPreset::plain(
-        "LeatherBlack",
-        "Leather",
-        [0.05, 0.04, 0.04],
-        0.45,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "LeatherBrown",
-        "Leather",
-        [0.32, 0.18, 0.10],
-        0.60,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "LeatherTan",
-        "Leather",
-        [0.58, 0.40, 0.24],
-        0.55,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
+    MaterialPreset::new("LeatherBlack", "Leather", [0.05, 0.04, 0.04], 0.45),
+    MaterialPreset::new("LeatherBrown", "Leather", [0.32, 0.18, 0.10], 0.60),
+    MaterialPreset::new("LeatherTan", "Leather", [0.58, 0.40, 0.24], 0.55),
     // --- Stone / concrete ---
-    MaterialPreset::plain(
-        "Concrete",
-        "Stone",
-        [0.55, 0.55, 0.53],
-        0.85,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "Slate",
-        "Stone",
-        [0.18, 0.19, 0.21],
-        0.75,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "Marble",
-        "Stone",
-        [0.90, 0.90, 0.88],
-        0.30,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
+    MaterialPreset::new("Concrete", "Stone", [0.55, 0.55, 0.53], 0.85),
+    MaterialPreset::new("Slate", "Stone", [0.18, 0.19, 0.21], 0.75),
+    MaterialPreset::new("Marble", "Stone", [0.90, 0.90, 0.88], 0.30),
     // --- Fabrics / velvet (Charlie sheen via pt-material-ext) ---
     // Velvets carry sheen so the PT renders the retroreflective sheen lobe; the
     // base diffuse stays deep/saturated. Cotton/Felt use a subtler sheen tint.
@@ -590,67 +287,26 @@ pub const PRESETS: &[MaterialPreset] = &[
         facing: None,
     },
     // --- Glass (exactly THREE: clear / amber tinted / frosted) ---
-    MaterialPreset::plain(
-        "GlassClear",
-        "Glass",
-        [0.92, 0.95, 0.97],
-        0.02,
-        0.0,
-        0.08,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "GlassAmber",
-        "Glass",
-        [0.85, 0.55, 0.20],
-        0.03,
-        0.0,
-        0.14,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "GlassFrosted",
-        "Glass",
-        [0.90, 0.92, 0.95],
-        0.32,
-        0.0,
-        0.30,
-        1.45,
-        [0.0, 0.0, 0.0],
-    ),
+    MaterialPreset {
+        opacity: 0.08,
+        ..MaterialPreset::new("GlassClear", "Glass", [0.92, 0.95, 0.97], 0.02)
+    },
+    MaterialPreset {
+        opacity: 0.14,
+        ..MaterialPreset::new("GlassAmber", "Glass", [0.85, 0.55, 0.20], 0.03)
+    },
+    MaterialPreset {
+        opacity: 0.30,
+        ior: 1.45,
+        ..MaterialPreset::new("GlassFrosted", "Glass", [0.90, 0.92, 0.95], 0.32)
+    },
     // --- Car paint (high-gloss low-roughness dielectric, clearcoat-ish) ---
-    MaterialPreset::plain(
-        "CarPaintCherry",
-        "CarPaint",
-        [0.55, 0.02, 0.06],
-        0.08,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "CarPaintSilver",
-        "CarPaint",
-        [0.62, 0.64, 0.68],
-        0.10,
-        1.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
-    MaterialPreset::plain(
-        "CarPaintMidnightBlue",
-        "CarPaint",
-        [0.04, 0.08, 0.28],
-        0.09,
-        0.0,
-        1.0,
-        1.5,
-        [0.0, 0.0, 0.0],
-    ),
+    MaterialPreset::new("CarPaintCherry", "CarPaint", [0.55, 0.02, 0.06], 0.08),
+    MaterialPreset {
+        metallic: 1.0,
+        ..MaterialPreset::new("CarPaintSilver", "CarPaint", [0.62, 0.64, 0.68], 0.10)
+    },
+    MaterialPreset::new("CarPaintMidnightBlue", "CarPaint", [0.04, 0.08, 0.28], 0.09),
     // --- Facing-mix (pearlescent / falloff via pt-material-ext) ---
     // These carry a SECOND `/SurfaceB` surface; the PT blends the head-on look
     // (the six base knobs = material A) toward B by facing ratio. Storm shows
@@ -705,11 +361,15 @@ pub const PRESETS: &[MaterialPreset] = &[
     // Absorption looks: colour is transmittance after transmission_depth world units.
     MaterialPreset {
         transmission_depth: 0.5,
-        ..MaterialPreset::plain("GlassBottleGreen", "Glass", [0.12, 0.82, 0.25], 0.03, 0.0, 0.0, 1.52, [0.0; 3])
+        opacity: 0.0,
+        ior: 1.52,
+        ..MaterialPreset::new("GlassBottleGreen", "Glass", [0.12, 0.82, 0.25], 0.03)
     },
     MaterialPreset {
         transmission_depth: 2.0,
-        ..MaterialPreset::plain("GlassWaterGreen", "Glass", [0.70, 0.94, 0.78], 0.01, 0.0, 0.0, 1.333, [0.0; 3])
+        opacity: 0.0,
+        ior: 1.333,
+        ..MaterialPreset::new("GlassWaterGreen", "Glass", [0.70, 0.94, 0.78], 0.01)
     },
 ];
 

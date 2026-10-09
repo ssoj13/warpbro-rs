@@ -48,9 +48,15 @@ pub fn catalog(directory: &Path) -> Result<Vec<Entry>, String> {
     for entry in read {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
-        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+        let name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
         let scene = format!(".{}", crate::fs_name::SCENE_SUFFIX);
-        let Some(stem) = name.strip_suffix(scene.as_str()).or_else(|| name.strip_suffix(".json")) else {
+        let Some(stem) = name
+            .strip_suffix(scene.as_str())
+            .or_else(|| name.strip_suffix(".json"))
+        else {
             continue;
         };
         if entry.file_type().map_err(|e| e.to_string())?.is_file() {
@@ -60,12 +66,20 @@ pub fn catalog(directory: &Path) -> Result<Vec<Entry>, String> {
     files.sort();
     for (stem, path) in files {
         let key = crate::fs_name::slug(&stem);
-        match entries[..builtins].iter_mut().find(|e| crate::fs_name::slug(&e.name) == key) {
+        match entries[..builtins]
+            .iter_mut()
+            .find(|e| crate::fs_name::slug(&e.name) == key)
+        {
             Some(builtin) => {
                 builtin.source = Source::File(path);
                 builtin.overrides = true;
             }
-            None => entries.push(Entry { name: stem, description: None, source: Source::File(path), overrides: false }),
+            None => entries.push(Entry {
+                name: stem,
+                description: None,
+                source: Source::File(path),
+                overrides: false,
+            }),
         }
     }
     Ok(entries)
@@ -98,15 +112,24 @@ mod tests {
     use super::*;
     #[test]
     fn builtins_need_no_directory_and_files_override_by_name() {
-        let dir = std::env::temp_dir().join(format!("warpbro-templates-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("warpbro-templates-test-{}", std::process::id()));
         let builtin = catalog(&dir).unwrap();
         assert_eq!(builtin.len(), crate::presets::ANIMATED.len());
-        assert!(builtin.iter().all(|e| matches!(e.source, Source::Builtin(_)) && e.description.is_some()));
+        assert!(
+            builtin
+                .iter()
+                .all(|e| matches!(e.source, Source::Builtin(_)) && e.description.is_some())
+        );
         assert!(!dir.exists(), "the catalog never creates the directory");
         std::fs::create_dir_all(&dir).unwrap();
         let first = crate::presets::ANIMATED[0].name;
         let text = serde_json::to_string(&crate::presets::scene(0).unwrap().document).unwrap();
-        let replaced = dir.join(crate::fs_name::frame_file(&crate::fs_name::stem(first), None, crate::fs_name::SCENE_SUFFIX));
+        let replaced = dir.join(crate::fs_name::frame_file(
+            &crate::fs_name::stem(first),
+            None,
+            crate::fs_name::SCENE_SUFFIX,
+        ));
         let user = dir.join("user-scene.json");
         std::fs::write(&replaced, &text).unwrap();
         std::fs::write(&user, &text).unwrap();
@@ -117,8 +140,12 @@ mod tests {
         assert_eq!(merged[0].source, Source::File(replaced));
         assert!(merged[0].overrides && merged[0].description.is_some());
         let added = merged.last().unwrap();
-        assert_eq!((added.name.as_str(), &added.source), ("user-scene", &Source::File(user.clone())));
-        let scene = crate::io_service::decode_scene(&std::fs::read_to_string(&user).unwrap()).unwrap();
+        assert_eq!(
+            (added.name.as_str(), &added.source),
+            ("user-scene", &Source::File(user.clone()))
+        );
+        let scene =
+            crate::io_service::decode_scene(&std::fs::read_to_string(&user).unwrap()).unwrap();
         assert_eq!(scene.document.unwrap().last, 249);
         std::fs::remove_dir_all(dir).unwrap();
     }

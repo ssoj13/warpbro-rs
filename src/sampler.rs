@@ -137,7 +137,10 @@ mod tests {
                     assert!((0.0..1.0).contains(&u) && (0.0..1.0).contains(&v));
                     cells[(u * 4.0) as usize * 4 + (v * 4.0) as usize] += 1;
                 }
-                assert!(cells.iter().all(|&c| c == 1), "pixel {px},{py} dims {dims:?}: {cells:?}");
+                assert!(
+                    cells.iter().all(|&c| c == 1),
+                    "pixel {px},{py} dims {dims:?}: {cells:?}"
+                );
             }
         }
     }
@@ -156,8 +159,14 @@ mod tests {
             equal += u32::from(a == sample(i + 1, 7, 3, 0));
         }
         let [ma, mb, mab] = mean.map(|m| m / f64::from(n));
-        assert!((ma - 0.5).abs() < 0.01 && (mb - 0.5).abs() < 0.01, "{ma} {mb}");
-        assert!((mab - ma * mb).abs() < 0.01, "groups must be independent: {mab}");
+        assert!(
+            (ma - 0.5).abs() < 0.01 && (mb - 0.5).abs() < 0.01,
+            "{ma} {mb}"
+        );
+        assert!(
+            (mab - ma * mb).abs() < 0.01,
+            "groups must be independent: {mab}"
+        );
         assert!(equal < 4, "neighbouring pixels must not share samples");
     }
 }

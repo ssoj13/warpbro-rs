@@ -1,7 +1,6 @@
 //! Palettes: the built-in colour schemes of ofx-rs `ofx-gen/src/palette.rs` (copied; the
 //! validated host-curve API dropped), sampled into the LUT the kernels read.
 
-
 use crate::params::PALETTE_SAMPLES;
 
 /// Built-in color schemes; custom host gradients use `PaletteLut::from_samples`.
@@ -24,7 +23,6 @@ pub enum PaletteScheme {
     RoseGold,
     Twilight,
 }
-
 
 #[derive(Clone, Copy)]
 struct Gradient {
@@ -163,7 +161,10 @@ pub fn build_lut(scheme: PaletteScheme) -> Vec<[f32; 4]> {
                 (0.16 + 0.84 * t).min(1.0),
             ],
             PaletteScheme::Mono => [t, t, t],
-            _ => gradient_color(GRADIENTS[scheme as usize - PaletteScheme::Sunset as usize], t),
+            _ => gradient_color(
+                GRADIENTS[scheme as usize - PaletteScheme::Sunset as usize],
+                t,
+            ),
         };
         // Palettes are authored in Rec.709; the matrix is linear, so the kernel's LUT
         // interpolation commutes with converting the samples here.
@@ -190,4 +191,3 @@ fn classic_color(t: f32) -> [f32; 3] {
         8.5 * inv * inv * inv * t,
     ]
 }
-
