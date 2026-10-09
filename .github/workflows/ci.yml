@@ -129,6 +129,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2.9.2
         with:
           key: ${{ matrix.platform }}
+          # Keep what compiled even when a later stage (tests, packaging) fails.
+          cache-on-failure: true
           # cargo-oxide builds and caches the codegen backend here.
           cache-directories: ~/.cargo/cuda-oxide
 

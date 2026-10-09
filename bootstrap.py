@@ -564,7 +564,10 @@ def run_ci(args: argparse.Namespace) -> int:
     stages = [
         ("Toolchain", lambda: 0 if doctor(fix=True, full=False, gpu=False) else 1),
         ("Format and clippy", lambda: run_check(args)),
-        ("Tests without a GPU", lambda: run(["cargo", "oxide", "test", "--", "--release", "--locked", "--",
+        # The same --arch as the release build: equal backend flags let the build reuse every
+        # crate the tests compiled (otherwise the whole graph builds twice).
+        ("Tests without a GPU", lambda: run(["cargo", "oxide", "test", "--arch", args.arch, "--",
+                                             "--release", "--locked", "--",
                                              *(a for p in GPU_TEST_PREFIXES for a in ("--skip", p))])[0]),
         ("Release build", lambda: build(args)),
     ]
