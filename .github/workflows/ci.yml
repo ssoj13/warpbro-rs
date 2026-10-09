@@ -137,8 +137,21 @@ jobs:
             echo "/usr/lib/llvm-${major}/bin" >> "$GITHUB_PATH"
           fi
 
+      # Every crate's fingerprint includes the codegen backend's identity, so a new
+      # cuda-oxide revision recompiles the whole graph. Keying the cache on the revision
+      # starts a fresh cache instead of restoring the old one and saving both
+      # generations of artifacts together.
+      - name: cuda-oxide revision
+        id: oxide
+        shell: bash
+        run: |
+          rev=$(sed -n 's/^CUDA_OXIDE_REV = "\([0-9a-f]*\)"/\1/p' bootstrap.py)
+          test -n "$rev"
+          echo "rev=${rev:0:12}" >> "$GITHUB_OUTPUT"
+
       - uses: Swatinem/rust-cache@v2.9.2
         with:
+          prefix-key: v0-rust-oxide-${{ steps.oxide.outputs.rev }}
           key: ${{ matrix.platform }}
           # Keep what compiled even when a later stage (tests, packaging) fails.
           cache-on-failure: true
