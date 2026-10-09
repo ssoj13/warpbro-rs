@@ -27,6 +27,7 @@ Commands:
     docs          Rebuild the README images in docs/ (needs uv for Pillow)
     i(nstall)     Copy the release binary to ~/.local/bin/WarpBro
     c(heck)       cargo fmt --check + cargo clippy
+    ci            Hosted CI without a GPU: toolchain, check, tests (--skip cuda_), build, dist/*.zip
     cl(ean)       cargo clean (+ stray *.ll / *.ptx dumps in the repo root)
     h(elp)        Print help
 
@@ -37,6 +38,7 @@ Examples:
     python bootstrap.py r -- --bench 1920 1080 64
     python bootstrap.py g out 3840 2160 1024
     python bootstrap.py i
+    python bootstrap.py ci
 """
 
 from __future__ import annotations
@@ -66,6 +68,10 @@ CUDA_OXIDE_REV = "be40bf23b6636f2eb053cb7aa1b915fd707d25d5"
 RUST_COMPONENTS = ["rust-src", "rustc-dev", "rust-analyzer", "clippy", "rustfmt", "llvm-tools"]
 MIN_LLVM = 21
 MIN_CUDA_MAJOR = 13
+# CI builds without a GPU to detect: PTX for Turing (sm_75) and newer, JIT-compiled by the
+# driver for the installed GPU on first launch.
+CI_ARCH = "sm_75"
+DIST_DIR = ROOT_DIR / "dist"
 
 
 class C:
@@ -229,20 +235,24 @@ def installed_oxide_matches(output: str) -> bool:
     return False
 
 
-def doctor(fix: bool, full: bool = True) -> bool:
-    """Check every toolchain piece; with `fix`, install the user-level ones (rustup, cargo-oxide)."""
+def doctor(fix: bool, full: bool = True, gpu: bool = True) -> bool:
+    """Check every toolchain piece; with `fix`, install the user-level ones (rustup, cargo-oxide).
+    `gpu=False` (hosted CI) builds without a driver: no device check, no `cargo oxide doctor`."""
     env = build_env()
     passed = True
 
     # --- GPU / driver
-    code, out, _ = run(["nvidia-smi", "--query-gpu=name,driver_version,compute_cap", "--format=csv,noheader"], capture=True)
-    if code == 0 and out.strip():
-        ok(f"GPU: {out.strip().splitlines()[0]}")
+    if gpu:
+        code, out, _ = run(["nvidia-smi", "--query-gpu=name,driver_version,compute_cap", "--format=csv,noheader"], capture=True)
+        if code == 0 and out.strip():
+            ok(f"GPU: {out.strip().splitlines()[0]}")
+        else:
+            err("nvidia-smi failed: no NVIDIA driver / GPU visible")
+            if IS_WSL:
+                step("WSL2: install/update the driver on WINDOWS; never install nvidia-driver-* or cuda-drivers in WSL")
+            passed = False
     else:
-        err("nvidia-smi failed: no NVIDIA driver / GPU visible")
-        if IS_WSL:
-            step("WSL2: install/update the driver on WINDOWS; never install nvidia-driver-* or cuda-drivers in WSL")
-        passed = False
+        step("GPU: not required (build-only)")
 
     # --- CUDA toolkit
     nvcc = which("nvcc")
@@ -315,7 +325,7 @@ def doctor(fix: bool, full: bool = True) -> bool:
         passed = False
 
     # --- cargo-oxide's own check (backend, libNVVM, nvJitLink, libdevice, ...)
-    if full and passed:
+    if full and gpu and passed:
         print()
         step("cargo oxide doctor")
         code, out, _ = run(["cargo", "oxide", "doctor"], capture=True)
@@ -350,7 +360,8 @@ def run_doctor(args: argparse.Namespace) -> int:
 # =============================================================================
 
 def build(args: argparse.Namespace) -> int:
-    if not doctor(fix=False, full=False):
+    no_gpu = getattr(args, "no_gpu", False)
+    if not doctor(fix=False, full=False, gpu=not no_gpu):
         err("Toolchain incomplete: python bootstrap.py d --fix")
         return 1
     cmd = ["cargo", "oxide", "build"]
@@ -362,7 +373,7 @@ def build(args: argparse.Namespace) -> int:
     if code != 0 or not RELEASE_BIN.is_file():
         err("Build failed")
         return code or 1
-    if not getattr(args, "skip_cuda_warmup", False):
+    if not (no_gpu or getattr(args, "skip_cuda_warmup", False)):
         # Prime the driver's cache for this exact executable, on the same GPU the
         # workspace uses. Fail here if its module/parameter ABI cannot initialize.
         step("Preparing CUDA kernels for the next application launch ...")
@@ -493,7 +504,7 @@ def run_check(_args: argparse.Namespace) -> int:
     # clippy only type-checks (no codegen), so it runs on the plain backend; build.rs lets it
     # through (CLIPPY_ARGS).
     step("Running clippy ...")
-    code, _, elapsed = run(["cargo", "clippy", "--release", "--", "-D", "warnings"])
+    code, _, elapsed = run(["cargo", "clippy", "--release", "--all-targets", "--locked", "--", "-D", "warnings"])
     if code == 0:
         ok(f"Clippy OK ({fmt_time(elapsed)})")
     else:
@@ -507,6 +518,63 @@ def run_check(_args: argparse.Namespace) -> int:
         err("Some checks failed")
     print()
     return 0 if passed else 1
+
+
+def platform_name() -> str:
+    """`windows-x86_64` / `linux-x86_64`: the release archive's platform tag."""
+    machine = platform.machine().lower()
+    arch = {"amd64": "x86_64", "x86_64": "x86_64", "arm64": "aarch64", "aarch64": "aarch64"}.get(machine, machine)
+    return f"{'windows' if IS_WINDOWS else 'linux'}-{arch}"
+
+
+def release_version() -> str:
+    """The tag on a tag build (`v0.3.0`), else the crate version and commit (`0.2.0-abcdef1`)."""
+    if os.environ.get("GITHUB_REF_TYPE") == "tag" and os.environ.get("GITHUB_REF_NAME"):
+        return os.environ["GITHUB_REF_NAME"]
+    manifest = (ROOT_DIR / "Cargo.toml").read_text(encoding="utf-8")
+    version = re.search(r'(?m)^version\s*=\s*"([^"]+)"', manifest)
+    code, sha, _ = run(["git", "rev-parse", "--short", "HEAD"], capture=True)
+    return f"{version.group(1) if version else '0.0.0'}-{sha.strip() if code == 0 else 'local'}"
+
+
+def package() -> Path:
+    """dist/warpbro-<version>-<platform>.zip: the release binary plus README and CHANGELOG,
+    under one top-level folder of the same name."""
+    import zipfile
+    stem = f"warpbro-{release_version()}-{platform_name()}"
+    DIST_DIR.mkdir(exist_ok=True)
+    archive = DIST_DIR / f"{stem}.zip"
+    archive.unlink(missing_ok=True)
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        z.write(RELEASE_BIN, f"{stem}/{BIN_NAME}")
+        for doc in ("README.md", "CHANGELOG.md"):
+            z.write(ROOT_DIR / doc, f"{stem}/{doc}")
+    return archive
+
+
+def run_ci(args: argparse.Namespace) -> int:
+    """Everything a hosted, GPU-less runner can verify, in order, stopping at the first failure:
+    toolchain, fmt + clippy, the ordinary suite without CUDA (`--skip cuda_`, see
+    src/test_gpu.rs), the release build for CI_ARCH, and the release archive."""
+    header("CI")
+    args.no_gpu = True
+    args.arch = args.arch or CI_ARCH
+    stages = [
+        ("Toolchain", lambda: 0 if doctor(fix=True, full=False, gpu=False) else 1),
+        ("Format and clippy", lambda: run_check(args)),
+        ("Tests without a GPU", lambda: run(["cargo", "oxide", "test", "--", "--release", "--locked",
+                                             "--", "--skip", "cuda_"])[0]),
+        ("Release build", lambda: build(args)),
+    ]
+    for name, stage in stages:
+        step(f"--- {name}")
+        code = stage()
+        if code != 0:
+            err(f"{name} failed")
+            return code
+    archive = package()
+    ok(f"Packaged {archive.relative_to(ROOT_DIR)} ({archive.stat().st_size / 1e6:.1f} MB)")
+    return 0
 
 
 def run_clean(_args: argparse.Namespace) -> int:
@@ -544,12 +612,14 @@ COMMANDS
   bench   time every preset:    bench [W H SPP]      (960 540 32)
   docs    regenerate docs/ (README images, bench table)
   i       install to ~/.local/bin (copies the release binary; -f rebuilds)
-  c       cargo fmt --check + cargo clippy -D warnings
+  c       cargo fmt --check + cargo clippy --all-targets -D warnings
+  ci      what hosted CI runs (no GPU): d --fix, c, tests --skip cuda_, build, dist/*.zip
   cl      cargo clean (+ *.ll / *.ptx dumps)
   h       help
 
 OPTIONS
-  --arch sm_86     target architecture for b / r (default: detected GPU)
+  --arch sm_86     target architecture for b / r / ci (default: detected GPU; ci: sm_75)
+  --no-gpu         b: build without a GPU (no device check, no CUDA warmup)
   --fix            doctor: install what can be installed without sudo
   -f, --force      install: rebuild first
 
@@ -564,9 +634,10 @@ EXAMPLES
   python bootstrap.py g out 3840 2160 1024
   python bootstrap.py docs
   python bootstrap.py i
+  python bootstrap.py ci
 """
 
-COMMANDS = ["d", "b", "r", "g", "bench", "docs", "i", "c", "cl", "h"]
+COMMANDS = ["d", "b", "r", "g", "bench", "docs", "i", "c", "ci", "cl", "h"]
 
 
 def main() -> int:
@@ -590,6 +661,7 @@ def main() -> int:
     parser.add_argument("--arch", help="CUDA architecture, e.g. sm_86")
     parser.add_argument("--skip-cuda-warmup", action="store_true",
                         help="Build without initializing CUDA (for packaging/cross-builds)")
+    parser.add_argument("--no-gpu", action="store_true", help="build without a GPU (no device check, no warmup)")
     parser.add_argument("--fix", action="store_true", help="doctor: install missing user-level tools")
     parser.add_argument("-f", "--force", dest="force_install", action="store_true", help="install: rebuild first")
 
@@ -610,6 +682,7 @@ def main() -> int:
         "docs": run_docs,
         "i": run_install,
         "c": run_check,
+        "ci": run_ci,
         "cl": run_clean,
     }
     handler = dispatch.get(args.command)

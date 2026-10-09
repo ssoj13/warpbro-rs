@@ -1,0 +1,139 @@
+name: CI and release
+
+# Hosted runners have no GPU: they check, lint, run every test not named cuda_* (see
+# src/test_gpu.rs), build the release for sm_75 and package it. CUDA tests stay local
+# (python bootstrap.py b; cargo oxide test). A v* tag also publishes the archives.
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  PYTHONUTF8: '1'
+  # Private ssh:// git dependencies are fetched by the git CLI through the rewrite below.
+  CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows-x86_64
+            os: windows-latest
+          - platform: linux-x86_64
+            os: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: '3.13'
+
+      - name: Read access to private ssoj13 dependencies
+        shell: bash
+        env:
+          DEPS_TOKEN: ${{ secrets.DEPS_TOKEN }}
+        run: |
+          test -n "$DEPS_TOKEN" || { echo "::error::DEPS_TOKEN secret is missing"; exit 1; }
+          git config --global url."https://x-access-token:${DEPS_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
+
+      - name: Install CUDA toolkit
+        id: cuda
+        uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: '13.3.1'
+          method: network
+          log-file-suffix: ${{ matrix.platform }}.txt
+
+      - name: Install LLVM (llc, clang, libclang)
+        uses: KyleMayes/install-llvm-action@v2.0.9
+        with:
+          version: '21'
+
+      - name: Linux system libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y pkg-config libxkbcommon-dev \
+            libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libudev-dev \
+            libasound2-dev libvulkan-dev
+
+      - name: Point the build at the toolkits
+        shell: bash
+        run: |
+          echo "CUDA_HOME=${{ steps.cuda.outputs.CUDA_PATH }}" >> "$GITHUB_ENV"
+          echo "CUDA_TOOLKIT_PATH=${{ steps.cuda.outputs.CUDA_PATH }}" >> "$GITHUB_ENV"
+          echo "CUDA_OXIDE_LLC=${LLVM_PATH}/bin/llc$([ "$RUNNER_OS" = Windows ] && echo .exe)" >> "$GITHUB_ENV"
+          echo "LIBCLANG_PATH=${LLVM_PATH}/$([ "$RUNNER_OS" = Windows ] && echo bin || echo lib)" >> "$GITHUB_ENV"
+
+      - uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: ${{ matrix.platform }}
+          # cargo-oxide builds and caches the codegen backend here.
+          cache-directories: ~/.cargo/cuda-oxide
+
+      - name: Toolchain, check, tests without a GPU, release build and archive
+        run: python bootstrap.py ci
+
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/*.zip
+          if-no-files-found: error
+          compression-level: 0
+
+  release:
+    name: Publish the release archives
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8.0.2
+        with:
+          pattern: '*'
+          path: release
+          merge-multiple: true
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          for platform in windows-x86_64 linux-x86_64; do
+            test -f "release/warpbro-${TAG}-${platform}.zip"
+          done
+          shopt -s nullglob
+          archives=(release/*.zip)
+          test "${#archives[@]}" -eq 2
+          prerelease=()
+          if [[ "$TAG" == *-* ]]; then
+            prerelease=(--prerelease)
+          fi
+          if ! gh release view "$TAG" > /dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --draft --generate-notes \
+              --title "$TAG" "${prerelease[@]}"
+          fi
+          gh release upload "$TAG" "${archives[@]}" --clobber
+          gh release edit "$TAG" --draft=false "${prerelease[@]}"
