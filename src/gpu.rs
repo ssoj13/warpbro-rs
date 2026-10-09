@@ -1717,7 +1717,15 @@ pub mod kernels {
             } else {
                 let (m, diag) = march_diag::<F>(ctx, ro, rd, kind, base, slope);
                 if bounce == 0 {
-                    primary_diag = diag;
+                    // set 2: hit point; set 3: [eps, mode code]; else the march diagnostics.
+                    let set = pr(ctx, P_DIAG_SET);
+                    primary_diag = if set == 2.0 {
+                        m.point
+                    } else if set == 3.0 {
+                        [m.eps, diag[0], 0.0]
+                    } else {
+                        diag
+                    };
                 }
                 m
             };

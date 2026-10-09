@@ -2176,7 +2176,7 @@ mod tests {
         scene.render.max_steps = std::env::var("WARPBRO_DIAG_STEPS").ok().and_then(|v| v.parse().ok()).unwrap_or(256);
         scene.render.step_factor = 0.85;
         scene.render.hit_epsilon = 0.001;
-        scene.render.max_bounces = 0;
+        scene.render.max_bounces = std::env::var("WARPBRO_DIAG_BOUNCES").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
         scene.render.adaptive.enabled = false;
         scene.render.denoise.enabled = false;
         scene.environment.enabled = false;
@@ -2186,7 +2186,12 @@ mod tests {
         scene.objects = vec![scene.clone()];
         let mut target = gpu.target(384, 384);
         let t0 = std::time::Instant::now();
+        let spp = std::env::var("WARPBRO_DIAG_SPP").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
         gpu.step(&mut target, &scene, 1, 19, None, false);
+        let t0 = std::time::Instant::now();
+        if spp > 1 {
+            gpu.step(&mut target, &scene, spp, 19, None, false);
+        }
         let diag = gpu.guide_sums(&target, &target.albedo);
         let normals = gpu.guide_sums(&target, &target.normal);
         println!("DIAG ms {}", t0.elapsed().as_secs_f32() * 1000.0);
