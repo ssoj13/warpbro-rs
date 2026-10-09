@@ -49,7 +49,7 @@ impl EffectiveRender {
     /// Apply only to an evaluated scene. Authored material/geometry nodes remain untouched.
     pub fn apply_to(&self, scene: &mut crate::scene::Scene) {
         let iterations = scene.render.iterations;
-        scene.render = self.render.clone();
+        scene.render = self.render;
         scene.render.iterations = iterations;
         if self.method == RenderMethod::Fast && scene.material.transmission <= 0.0 {
             scene.material.model = crate::scene::MaterialModel::Fast;

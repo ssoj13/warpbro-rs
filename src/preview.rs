@@ -229,25 +229,24 @@ impl PreviewController {
             return None;
         }
         for slot in &mut self.recycled {
-            if let Some(frame) = slot.take() {
-                if let Err(Command::RecyclePreviewFrame { frame }) =
+            if let Some(frame) = slot.take()
+                && let Err(Command::RecyclePreviewFrame { frame }) =
                     service.try_preview_command(Command::RecyclePreviewFrame { frame })
-                {
-                    *slot = Some(frame);
-                }
+            {
+                *slot = Some(frame);
             }
         }
-        if let Some(command) = self.begin.take() {
-            if let Err(command) = service.try_preview_command(command) {
-                self.begin = Some(command);
-                return None;
-            }
+        if let Some(command) = self.begin.take()
+            && let Err(command) = service.try_preview_command(command)
+        {
+            self.begin = Some(command);
+            return None;
         }
-        if let Some(command) = self.pending.take() {
-            if let Err(command) = service.try_preview_command(command) {
-                self.pending = Some(command);
-                return None;
-            }
+        if let Some(command) = self.pending.take()
+            && let Err(command) = service.try_preview_command(command)
+        {
+            self.pending = Some(command);
+            return None;
         }
         let request = self.request.as_ref()?;
         let clock = self.clock.as_mut()?;
@@ -569,13 +568,19 @@ impl PreviewCache {
         frame.pixels.clear();
         frame.pixels.extend(
             codes
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]])),
         );
         frame.light.clear();
-        frame
-            .light
-            .extend(linear.chunks_exact(4).map(|v| [v[0], v[1], v[2], v[3]]));
+        frame.light.extend(
+            linear
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|v| [v[0], v[1], v[2], v[3]]),
+        );
         let sdr = Arc::get_mut(&mut frame.sdr_bytes)?;
         sdr.clear();
         sdr.extend_from_slice(codes);

@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn animated_presets_remain_finite_visible_and_authored_for_all_250_frames() {
-        for index in 0..ANIMATED.len() {
+        for (index, animated) in ANIMATED.iter().enumerate() {
             let preset = scene(index).unwrap();
             let document = preset.document.as_ref().unwrap();
             assert_eq!(
@@ -361,7 +361,7 @@ mod tests {
             );
             for frame in 0..250 {
                 let snapshot = document.snapshot(f64::from(frame)).unwrap();
-                assert_eq!(snapshot.objects.len(), 1, "{}", ANIMATED[index].name);
+                assert_eq!(snapshot.objects.len(), 1, "{}", animated.name);
                 assert!(snapshot.pack(320, 180).iter().all(|v| v.is_finite()));
                 assert!(
                     snapshot.objects[0]

@@ -81,11 +81,21 @@ pub fn write_rgb(
         .map_err(|e| format!("EXR {}: {e}", path.display()))
 }
 
+/// Linear float RGB read from an EXR (`read_rgb`).
+pub struct RgbImage {
+    pub width: u32,
+    pub height: u32,
+    /// Raster order over the data window.
+    pub pixels: Vec<[f32; 3]>,
+    /// The file's `chromaticities`, or OpenEXR's BT.709/D65 default when untagged.
+    pub primaries: Primaries,
+}
+
 /// Read the R, G, B channels of a single-part flat EXR as linear float RGB, raster order over the
 /// data window. Any channel type is widened to f32; a file without all three is an error, never a
 /// guessed fill. The size is checked from the header before the pixels are read. Also returns the
 /// file's primaries: its `chromaticities`, or OpenEXR's BT.709/D65 default when untagged.
-pub fn read_rgb(path: &Path) -> Result<(u32, u32, Vec<[f32; 3]>, Primaries), String> {
+pub fn read_rgb(path: &Path) -> Result<RgbImage, String> {
     let err = |e: exr_core::ExrError| format!("EXR {}: {e}", path.display());
     let header = Image::read_header_only(path).map_err(err)?;
     let (w, h) = (header.width(), header.height());
@@ -128,7 +138,12 @@ pub fn read_rgb(path: &Path) -> Result<(u32, u32, Vec<[f32; 3]>, Primaries), Str
         .map(|((r, g), b)| [*r, *g, *b])
         .collect();
     // Bounded by the checks above, so the casts cannot truncate.
-    Ok((w as u32, h as u32, pixels, primaries(&tag)))
+    Ok(RgbImage {
+        width: w as u32,
+        height: h as u32,
+        pixels,
+        primaries: primaries(&tag),
+    })
 }
 
 /// The EXR attribute for `p` (narrowed to the attribute's f32).
@@ -181,7 +196,12 @@ mod tests {
         let pixels = vec![[19.43, -0.25, 1e-6, 1.0], [0.5, 2.0, 0.125, 1.0]];
         let display = &crate::color::DISPLAY_PRIMS;
         write_rgb(&path, 2, 1, &pixels, display, Some(100.0), true).unwrap();
-        let (w, h, back, prims) = read_rgb(&path).unwrap();
+        let RgbImage {
+            width: w,
+            height: h,
+            pixels: back,
+            primaries: prims,
+        } = read_rgb(&path).unwrap();
         assert_eq!((w, h), (2, 1));
         assert_eq!(back, vec![[19.43, -0.25, 1e-6], [0.5, 2.0, 0.125]]);
         // BT.709 is OpenEXR's default attribute value; the f32 tag reads back within f32.
@@ -206,7 +226,7 @@ mod tests {
             Some(chroma(&crate::color::WORKING_PRIMS))
         );
         assert_eq!(
-            read_rgb(&path).unwrap().3.wht,
+            read_rgb(&path).unwrap().primaries.wht,
             chroma(&crate::color::WORKING_PRIMS).white.map(f64::from)
         );
         assert!(

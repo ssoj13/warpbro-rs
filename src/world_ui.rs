@@ -275,6 +275,15 @@ fn wid(id: NodeId) -> u64 {
     id.hash(&mut h);
     h.finish()
 }
+/// What one timeline lane row is drawn from: its node, that node's attributes and the
+/// outline's node list (for key identity and selection).
+#[derive(Clone, Copy)]
+struct LaneData<'a> {
+    id: NodeId,
+    attrs: &'a [WorldAttribute],
+    nodes: &'a [WorldNodeInfo],
+}
+
 fn kind_label(k: WorldKind) -> &'static str {
     match k {
         WorldKind::Fractal => "Fractal",
@@ -616,13 +625,13 @@ impl WorldUi {
         nodes: &[WorldNodeInfo],
     ) {
         if range {
-            if let Some(anchor) = e.selection {
-                if let (Some(a), Some(b)) = (
+            if let Some(anchor) = e.selection
+                && let (Some(a), Some(b)) = (
                     nodes.iter().position(|n| n.id == anchor),
                     nodes.iter().position(|n| n.id == id),
-                ) {
-                    e.selected = nodes[a.min(b)..=a.max(b)].iter().map(|n| n.id).collect();
-                }
+                )
+            {
+                e.selected = nodes[a.min(b)..=a.max(b)].iter().map(|n| n.id).collect();
             }
         } else if add {
             if let Some(i) = e.selected.iter().position(|n| *n == id) {
@@ -674,10 +683,9 @@ impl WorldUi {
                 .add_enabled(e.selection.is_some(), egui::Button::new(ph::COPY))
                 .on_hover_text("Duplicate selected object")
                 .clicked()
+                && let Some(id) = e.selection
             {
-                if let Some(id) = e.selection {
-                    self.command(e, WorldCommand::Duplicate(vec![id]));
-                }
+                self.command(e, WorldCommand::Duplicate(vec![id]));
             }
             if ui
                 .add_enabled(e.selection.is_some(), egui::Button::new(ph::TRASH))
@@ -698,7 +706,7 @@ impl WorldUi {
         let model = &cache.model;
         let cfg = &cache.config;
         let actions = ui
-            .push_id("world_outliner", |ui| egui_outliner::show(ui, &model, &cfg))
+            .push_id("world_outliner", |ui| egui_outliner::show(ui, model, cfg))
             .inner;
         for a in actions {
             match a {
@@ -708,7 +716,7 @@ impl WorldUi {
                     range,
                 } => {
                     if let Some(id) = map.get(&id) {
-                        self.select(e, *id, additive, range, &nodes);
+                        self.select(e, *id, additive, range, nodes);
                     }
                 }
                 OutlinerAction::SelectMany { ids } => {
@@ -744,7 +752,7 @@ impl WorldUi {
                 } => {
                     if let Some(id) = map.get(&id).copied() {
                         let parent = new_parent.and_then(|p| map.get(&p).copied());
-                        let ids = reparent_order(&nodes, id, parent, index);
+                        let ids = reparent_order(nodes, id, parent, index);
                         self.command(
                             e,
                             WorldCommand::Batch(vec![
@@ -1088,7 +1096,7 @@ impl WorldUi {
                     group: false,
                     attr: Some(a.clone()),
                 });
-                if self.components_open(id, &a.path, &attrs) {
+                if self.components_open(id, &a.path, attrs) {
                     for child in attrs.iter().filter(|child| {
                         child.component.is_some()
                             && (filter.0 != PropertyFilter::KEYED || !child.frames.is_empty())
@@ -1296,7 +1304,7 @@ impl WorldUi {
                         .max_rect(right_rect),
                 );
                 canvas.set_clip_rect(canvas.clip_rect().intersect(right_rect));
-                let resp = TrackTimeline::new(cfg).show_pinned_ruler(&mut canvas, &mut self.view, &model, ruler_top);
+                let resp = TrackTimeline::new(cfg).show_pinned_ruler(&mut canvas, &mut self.view, model, ruler_top);
                 let painter = canvas.painter().with_clip_rect(resp.ruler_rect.intersect(canvas.clip_rect()));
                 let color = if self.cache_draft { Color32::from_rgb(75, 155, 235) } else { Color32::from_rgb(75, 205, 110) };
                 for &frame in self.cached_frames.iter() {
@@ -1361,7 +1369,7 @@ impl WorldUi {
                         Pos2::new(origin.x, y),
                         Vec2::new(left_w, cfg.row_height),
                     );
-                    self.layer_row(ui, e, n, &nodes, row, model.tracks[ti].expanded);
+                    self.layer_row(ui, e, n, nodes, row, model.tracks[ti].expanded);
                     if model.tracks[ti].expanded {
                         for (li, l) in lanes[ti].iter_mut().enumerate() {
                             let rect = Rect::from_min_size(
@@ -1377,19 +1385,11 @@ impl WorldUi {
                                 ui.scroll_to_rect(rect, Some(egui::Align::Center));
                                 self.reveal = None;
                             }
-                            self.lane_row(
-                                ui,
-                                e,
-                                n.id,
-                                l,
-                                rect,
-                                cache
+                            self.lane_row(ui, e, l, rect, LaneData { id: n.id, attrs: cache
                                     .attributes
                                     .get(&n.id)
                                     .map(Vec::as_slice)
-                                    .unwrap_or_default(),
-                                nodes,
-                            );
+                                    .unwrap_or_default(), nodes });
                         }
                     }
                 }
@@ -1431,7 +1431,7 @@ impl WorldUi {
                 );
             });
         for a in actions {
-            self.timeline_action(e, &nodes, &lanes, a);
+            self.timeline_action(e, nodes, lanes, a);
         }
         if let Some(slot) = unmark {
             self.command(e, WorldCommand::SetMark { slot, frame: None });
@@ -1613,33 +1613,33 @@ impl WorldUi {
                 }
             });
             let target = ui.interact(r, ui.id().with("layer_drop"), Sense::hover());
-            if let Some(payload) = target.dnd_hover_payload::<LayerDrag>() {
-                if payload.id != n.id {
-                    let after = ui
-                        .ctx()
-                        .pointer_interact_pos()
-                        .is_some_and(|p| p.y > r.center().y);
-                    let y = if after { r.bottom() } else { r.top() };
-                    ui.painter().line_segment(
-                        [Pos2::new(r.left() + 3.0, y), Pos2::new(r.right(), y)],
-                        egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
-                    );
-                }
+            if let Some(payload) = target.dnd_hover_payload::<LayerDrag>()
+                && payload.id != n.id
+            {
+                let after = ui
+                    .ctx()
+                    .pointer_interact_pos()
+                    .is_some_and(|p| p.y > r.center().y);
+                let y = if after { r.bottom() } else { r.top() };
+                ui.painter().line_segment(
+                    [Pos2::new(r.left() + 3.0, y), Pos2::new(r.right(), y)],
+                    egui::Stroke::new(2.0, ui.visuals().selection.stroke.color),
+                );
             }
-            if let Some(payload) = target.dnd_release_payload::<LayerDrag>() {
-                if let Some(order) = &payload.order {
-                    let ids = layer_drop_order(
-                        nodes,
-                        order,
-                        payload.id,
-                        n.id,
-                        ui.ctx()
-                            .pointer_interact_pos()
-                            .is_some_and(|p| p.y > r.center().y),
-                    );
-                    if ids.iter().copied().ne(nodes.iter().map(|n| n.id)) {
-                        self.command(e, WorldCommand::Reorder { ids });
-                    }
+            if let Some(payload) = target.dnd_release_payload::<LayerDrag>()
+                && let Some(order) = &payload.order
+            {
+                let ids = layer_drop_order(
+                    nodes,
+                    order,
+                    payload.id,
+                    n.id,
+                    ui.ctx()
+                        .pointer_interact_pos()
+                        .is_some_and(|p| p.y > r.center().y),
+                );
+                if ids.iter().copied().ne(nodes.iter().map(|n| n.id)) {
+                    self.command(e, WorldCommand::Reorder { ids });
                 }
             }
         });
@@ -1649,12 +1649,11 @@ impl WorldUi {
         &mut self,
         ui: &mut egui::Ui,
         e: &mut WorldEditor,
-        id: NodeId,
         lane: &mut Lane,
         r: Rect,
-        attrs: &[WorldAttribute],
-        nodes: &[WorldNodeInfo],
+        data: LaneData<'_>,
     ) {
+        let LaneData { id, attrs, nodes } = data;
         if !r.intersects(ui.clip_rect()) {
             return;
         }
@@ -1677,10 +1676,9 @@ impl WorldUi {
                     true,
                 )
                 .clicked()
+                    && !self.groups.remove(&(id, path.clone()))
                 {
-                    if !self.groups.remove(&(id, path.clone())) {
-                        self.groups.insert((id, path.clone()));
-                    }
+                    self.groups.insert((id, path.clone()));
                 }
                 cell_ui(ui, cells.label, "group", |ui| {
                     ui.strong(&lane.label);
@@ -2275,10 +2273,8 @@ impl WorldUi {
             e.selection = Some(edit);
             e.selected = vec![edit];
         }
-        if node.kind == WorldKind::Camera {
-            if ui.button("Use as active camera").clicked() {
-                self.command(e, WorldCommand::SetActiveCamera(id));
-            }
+        if node.kind == WorldKind::Camera && ui.button("Use as active camera").clicked() {
+            self.command(e, WorldCommand::SetActiveCamera(id));
         }
         if node.kind == WorldKind::Environment {
             ui.horizontal(|ui| {
@@ -2819,11 +2815,10 @@ fn schema_editor(
                             choice_label(&attr.path, choice),
                         )
                         .clicked()
+                        && !choice_selected(&attr.path, value, choice)
                     {
-                        if !choice_selected(&attr.path, value, choice) {
-                            apply_choice(&attr.path, value, choice);
-                            changed = true;
-                        }
+                        apply_choice(&attr.path, value, choice);
+                        changed = true;
                     }
                 }
             });
@@ -3136,8 +3131,10 @@ mod tests {
         e.document.first = 100;
         e.document.last = 399;
         // Layer bars retain their original bounds, outside the working range.
-        let mut state = WorldUi::default();
-        state.timeline_outline_width = 400.0;
+        let mut state = WorldUi {
+            timeline_outline_width: 400.0,
+            ..Default::default()
+        };
         let before = serde_json::to_string(&e.document).unwrap();
         state.fit_timeline(1000.0, &e);
         let ppf = state.view.zoom * TimelineConfig::default().pixels_per_frame;
@@ -4537,7 +4534,17 @@ mod tests {
                             Pos2::new(20.0, 50.0 + i as f32 * state.attribute_metrics.row_height()),
                             Vec2::new(width, state.attribute_metrics.row_height()),
                         );
-                        state.lane_row(ui, &mut e, id, &mut lane, row, &attrs, &nodes);
+                        state.lane_row(
+                            ui,
+                            &mut e,
+                            &mut lane,
+                            row,
+                            LaneData {
+                                id,
+                                attrs: &attrs,
+                                nodes: &nodes,
+                            },
+                        );
                     }
                 });
             });
@@ -4762,7 +4769,17 @@ mod tests {
                         Pos2::new(initial.left() - 180.0 - 8.0, 320.0),
                         Vec2::new(700.0, state.attribute_metrics.row_height()),
                     );
-                    state.lane_row(ui, &mut e, id, &mut lane, row, &attrs, &[]);
+                    state.lane_row(
+                        ui,
+                        &mut e,
+                        &mut lane,
+                        row,
+                        LaneData {
+                            id,
+                            attrs: &attrs,
+                            nodes: &[],
+                        },
+                    );
                 });
             },
         );
@@ -4858,7 +4875,6 @@ mod tests {
                         state.lane_row(
                             ui,
                             &mut e,
-                            id,
                             &mut lane,
                             Rect::from_min_size(
                                 Pos2::new(
@@ -4867,8 +4883,11 @@ mod tests {
                                 ),
                                 Vec2::new(width, state.attribute_metrics.row_height()),
                             ),
-                            &attrs,
-                            &nodes,
+                            LaneData {
+                                id,
+                                attrs: &attrs,
+                                nodes: &nodes,
+                            },
                         );
                     }
                 });

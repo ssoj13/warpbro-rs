@@ -19,6 +19,11 @@ use cuda_device::{
 use cuda_host::cuda_module;
 
 #[cuda_module]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "#[kernel] entry points take the launch ABI: each device buffer the host binds is \
+              one parameter. Device helpers keep grouped arguments (PixelOut, Context)."
+)]
 pub mod kernels {
     use super::*;
     use crate::path_sampling::{
@@ -88,10 +93,10 @@ pub mod kernels {
     #[inline(always)]
     fn pr(ctx: Context<'_>, i: usize) -> f32 {
         if ctx.world
-            && ((i >= P_FAMILY && i < P_LIGHT_DIR)
-                || (i >= P_BASE && i < P_EXPOSURE)
+            && ((P_FAMILY..P_LIGHT_DIR).contains(&i)
+                || (P_BASE..P_EXPOSURE).contains(&i)
                 || i == P_MATERIAL_MODEL
-                || (i >= P_TRANSMISSION && i < P_COUNT))
+                || (P_TRANSMISSION..P_COUNT).contains(&i))
         {
             ctx.objects[ctx.object * OBJECT_STRIDE + i]
         } else {
@@ -1968,17 +1973,30 @@ pub mod kernels {
         )
     }
 
+    /// One pixel's accumulators, written by `trace_pixel`: (rgb sum, sample count) radiance,
+    /// the albedo and normal guides, and (sum of squared luminance, unresolved march count)
+    /// for the adaptive variance and the march-limit indicator.
+    struct PixelOut<'a> {
+        acc: &'a mut [f32; 4],
+        albedo: &'a mut [f32; 4],
+        normal: &'a mut [f32; 4],
+        stats: &'a mut [f32; 2],
+    }
+
     #[inline(always)]
     fn trace_pixel<const FULL: bool, const F: u32, const MIXED: bool, const DIRECT: bool>(
         ctx: Context<'_>,
         lut: &[[f32; 4]],
         i: u32,
-        acc: &mut [f32; 4],
-        albedo: &mut [f32; 4],
-        normal: &mut [f32; 4],
         active: &[u32],
-        stats: &mut [f32; 2],
+        out: PixelOut<'_>,
     ) {
+        let PixelOut {
+            acc,
+            albedo,
+            normal,
+            stats,
+        } = out;
         // Adaptive sampling: a converged 8x4 tile (one warp) is skipped as a whole.
         if active.get((i / 32) as usize).is_some_and(|&a| a == 0) {
             return;
@@ -2157,11 +2175,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -2196,11 +2216,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -2235,11 +2257,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -2274,11 +2298,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -2313,11 +2339,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -2352,11 +2380,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -2391,11 +2421,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -2430,11 +2462,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -2469,11 +2503,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -2508,11 +2544,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -2547,11 +2585,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -2586,11 +2626,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -2625,11 +2667,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -2664,11 +2708,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -2703,11 +2749,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -2742,11 +2790,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -2781,11 +2831,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -2822,11 +2874,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -2864,11 +2918,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -2904,11 +2960,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -2944,11 +3002,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -2984,11 +3044,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -3024,11 +3086,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -3064,11 +3128,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -3104,11 +3170,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -3144,11 +3212,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }
@@ -3184,11 +3254,13 @@ pub mod kernels {
                 },
                 lut,
                 i,
-                acc,
-                albedo,
-                normal,
                 active,
-                stats,
+                PixelOut {
+                    acc,
+                    albedo,
+                    normal,
+                    stats,
+                },
             );
         }
     }

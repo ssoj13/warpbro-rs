@@ -906,7 +906,7 @@ fn coordinate_export(
                 }
                 match port.try_command(Command::RenderExport {
                     id,
-                    scene: frame_scene.clone(),
+                    scene: Box::new(frame_scene.clone()),
                     width: settings.output.width,
                     height: settings.output.height,
                     spp: settings.samples,
@@ -2004,7 +2004,9 @@ mod tests {
             writer.events.recv_timeout(Duration::from_secs(30)).unwrap(),
             WriteEvent::Finished(_)
         ));
-        let (_, _, pixels, _) = crate::exr_io::read_rgb(&settings.frame_path(7)).unwrap();
+        let pixels = crate::exr_io::read_rgb(&settings.frame_path(7))
+            .unwrap()
+            .pixels;
         assert_eq!(pixels[0], [2., 0.5, 0.125]);
         assert!(settings.frame_path(8).exists());
         finish_fixture(dir);
@@ -2227,7 +2229,7 @@ mod tests {
         }
         for encoder in [VideoEncoder::Kvazaar, VideoEncoder::Vulkan] {
             let demux =
-                av_format_mov::Demuxer::open(&dir.join(format!("motion-{encoder:?}.mp4"))).unwrap();
+                av_format_mov::Demuxer::open(dir.join(format!("motion-{encoder:?}.mp4"))).unwrap();
             assert_eq!(demux.presented_frame_count().unwrap(), 51);
         }
         if retained.is_none() {
@@ -2360,11 +2362,19 @@ mod tests {
         let _gpu_test = crate::test_gpu::lock();
         let dir = temp_dir("cuda");
         let service = RenderService::spawn();
-        let mut controller = ExportController::default();
-        controller.out_root = dir.clone();
-        controller.settings.samples = 2;
-        controller.settings.job.first = 3;
-        controller.settings.job.last = 4;
+        let mut controller = ExportController {
+            out_root: dir.clone(),
+            settings: ExportSettings {
+                samples: 2,
+                job: ExportJob {
+                    first: 3,
+                    last: 4,
+                    ..ExportJob::default()
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let mut scene = Scene::preset(crate::params::FAMILY_KIFS);
         scene.render.denoise.enabled = false; // This test checks exact physical animation output.
         scene.camera.target = [1000.0; 3];
@@ -2453,7 +2463,7 @@ mod tests {
         let pixel = |number| {
             crate::exr_io::read_rgb(&written.frame_path(number))
                 .unwrap()
-                .2[0]
+                .pixels[0]
         };
         assert_eq!(pixel(3)[0], 0.0);
         assert!(
@@ -2469,18 +2479,20 @@ mod tests {
         finish_fixture(dir);
     }
     #[test]
-    fn cancel_controller_publishes_completed_movie_without_gui_waiting() {
+    fn cuda_cancel_controller_publishes_completed_movie_without_gui_waiting() {
         let _gpu_test = crate::test_gpu::lock();
         let dir = temp_dir("controller-cancel");
         let service = RenderService::spawn();
-        let mut controller = ExportController::default();
-        controller.out_root = dir.clone();
-        controller.settings = ExportSettings {
-            samples: 1,
-            job: ExportJob {
-                name: "partial".into(),
-                last: 10000,
-                ..ExportJob::default()
+        let mut controller = ExportController {
+            out_root: dir.clone(),
+            settings: ExportSettings {
+                samples: 1,
+                job: ExportJob {
+                    name: "partial".into(),
+                    last: 10000,
+                    ..ExportJob::default()
+                },
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -2534,7 +2546,7 @@ mod tests {
             controller.status
         );
         let demux =
-            av_format_mov::Demuxer::open(&controller.last.clone().unwrap().output()).unwrap();
+            av_format_mov::Demuxer::open(controller.last.clone().unwrap().output()).unwrap();
         assert_eq!(
             demux.presented_frame_count().unwrap(),
             controller.completed as usize

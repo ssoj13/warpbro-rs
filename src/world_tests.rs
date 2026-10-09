@@ -1054,7 +1054,7 @@ fn constructs_all_formula_families_without_dropping_parameters() {
         let snapshot = world.snapshot(0.0).unwrap();
         assert_eq!(snapshot.formula, s.formula);
         assert_eq!(snapshot.material, s.material);
-        let mut expected_render = s.render.clone();
+        let mut expected_render = s.render;
         expected_render.iterations = Scene::preset(crate::params::FAMILY_BULB).render.iterations;
         assert_eq!(snapshot.render, expected_render);
         assert_eq!(snapshot.camera, s.camera);

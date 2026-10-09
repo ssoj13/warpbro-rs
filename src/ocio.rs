@@ -470,9 +470,6 @@ pub struct Transform {
     absolute: bool,
 }
 
-/// Scene light (working space) far above every view's range, so a tone-mapped view returns its
-/// peak for it (ACES 2.0's tone scale is asymptotic: at 1e5 it is at its peak to f32 precision).
-
 impl Transform {
     pub(crate) fn processor(&self) -> &Processor {
         &self.proc

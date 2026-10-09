@@ -849,10 +849,10 @@ impl WorldEditor {
                 if !self.document.supports_material(id) {
                     return Err("Selected node has no material reference field".into());
                 }
-                if let Some(material) = material {
-                    if self.document.info(material)?.kind != WorldKind::Material {
-                        return Err("Select a material layer".into());
-                    }
+                if let Some(material) = material
+                    && self.document.info(material)?.kind != WorldKind::Material
+                {
+                    return Err("Select a material layer".into());
                 }
                 self.document.node_mut(id)?["material"] = json!(material);
             }
@@ -1146,8 +1146,7 @@ impl WorldEditor {
                     path,
                     value,
                     frame,
-                    auto_key,
-                    editor.new_key,
+                    auto_key.then_some(editor.new_key),
                 )?;
             }
             // Navigation mode is a static preference on the camera, never a generated key.
@@ -1232,15 +1231,14 @@ impl WorldEditor {
                     continue;
                 }
                 if let (Some(a), Some(b)) = (before.pointer(&attr.path), after.pointer(&attr.path))
+                    && a != b
                 {
-                    if a != b {
-                        commands.push(WorldCommand::SetAttribute {
-                            id: node.id,
-                            path: attr.path.clone(),
-                            value: b.clone(),
-                            frame,
-                        });
-                    }
+                    commands.push(WorldCommand::SetAttribute {
+                        id: node.id,
+                        path: attr.path.clone(),
+                        value: b.clone(),
+                        frame,
+                    });
                 }
             }
             if node.kind == WorldKind::Fractal
@@ -1281,15 +1279,14 @@ impl WorldEditor {
                 let scene_path = path.replacen("/quality/", "/render/", 1);
                 if let (Some(a), Some(b)) =
                     (before.pointer(&scene_path), after.pointer(&scene_path))
+                    && a != b
                 {
-                    if a != b {
-                        commands.push(WorldCommand::SetAttribute {
-                            id: target,
-                            path,
-                            value: b.clone(),
-                            frame,
-                        });
-                    }
+                    commands.push(WorldCommand::SetAttribute {
+                        id: target,
+                        path,
+                        value: b.clone(),
+                        frame,
+                    });
                 }
             }
         }
@@ -2440,7 +2437,7 @@ impl WorldDocument {
     }
     fn settings_template(&self, kind: WorldKind, scene: &Scene) -> Result<Value, String> {
         use crate::render_profiles::{quality_values, render_values, viewport_values};
-        let render = serde_json::to_value(&scene.render).map_err(|e| e.to_string())?;
+        let render = serde_json::to_value(scene.render).map_err(|e| e.to_string())?;
         match kind {
             WorldKind::QualitySettings => Ok(json!({"quality":quality_values(&render)})),
             WorldKind::RenderSettings => {
@@ -3291,23 +3288,19 @@ impl WorldDocument {
                 .ok_or_else(|| format!("Invalid discrete key {path}"));
         }
         let mut value = attr_json(value);
-        if let Some(anim) = a.anim(path) {
-            if let Some(values) = value.as_array_mut() {
-                if let Some(base) = a
-                    .get(path)
-                    .cloned()
-                    .map(attr_json)
-                    .and_then(|v| v.as_array().cloned())
+        if let Some(anim) = a.anim(path)
+            && let Some(values) = value.as_array_mut()
+            && let Some(base) = a
+                .get(path)
+                .cloned()
+                .map(attr_json)
+                .and_then(|v| v.as_array().cloned())
+        {
+            for (index, ch) in anim.channels.iter().enumerate() {
+                if ch.is_empty()
+                    && let (Some(slot), Some(base)) = (values.get_mut(index), base.get(index))
                 {
-                    for (index, ch) in anim.channels.iter().enumerate() {
-                        if ch.is_empty() {
-                            if let (Some(slot), Some(base)) =
-                                (values.get_mut(index), base.get(index))
-                            {
-                                *slot = base.clone();
-                            }
-                        }
-                    }
+                    *slot = base.clone();
                 }
             }
         }
@@ -3318,17 +3311,14 @@ impl WorldDocument {
         if attrs.contains(path) {
             return Ok(None);
         }
-        if let Some((parent, last)) = path.rsplit_once('/') {
-            if let Ok(component) = last.parse::<usize>() {
-                if let Some(value) = attrs.get(parent) {
-                    if attr_json(value.clone())
-                        .as_array()
-                        .is_some_and(|v| component < v.len())
-                    {
-                        return Ok(Some((parent.into(), component)));
-                    }
-                }
-            }
+        if let Some((parent, last)) = path.rsplit_once('/')
+            && let Ok(component) = last.parse::<usize>()
+            && let Some(value) = attrs.get(parent)
+            && attr_json(value.clone())
+                .as_array()
+                .is_some_and(|v| component < v.len())
+        {
+            return Ok(Some((parent.into(), component)));
         }
         Ok(None)
     }
@@ -3510,12 +3500,11 @@ impl WorldDocument {
             data["children"] = json!([]);
         }
         for node in nodes {
-            if let Some(p) = node.parent {
-                if let Some(parent) = self.graph.nodes.get_mut(&p.to_string()) {
-                    if let Some(children) = parent["children"].as_array_mut() {
-                        children.push(json!(node.id));
-                    }
-                }
+            if let Some(p) = node.parent
+                && let Some(parent) = self.graph.nodes.get_mut(&p.to_string())
+                && let Some(children) = parent["children"].as_array_mut()
+            {
+                children.push(json!(node.id));
             }
         }
     }
@@ -3728,6 +3717,8 @@ impl WorldDocument {
         Ok(value)
     }
 
+    /// `auto_key`: Some(tangent) keys the change at `frame` with that new-key tangent;
+    /// None writes it as a navigation offset (or the static base) without a key.
     fn write_navigation_value(
         &self,
         id: NodeId,
@@ -3735,8 +3726,7 @@ impl WorldDocument {
         path: &str,
         desired: Value,
         frame: f64,
-        auto_key: bool,
-        kind: Tan,
+        auto_key: Option<Tan>,
     ) -> Result<bool, String> {
         let sampled = self.resolve_attribute(id, path, frame, &mut HashSet::new())?;
         let mut base = attrs
@@ -3782,7 +3772,7 @@ impl WorldDocument {
                 .anim(path)
                 .and_then(|a| a.channels.get(component))
                 .is_some_and(|channel| !channel.is_empty());
-            if auto_key {
+            if let Some(kind) = auto_key {
                 keys_changed = true;
                 if attrs.anim(path).is_none() {
                     attrs.set_anim(path, Some(Animation::with_arity(arity)));

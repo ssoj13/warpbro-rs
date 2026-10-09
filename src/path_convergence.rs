@@ -26,7 +26,7 @@ pub fn roulette_probability(throughput: [f32; 3], eta_compensation: f32, depth: 
     // Signed working-space RGB can have nonpositive Y without being black.
     // A zero survival probability there would bias its nonzero RGB components.
     let energy = (luminance(throughput) * eta_compensation).max(0.0);
-    energy.max(MIN_SURVIVAL).min(1.0)
+    energy.clamp(MIN_SURVIVAL, 1.0)
 }
 
 /// Biased cap of a single indirect contribution, preserving its RGB ratios.

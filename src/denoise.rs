@@ -95,18 +95,38 @@ mod tests {
         state.complete(4096, success(4096));
         assert!(!state.due(&settings, 4096, true));
     }
+    /// The positional form the tests read best; production code names the fields.
+    fn image<'a>(
+        width: usize,
+        height: usize,
+        color: &'a [[f32; 4]],
+        albedo: Option<&'a [[f32; 4]]>,
+        normal: Option<&'a [[f32; 4]]>,
+    ) -> Image<'a> {
+        Image {
+            width,
+            height,
+            color,
+            albedo,
+            normal,
+        }
+    }
     #[test]
     fn invalid_inputs_fail_before_initializing_gpu() {
         let _gpu_test = crate::test_gpu::lock();
         let mut processor = Processor::new().unwrap();
         assert!(
             processor
-                .process(2, 2, &[[0.0; 4]; 3], None, None, &Settings::default(), 1)
+                .process(
+                    image(2, 2, &[[0.0; 4]; 3], None, None),
+                    &Settings::default(),
+                    1
+                )
                 .is_err()
         );
         assert!(
             processor
-                .process(0, 2, &[], None, None, &Settings::default(), 1)
+                .process(image(0, 2, &[], None, None), &Settings::default(), 1)
                 .is_err()
         );
         assert!(processor.inner.is_none());
@@ -140,11 +160,7 @@ mod tests {
             };
             let result = processor
                 .process(
-                    width,
-                    height,
-                    &pixels,
-                    Some(&albedo),
-                    Some(&normal),
+                    image(width, height, &pixels, Some(&albedo), Some(&normal)),
                     &settings,
                     128,
                 )
@@ -173,11 +189,7 @@ mod tests {
         };
         let resized = processor
             .process(
-                17,
-                19,
-                &vec![[2.0, 1.5, 1.0, 1.0]; 17 * 19],
-                None,
-                None,
+                image(17, 19, &vec![[2.0, 1.5, 1.0, 1.0]; 17 * 19], None, None),
                 &settings,
                 128,
             )
@@ -320,20 +332,33 @@ struct Inner {
     readback: wgpu::Buffer,
     padded_row: u32,
 }
+/// The frame OIDN denoises: averaged colour plus the optional albedo / normal guides, each
+/// `width * height` pixels in raster order.
+pub struct Image<'a> {
+    pub width: usize,
+    pub height: usize,
+    pub color: &'a [[f32; 4]],
+    pub albedo: Option<&'a [[f32; 4]]>,
+    pub normal: Option<&'a [[f32; 4]]>,
+}
+
 impl Processor {
     pub fn new() -> Result<Self, String> {
         Ok(Self { inner: None })
     }
     pub fn process(
         &mut self,
-        width: usize,
-        height: usize,
-        color: &[[f32; 4]],
-        albedo: Option<&[[f32; 4]]>,
-        normal: Option<&[[f32; 4]]>,
+        image: Image<'_>,
         settings: &Settings,
         spp: u32,
     ) -> Result<Output, String> {
+        let Image {
+            width,
+            height,
+            color,
+            albedo,
+            normal,
+        } = image;
         let count = width
             .checked_mul(height)
             .ok_or("OIDN dimensions overflow")?;
@@ -548,7 +573,7 @@ impl Inner {
                 .map_err(|e| format!("OIDN mapped readback view: {e}"))?;
             let mut pixels = Vec::with_capacity(self.width as usize * self.height as usize);
             for row in mapped.chunks_exact(self.padded_row as usize) {
-                for pixel in row[..self.width as usize * 16].chunks_exact(16) {
+                for pixel in row[..self.width as usize * 16].as_chunks::<16>().0 {
                     pixels.push(std::array::from_fn(|channel| {
                         f32::from_le_bytes(pixel[channel * 4..channel * 4 + 4].try_into().unwrap())
                     }));

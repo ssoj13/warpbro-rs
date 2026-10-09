@@ -104,7 +104,7 @@ pub(crate) struct App {
     world: crate::world::WorldEditor,
     world_ui: crate::world_ui::WorldUi,
     preview: crate::preview::PreviewController,
-    preview_key: Option<(playa_graph::NodeId, u64, bool, u32, u32, usize, usize, u32)>,
+    preview_key: Option<PreviewKey>,
     preview_sequence: u64,
     material_targets: Vec<crate::world::NodeId>,
     material_selection_stamp: Option<(playa_graph::NodeId, u64, Option<crate::world::NodeId>, u64)>,
@@ -1401,7 +1401,7 @@ impl App {
             .renderer
             .try_command(Command::Thumbnail {
                 id,
-                scene: scene.clone(),
+                scene: Box::new(scene.clone()),
                 width,
                 height,
                 spp,
@@ -2055,7 +2055,7 @@ impl App {
         snapshot.camera = self.scene.camera;
         snapshot.colour = self.scene.colour.clone();
         snapshot.animation = Default::default();
-        snapshot.render = effective.render.clone();
+        snapshot.render = effective.render;
         let width = ((w as f32 * effective.resolution_scale).round() as usize).max(1);
         let height = ((h as f32 * effective.resolution_scale).round() as usize).max(1);
         self.target_spp = effective.samples;
@@ -3128,7 +3128,10 @@ impl App {
         );
         let monitor = Monitor::read(ui.ctx());
         let (output_hdr, white) = (monitor.hdr, monitor.white_nits);
-        if self.preview_key.is_some_and(|key| key.5 != w || key.6 != h) {
+        if self
+            .preview_key
+            .is_some_and(|key| key.width != w || key.height != h)
+        {
             self.preview.cancel();
             self.preview_key = None;
             self.world_ui.playing = false;
@@ -3182,12 +3185,25 @@ impl App {
     }
 }
 
+/// What a cached preview was rendered for: any difference makes the cache stale. Compared
+/// on repaint, so it holds identities and bits rather than the document itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PreviewKey {
+    document: playa_graph::NodeId,
+    revision: u64,
+    output_hdr: bool,
+    /// `f32::to_bits` of the display's SDR reference white (nits).
+    white_nits_bits: u32,
+    seed: u32,
+    width: usize,
+    height: usize,
+    /// The Still profile's sample target.
+    samples: u32,
+}
+
 impl App {
     /// Identify cached render content without serializing the document on repaint.
-    fn preview_identity(
-        &self,
-        ctx: &egui::Context,
-    ) -> (playa_graph::NodeId, u64, bool, u32, u32, usize, usize, u32) {
+    fn preview_identity(&self, ctx: &egui::Context) -> PreviewKey {
         let state =
             ctx.data(|d| d.get_temp::<egui_display::DisplayState>(egui_display::state_id()));
         let effective = self
@@ -3212,16 +3228,16 @@ impl App {
                     self.request.as_ref().map_or(360, |r| r.height),
                 )
             });
-        (
-            playa_graph::NodeId(self.world.document.graph.id),
-            self.world.revision(),
-            state.as_ref().is_some_and(|s| s.output.is_hdr()),
-            state.as_ref().map_or(100.0, |s| s.target.white).to_bits(),
-            self.seed,
-            extent.0.max(1),
-            extent.1.max(1),
-            effective.as_ref().map_or(0, |r| r.samples),
-        )
+        PreviewKey {
+            document: playa_graph::NodeId(self.world.document.graph.id),
+            revision: self.world.revision(),
+            output_hdr: state.as_ref().is_some_and(|s| s.output.is_hdr()),
+            white_nits_bits: state.as_ref().map_or(100.0, |s| s.target.white).to_bits(),
+            seed: self.seed,
+            width: extent.0.max(1),
+            height: extent.1.max(1),
+            samples: effective.as_ref().map_or(0, |r| r.samples),
+        }
     }
 
     /// The stamp rejects late frames after scrubbing or authoring; interactive
@@ -3246,10 +3262,10 @@ impl App {
             return;
         }
         let key = self.preview_identity(ctx);
-        if viewport.target_spp != key.7
-            || viewport.output_hdr != key.2
-            || viewport.white_nits.to_bits() != key.3
-            || viewport.seed != key.4
+        if viewport.target_spp != key.samples
+            || viewport.output_hdr != key.output_hdr
+            || viewport.white_nits.to_bits() != key.white_nits_bits
+            || viewport.seed != key.seed
         {
             return;
         }
@@ -3263,7 +3279,7 @@ impl App {
             self.make_preview_request(
                 self.world.document.first,
                 self.world.document.last,
-                key.7,
+                key.samples,
                 ctx,
             )
         };
@@ -3302,12 +3318,12 @@ impl App {
             first,
             last,
             fps: self.world.document.fps as f32,
-            width: key.5,
-            height: key.6,
+            width: key.width,
+            height: key.height,
             spp,
             seed: self.seed,
-            output_hdr: key.2,
-            white_nits: f32::from_bits(key.3),
+            output_hdr: key.output_hdr,
+            white_nits: f32::from_bits(key.white_nits_bits),
             cache_fraction: 0.05,
             reserve_gb: 2.0,
         }
@@ -3323,7 +3339,7 @@ impl App {
         self.world.finish_edit();
         self.preview_sequence = self.preview_sequence.wrapping_add(1);
         let key = self.preview_identity(ctx);
-        let request = self.make_preview_request(first, last, mode.samples(key.7), ctx);
+        let request = self.make_preview_request(first, last, mode.samples(key.samples), ctx);
         self.start_preview_request(request, mode.cache_all(), key);
     }
 
@@ -3331,7 +3347,7 @@ impl App {
         &mut self,
         request: crate::preview::PreviewRequest,
         cache_all: bool,
-        key: (playa_graph::NodeId, u64, bool, u32, u32, usize, usize, u32),
+        key: PreviewKey,
     ) {
         let first = request.first;
         match self.preview.start(request, cache_all) {
@@ -3391,13 +3407,12 @@ impl App {
                 }
             }
         }
-        if self.preview.displaying_preview() {
-            if let Some(request) = &mut self.request {
-                if request.active {
-                    request.active = false;
-                    self.renderer.request_viewport(request.clone());
-                }
-            }
+        if self.preview.displaying_preview()
+            && let Some(request) = &mut self.request
+            && request.active
+        {
+            request.active = false;
+            self.renderer.request_viewport(request.clone());
         }
         self.world_ui.cached_frames = self.preview.resident.clone();
         self.world_ui.cache_draft = self
@@ -3474,8 +3489,8 @@ impl App {
         // navigation evaluates the current pose before any authoring takes place.
         if self.preview.running()
             && self.preview_key.is_some_and(|key| {
-                key.0 == playa_graph::NodeId(self.world.document.graph.id)
-                    && key.1 == self.world.revision()
+                key.document == playa_graph::NodeId(self.world.document.graph.id)
+                    && key.revision == self.world.revision()
             })
         {
             return Ok(());
@@ -3571,18 +3586,18 @@ impl App {
                 || self.scene.render != before.render
                 || self.scene.colour != before.colour)
         {
-            if self.scene.camera != before.camera {
-                if let Err(error) = self.world.navigate_camera(
+            if self.scene.camera != before.camera
+                && let Err(error) = self.world.navigate_camera(
                     &self.scene,
                     edit_frame,
                     self.world_ui.auto_key,
                     camera_gesture,
-                ) {
-                    // Rejected navigation must not leave an unauthored viewport pose or inertia.
-                    self.evaluated_world = None;
-                    self.fly = None;
-                    self.status = error;
-                }
+                )
+            {
+                // Rejected navigation must not leave an unauthored viewport pose or inertia.
+                self.evaluated_world = None;
+                self.fly = None;
+                self.status = error;
             }
             let gesture = egui_attr_grid::edit_gesture(&ctx)
                 .or(camera_gesture)
@@ -4081,7 +4096,7 @@ mod tests {
             egui::vec2(128.0, 64.0),
         ));
         let key = app.preview_identity(&ctx);
-        let cached = app.make_preview_request(0, 10, key.7, &ctx);
+        let cached = app.make_preview_request(0, 10, key.samples, &ctx);
         assert_eq!((cached.width, cached.height, cached.spp), (96, 48, 41));
         assert_eq!(cached.render_profile, Some(policy.still_id));
         app.last_change = Instant::now() - std::time::Duration::from_secs(2);

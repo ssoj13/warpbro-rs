@@ -173,7 +173,7 @@ enum WorldMaterial {
 }
 impl WorldMaterial {
     fn from_upload(upload: &WorldUpload) -> Self {
-        let mut objects = upload.objects.chunks_exact(OBJECT_STRIDE);
+        let mut objects = upload.objects.as_chunks::<OBJECT_STRIDE>().0.iter();
         let Some(first) = objects.next() else {
             return Self::Mixed;
         };
@@ -649,10 +649,10 @@ impl Gpu {
     /// Read the accumulated scene-linear radiance without exposure, saturation or OCIO.
     /// Only final exports need this additional readback; CUDA uses padded 8×4 tiles.
     pub fn scene_linear(&self, target: &Target) -> Vec<[f32; 4]> {
-        if target.denoise_selected {
-            if let Some(output) = &target.denoise.output {
-                return output.clone();
-            }
+        if target.denoise_selected
+            && let Some(output) = &target.denoise.output
+        {
+            return output.clone();
         }
         self.raw_scene_linear(target)
     }
@@ -1109,11 +1109,13 @@ impl Gpu {
                 .get_or_insert_with(crate::denoise::Processor::new);
             let result = match processor {
                 Ok(processor) => processor.process(
-                    target.width,
-                    target.height,
-                    &scratch.color,
-                    albedo,
-                    normal,
+                    crate::denoise::Image {
+                        width: target.width,
+                        height: target.height,
+                        color: &scratch.color,
+                        albedo,
+                        normal,
+                    },
                     settings,
                     target.samples,
                 ),
@@ -2323,14 +2325,14 @@ mod tests {
         // the same escape iteration count. The old tetrahedral stencil errs 15..40 degrees here.
         // (The former points were closest samples of rays out of steps, not surface points.)
         let references = [
-            (316, 125, [-0.08490141, 0.18438966, -0.97917935]),
+            (316, 125, [-0.08490141, 0.18438966, -0.979_179_3]),
             (140, 189, [0.83308777, 0.40453982, 0.37724303]),
-            (215, 198, [0.21227319, 0.17521111, 0.96137462]),
-            (155, 208, [0.67414312, -0.60654477, -0.42146708]),
+            (215, 198, [0.212_273_2, 0.17521111, 0.96137462]),
+            (155, 208, [0.67414312, -0.606_544_8, -0.42146708]),
             (259, 232, [0.81196077, 0.44119635, 0.38218516]),
-            (280, 246, [0.85079439, -0.52109719, -0.067872074]),
-            (366, 263, [0.028329306, -0.4778096, 0.87800651]),
-            (180, 268, [0.75667956, -0.027518156, -0.65320655]),
+            (280, 246, [0.850_794_4, -0.521_097_2, -0.067_872_08]),
+            (366, 263, [0.028329306, -0.4778096, 0.878_006_5]),
+            (180, 268, [0.75667956, -0.027518156, -0.653_206_5]),
         ];
         let mut gpu = Gpu::new().unwrap();
         let mut target = gpu.target(384, 384);
@@ -2821,7 +2823,7 @@ mod tests {
     }
 
     #[test]
-    fn hdr_background_interpolates_texels_instead_of_showing_nearest_blocks() {
+    fn cuda_hdr_background_interpolates_texels_instead_of_showing_nearest_blocks() {
         let _gpu_test = crate::test_gpu::lock();
         let path = std::env::temp_dir().join(format!("frac-env-filter-{}.exr", std::process::id()));
         let texels: Vec<[f32; 4]> = (0..4)
@@ -2862,7 +2864,7 @@ mod tests {
     }
 
     #[test]
-    fn hdr_environment_lights_surfaces_and_preserves_background_radiance() {
+    fn cuda_hdr_environment_lights_surfaces_and_preserves_background_radiance() {
         let _gpu_test = crate::test_gpu::lock();
         let path = std::env::temp_dir().join(format!("frac-env-gpu-{}.exr", std::process::id()));
         crate::exr_io::write_rgb(

@@ -85,7 +85,7 @@ pub struct Frame {
     pub hdr_bytes: Arc<Vec<u8>>,
 }
 pub(crate) fn hdr_canvas_bytes(light: &[[f32; 4]], gain: f32) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(light.len() * std::mem::size_of::<[f32; 4]>());
+    let mut bytes = Vec::with_capacity(std::mem::size_of_val(light));
     for pixel in light {
         for value in [
             crate::color::oetf(pixel[0] * gain),
@@ -209,16 +209,18 @@ impl Frame {
 }
 
 pub enum Command {
+    /// The scene is boxed in both render commands so Command stays small in every queue
+    /// and in Result<(), Command> hand-backs.
     Thumbnail {
         id: u64,
-        scene: Scene,
+        scene: Box<Scene>,
         width: usize,
         height: usize,
         spp: u32,
     },
     RenderExport {
         id: u64,
-        scene: Scene,
+        scene: Box<Scene>,
         width: usize,
         height: usize,
         spp: u32,
@@ -561,10 +563,10 @@ impl Drop for RenderService {
         // Production never joins the UI thread. Tests must release the adapter only after the
         // worker has dropped its CUDA/OIDN resources, otherwise the next test races teardown.
         #[cfg(test)]
-        if let Some(worker) = self.worker_thread.take() {
-            if worker.join().is_err() {
-                log::error!("CUDA test worker panicked during shutdown");
-            }
+        if let Some(worker) = self.worker_thread.take()
+            && worker.join().is_err()
+        {
+            log::error!("CUDA test worker panicked during shutdown");
         }
     }
 }
@@ -1273,17 +1275,15 @@ fn run_worker(shared: &Shared) {
                 }
             }
         }
-        if let Some((generation, number)) = preview_seek {
-            if let Some(session) = preview
+        if let Some((generation, number)) = preview_seek
+            && let Some(session) = preview
                 .as_mut()
                 .filter(|p| p.cache.request.generation == generation)
-            {
-                if session.cache.index(number).is_some() {
-                    session.cache.manager.increment_generation();
-                    session.wanted = Some(number);
-                    // Presentation is served below after a reusable pool slot becomes available.
-                }
-            }
+            && session.cache.index(number).is_some()
+        {
+            session.cache.manager.increment_generation();
+            session.wanted = Some(number);
+            // Presentation is served below after a reusable pool slot becomes available.
         }
         if let Some(command) = command {
             match command {
@@ -1323,7 +1323,7 @@ fn run_worker(shared: &Shared) {
                         }
                         export = Some(RenderJob {
                             id,
-                            scene,
+                            scene: *scene,
                             target: gpu.target(width, height),
                             spp,
                             reply,
@@ -1337,7 +1337,7 @@ fn run_worker(shared: &Shared) {
                     height,
                     spp,
                 } => {
-                    let scene = match thumbnail_snapshot(scene) {
+                    let scene = match thumbnail_snapshot(*scene) {
                         Ok(scene) => scene,
                         Err(error) => {
                             push_event(shared, RenderEvent::Error(error));
@@ -1409,10 +1409,10 @@ fn run_worker(shared: &Shared) {
                 }
             }
         }
-        if export.is_none() {
-            if let Some(session) = &mut preview {
-                worked |= step_preview(&mut gpu, session, &mut presentations, shared, interactive);
-            }
+        if export.is_none()
+            && let Some(session) = &mut preview
+        {
+            worked |= step_preview(&mut gpu, session, &mut presentations, shared, interactive);
         }
         if let Some(job) = &mut thumbnail {
             if !interactive && !job.target.complete(job.spp) {
@@ -2146,7 +2146,7 @@ mod tests {
         service
             .try_command(Command::RenderExport {
                 id: 401,
-                scene,
+                scene: Box::new(scene),
                 width: 33,
                 height: 25,
                 spp: 2,

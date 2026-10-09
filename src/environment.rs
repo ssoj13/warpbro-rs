@@ -42,7 +42,12 @@ impl Map {
             return Err("Environment must be a lat-long .hdr or .exr image".into());
         }
         if extension.eq_ignore_ascii_case("exr") {
-            let (w, h, pixels, prims) = crate::exr_io::read_rgb(path)?;
+            let crate::exr_io::RgbImage {
+                width: w,
+                height: h,
+                pixels,
+                primaries: prims,
+            } = crate::exr_io::read_rgb(path)?;
             let m = crate::color::working_from(&prims)
                 .map_err(|e| format!("Environment {}: chromaticities: {e}", path.display()))?;
             return Self::from_pixels(

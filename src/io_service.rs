@@ -126,13 +126,13 @@ impl IoService {
                             }
                         }
                         Err(mpsc::RecvTimeoutError::Disconnected) => {
-                            if let Some((path, text)) = pending.lock().unwrap().take() {
-                                if let Err(error) = write(&path, &text) {
-                                    log::error!(
-                                        "Final settings save {} failed: {error}",
-                                        path.display()
-                                    );
-                                }
+                            if let Some((path, text)) = pending.lock().unwrap().take()
+                                && let Err(error) = write(&path, &text)
+                            {
+                                log::error!(
+                                    "Final settings save {} failed: {error}",
+                                    path.display()
+                                );
                             }
                             break;
                         }
