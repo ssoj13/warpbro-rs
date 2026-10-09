@@ -62,7 +62,7 @@ RELEASE_BIN = ROOT_DIR / "target" / "release" / BIN_NAME
 INSTALL_DIR = Path.home() / ".local" / "bin"
 
 CUDA_OXIDE_GIT = "ssh://git@github.com/ssoj13/cuda-oxide-windows.git"
-CUDA_OXIDE_REV = "f3f1098a776a630d8003f2229934e0563cdec252"
+CUDA_OXIDE_REV = "be40bf23b6636f2eb053cb7aa1b915fd707d25d5"
 RUST_COMPONENTS = ["rust-src", "rustc-dev", "rust-analyzer", "clippy", "rustfmt", "llvm-tools"]
 MIN_LLVM = 21
 MIN_CUDA_MAJOR = 13
