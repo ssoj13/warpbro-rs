@@ -1,5 +1,7 @@
 //! Render/quality catalog controls. All settings and references live in World nodes.
-use crate::render_profiles::{CatalogRole, ProfileTarget, ViewportMode};
+use crate::render_profiles::{
+    CatalogRole, ProfileTarget, RenderMethod, ViewportMode, ViewportRender,
+};
 use crate::world::{NodeId, WorldCommand, WorldEditor, WorldKind, WorldNodeInfo};
 use egui_widgets_config::icons as ph;
 use serde_json::json;
@@ -339,8 +341,30 @@ fn binding_controls(
     actions
 }
 
-/// Compact viewport controls share the same node references as the Settings panel.
-pub(crate) fn toolbar(ui: &mut egui::Ui, world: &mut WorldEditor, frame: f64) -> Actions {
+/// One line naming what the viewport renders, so motion switching is visible while it happens.
+fn active_summary(nodes: &[WorldNodeInfo], active: &ViewportRender) -> String {
+    let effective = &active.effective;
+    format!(
+        "{}: {} · {} · {} spp · {:.0}% resolution",
+        target_name(active.target),
+        profile_name(nodes, effective.profile),
+        match effective.method {
+            RenderMethod::Fast => "Fast",
+            RenderMethod::Full => "Full",
+        },
+        effective.samples,
+        effective.resolution_scale * 100.0
+    )
+}
+
+/// Compact viewport controls share the same node references as the Settings panel. The
+/// profile menu is labelled with the binding the viewport rendered last (`active`).
+pub(crate) fn toolbar(
+    ui: &mut egui::Ui,
+    world: &mut WorldEditor,
+    frame: f64,
+    active: Option<&ViewportRender>,
+) -> Actions {
     let mut actions = Actions::default();
     match (
         world.document.viewport_settings_id(),
@@ -369,8 +393,22 @@ pub(crate) fn toolbar(ui: &mut egui::Ui, world: &mut WorldEditor, frame: f64) ->
                     },
                 );
             }
-            ui.menu_button("Profiles", |ui| actions.merge(binding_controls(ui, world, false, frame)))
-                .response.on_hover_text("Auto uses Moving and Still profiles; Locked always uses Manual. Fast uses path tracing with approximate opaque materials and the selected quality.");
+            const ROUTING: &str = "Auto uses Moving and Still profiles; Locked always uses Manual. Fast uses path tracing with approximate opaque materials and the selected quality.";
+            let (label, hover) = match active {
+                Some(active) => {
+                    let nodes = world.document.render_profiles(Some(CatalogRole::Profile));
+                    (
+                        target_name(active.target),
+                        format!("{}\n\n{ROUTING}", active_summary(&nodes, active)),
+                    )
+                }
+                None => ("Profiles", ROUTING.to_owned()),
+            };
+            ui.menu_button(label, |ui| {
+                actions.merge(binding_controls(ui, world, false, frame))
+            })
+            .response
+            .on_hover_text(hover);
             for (path, before, label, tooltip) in [
                 (
                     "/viewport/paused",
@@ -866,12 +904,15 @@ mod tests {
         let output = world.document.output_render_profile().unwrap();
         let original = world.document.clone();
         let ctx = egui::Context::default();
+        // The profile menu is labelled with the binding the viewport rendered last.
+        let moving = world.document.viewport_render(at, true).unwrap();
         let draw = |ui: &mut egui::Ui, world: &mut WorldEditor| {
             ui.horizontal(|ui| {
-                assert!(toolbar(ui, world, 0.0).error.is_none());
+                assert!(toolbar(ui, world, 0.0, Some(&moving)).error.is_none());
             });
         };
         let painted = frame(&ctx, vec![], |ui| draw(ui, &mut world));
+        text_center(&painted, "Moving");
         let position = text_center(&painted, ph::PAUSE);
         frame(&ctx, pointer(position, true), |ui| draw(ui, &mut world));
         frame(&ctx, pointer(position, false), |ui| draw(ui, &mut world));

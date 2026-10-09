@@ -72,13 +72,22 @@ pub struct ViewportPolicy {
     pub frozen: bool,
 }
 impl ViewportPolicy {
-    pub fn selected(self, moving: bool) -> NodeId {
+    /// The binding the viewport renders: Auto follows motion between Moving and Still,
+    /// Locked always renders Manual.
+    pub fn selected(self, moving: bool) -> (ProfileTarget, NodeId) {
         match self.mode {
-            ViewportMode::Locked => self.manual_id,
-            ViewportMode::Auto if moving => self.moving_id,
-            ViewportMode::Auto => self.still_id,
+            ViewportMode::Locked => (ProfileTarget::Manual, self.manual_id),
+            ViewportMode::Auto if moving => (ProfileTarget::Moving, self.moving_id),
+            ViewportMode::Auto => (ProfileTarget::Still, self.still_id),
         }
     }
+}
+/// What the viewport renders in one UI frame: the policy's binding and its evaluated profile.
+/// The App keeps the one it sent to the worker so every indicator shows that exact choice.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ViewportRender {
+    pub target: ProfileTarget,
+    pub effective: EffectiveRender,
 }
 pub(crate) const QUALITY_RENDER_FIELDS: &[&str] = &[
     "max_steps",

@@ -420,19 +420,9 @@ impl App {
         .show(ui, rect, &mut state, |ui| {
             use egui_widgets_config::icons as ph;
             let frame = f64::from(self.world_ui.playhead);
-            let active_profile = self
-                .world
-                .document
-                .viewport_policy(frame)
-                .map(|policy| {
-                    policy.selected(
-                        self.world_ui.playing
-                            || self.last_change.elapsed().as_secs_f32() * 1000.0
-                                < policy.settle_delay_ms,
-                    )
-                })
-                .and_then(|id| self.world.document.effective_render(id, frame));
-            if let Ok(effective) = &active_profile {
+            // The binding the viewport actually renders; step_viewport is its only producer.
+            let active = self.viewport_render.clone();
+            if let Some(effective) = active.as_ref().map(|selection| &selection.effective) {
                 let mut exposure = effective.render.exposure_stops;
                 egui_viewport_toolbar::exposure_control(
                     ui,
@@ -480,14 +470,15 @@ impl App {
                 ui,
                 &mut self.world,
                 f64::from(self.world_ui.playhead),
+                active.as_ref(),
             );
             self.profile_ui_actions(actions);
             ui.separator();
             // A/B of the viewport only: the scene's denoise settings (World Settings) and exports
             // stay as authored, and denoising keeps running so switching back is instant.
-            let denoising = active_profile
+            let denoising = active
                 .as_ref()
-                .is_ok_and(|effective| effective.render.denoise.enabled);
+                .is_some_and(|selection| selection.effective.render.denoise.enabled);
             let mut shown = denoising && !self.raw_view;
             if ui
                 .add_enabled(denoising, egui::Button::selectable(shown, ph::PATH_TRACE))

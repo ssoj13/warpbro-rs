@@ -2123,13 +2123,18 @@ fn current_world_format_roundtrips_but_old_and_future_graph_versions_are_rejecte
 
 #[test]
 fn render_profiles_route_auto_locked_and_output_without_mutating_document() {
-    use crate::render_profiles::{RenderMethod, ViewportMode};
+    use crate::render_profiles::{ProfileTarget, RenderMethod, ViewportMode};
     let mut e = editor();
     let saved = e.document.clone();
     let output = e.document.output_render_profile().unwrap();
     let policy = e.document.viewport_policy(0.0).unwrap();
     let moving = e.document.viewport_render(0.0, true).unwrap();
     let still = e.document.viewport_render(0.0, false).unwrap();
+    assert_eq!(
+        (moving.target, still.target),
+        (ProfileTarget::Moving, ProfileTarget::Still)
+    );
+    let (moving, still) = (moving.effective, still.effective);
     assert_eq!(moving.profile, policy.moving_id);
     assert_eq!(moving.method, RenderMethod::Fast);
     assert_eq!(
@@ -2163,10 +2168,13 @@ fn render_profiles_route_auto_locked_and_output_without_mutating_document() {
         json!(policy.moving_id),
         0.0,
     );
-    assert_eq!(
-        e.document.viewport_render(0.0, false).unwrap().profile,
-        policy.moving_id
-    );
+    for moving in [true, false] {
+        let locked = e.document.viewport_render(0.0, moving).unwrap();
+        assert_eq!(
+            (locked.target, locked.effective.profile),
+            (ProfileTarget::Manual, policy.moving_id)
+        );
+    }
     let exported = e.document.snapshot(0.0).unwrap();
     assert_eq!(exported.render, saved.snapshot(0.0).unwrap().render);
     assert!(
@@ -2265,6 +2273,7 @@ fn live_render_profile_edits_reach_all_uuid_consumers_and_roundtrip() {
             e.document
                 .viewport_render(0.0, moving)
                 .unwrap()
+                .effective
                 .render
                 .max_bounces,
             5

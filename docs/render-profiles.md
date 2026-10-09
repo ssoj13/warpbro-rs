@@ -92,7 +92,7 @@ RenderSettings или QualitySettings видно всем потребителя
 ## Viewport и переключение при движении
 
 Toolbar viewport использует те же ссылки, что Settings → Render & Viewport. В нём доступны
-**Auto / Locked**, меню **Profiles**, pause и freeze. Через Profiles можно
+**Auto / Locked**, меню профилей, pause и freeze. Через меню профилей можно
 назначить Moving, Still и Manual, открыть профиль в Attribute Editor, создать
 новый или независимую копию и применить шаблон.
 
@@ -101,6 +101,13 @@ Toolbar viewport использует те же ссылки, что Settings �
 затем выбирается Still. Orbit, fly и scrubbing меняют сцену
 и используют этот же путь. В **Locked** всегда используется Manual, в том числе
 при движении камеры.
+
+Выбор делается в одном месте (`App::step_viewport` → `WorldDocument::viewport_render`)
+и сохраняется как `ViewportRender` (ветвь + вычисленный профиль), отправленный worker.
+Toolbar не пересчитывает выбор: кнопка меню профилей подписана активной ветвью
+(Moving / Still / Manual), подсказка показывает профиль, метод, samples и масштаб
+разрешения. Тест `camera_motion_routes_moving_until_settled` проверяет, что одна
+смена позы камеры включает Moving, после settle delay — Still, а в Locked — Manual.
 
 Runtime выбирает ветвь без перезаписи authored-ссылок и без новых Undo-записей.
 Samples и resolution scale берутся из выбранного QualitySettings. Размер

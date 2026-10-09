@@ -2515,8 +2515,12 @@ impl WorldDocument {
         &self,
         frame: f64,
         moving: bool,
-    ) -> Result<crate::render_profiles::EffectiveRender, String> {
-        self.effective_render(self.viewport_policy(frame)?.selected(moving), frame)
+    ) -> Result<crate::render_profiles::ViewportRender, String> {
+        let (target, id) = self.viewport_policy(frame)?.selected(moving);
+        Ok(crate::render_profiles::ViewportRender {
+            target,
+            effective: self.effective_render(id, frame)?,
+        })
     }
     fn settings_values(&self, id: NodeId, branch: &str, frame: f64) -> Result<Value, String> {
         let mut value = self.node(id)?["gpu"][branch].clone();

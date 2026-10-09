@@ -160,6 +160,8 @@ pub(crate) struct App {
     last_scene: Scene,
     /// Evaluated selected-profile scene; invalidated by graph revision, time or profile.
     viewport_scene: Option<(playa_graph::NodeId, u64, u64, Scene)>,
+    /// The profile binding sent with the last viewport request; the toolbar shows and edits it.
+    viewport_render: Option<crate::render_profiles::ViewportRender>,
     /// Viewport A/B: raw samples instead of the denoised image (view state, not the scene).
     raw_view: bool,
     /// Exposure parked by the toolbar's EV bypass (`exposure_control`).
@@ -563,6 +565,7 @@ impl App {
             origin: scene.clone(),
             last_scene: scene.clone(),
             viewport_scene: None,
+            viewport_render: None,
             scene: scene.clone(),
             world: crate::world::WorldEditor::new(crate::world::WorldDocument::from_scene(&scene)),
             world_ui: Default::default(),
@@ -1303,6 +1306,7 @@ impl App {
         self.scene_file_pending = None;
         self.evaluated_world = None;
         self.viewport_scene = None;
+        self.viewport_render = None;
         self.load_revision = self.load_revision.wrapping_add(1);
         let document = crate::world::WorldDocument::from_scene(&scene);
         self.world_ui.reset();
@@ -1962,10 +1966,12 @@ impl App {
         {
             Ok(policy) => policy,
             Err(error) => {
+                self.viewport_render = None;
                 self.status = error;
                 return;
             }
         };
+        // Frozen keeps the previous request, so the previous selection stays the displayed one.
         if policy.frozen {
             if let Some(request) = &mut self.request {
                 request.paused = true;
@@ -1989,17 +1995,19 @@ impl App {
         self.last_scene = snapshot.clone();
         let moving = self.world_ui.playing
             || self.last_change.elapsed().as_secs_f32() * 1000.0 < policy.settle_delay_ms;
-        let effective = match self
+        let selection = match self
             .world
             .document
             .viewport_render(f64::from(self.world_ui.playhead), moving)
         {
-            Ok(effective) => effective,
+            Ok(selection) => selection,
             Err(error) => {
+                self.viewport_render = None;
                 self.status = error;
                 return;
             }
         };
+        let effective = &selection.effective;
         let profile_key = (
             effective.profile,
             self.world.revision(),
@@ -2019,6 +2027,7 @@ impl App {
                     self.viewport_scene = Some((profile_key.0, profile_key.1, profile_key.2, scene))
                 }
                 Err(error) => {
+                    self.viewport_render = None;
                     self.status = error;
                     return;
                 }
@@ -2034,11 +2043,12 @@ impl App {
         snapshot.camera = self.scene.camera;
         snapshot.colour = self.scene.colour.clone();
         snapshot.animation = Default::default();
-        snapshot.render = effective.render;
+        snapshot.render = effective.render.clone();
         let width = ((w as f32 * effective.resolution_scale).round() as usize).max(1);
         let height = ((h as f32 * effective.resolution_scale).round() as usize).max(1);
         self.target_spp = effective.samples;
-        let preview = policy.mode == crate::render_profiles::ViewportMode::Auto && moving;
+        // Only the Moving binding is a disposable proxy; Locked motion keeps Manual's film.
+        let preview = selection.target == crate::render_profiles::ProfileTarget::Moving;
         let mut req = ViewportRequest {
             active: true,
             generation: self.generation,
@@ -2075,6 +2085,7 @@ impl App {
             self.world.revision(),
             self.world_ui.playhead,
         ));
+        self.viewport_render = Some(selection);
         self.renderer.request_viewport(req.clone());
         self.request = Some(req);
     }
@@ -3132,7 +3143,8 @@ impl App {
             .world
             .document
             .viewport_render(f64::from(self.world_ui.playhead), false)
-            .ok();
+            .ok()
+            .map(|selection| selection.effective);
         let extent = self
             .viewport_rect
             .map(|rect| {
@@ -3235,7 +3247,7 @@ impl App {
                 .document
                 .viewport_policy(f64::from(first))
                 .ok()
-                .map(|policy| policy.selected(false)),
+                .map(|policy| policy.selected(false).1),
             first,
             last,
             fps: self.world.document.fps as f32,
@@ -4085,6 +4097,81 @@ mod tests {
             (frozen.width, frozen.height, &frozen.scene)
         );
         assert!(request.paused);
+    }
+
+    /// Navigation (flight or orbit) writes the camera pose before `step_viewport`; that change
+    /// alone must route Auto to Moving, back to Still after the settle delay, and Locked to Manual.
+    #[test]
+    fn camera_motion_routes_moving_until_settled() {
+        let _gpu_test = crate::test_gpu::lock();
+        use crate::render_profiles::ProfileTarget;
+        use crate::world::WorldCommand;
+        use serde_json::json;
+        let mut app = App::new();
+        let viewport = app.world.document.viewport_settings_id().unwrap();
+        app.world
+            .execute(WorldCommand::SetAttribute {
+                id: viewport,
+                path: "/viewport/settle_delay_ms".into(),
+                value: json!(40.0),
+                frame: 0.0,
+            })
+            .unwrap();
+        let policy = app.world.document.viewport_policy(0.0).unwrap();
+        let settle = || std::thread::sleep(std::time::Duration::from_millis(120));
+        let routed = |app: &App| {
+            let selection = app.viewport_render.as_ref().unwrap();
+            let request = app.request.as_ref().unwrap();
+            (
+                selection.target,
+                selection.effective.profile,
+                request.interactive,
+                request.preview,
+            )
+        };
+        app.step_viewport(64, 32, false, 100.0);
+        settle();
+        app.step_viewport(64, 32, false, 100.0);
+        assert_eq!(
+            routed(&app),
+            (ProfileTarget::Still, policy.still_id, false, false),
+            "an unchanged scene settles"
+        );
+        app.scene.camera.yaw_degrees += 5.0;
+        app.step_viewport(64, 32, false, 100.0);
+        assert_eq!(
+            routed(&app),
+            (ProfileTarget::Moving, policy.moving_id, true, true)
+        );
+        let moving = app.request.clone().unwrap();
+        assert_eq!((moving.width, moving.height), (32, 16));
+        app.step_viewport(64, 32, false, 100.0);
+        assert_eq!(
+            routed(&app).0,
+            ProfileTarget::Moving,
+            "a still frame inside the settle delay keeps the moving proxy"
+        );
+        settle();
+        app.step_viewport(64, 32, false, 100.0);
+        assert_eq!(
+            routed(&app),
+            (ProfileTarget::Still, policy.still_id, false, false)
+        );
+        app.world
+            .execute(WorldCommand::SetAttribute {
+                id: viewport,
+                path: "/viewport/mode".into(),
+                value: json!("Locked"),
+                frame: 0.0,
+            })
+            .unwrap();
+        app.scene.camera.yaw_degrees += 5.0;
+        app.step_viewport(64, 32, false, 100.0);
+        assert_eq!(
+            routed(&app),
+            (ProfileTarget::Manual, policy.manual_id, true, false),
+            "Locked motion keeps Manual's film instead of a proxy"
+        );
     }
 
     #[test]
