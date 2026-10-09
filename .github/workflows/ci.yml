@@ -1,6 +1,6 @@
 name: CI and release
 
-# Hosted runners have no GPU: they check, lint, run every test not named cuda_* (see
+# Hosted runners have no GPU: they check, lint, run every test not named cuda_* / gpu_* (see
 # src/test_gpu.rs), build the release for sm_75 and package it. CUDA tests stay local
 # (python bootstrap.py b; cargo oxide test). A v* tag also publishes the archives.
 

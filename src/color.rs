@@ -322,7 +322,7 @@ mod tests {
         }
     }
     #[test]
-    fn shared_gpu_matches_ocio_cpu() {
+    fn gpu_shared_device_matches_ocio_cpu() {
         let _gpu_test = crate::test_gpu::lock();
         let _ = env_logger::try_init();
         let mut pipeline = ColorPipeline::new();

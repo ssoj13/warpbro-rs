@@ -2172,7 +2172,7 @@ mod tests {
     /// expose stale references. Set WARP_BRO_VIDEO_FIXTURE to retain RGB oracles
     /// and movies for an independent decoder comparison.
     #[test]
-    fn hevc_motion_fixture_encodes_every_source_frame() {
+    fn gpu_hevc_motion_fixture_encodes_every_source_frame() {
         let _gpu_test = crate::test_gpu::lock();
         use std::io::Write;
         let retained = std::env::var_os("WARP_BRO_VIDEO_FIXTURE");

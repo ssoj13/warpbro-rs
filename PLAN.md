@@ -334,7 +334,7 @@ Merged with a stopped agent's WIP and WITHOUT a full build (usage limit): first 
     ids, select vs assign intents, one transaction per gesture) first; pilot in Playa.
 17. ofx-rs fractal kernel copy still uses pcg4d white noise and no adaptive sampling: resync with the
     Owen-Sobol sampler and `active` / `moment` buffers, or record that ofx-rs keeps its own (low).
-18. Kvazaar inter-prediction corruption (repro: export.rs `hevc_motion_fixture_encodes_every_source_frame`)
+18. Kvazaar inter-prediction corruption (repro: export.rs `gpu_hevc_motion_fixture_encodes_every_source_frame`)
     is mitigated by I-frames only; file it in ffmpeg-rs (low).
 19. Deferred: HDR environment blending, area lights (operator decision; low).
 

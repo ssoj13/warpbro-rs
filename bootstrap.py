@@ -27,7 +27,7 @@ Commands:
     docs          Rebuild the README images in docs/ (needs uv for Pillow)
     i(nstall)     Copy the release binary to ~/.local/bin/WarpBro
     c(heck)       cargo fmt --check + cargo clippy
-    ci            Hosted CI without a GPU: toolchain, check, tests (--skip cuda_), build, dist/*.zip
+    ci            Hosted CI without a GPU: toolchain, check, tests (--skip cuda_ gpu_), build, dist/*.zip
     cl(ean)       cargo clean (+ stray *.ll / *.ptx dumps in the repo root)
     h(elp)        Print help
 
@@ -72,6 +72,8 @@ MIN_CUDA_MAJOR = 13
 # driver for the installed GPU on first launch.
 CI_ARCH = "sm_75"
 DIST_DIR = ROOT_DIR / "dist"
+# Test-name prefixes of device tests (src/test_gpu.rs): CUDA, and other GPU APIs (wgpu, Vulkan Video).
+GPU_TEST_PREFIXES = ("cuda_", "gpu_")
 
 
 class C:
@@ -554,7 +556,7 @@ def package() -> Path:
 
 def run_ci(args: argparse.Namespace) -> int:
     """Everything a hosted, GPU-less runner can verify, in order, stopping at the first failure:
-    toolchain, fmt + clippy, the ordinary suite without CUDA (`--skip cuda_`, see
+    toolchain, fmt + clippy, the ordinary suite without device tests (GPU_TEST_PREFIXES, see
     src/test_gpu.rs), the release build for CI_ARCH, and the release archive."""
     header("CI")
     args.no_gpu = True
@@ -562,8 +564,8 @@ def run_ci(args: argparse.Namespace) -> int:
     stages = [
         ("Toolchain", lambda: 0 if doctor(fix=True, full=False, gpu=False) else 1),
         ("Format and clippy", lambda: run_check(args)),
-        ("Tests without a GPU", lambda: run(["cargo", "oxide", "test", "--", "--release", "--locked",
-                                             "--", "--skip", "cuda_"])[0]),
+        ("Tests without a GPU", lambda: run(["cargo", "oxide", "test", "--", "--release", "--locked", "--",
+                                             *(a for p in GPU_TEST_PREFIXES for a in ("--skip", p))])[0]),
         ("Release build", lambda: build(args)),
     ]
     for name, stage in stages:
@@ -613,7 +615,7 @@ COMMANDS
   docs    regenerate docs/ (README images, bench table)
   i       install to ~/.local/bin (copies the release binary; -f rebuilds)
   c       cargo fmt --check + cargo clippy --all-targets -D warnings
-  ci      what hosted CI runs (no GPU): d --fix, c, tests --skip cuda_, build, dist/*.zip
+  ci      what hosted CI runs (no GPU): d --fix, c, tests --skip cuda_ gpu_, build, dist/*.zip
   cl      cargo clean (+ *.ll / *.ptx dumps)
   h       help
 
