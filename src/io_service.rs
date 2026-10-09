@@ -6,10 +6,25 @@ use std::{
     thread,
 };
 
-fn report(done: &mpsc::Sender<Result<String, String>>, result: Result<String, String>) {
-    if let Err(mpsc::SendError(result)) = done.send(result) {
-        log::warn!("Filesystem result has no receiver: {result:?}");
+/// Deliver a finished result to the app. When the app has gone (receiver dropped) nobody can
+/// show it, so it is logged, described by `describe`, rather than lost silently.
+fn deliver<T>(channel: &mpsc::Sender<T>, value: T, describe: impl FnOnce(&T) -> String) {
+    if let Err(mpsc::SendError(value)) = channel.send(value) {
+        log::warn!("Filesystem result has no receiver: {}", describe(&value));
     }
+}
+
+fn report(done: &mpsc::Sender<Result<String, String>>, result: Result<String, String>) {
+    deliver(done, result, |result| format!("{result:?}"));
+}
+
+/// A scene event without its document: id, path and the outcome.
+fn describe_scene(event: &SceneEvent) -> String {
+    let outcome = match &event.result {
+        Ok(_) => "ok".to_owned(),
+        Err(error) => error.clone(),
+    };
+    format!("scene {} {}: {outcome}", event.id, event.path.display())
 }
 
 pub enum Command {
@@ -106,7 +121,7 @@ impl IoService {
                                 .map_err(|error| error.to_string())
                                 .and_then(|text| decode_scene(&text))
                                 .map(|scene| Some(Box::new(scene)));
-                            let _ = scene_done.send(SceneEvent { id, path, result });
+                            deliver(&scene_done, SceneEvent { id, path, result }, describe_scene);
                         }
                         Ok(Command::SaveScene { id, path, document }) => {
                             let result = serde_json::to_string_pretty(&document)
@@ -115,10 +130,17 @@ impl IoService {
                                     write(&path, &text).map_err(|error| error.to_string())
                                 })
                                 .map(|_| None);
-                            let _ = scene_done.send(SceneEvent { id, path, result });
+                            deliver(&scene_done, SceneEvent { id, path, result }, describe_scene);
                         }
                         Ok(Command::RefreshTemplates { directory }) => {
-                            let _ = template_done.send(crate::templates::catalog(&directory));
+                            deliver(
+                                &template_done,
+                                crate::templates::catalog(&directory),
+                                |result| match result {
+                                    Ok(entries) => format!("{} templates", entries.len()),
+                                    Err(error) => error.clone(),
+                                },
+                            );
                         }
                         Ok(Command::Delete(path)) => {
                             if let Err(e) = std::fs::remove_file(path) {
