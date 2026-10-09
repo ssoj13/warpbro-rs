@@ -77,28 +77,15 @@ unfinished gates. No extra approval is needed for the already authorized scope.
   movies are skipped after relevant tests pass and are not mandatory completion blockers.
   Five mandatory nullable LMB-recall/RMB-store camera slots and named preset buttons remain
   incomplete WarpBro OCIO/proxy/denoise/snapshot/full-toolbar parity.
-- [ ] Finish WarpBro full DE-boundary performance acceptance after published docs `d1bc4ba8`
-  and production source
-  `cd505435cfafff60102f6038e55fb44d148f8e36` (four files: lock/app/gpu/ocio), following
-  baseline `301b61e`. d411 integration passed plain all-target in 28.01s, no warnings.
-  Strict clippy stopped at the existing fractal-materials eight-argument factory before
-  WarpBro linting; no strict WarpBro clippy PASS. Earlier schema gate recorded 256
-  passed / one failed / nine ignored; its remaining lens fixture was fixed and four targeted
-  lens tests passed. Actual OIDN HDR/all-quality, PNG-video PQ HEVC/PQ ProRes/HLG HEVC/SDR
-  ProRes tags+CLL, and Vulkan partial exact `24000/1001` each passed one gate. Specialized
-  radiance/all guides are now exact on all four routes with unchanged tolerance; 15 OCIO
-  tests passed, including invalid-input/look warm-cache. Ordinary oxide `27252` passed 254,
-  zero failed, ten intentionally ignored, four previously certified native-movie fixtures
-  filtered, in 35.80s; no movie reruns. Full DE boundary remains about
-  27–28% slower. Narrow affine attempt failed the original oracle because the compiler
-  dropped inline-never intent; it was reverted and correct published source is frozen.
-  Authorized cuda-oxide inline-intent propagation fix is pending plan/compile in an owned
-  producer checkout/tool build, not a global replacement. Do not mark performance accepted
-  or WarpBro complete from the numerical/OCIO receipts.
-  Producer base `C:/projects/projects.rust.cg/nv/cuda-oxide-windows` is tracked-clean
-  `f3f1098`; isolated candidate worktree is planned. Proposed canonical InlineIntent
-  Default/Hint/Always/Never maps Rust Always/Force to Always and propagates attributes
-  through MIR to LLVM; implementation/acceptance is pending.
+- [x] DE-boundary performance recovered (2026-10-09). cuda-oxide fork `be40bf2` carries every
+  `#[inline]` intent to LLVM (`noinline` included; InlineIntent in reserved-oxide-symbols,
+  MirFuncOp accessors, lowered into llvm_func_attrs). With it the narrow boundary holds:
+  `bulb_estimate` is inlined into the march again and only `inverse_affine` (the world
+  object's 3x4 inverse, 12 values) stays out of line. Route oracle: all exact routes
+  bit-identical, single-bulb route max_abs 2.4e-7 (contract 3e-5). Alternating A/B,
+  512x512 64 spp, medians of 5: fast-metal 6.57 -> 8.38 Msamples/s (+27.5%), ember-mid
+  5.42 -> 5.66 (+4.4%, bit-identical image). fast-metal image vs the old kernels: RMSE
+  3.7e-3 against seed-to-seed noise 4.1e-2, means equal to 1e-4. Ordinary suite 277/0.
 - [ ] Finish the native app queue: COLMAP seven/seven actual ingest tests and 35m30s native
   release passed at 8c4+9d. Its coherent-d411 follow-up
   `8d44976db7e76f3a1f34ab535d72eb3cdd365d7c` is published; cached native `43593` is

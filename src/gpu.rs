@@ -705,19 +705,19 @@ pub mod kernels {
             );
         }
         let b = ctx.object * OBJECT_STRIDE + O_INVERSE;
+        inverse_affine(&ctx.objects[b..b + 12], x)
+    }
+
+    /// A world object's inverse affine (row-major 3x4) applied to `x`. Out of line so every
+    /// route (specialized, mixed-world) contracts this stencil into the same FMAs: the oracle
+    /// compares the routes bit for bit. It takes only the 12 matrix values, so the call costs
+    /// a pointer, not the whole `Context`.
+    #[inline(never)]
+    fn inverse_affine(m: &[f32], x: V3) -> V3 {
         [
-            ctx.objects[b] * x[0]
-                + ctx.objects[b + 1] * x[1]
-                + ctx.objects[b + 2] * x[2]
-                + ctx.objects[b + 3],
-            ctx.objects[b + 4] * x[0]
-                + ctx.objects[b + 5] * x[1]
-                + ctx.objects[b + 6] * x[2]
-                + ctx.objects[b + 7],
-            ctx.objects[b + 8] * x[0]
-                + ctx.objects[b + 9] * x[1]
-                + ctx.objects[b + 10] * x[2]
-                + ctx.objects[b + 11],
+            m[0] * x[0] + m[1] * x[1] + m[2] * x[2] + m[3],
+            m[4] * x[0] + m[5] * x[1] + m[6] * x[2] + m[7],
+            m[8] * x[0] + m[9] * x[1] + m[10] * x[2] + m[11],
         ]
     }
 
@@ -752,8 +752,8 @@ pub mod kernels {
     }
 
     /// Share transformed Mandelbulb arithmetic across the runtime and specialized routes.
-    /// The call boundary prevents caller-specific contraction of its DE/affine stencil.
-    #[inline(never)]
+    /// Inlined: the hot march pays no call; `inverse_affine` alone keeps a call boundary.
+    #[inline(always)]
     fn bulb_estimate(ctx: Context<'_>, x: V3, trap_mode: u32, world_clip: bool) -> (f32, f32) {
         let q = object_point(ctx, x);
         let (d, trap) = bulb_distance(ctx, q, trap_mode);
