@@ -1,0 +1,5 @@
+# cargo-oxide project config (read by every `cargo oxide` command; `--arch` overrides it).
+# Embedded PTX targets Turing (sm_75), the oldest supported GPU; the driver JIT-compiles it for
+# the installed GPU on first launch. Builds without it would follow the backend default, which
+# upstream moves between releases.
+default-arch = "sm_75"

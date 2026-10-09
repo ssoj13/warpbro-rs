@@ -29,8 +29,11 @@ egui-widgets-rs. Topic docs (how things work) live in docs/; this file only trac
   OutputSettings (the export recipe), with Profile / Template catalogs; preferences keep only the
   export job (name, range, cadence). Viewport routing has one producer (`App::step_viewport` ->
   `ViewportRender`) and the toolbar shows the active binding. Details: docs/render-profiles.md.
-- **cuda-oxide fork** `be40bf2` carries every `#[inline]` intent to LLVM (`noinline` included);
-  the lock, bootstrap's cargo-oxide pin and the installed tool match it.
+- **cuda-oxide fork** `ssoj13/cuda-rust-windows` `81ea1f8` (renamed from cuda-oxide-windows,
+  synced with the NVIDIA/cuda-rust monorepo via ansidium) carries every `#[inline]` intent to LLVM
+  (`noinline` included). cuda-core, cuda-host and cuda-device all come from it; the lock,
+  bootstrap's cargo-oxide pin and the installed tool match it. `.cargo/cuda-oxide.toml` fixes
+  `default-arch = "sm_75"` for every build and test.
 - **DE boundary** narrowed to `inverse_affine`: fast-metal +27.5%, exact routes bit-identical.
 - **Lint**: `cargo fmt --check` and `clippy --all-targets -D warnings` pass on the whole crate.
 - **CI** (branch `ci/github-actions`, not merged yet): `python bootstrap.py ci` on Windows and
@@ -46,7 +49,8 @@ egui-widgets-rs. Topic docs (how things work) live in docs/; this file only trac
 2. **First launch of a release build JIT-compiles ~9 MB of sm_75 PTX** (minutes on a cold driver
    cache; README tells users to run `WarpBro --warmup-cuda` once). Fix: shipping cubins needs the
    cuda-oxide constant-memory contract (see Findings: cubin) fixed in the fork, then CI
-   materializes cubins for the supported architectures.
+   materializes cubins for the supported architectures. Re-test first: since the 2026-10 upstream
+   sync, device globals are emitted as `__device_global_<hash>_N`.
 3. **Kernel entry points**: 20 near-identical `#[kernel]` bodies with an 8-parameter launch ABI
    (one documented `#[expect(clippy::too_many_arguments)]`). Generate them from one
    `macro_rules!` and pass a `#[repr(C)]` parameter block (grid constant); embedded PTX must stay
@@ -120,7 +124,9 @@ egui-widgets-rs. Topic docs (how things work) live in docs/; this file only trac
 - `cargo oxide` keeps one backend cache per machine (`~/.cargo/cuda-oxide`): two concurrent builds
   against different cuda-oxide revisions overwrite each other's backend. Build them in sequence.
 - `--arch` changes the backend flags, so every crate's fingerprint: tests and builds that should
-  share artifacts must pass the same `--arch` (bootstrap.py ci does).
+  share artifacts need the same arch. `default-arch` in `.cargo/cuda-oxide.toml` gives them one;
+  without it builds follow the backend default, which moved from sm_75 to sm_80 in the 2026-10
+  upstream sync.
 - The Windows LLVM installer has no `llc`; the clang+llvm release archive does. cuda-oxide also
   runs `opt` and `llvm-link` from llc's directory.
 - Many sources here are CRLF on disk: scripted replacements must match `\r\n` (or use Edit).

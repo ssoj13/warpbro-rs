@@ -63,14 +63,11 @@ BIN_NAME = "WarpBro.exe" if IS_WINDOWS else "WarpBro"
 RELEASE_BIN = ROOT_DIR / "target" / "release" / BIN_NAME
 INSTALL_DIR = Path.home() / ".local" / "bin"
 
-CUDA_OXIDE_GIT = "ssh://git@github.com/ssoj13/cuda-oxide-windows.git"
-CUDA_OXIDE_REV = "be40bf23b6636f2eb053cb7aa1b915fd707d25d5"
+CUDA_OXIDE_GIT = "ssh://git@github.com/ssoj13/cuda-rust-windows.git"
+CUDA_OXIDE_REV = "81ea1f84b25aba046d6ea3b35b20b35a600b2ef1"
 RUST_COMPONENTS = ["rust-src", "rustc-dev", "rust-analyzer", "clippy", "rustfmt", "llvm-tools"]
 MIN_LLVM = 21
 MIN_CUDA_MAJOR = 13
-# CI builds without a GPU to detect: PTX for Turing (sm_75) and newer, JIT-compiled by the
-# driver for the installed GPU on first launch.
-CI_ARCH = "sm_75"
 DIST_DIR = ROOT_DIR / "dist"
 # Test-name prefixes of device tests (src/test_gpu.rs): CUDA, and other GPU APIs (wgpu, Vulkan Video).
 GPU_TEST_PREFIXES = ("cuda_", "gpu_")
@@ -361,14 +358,19 @@ def run_doctor(args: argparse.Namespace) -> int:
 # build / run / render
 # =============================================================================
 
+def arch_args(args: argparse.Namespace) -> list[str]:
+    """`--arch` only when given; otherwise cargo-oxide reads default-arch from
+    .cargo/cuda-oxide.toml, the one place the shipped architecture is set."""
+    arch = getattr(args, "arch", None)
+    return ["--arch", arch] if arch else []
+
+
 def build(args: argparse.Namespace) -> int:
     no_gpu = getattr(args, "no_gpu", False)
     if not doctor(fix=False, full=False, gpu=not no_gpu):
         err("Toolchain incomplete: python bootstrap.py d --fix")
         return 1
-    cmd = ["cargo", "oxide", "build"]
-    if getattr(args, "arch", None):
-        cmd += ["--arch", args.arch]
+    cmd = ["cargo", "oxide", "build", *arch_args(args)]
     step("cargo oxide build (release; embedded PTX)")
     print()
     code, _, elapsed = run(cmd)
@@ -557,16 +559,15 @@ def package() -> Path:
 def run_ci(args: argparse.Namespace) -> int:
     """Everything a hosted, GPU-less runner can verify, in order, stopping at the first failure:
     toolchain, fmt + clippy, the ordinary suite without device tests (GPU_TEST_PREFIXES, see
-    src/test_gpu.rs), the release build for CI_ARCH, and the release archive."""
+    src/test_gpu.rs), the release build, and the release archive."""
     header("CI")
     args.no_gpu = True
-    args.arch = args.arch or CI_ARCH
     stages = [
         ("Toolchain", lambda: 0 if doctor(fix=True, full=False, gpu=False) else 1),
         ("Format and clippy", lambda: run_check(args)),
-        # The same --arch as the release build: equal backend flags let the build reuse every
+        # The same arch as the release build: equal backend flags let the build reuse every
         # crate the tests compiled (otherwise the whole graph builds twice).
-        ("Tests without a GPU", lambda: run(["cargo", "oxide", "test", "--arch", args.arch, "--",
+        ("Tests without a GPU", lambda: run(["cargo", "oxide", "test", *arch_args(args), "--",
                                              "--release", "--locked", "--",
                                              *(a for p in GPU_TEST_PREFIXES for a in ("--skip", p))])[0]),
         ("Release build", lambda: build(args)),
@@ -623,7 +624,7 @@ COMMANDS
   h       help
 
 OPTIONS
-  --arch sm_86     target architecture for b / r / ci (default: detected GPU; ci: sm_75)
+  --arch sm_86     target architecture for b / r / ci (default: default-arch in .cargo/cuda-oxide.toml)
   --no-gpu         b: build without a GPU (no device check, no CUDA warmup)
   --fix            doctor: install what can be installed without sudo
   -f, --force      install: rebuild first

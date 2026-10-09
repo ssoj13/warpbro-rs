@@ -28,10 +28,10 @@ playa-coord = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "main" }
 playa-events = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "main" }
 egui-outliner = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
 # Our Windows fork includes the Rust 1.99 backend fixes.
-cuda-device = { git = "ssh://git@github.com/ssoj13/cuda-oxide-windows.git", branch = "main" }
-cuda-host = { git = "ssh://git@github.com/ssoj13/cuda-oxide-windows.git", branch = "main" }
-# Third-party: the exact source cuda-oxide-windows declares, so cuda-host and we share one cuda-core.
-cuda-core = { git = "https://github.com/ansidium/cutile-rs", rev = "b4eae9b2a783eba8e18587aa2b760f985a07f866" }
+cuda-device = { git = "ssh://git@github.com/ssoj13/cuda-rust-windows.git", branch = "main" }
+cuda-host = { git = "ssh://git@github.com/ssoj13/cuda-rust-windows.git", branch = "main" }
+# The monorepo ships cuda-core next to cuda-host; one source keeps a single cuda-core in the graph.
+cuda-core = { git = "ssh://git@github.com/ssoj13/cuda-rust-windows.git", branch = "main" }
 egui = "0.36"
 egui_dock = { version = "0.21", features = ["serde"] }
 egui-dock-layout = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
