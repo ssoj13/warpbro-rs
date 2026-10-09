@@ -54,7 +54,10 @@ jobs:
           DEPS_TOKEN: ${{ secrets.DEPS_TOKEN }}
         run: |
           test -n "$DEPS_TOKEN" || { echo "::error::DEPS_TOKEN secret is missing"; exit 1; }
-          git config --global url."https://x-access-token:${DEPS_TOKEN}@github.com/".insteadOf "ssh://git@github.com/"
+          # Both SSH spellings: Cargo.toml uses ssh://, git submodules (kvz-rs) use scp-style.
+          base="https://x-access-token:${DEPS_TOKEN}@github.com/"
+          git config --global url."$base".insteadOf "ssh://git@github.com/"
+          git config --global --add url."$base".insteadOf "git@github.com:"
 
       # The full CUDA toolkit does not fit beside the image's preinstalled SDKs on the
       # Ubuntu runner's root disk; drop the ones this build never uses.
