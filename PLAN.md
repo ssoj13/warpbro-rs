@@ -29,29 +29,31 @@ egui-widgets-rs. Topic docs (how things work) live in docs/; this file only trac
   OutputSettings (the export recipe), with Profile / Template catalogs; preferences keep only the
   export job (name, range, cadence). Viewport routing has one producer (`App::step_viewport` ->
   `ViewportRender`) and the toolbar shows the active binding. Details: docs/render-profiles.md.
-- **cuda-oxide fork** `ssoj13/cuda-rust-windows` `314033b` (renamed from cuda-oxide-windows,
+- **cuda-oxide fork** `ssoj13/cuda-rust-windows` `750e60b` (renamed from cuda-oxide-windows,
   synced with the NVIDIA/cuda-rust monorepo via ansidium) carries every `#[inline]` intent to LLVM
-  (`noinline` included) and pins release codegen in the Cargo profile instead of rustflags, so
-  `test -- --release` then `build` compiles 1 crate instead of ~680 (CI built everything twice). cuda-core, cuda-host and cuda-device all come from it; the lock,
+  (`noinline` included), pins release codegen in the Cargo profile instead of rustflags (so
+  `test -- --release` then `build` compiles 1 crate instead of ~680), and keeps `#[constant]`
+  memory through cubin LTO (see Findings: cubin). cuda-core, cuda-host and cuda-device all come
+  from it; the lock,
   bootstrap's cargo-oxide pin and the installed tool match it. `.cargo/cuda-oxide.toml` fixes
   `default-arch = "sm_75"` for every build and test.
 - **DE boundary** narrowed to `inverse_affine`: fast-metal +27.5%, exact routes bit-identical.
 - **Lint**: `cargo fmt --check` and `clippy --all-targets -D warnings` pass on the whole crate.
-- **CI** (branch `ci/github-actions`, not merged yet): `python bootstrap.py ci` on Windows and
-  Linux runners (no GPU): toolchain, fmt + clippy, tests without cuda_/gpu_, release build for
-  sm_75, `dist/warpbro-<version>-<platform>.zip`; a `v*` tag publishes both archives. Both
-  platforms passed (253 tests each). The repo is public, so runner minutes are free.
+- **CI** (on main): `python bootstrap.py ci` on Windows and Linux runners (no GPU): toolchain,
+  fmt + clippy, tests without cuda_/gpu_, release build for sm_75,
+  `dist/warpbro-<version>-<platform>.zip`; a `v*` tag publishes both archives. Warm runs take
+  ~24 min; the Rust caches are keyed on the cuda-oxide revision (Windows 4.8 + Linux 4.1 GB of
+  the 10 GB repo limit). The repo is public, so runner minutes are free.
 
 ## Open work (priority order)
 
-1. **CI finish**: with the profile-pin fork (one compile of the graph per job) confirm both Rust
-   caches plus the trimmed LLVM cache fit the 10 GB repo limit (before: Windows 5.8 + Linux 5.1 GB
-   holding two variants of every crate), then merge into main.
-2. **First launch of a release build JIT-compiles ~9 MB of sm_75 PTX** (minutes on a cold driver
-   cache; README tells users to run `WarpBro --warmup-cuda` once). Fix: shipping cubins needs the
-   cuda-oxide constant-memory contract (see Findings: cubin) fixed in the fork, then CI
-   materializes cubins for the supported architectures. Re-test first: since the 2026-10 upstream
-   sync, device globals are emitted as `__device_global_<hash>_N`.
+1. **Ship cubins instead of a cold PTX JIT.** A release JIT-compiles ~9 MB of sm_75 PTX on first
+   launch (84 s for one CUDA test with the driver cache disabled; README tells users to run
+   `WarpBro --warmup-cuda` once). The sm_86 cubin now works (fork fix, see Findings: cubin) and
+   starts in 0.5 s, but it is 23 MB and nvJitLink takes ~15 min per architecture locally. Decide
+   which architectures to ship (one cubin each plus sm_75 PTX as the fallback) and whether hosted
+   CI can afford the compile, then wire `--materialize-cubin` into the release build. The NVIDIA
+   PR is prepared, not sent: C:\Temp\wb-bench\nvidia-constant-memory-pr.md.
 3. **Kernel entry points**: 20 near-identical `#[kernel]` bodies with an 8-parameter launch ABI
    (one documented `#[expect(clippy::too_many_arguments)]`). Generate them from one
    `macro_rules!` and pass a `#[repr(C)]` parameter block (grid constant); embedded PTX must stay
@@ -155,12 +157,18 @@ egui-widgets-rs. Topic docs (how things work) live in docs/; this file only trac
 - Measure kernels by A/B with alternating runs and medians (`--world-bench`), and compare embedded
   PTX bytes to prove a source change did not touch device code.
 
-### Cubin (2026-10-04)
+### Cubin (2026-10-04, fixed 2026-10-10)
 
-- `--materialize-cubin --arch sm_86` loaded in 82 ms, then the first constant-memory parameter
-  upload failed with `DriverError(500, "named symbol not found")`: the embedded cubin had no
-  parameter symbol. A volatile-read workaround triggered a very slow full NVVM compile. The route
-  needs a proper constant-memory contract in cuda-oxide and a regression before adoption.
+- `--materialize-cubin --arch sm_86` failed the first constant-memory upload with
+  `DriverError(500, "named symbol not found")`. Cause: `#[constant] PARAMS` was emitted as a
+  zero-initialized global, not in `@llvm.used` and not `externally_initialized`; the cubin
+  route's whole-program LTO (libNVVM `-gen-lto` + nvJitLink `-lto`) folded every load to 0 and
+  dropped the symbol. The PTX route survived only because its own `opt` step keeps globals public.
+- The 82 ms / 96 KB cubin was that folded program; the honest one is 23 MB and takes ~15 min of
+  nvJitLink (the earlier "slow workaround compile" was the real compile).
+- Fork fix (`750e60b`): `create_device_global` marks AS4 globals retained + host-written and the
+  exporter emits `externally_initialized`. Cubin CUDA tests 18/18 (were 0/18); embedded PTX
+  byte-identical. Upstream repro: `cargo oxide run constant_memory --materialize-cubin --arch sm_86`.
 
 ### BUG1 (2026-10-05; scene copper-turbine-kifs, frame 27)
 

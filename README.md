@@ -97,7 +97,7 @@ WarpBro is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX
 - CUDA Toolkit 13.x, LLVM/`llc` 21 or newer, and clang (for bindgen).
 - Rust stable (currently **1.99**), with compiler-internal APIs enabled through `.cargo/config.toml` (see `rust-toolchain.toml`).
 - CUDA crates and the backend come from [our Windows fork](https://github.com/ssoj13/cuda-rust-windows),
-  pinned to `314033b9f9df853f998e81dc23292b25c9c0c156` with the Rust 1.99 fixes and every
+  pinned to `750e60b06d13ce8fe7e6ba3c531bdf5499c9acb1` with the Rust 1.99 fixes and every
   `#[inline]` intent (`noinline` included) carried to LLVM; its cargo-oxide pins release
   codegen in the Cargo profile, so `cargo oxide test -- --release` and `cargo oxide build`
   share every compiled crate. Cargo fetches the
@@ -105,7 +105,7 @@ WarpBro is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX
 - `cargo-oxide` must come from the same fork and revision:
 
   ```sh
-  cargo +stable install --force --locked --git ssh://git@github.com/ssoj13/cuda-rust-windows.git --rev 314033b9f9df853f998e81dc23292b25c9c0c156 cargo-oxide
+  cargo +stable install --force --locked --git ssh://git@github.com/ssoj13/cuda-rust-windows.git --rev 750e60b06d13ce8fe7e6ba3c531bdf5499c9acb1 cargo-oxide
   cargo oxide doctor
   ```
 
