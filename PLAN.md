@@ -52,8 +52,9 @@ egui-widgets-rs. Topic docs (how things work) live in docs/; this file only trac
    `WarpBro --warmup-cuda` once). The sm_86 cubin now works (fork fix, see Findings: cubin) and
    starts in 0.5 s, but it is 23 MB and nvJitLink takes ~15 min per architecture locally. Decide
    which architectures to ship (one cubin each plus sm_75 PTX as the fallback) and whether hosted
-   CI can afford the compile, then wire `--materialize-cubin` into the release build. The NVIDIA
-   PR is prepared, not sent: C:\Temp\wb-bench\nvidia-constant-memory-pr.md.
+   CI can afford the compile, then wire `--materialize-cubin` into the release build. The fix is
+   ansidium/cuda-rust-windows#10; the NVIDIA PR waits for their pause on external PRs to lift
+   (texts and evidence: C:\projects\projects.rust.cg\nv\prs).
 3. **Kernel entry points**: 20 near-identical `#[kernel]` bodies with an 8-parameter launch ABI
    (one documented `#[expect(clippy::too_many_arguments)]`). Generate them from one
    `macro_rules!` and pass a `#[repr(C)]` parameter block (grid constant); embedded PTX must stay
