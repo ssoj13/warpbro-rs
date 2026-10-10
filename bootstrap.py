@@ -64,8 +64,12 @@ RELEASE_BIN = ROOT_DIR / "target" / "release" / BIN_NAME
 INSTALL_DIR = Path.home() / ".local" / "bin"
 
 CUDA_OXIDE_GIT = "ssh://git@github.com/ssoj13/cuda-rust-windows.git"
-CUDA_OXIDE_REV = "750e60b06d13ce8fe7e6ba3c531bdf5499c9acb1"
+CUDA_OXIDE_REV = "158229b5bacef244f27774e19e4f3b82c955f667"
 RUST_COMPONENTS = ["rust-src", "rustc-dev", "rust-analyzer", "clippy", "rustfmt", "llvm-tools"]
+# Release builds (`--cubins`) also embed cubins for these GPUs (RTX 20/30/40/50), assembled
+# from the sm_75 PTX by cuda-oxide into one fat binary ahead of that PTX: those GPUs skip the
+# first-launch JIT, any other GPU or an older driver still JIT-compiles the PTX.
+CUBIN_ARCHS = "sm_75,sm_86,sm_89,sm_120"
 MIN_LLVM = 21
 MIN_CUDA_MAJOR = 13
 DIST_DIR = ROOT_DIR / "dist"
@@ -371,9 +375,14 @@ def build(args: argparse.Namespace) -> int:
         err("Toolchain incomplete: python bootstrap.py d --fix")
         return 1
     cmd = ["cargo", "oxide", "build", *arch_args(args)]
-    step("cargo oxide build (release; embedded PTX)")
+    env = build_env()
+    if getattr(args, "cubins", False):
+        env["CUDA_OXIDE_CUBIN_ARCHS"] = CUBIN_ARCHS
+        step(f"cargo oxide build (release; embedded PTX + cubins {CUBIN_ARCHS})")
+    else:
+        step("cargo oxide build (release; embedded PTX)")
     print()
-    code, _, elapsed = run(cmd)
+    code, _, elapsed = run(cmd, env=env)
     if code != 0 or not RELEASE_BIN.is_file():
         err("Build failed")
         return code or 1
@@ -626,6 +635,7 @@ COMMANDS
 OPTIONS
   --arch sm_86     target architecture for b / r / ci (default: default-arch in .cargo/cuda-oxide.toml)
   --no-gpu         b: build without a GPU (no device check, no CUDA warmup)
+  --cubins         b / ci: also embed cubins for sm_75/86/89/120 (release archives; +1-2 min)
   --fix            doctor: install what can be installed without sudo
   -f, --force      install: rebuild first
 
@@ -641,6 +651,7 @@ EXAMPLES
   python bootstrap.py docs
   python bootstrap.py i
   python bootstrap.py ci
+  python bootstrap.py b --cubins
 """
 
 COMMANDS = ["d", "b", "r", "g", "bench", "docs", "i", "c", "ci", "cl", "h"]
@@ -668,6 +679,8 @@ def main() -> int:
     parser.add_argument("--skip-cuda-warmup", action="store_true",
                         help="Build without initializing CUDA (for packaging/cross-builds)")
     parser.add_argument("--no-gpu", action="store_true", help="build without a GPU (no device check, no warmup)")
+    parser.add_argument("--cubins", action="store_true",
+                        help=f"b / ci: also embed cubins for {CUBIN_ARCHS} (release archives)")
     parser.add_argument("--fix", action="store_true", help="doctor: install missing user-level tools")
     parser.add_argument("-f", "--force", dest="force_install", action="store_true", help="install: rebuild first")
 

@@ -158,8 +158,10 @@ jobs:
           # cargo-oxide builds and caches the codegen backend here.
           cache-directories: ~/.cargo/cuda-oxide
 
+      # Tag builds produce the published archives: they also embed cubins (bootstrap.py
+      # CUBIN_ARCHS). Branch builds stay on PTX only, which saves the ptxas minutes.
       - name: Toolchain, check, tests without a GPU, release build and archive
-        run: python bootstrap.py ci
+        run: python bootstrap.py ci ${{ github.ref_type == 'tag' && '--cubins' || '' }}
 
       - uses: actions/upload-artifact@v7.0.2
         with:

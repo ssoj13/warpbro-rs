@@ -44,17 +44,20 @@ egui-widgets-rs. Topic docs (how things work) live in docs/; this file only trac
   `dist/warpbro-<version>-<platform>.zip`; a `v*` tag publishes both archives. Warm runs take
   ~24 min; the Rust caches are keyed on the cuda-oxide revision (Windows 4.8 + Linux 4.1 GB of
   the 10 GB repo limit). The repo is public, so runner minutes are free.
+- **Cubins in releases** (fork 158229b5b, `cubin-archs`): tag builds (`bootstrap.py ci --cubins`,
+  locally `b --cubins`) embed one compressed fat binary with ptxas cubins for sm_75/86/89/120
+  ahead of the sm_75 PTX; the loader falls back to the PTX when the driver rejects it (older
+  driver, other GPU). 6.1 MB of cubins against 8.9 MB of PTX; cold module load 0.26 s against
+  ~97 s of PTX JIT; CUDA tests 18/18 in 9 s with the JIT cache disabled. The 23 MB / 15 min
+  cubin of `--materialize-cubin` came from its libNVVM + nvJitLink LTO route, not from the
+  kernels. Branch builds stay PTX-only. Evidence: C:\projects\projects.rust.cg\nv\prs\cubin-probe.
 
 ## Open work (priority order)
 
-1. **Ship cubins instead of a cold PTX JIT.** A release JIT-compiles ~9 MB of sm_75 PTX on first
-   launch (84 s for one CUDA test with the driver cache disabled; README tells users to run
-   `WarpBro --warmup-cuda` once). The sm_86 cubin now works (fork fix, see Findings: cubin) and
-   starts in 0.5 s, but it is 23 MB and nvJitLink takes ~15 min per architecture locally. Decide
-   which architectures to ship (one cubin each plus sm_75 PTX as the fallback) and whether hosted
-   CI can afford the compile, then wire `--materialize-cubin` into the release build. The fix is
-   ansidium/cuda-rust-windows#10; the NVIDIA PR waits for their pause on external PRs to lift
-   (texts and evidence: C:\projects\projects.rust.cg\nv\prs).
+1. **Register spills under `#[launch_bounds(128)]`.** Now visible as build warnings (ptxas
+   reports per architecture; the driver JIT did the same silently): 13 kernels spill, e.g.
+   `world` 168 registers with 1096 B spill stores on sm_75, 255 registers with 820 B on sm_86.
+   Measure whether a different bound (or none) on the heavy kernels is faster, per GPU class.
 3. **Kernel entry points**: 20 near-identical `#[kernel]` bodies with an 8-parameter launch ABI
    (one documented `#[expect(clippy::too_many_arguments)]`). Generate them from one
    `macro_rules!` and pass a `#[repr(C)]` parameter block (grid constant); embedded PTX must stay

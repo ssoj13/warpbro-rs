@@ -416,16 +416,21 @@ QP/preset tradeoff and verified zero-origin rational video timing on determinist
 
 ## CUDA startup
 
-The kernels ship as PTX that the NVIDIA driver compiles for the installed GPU on first use and
-keeps in its disk JIT cache. A cold compile takes minutes; the renderer, material previews and
-Gallery wait for it. So:
+The kernels are PTX that the NVIDIA driver compiles for the installed GPU on first use and
+keeps in its disk JIT cache. A cold compile takes about a minute and a half; the renderer,
+material previews and Gallery wait for it. Release archives avoid it on most GPUs:
 
-- `python bootstrap.py b` warms the cache for the executable it built, on this GPU, before
-  reporting success (`--skip-cuda-warmup` skips it).
-- A release archive (built by CI for sm_75 and newer) needs one warm-up after unpacking:
-  `WarpBro --warmup-cuda`. It creates the context, loads and validates the module, and exits.
-- A driver update, another GPU, a cleared cache or `CUDA_CACHE_DISABLE` means warming again;
-  `CUDA_CACHE_PATH` and `CUDA_CACHE_MAXSIZE` must match between warm-up and use.
+- A release archive (CI, tag builds; locally `python bootstrap.py b --cubins`) also carries
+  ready cubins for sm_75, sm_86, sm_89 and sm_120 (RTX 20, 30, 40 and 50 series) in one
+  compressed fat binary next to the sm_75 PTX. Those GPUs load in a fraction of a second. Any
+  other GPU, or a driver older than CUDA 13 that cannot read the fat binary, falls back to the
+  PTX and its JIT compile; `CUDA_OXIDE_VERBOSE=1` reports the fallback.
+- `python bootstrap.py b` (PTX only) warms the cache for the executable it built, on this GPU,
+  before reporting success (`--skip-cuda-warmup` skips it).
+- On the PTX route, `WarpBro --warmup-cuda` warms the cache ahead of time: it creates the
+  context, loads and validates the module, and exits. A driver update, another GPU, a cleared
+  cache or `CUDA_CACHE_DISABLE` means warming again; `CUDA_CACHE_PATH` and
+  `CUDA_CACHE_MAXSIZE` must match between warm-up and use.
 
 The eight OFX Direct entry points (`direct_*`, about a quarter of the PTX) are built only with
 `cargo oxide build --features ofx-direct`; WarpBro never dispatches them. With
