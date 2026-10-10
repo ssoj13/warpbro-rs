@@ -2713,3 +2713,131 @@ fn output_settings_node_is_the_typed_static_export_recipe() {
         serde_json::from_str(&serde_json::to_string(&animated).unwrap()).unwrap();
     assert!(restored.snapshot(0.0).is_err());
 }
+
+/// Scene files of a templates directory (`WARPBRO_TEMPLATES`) load through the ordinary loader,
+/// round-trip unchanged through `WorldDocument`, and evaluate every node into its typed value at
+/// the first, middle and last frame. Every keyed channel's samples at each whole frame of the
+/// range go to `WARPBRO_CHANNELS_OUT` (JSON), so an outside converter can compare them with the
+/// curves its source files described. Ignored: it reads the operator's files.
+#[test]
+#[ignore = "reads WARPBRO_TEMPLATES and writes WARPBRO_CHANNELS_OUT"]
+fn templates_load_and_evaluate() {
+    let dir = std::env::var("WARPBRO_TEMPLATES").expect("WARPBRO_TEMPLATES");
+    let out = std::env::var("WARPBRO_CHANNELS_OUT").expect("WARPBRO_CHANNELS_OUT");
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|e| e == "json"))
+        .collect();
+    files.sort();
+    assert!(!files.is_empty(), "no templates in {dir}");
+    let mut channels = serde_json::Map::new();
+    let mut failures = Vec::new();
+    for path in files {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let text = std::fs::read_to_string(&path).unwrap();
+        match check_template(&text) {
+            Ok(samples) => {
+                println!("{name}: OK ({} keyed channels)", samples.len());
+                channels.insert(name, Value::Object(samples));
+            }
+            Err(e) => {
+                println!("{name}: FAILED: {e}");
+                failures.push(name);
+            }
+        }
+    }
+    std::fs::write(
+        &out,
+        serde_json::to_string_pretty(&Value::Object(channels)).unwrap(),
+    )
+    .unwrap();
+    assert!(failures.is_empty(), "failed: {failures:?}");
+}
+
+fn check_template(text: &str) -> Result<serde_json::Map<String, Value>, String> {
+    let scene = crate::io_service::decode_scene(text)?;
+    let doc = scene.document.ok_or("decode_scene kept no document")?;
+    let file: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    if serde_json::to_value(&*doc).map_err(|e| e.to_string())? != file {
+        return Err("document does not round-trip unchanged".into());
+    }
+    if doc.output_settings()? != crate::export::OutputSettings::default() {
+        return Err("output recipe is not the default".into());
+    }
+    let (first, last) = (f64::from(doc.first), f64::from(doc.last));
+    for frame in [first, ((first + last) * 0.5).floor(), last] {
+        doc.snapshot(frame)
+            .map_err(|e| format!("snapshot at {frame}: {e}"))?;
+        doc.viewport_render(frame, true)?;
+        doc.viewport_render(frame, false)?;
+        for node in doc.nodes() {
+            let v = doc.evaluated_node(node.id, frame)?;
+            let typed = |key: &str| v[key].clone();
+            let checked: Result<(), String> = match node.kind {
+                WorldKind::Fractal => serde_json::from_value::<Scene>(v.clone())
+                    .map(drop)
+                    .map_err(|e| e.to_string()),
+                WorldKind::Camera => {
+                    serde_json::from_value::<crate::scene::Camera>(typed("camera"))
+                        .map_err(|e| e.to_string())
+                        .and_then(|camera| camera.validate_lens())
+                }
+                WorldKind::DirectionalLight => {
+                    serde_json::from_value::<crate::scene::Lighting>(typed("lighting"))
+                        .map(drop)
+                        .map_err(|e| e.to_string())
+                }
+                WorldKind::Environment => {
+                    serde_json::from_value::<crate::environment::Environment>(typed("environment"))
+                        .map(drop)
+                        .and_then(|()| {
+                            serde_json::from_value::<crate::scene::Lighting>(typed("lighting"))
+                                .map(drop)
+                        })
+                        .map_err(|e| e.to_string())
+                }
+                WorldKind::Material => {
+                    serde_json::from_value::<crate::scene::Material>(typed("material"))
+                        .map(drop)
+                        .map_err(|e| e.to_string())
+                }
+                WorldKind::RenderSettings => doc.effective_render(node.id, frame).map(drop),
+                WorldKind::Group
+                | WorldKind::QualitySettings
+                | WorldKind::ViewportSettings
+                | WorldKind::OutputSettings => Ok(()),
+            };
+            checked.map_err(|e| format!("{:?} {} at {frame}: {e}", node.kind, node.name))?;
+        }
+    }
+    let mut samples = serde_json::Map::new();
+    for node in doc.nodes() {
+        let attrs = doc.attrs(node.id)?;
+        for (path, _) in attrs.iter() {
+            let Some(anim) = attrs.anim(path) else {
+                continue;
+            };
+            for (index, channel) in anim.channels.iter().enumerate() {
+                if channel.is_empty() {
+                    continue;
+                }
+                let values: Vec<f32> = (doc.first..=doc.last)
+                    .map(|frame| channel.sample(frame as i32))
+                    .collect();
+                samples.insert(format!("{}{path}#{index}", node.id), json!(values));
+            }
+        }
+    }
+    Ok(samples)
+}
+
+/// A fresh document (`WorldDocument::from_scene` of preset 0) written to `WARPBRO_REFERENCE_OUT`:
+/// the canonical settings-node layout an outside template converter reproduces.
+#[test]
+#[ignore = "writes WARPBRO_REFERENCE_OUT"]
+fn templates_reference_document() {
+    let out = std::env::var("WARPBRO_REFERENCE_OUT").expect("WARPBRO_REFERENCE_OUT");
+    let doc = WorldDocument::from_scene(&Scene::preset(0));
+    std::fs::write(out, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+}
