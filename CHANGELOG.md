@@ -2,6 +2,16 @@
 
 ## Unreleased — 2026-10-09
 
+### Window screenshots
+
+- **F12** / File → *Window screenshot*: the whole window (viewport, panels, menus) at its physical
+  resolution as a linear BT.709 EXR (`whiteLuminance` = reference white) and/or a 16-bit PQ / BT.2020
+  PNG with `cICP`, `mDCV`, `cLLI`. Reference white: the monitor's SDR white on HDR, else BT.2408's
+  203 nits. Captured by the present pass from the frame after the request, read back and written on
+  the file worker through the viewport snapshot's encoders (`exr_io::write_rgb`, `write_png`).
+- `FRAC_SNAP` uses the same capture request (no `ViewportCommand::Screenshot`, no blocking readback
+  on the window's thread); failures surface in the status line and the log.
+
 ### Render settings as graph nodes
 
 - **RenderSettings / QualitySettings / ViewportSettings / OutputSettings** are document nodes

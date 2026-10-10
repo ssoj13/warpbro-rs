@@ -173,6 +173,9 @@ pub(crate) struct App {
     /// `FRAC_SNAP=out.png [FRAC_SNAP_PRESET=i] [FRAC_SNAP_SPP=n]`: screenshot the window once the
     /// thumbnails and n viewport samples are done, then quit (for docs).
     snap: Option<(PathBuf, u32, bool)>,
+    /// The armed window screenshot (`window_shot`) and whether a frame was drawn since it was
+    /// requested: the window captures it only then, so a menu that asked for it is closed.
+    window_shot: Option<(crate::window_shot::WindowShot, bool)>,
     /// Flight via cam-controls' inertial `SpaceFlight`, alive while RMB is held and
     /// while its momentum coasts after release.
     fly: Option<cam_controls::SpaceFlight>,
@@ -253,6 +256,16 @@ impl Monitor {
         Self {
             hdr: state.as_ref().is_some_and(|s| s.output.is_hdr()),
             white_nits: state.as_ref().map_or(100.0, |s| s.target.white),
+        }
+    }
+    /// Nits of relative light's 1.0 (SDR reference white) in an HDR file: the monitor's SDR white
+    /// when it shows HDR, so the file is as bright as the screen, else ITU-R BT.2408's 203 nits.
+    /// Viewport snapshots and window screenshots share this rule.
+    pub(crate) fn sdr_white_nits(self) -> f32 {
+        if self.hdr {
+            self.white_nits
+        } else {
+            crate::color::BT2408_SDR_WHITE_NITS
         }
     }
 }
@@ -639,6 +652,7 @@ impl App {
                     .unwrap_or(256);
                 (PathBuf::from(p), spp, false)
             }),
+            window_shot: None,
         }
         .with_snap_preset()
         .with_settings()
@@ -1162,7 +1176,7 @@ impl App {
     }
 
     fn handle_snap(&mut self, ctx: &egui::Context, thumbs_pending: bool) {
-        let Some((_path, spp, requested)) = self.snap.clone() else {
+        let Some((path, spp, requested)) = self.snap.clone() else {
             return;
         };
         let wait_thumbs = !std::env::var("FRAC_SNAP_WAIT_THUMBS").is_ok_and(|value| value == "0");
@@ -1170,7 +1184,15 @@ impl App {
             && !self.showing_preview
             && self.frame.as_ref().is_some_and(|t| t.complete(spp));
         if ready && !requested {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
+            // The window's own signal through the one window-screenshot path; the window
+            // closes once the file is written (`window_event`).
+            self.window_shot = Some((
+                crate::window_shot::WindowShot {
+                    kind: crate::window_shot::ShotKind::Displayed { path },
+                    quit: true,
+                },
+                false,
+            ));
             self.snap = self.snap.take().map(|(path, spp, _)| (path, spp, true));
         }
         ctx.request_repaint();
@@ -1955,20 +1977,117 @@ impl App {
             None,
             file.suffix(),
         ));
-        let sdr_white_nits = if monitor.hdr {
-            monitor.white_nits
-        } else {
-            crate::color::BT2408_SDR_WHITE_NITS
-        };
         self.status = match self.io.send(crate::io_service::Command::SaveFrame {
             frame,
             path,
             file,
-            sdr_white_nits,
+            sdr_white_nits: monitor.sdr_white_nits(),
         }) {
             Ok(()) => "Saving image…".into(),
             Err(e) => e,
         };
+    }
+    /// The window-screenshot choices of the File menu (`F12`: EXR + PQ PNG).
+    fn window_shot_menu(&mut self, ui: &mut egui::Ui) {
+        let hint = "The whole window as presented (viewport, panels, menus) at its physical \
+            resolution. EXR: linear BT.709 light, 1.0 = SDR white, whiteLuminance in nits. PQ PNG: \
+            16-bit ST 2084 / BT.2020 with cICP; SDR white at the monitor's (HDR) or 203 nits.";
+        for files in crate::window_shot::WindowFiles::ALL {
+            let label = if files == crate::window_shot::WindowFiles::ExrAndPq {
+                format!("{}    F12", files.label())
+            } else {
+                files.label().to_owned()
+            };
+            if ui.button(label).on_hover_text(hint).clicked() {
+                self.request_window_shot(files, Monitor::read(ui.ctx()));
+                ui.close();
+            }
+        }
+    }
+
+    /// Arm a whole-window screenshot of `files` into a new folder under `~/.warpbro/out`, with
+    /// SDR white at `monitor`'s reference white (`Monitor::sdr_white_nits`). The window captures
+    /// the frame after this one (`take_window_shot`).
+    pub(crate) fn request_window_shot(
+        &mut self,
+        files: crate::window_shot::WindowFiles,
+        monitor: Monitor,
+    ) {
+        self.window_shot = Some((
+            crate::window_shot::WindowShot {
+                kind: crate::window_shot::ShotKind::Linear {
+                    root: crate::out_root(),
+                    stem: crate::fs_name::stem(&self.scene.name),
+                    files,
+                    sdr_white_nits: monitor.sdr_white_nits(),
+                },
+                quit: false,
+            },
+            false,
+        ));
+    }
+
+    /// The armed window screenshot, once a frame has been drawn since it was requested. The
+    /// window calls this after presenting a frame and captures that frame.
+    pub(crate) fn take_window_shot(&mut self) -> Option<crate::window_shot::WindowShot> {
+        match self.window_shot.take() {
+            Some((shot, true)) => Some(shot),
+            pending => {
+                self.window_shot = pending;
+                None
+            }
+        }
+    }
+
+    /// Hand a submitted window capture to the file worker, which waits for the readback and
+    /// writes the files. A failed capture or a refused request is reported at once, through
+    /// the same `window_event` as a finished one.
+    pub(crate) fn submit_window_shot(
+        &mut self,
+        ctx: &egui::Context,
+        shot: crate::window_shot::WindowShot,
+        capture: Result<egui_display::PendingCapture, egui_display::CaptureError>,
+        device: &wgpu::Device,
+    ) {
+        use crate::window_shot::ShotError;
+        let quit = shot.quit;
+        let sent = capture.map_err(ShotError::from).and_then(|capture| {
+            self.io
+                .send(crate::io_service::Command::SaveWindow {
+                    shot,
+                    capture,
+                    device: device.clone(),
+                })
+                .map_err(ShotError::Worker)
+        });
+        match sent {
+            Ok(()) => self.status = "Saving window screenshot…".into(),
+            Err(error) => self.window_event(
+                ctx,
+                crate::io_service::WindowEvent {
+                    quit,
+                    result: Err(error),
+                },
+            ),
+        }
+    }
+
+    /// A finished window screenshot: the files or the error in the status line (and the log).
+    fn window_event(&mut self, ctx: &egui::Context, event: crate::io_service::WindowEvent) {
+        match event.result {
+            Ok(paths) => {
+                let names: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
+                log::info!("Window screenshot: {}", names.join(", "));
+                self.status = format!("Saved {}", names.join(", "));
+            }
+            Err(error) => {
+                log::error!("Window screenshot: {error}");
+                self.status = format!("Window screenshot failed: {error}");
+            }
+        }
+        if event.quit {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
     }
     fn step_viewport(&mut self, w: usize, h: usize, output_hdr: bool, white_nits: f32) {
         let policy = match self
@@ -2217,6 +2336,9 @@ impl App {
         }
         while let Some(result) = self.io.poll() {
             self.status = result.unwrap_or_else(|e| e);
+        }
+        while let Some(event) = self.io.poll_window() {
+            self.window_event(ctx, event);
         }
     }
     pub(crate) fn gui_fps(&self) -> u32 {
@@ -2726,6 +2848,8 @@ impl App {
                     ui.close();
                 }
                 self.snapshot_menu(ui);
+                ui.separator();
+                self.window_shot_menu(ui);
             });
             ui.menu_button("Edit", |ui| {
                 if ui.button("Undo    Ctrl+Z").clicked() {
@@ -3534,6 +3658,16 @@ impl App {
         use crate::hotkeys::{self, Command as Hotkey, Scope};
         if hotkeys::consume(&ctx, Scope::Global, Hotkey::ToggleUi) {
             self.show_ui = !self.show_ui;
+        }
+        // A window shot armed in an earlier frame is captured after this one.
+        if let Some((_, drawn)) = &mut self.window_shot {
+            *drawn = true;
+        }
+        if hotkeys::consume(&ctx, Scope::Global, Hotkey::WindowShot) {
+            self.request_window_shot(
+                crate::window_shot::WindowFiles::ExrAndPq,
+                Monitor::read(&ctx),
+            );
         }
         if hotkeys::consume(&ctx, Scope::Global, Hotkey::Redo) {
             self.world.redo();

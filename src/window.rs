@@ -179,12 +179,10 @@ impl Native {
         self.next_redraw = tick + Duration::from_secs_f64(1.0 / self.app.gui_fps() as f64);
         self.input
             .handle_platform_output(&self.window, full.platform_output);
-        let mut screenshot = false;
         for out in full.viewport_output.values() {
             for cmd in &out.commands {
                 match cmd {
                     egui::ViewportCommand::Close => events.exit(),
-                    egui::ViewportCommand::Screenshot(_) => screenshot = true,
                     egui::ViewportCommand::CursorGrab(mode) if self.cursor_grab != *mode => {
                         use winit::window::CursorGrabMode;
                         let grab = match mode {
@@ -231,30 +229,16 @@ impl Native {
             }
             other => anyhow::bail!("surface acquisition: {other:?}"),
         };
-        self.present
-            .prepare_canvas(&self.device, &self.queue, size.width, size.height);
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        let buffers =
-            self.renderer
-                .update_buffers(&self.device, &self.queue, &mut encoder, &jobs, &screen);
-        {
-            let canvas = self.present.canvas(&self.device, size.width, size.height);
-            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("frac.egui"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: canvas,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            self.renderer
-                .render(&mut pass.forget_lifetime(), &jobs, &screen);
-        }
+        let buffers = paint_canvas(
+            &self.device,
+            &self.queue,
+            &mut self.renderer,
+            &mut self.present,
+            &mut encoder,
+            &jobs,
+            &screen,
+        );
         let view = frame.texture.create_view(&Default::default());
         self.present.draw(&self.queue, &mut encoder, &view, target);
         // This queue belongs exclusively to Native. The shared submit helper's
@@ -265,24 +249,54 @@ impl Native {
         for id in &full.textures_delta.free {
             self.renderer.free_texture(id);
         }
-        if screenshot {
-            // FRAC_SNAP captures the canvas using the shared output writer below.
-            self.capture_snap(target)?;
+        // A window screenshot captures the canvas of the frame just presented, through the
+        // present pass, and is read back and written on the file worker (`window_shot`).
+        if let Some(shot) = self.app.take_window_shot() {
+            let capture = self.present.capture(
+                &self.device,
+                &self.queue,
+                shot.output(self.output),
+                shot.target(target),
+            );
+            self.app
+                .submit_window_shot(&self.ctx, shot, capture, &self.device);
         }
         Ok(())
     }
-    fn capture_snap(&mut self, target: egui_display::Target) -> Result<()> {
-        let Some(path) = std::env::var_os("FRAC_SNAP") else {
-            return Ok(());
-        };
-        let capture = self
-            .present
-            .capture(&self.device, &self.queue, self.output, target)?
-            .wait(&self.device)?;
-        capture.save(std::path::Path::new(&path))?;
-        self.ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-        Ok(())
-    }
+}
+
+/// Paint tessellated egui `jobs` into `present`'s float canvas (cleared to black) at the size of
+/// `screen`: buffer uploads and the egui pass, recorded into `encoder`. Returns egui's own command
+/// buffers, to submit before `encoder`. The window's redraw and the headless window-screenshot
+/// test draw through here, so a test frame is composited exactly like a presented one.
+pub(crate) fn paint_canvas(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    renderer: &mut egui_wgpu::Renderer,
+    present: &mut PresentPass,
+    encoder: &mut wgpu::CommandEncoder,
+    jobs: &[egui::ClippedPrimitive],
+    screen: &egui_wgpu::ScreenDescriptor,
+) -> Vec<wgpu::CommandBuffer> {
+    let [width, height] = screen.size_in_pixels;
+    present.prepare_canvas(device, queue, width, height);
+    let buffers = renderer.update_buffers(device, queue, encoder, jobs, screen);
+    let canvas = present.canvas(device, width, height);
+    let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("frac.egui"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: canvas,
+            depth_slice: None,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                store: wgpu::StoreOp::Store,
+            },
+        })],
+        ..Default::default()
+    });
+    renderer.render(&mut pass.forget_lifetime(), jobs, screen);
+    buffers
 }
 impl ApplicationHandler for Host {
     fn device_event(
@@ -337,5 +351,138 @@ impl ApplicationHandler for Host {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::window_shot::{ShotKind, WindowFiles, WindowShot};
+
+    /// Headless whole-window shot: egui draws a small frame (a mid-grey block and a label) into
+    /// the float canvas through the window's own `paint_canvas`, the present pass captures it the
+    /// way the window does after presenting, and the file writer saves the EXR and the PQ PNG.
+    /// Oracles: the grey block (egui sRGB code 128) decodes to linear 0.2159 in the EXR and to
+    /// 0.2159 x 203 = 43.8 nits in the PQ PNG; the uncovered canvas stays black; the PNG carries
+    /// cICP 9/16/0/1 and both files have the window's size.
+    #[test]
+    fn gpu_window_shot_writes_exr_and_pq_png() {
+        let _gpu = crate::test_gpu::lock();
+        let gpu = gpu_info::shared_device().expect("wgpu adapter");
+        let (device, queue) =
+            gpu_info::request_max_device_blocking(&gpu.adapter, gpu.device.features())
+                .expect("wgpu device");
+        let (w, h) = (96u32, 64u32);
+        let ctx = egui::Context::default();
+        let block = egui::Rect::from_min_max(egui::pos2(56.0, 16.0), egui::pos2(96.0, 64.0));
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(w as f32, h as f32),
+            )),
+            ..Default::default()
+        };
+        let full = ctx.run_ui(raw, |ui| {
+            ui.painter()
+                .rect_filled(block, 0.0, egui::Color32::from_gray(128));
+            ui.label("W");
+        });
+        assert_eq!(full.pixels_per_point, 1.0);
+
+        let mut renderer =
+            egui_wgpu::Renderer::new(&device, egui_display::CANVAS_FORMAT, Default::default());
+        let mut present = PresentPass::new(&device, wgpu::TextureFormat::Rgba8Unorm, Output::Sdr8);
+        for (id, deltas) in &full.textures_delta.set {
+            for delta in deltas {
+                renderer.update_texture(&device, &queue, *id, delta);
+            }
+        }
+        let jobs = ctx.tessellate(full.shapes, full.pixels_per_point);
+        let screen = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [w, h],
+            pixels_per_point: full.pixels_per_point,
+        };
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let buffers = paint_canvas(
+            &device,
+            &queue,
+            &mut renderer,
+            &mut present,
+            &mut encoder,
+            &jobs,
+            &screen,
+        );
+        queue.submit(buffers.into_iter().chain([encoder.finish()]));
+
+        let root = std::env::temp_dir().join(format!("warpbro-window-gpu-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let white = crate::color::BT2408_SDR_WHITE_NITS;
+        let shot = WindowShot {
+            kind: ShotKind::Linear {
+                root: root.clone(),
+                stem: "ui".into(),
+                files: WindowFiles::ExrAndPq,
+                sdr_white_nits: white,
+            },
+            quit: false,
+        };
+        // An HDR window's levels: the capture must not inherit its white (canvas 1.0 stays 1.0).
+        let shown = egui_display::Target {
+            hdr: true,
+            white: 240.0,
+            peak: 1000.0,
+        };
+        let capture = present
+            .capture(
+                &device,
+                &queue,
+                shot.output(Output::Sdr8),
+                shot.target(shown),
+            )
+            .expect("capture")
+            .wait(&device)
+            .expect("readback");
+        assert_eq!((capture.width, capture.height), (w, h));
+        let paths = crate::window_shot::save(&shot, &capture).expect("window shot files");
+        assert_eq!(paths.len(), 2);
+        let (exr, png) = (&paths[0], &paths[1]);
+        assert!(exr.ends_with("ui.window.exr") && png.ends_with("ui.window.pq.png"));
+
+        let grey = egui_display::transfer::eotf(128.0 / 255.0);
+        let at = |x: u32, y: u32| (y * w + x) as usize;
+        let image = crate::exr_io::read_rgb(exr).unwrap();
+        assert_eq!((image.width, image.height), (w, h));
+        for c in image.pixels[at(80, 40)] {
+            assert!((c - grey).abs() < 0.005, "grey block {c}, want {grey}");
+        }
+        assert!(
+            image.pixels[at(4, 60)].iter().all(|c| c.abs() < 1e-4),
+            "uncovered canvas is black: {:?}",
+            image.pixels[at(4, 60)]
+        );
+
+        let decoder = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(png).unwrap()));
+        let mut reader = decoder.read_info().unwrap();
+        let cicp = reader.info().coding_independent_code_points.expect("cICP");
+        assert_eq!(
+            [
+                cicp.color_primaries,
+                cicp.transfer_function,
+                cicp.matrix_coefficients,
+                u8::from(cicp.is_video_full_range_image)
+            ],
+            [9, 16, 0, 1]
+        );
+        assert_eq!((reader.info().width, reader.info().height), (w, h));
+        let mut buf = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut buf).unwrap();
+        let sample = |i: usize| u16::from_be_bytes([buf[2 * i], buf[2 * i + 1]]);
+        let nits = egui_display::pq_nits(f32::from(sample(4 * at(80, 40))) / 65535.0);
+        assert!(
+            (nits - grey * white).abs() < 1.5,
+            "grey block at {nits} nits, want {}",
+            grey * white
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

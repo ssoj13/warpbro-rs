@@ -9404,6 +9404,7 @@ dependencies = [
  "fractal-materials",
  "glam",
  "gpu-info-rs",
+ "half",
  "image",
  "imath-rs",
  "jiff",

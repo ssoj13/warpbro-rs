@@ -96,4 +96,6 @@ image = { version = "0.25", default-features = false, features = ["hdr"] }
 jiff = "0.2"
 
 [dev-dependencies]
+# Half-float pixels of synthetic window captures (`window_shot` tests; egui-display's `Pixels::RgbaF16`).
+half = "2.7"
 av-format-mov = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }

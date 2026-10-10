@@ -148,6 +148,7 @@ python bootstrap.py r                                  # build, warm the CUDA ca
 | hold right button | fly: mouse looks, WASD moves, R/Space up, C down, Q/E rolls (tilts under the lock), Shift x4, Alt x0.1, wheel speed |
 | double-click      | recentre                                                                                                   |
 | `Tab`             | hide the panels                                                                                            |
+| `F12`             | window screenshot: the whole window as EXR + PQ PNG (see *Window screenshots*)                             |
 | `Space`           | pause                                                                                                      |
 | backtick / tilde  | switch horizon lock / free flight                                                                          |
 
@@ -307,6 +308,23 @@ HDR monitor), so the file is as bright as the screen. Right click (or File) also
 and the HDR10 PNG explicitly, and **Display EXR**: unquantized linear Rec.709 display light with
 chromaticities and `whiteLuminance = 100` (display-referred, not a scene-linear master). HDR PNGs are
 named `*.pq.png` / `*.hlg.png`: in a viewer that ignores `cICP` they look washed out.
+
+**Window screenshots** (`F12`, or File → *Window screenshot: EXR + PQ PNG / EXR / PQ PNG*) save
+the whole window - viewport, panels, menus, status line - at its physical resolution, from the
+frame presented right after the request (so the menu that asked is already closed). The present
+pass re-encodes that frame's float canvas offscreen; the file worker reads it back and writes
+`<scene>.window.exr` and/or `<scene>.window.pq.png` into a new `~/.warpbro/out/<date_time>/`
+folder. Both hold the canvas decoded to linear light, unclipped (an HDR viewport keeps its
+highlights; egui itself is display-referred). Reference white: the monitor's SDR white when it
+shows HDR (the file is as bright as the screen), else ITU-R BT.2408's **203 nits**.
+
+- **EXR:** float RGB, linear BT.709 / D65 (`chromaticities`), 1.0 = that reference white,
+  `whiteLuminance` = its nits, so value x whiteLuminance = nits.
+- **PQ PNG (HDR10):** 16-bit SMPTE ST 2084 of BT.2020 nits, `cICP` 9/16/0/1, `mDCV`, measured
+  `cLLI` - the same writer as the viewport's HDR10 snapshot.
+
+Errors (readback, folder, encoder) show in the status line and the log. `FRAC_SNAP` (README
+images) captures through the same path as the window's own signal (sRGB PNG on SDR).
 
 ```sh
 ./target/release/WarpBro --gallery out 1920 1080 256 --hdr --display-exr
@@ -479,6 +497,7 @@ src/denoise.rs    worker OIDN settings, target cadence and shared-device process
 src/color.rs      working space (ACEScg) matrices and luma, cached vfx-ocio GPU colour processing
 src/ocio.rs       OCIO controls and background config loader, adapted from exr-view (BSD-3-Clause)
 src/window.rs     winit/wgpu shell + egui-display float canvas and SDR/HDR swapchain
+src/window_shot.rs  whole-window screenshots: request, linear canvas decode, EXR / PQ PNG writers
 src/palette.rs    the 14 palettes
 src/materials.rs  host adapter for the shared fractal-materials catalog
 crates/fractal-materials   renderer-independent material preset definitions

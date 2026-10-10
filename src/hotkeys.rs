@@ -57,6 +57,8 @@ pub enum Scope {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
     ToggleUi,
+    /// Save a screenshot of the whole window (EXR + PQ PNG, `window_shot`).
+    WindowShot,
     Undo,
     Redo,
     Duplicate,
@@ -123,6 +125,7 @@ const fn physical(command: Command, key: Key, modifiers: Modifiers) -> Binding {
 }
 pub const GLOBAL: &[Binding] = &[
     binding(Command::ToggleUi, Key::Tab, Modifiers::NONE),
+    binding(Command::WindowShot, Key::F12, Modifiers::NONE),
     binding(Command::Undo, Key::Z, Modifiers::COMMAND),
     binding(
         Command::Redo,

@@ -35,6 +35,14 @@ pub enum Command {
         /// Nits of relative light's 1.0 in an HDR PNG (`render_service::hdr_scale`).
         sdr_white_nits: f32,
     },
+    /// Read back a window screenshot submitted by the window after a presented frame and write
+    /// its files (`window_shot::save`); the result arrives as a [`WindowEvent`].
+    SaveWindow {
+        shot: crate::window_shot::WindowShot,
+        capture: egui_display::PendingCapture,
+        /// The window's device: the readback waits on it here, never on the window's thread.
+        device: wgpu::Device,
+    },
     Write {
         path: PathBuf,
         text: String,
@@ -53,6 +61,13 @@ pub enum Command {
         document: Box<crate::world::WorldDocument>,
     },
 }
+/// A finished window screenshot ([`Command::SaveWindow`]): the files written, or why none were.
+pub struct WindowEvent {
+    /// The request asked to close the window afterwards (`FRAC_SNAP`).
+    pub quit: bool,
+    pub result: Result<Vec<PathBuf>, crate::window_shot::ShotError>,
+}
+
 pub struct SceneEvent {
     pub id: u64,
     pub path: PathBuf,
@@ -76,6 +91,7 @@ pub struct IoService {
     events: mpsc::Receiver<Result<String, String>>,
     scene_events: mpsc::Receiver<SceneEvent>,
     template_events: mpsc::Receiver<Result<Vec<crate::templates::Entry>, String>>,
+    window_events: mpsc::Receiver<WindowEvent>,
 }
 impl IoService {
     pub fn spawn() -> Self {
@@ -83,6 +99,7 @@ impl IoService {
         let (done, events) = mpsc::channel();
         let (scene_done, scene_events) = mpsc::channel();
         let (template_done, template_events) = mpsc::channel();
+        let (window_done, window_events) = mpsc::channel();
         let settings = Arc::new(Mutex::new(None::<(PathBuf, String)>));
         let pending = settings.clone();
         thread::Builder::new()
@@ -107,6 +124,20 @@ impl IoService {
                         }) => {
                             let result = frame.save(&path, file, sdr_white_nits);
                             report(&done, result.map(|_| format!("Saved {}", path.display())));
+                        }
+                        Ok(Command::SaveWindow {
+                            shot,
+                            capture,
+                            device,
+                        }) => {
+                            let result = capture
+                                .wait(&device)
+                                .map_err(crate::window_shot::ShotError::from)
+                                .and_then(|capture| crate::window_shot::save(&shot, &capture));
+                            let quit = shot.quit;
+                            deliver(&window_done, WindowEvent { quit, result }, |event| {
+                                format!("window screenshot: {:?}", event.result)
+                            });
                         }
                         Ok(Command::Write { path, text }) => {
                             report(
@@ -175,6 +206,7 @@ impl IoService {
             events,
             scene_events,
             template_events,
+            window_events,
         }
     }
     pub fn send(&self, cmd: Command) -> Result<(), String> {
@@ -190,6 +222,9 @@ impl IoService {
     }
     pub fn poll_scene(&self) -> Option<SceneEvent> {
         self.scene_events.try_recv().ok()
+    }
+    pub fn poll_window(&self) -> Option<WindowEvent> {
+        self.window_events.try_recv().ok()
     }
     pub fn poll(&self) -> Option<Result<String, String>> {
         self.events.try_recv().ok()

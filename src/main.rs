@@ -47,6 +47,7 @@ mod test_gpu;
 mod transfer;
 mod transmission;
 mod window;
+mod window_shot;
 mod world;
 mod world_ui;
 
