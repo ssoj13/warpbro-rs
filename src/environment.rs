@@ -8,6 +8,8 @@ pub struct Environment {
     pub path: String,
     pub enabled: bool,
     pub intensity: f32,
+    /// Turns the environment about +Y; positive values make the image content appear to turn
+    /// left in the view (see `path_sampling::env_uv`).
     pub rotation_degrees: f32,
     #[serde(skip)]
     pub revision: u64,

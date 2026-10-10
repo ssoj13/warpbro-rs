@@ -27,7 +27,8 @@ use cuda_host::cuda_module;
 pub mod kernels {
     use super::*;
     use crate::path_sampling::{
-        allows_surface_vertex, fast_ggx_pdf, fast_ggx_sample_local, fast_spec_probability,
+        allows_surface_vertex, env_dir, env_uv, fast_ggx_pdf, fast_ggx_sample_local,
+        fast_spec_probability,
     };
     use crate::transmission::{AIR, exit_distance, medium_after_scatter, volume_transmittance};
     use standard_surface_bsdf::ThinFilmEnergy;
@@ -1207,10 +1208,7 @@ pub mod kernels {
 
     #[inline(always)]
     fn map_uv(ctx: Context<'_>, dir: V3) -> [f32; 2] {
-        let u =
-            (0.5 + (dir[0].atan2(dir[2]) - pr(ctx, P_ENV_ROTATION)) / (2.0 * PI)).rem_euclid(1.0);
-        let v = dir[1].clamp(-1.0, 1.0).acos() / PI;
-        [u, v]
+        env_uv(dir, pr(ctx, P_ENV_ROTATION))
     }
 
     #[inline(always)]
@@ -1304,13 +1302,11 @@ pub mod kernels {
         };
         let probability = map_texel(ctx, lut, i)[3] - start;
         let jitter = ((u - start) / probability.max(1e-20)).clamp(0.0, 0.999999);
-        let phi = ((i % w) as f32 + jitter) / w as f32 * (2.0 * PI) - PI + pr(ctx, P_ENV_ROTATION);
+        let lon = ((i % w) as f32 + jitter) / w as f32;
         let t0 = PI * (i / w) as f32 / h as f32;
         let t1 = PI * (i / w + 1) as f32 / h as f32;
         let y = t0.cos() + (t1.cos() - t0.cos()) * v;
-        let radius = (1.0 - y * y).max(0.0).sqrt();
-        let (sp, cp) = phi.sin_cos();
-        [radius * sp, y, radius * cp]
+        env_dir(lon, y, pr(ctx, P_ENV_ROTATION))
     }
 
     #[inline(always)]

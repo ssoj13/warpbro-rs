@@ -2,6 +2,14 @@
 
 ## Unreleased — 2026-10-09
 
+### Environment orientation
+
+- **Fix: the lat-long environment was mirrored** (u fell as the view turned right). Lookup and
+  importance-sampling inverse now share `path_sampling::env_uv` / `env_dir` with ofx-fractal's
+  convention: `u = 0.5 + (atan2(z, x) + rotation) / 2pi`, `v = acos(y) / pi`. Scenes that use an
+  environment look mirrored relative to before (no rotation can compensate a mirror); positive
+  Environment rotation makes the image content turn left in the view.
+
 ### Window screenshots
 
 - **F12** / File → *Window screenshot*: the whole window (viewport, panels, menus) at its physical
