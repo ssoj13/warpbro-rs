@@ -176,6 +176,9 @@ impl Native {
         });
         let raw = self.input.take_egui_input(&self.window);
         let full = self.ctx.run_ui(raw, |root| self.app.ui(root));
+        if let Some(error) = self.app.take_fatal() {
+            anyhow::bail!(error);
+        }
         self.next_redraw = tick + Duration::from_secs_f64(1.0 / self.app.gui_fps() as f64);
         self.input
             .handle_platform_output(&self.window, full.platform_output);
@@ -238,6 +241,7 @@ impl Native {
             &mut encoder,
             &jobs,
             &screen,
+            wgpu::Color::BLACK,
         );
         let view = frame.texture.create_view(&Default::default());
         self.present.draw(&self.queue, &mut encoder, &view, target);
@@ -260,15 +264,24 @@ impl Native {
             );
             self.app
                 .submit_window_shot(&self.ctx, shot, capture, &self.device);
+            if let Some(error) = self.app.take_fatal() {
+                anyhow::bail!(error);
+            }
         }
         Ok(())
     }
 }
 
-/// Paint tessellated egui `jobs` into `present`'s float canvas (cleared to black) at the size of
-/// `screen`: buffer uploads and the egui pass, recorded into `encoder`. Returns egui's own command
-/// buffers, to submit before `encoder`. The window's redraw and the headless window-screenshot
-/// test draw through here, so a test frame is composited exactly like a presented one.
+/// Paint tessellated egui `jobs` into `present`'s float canvas, cleared to `clear` (canvas
+/// values: extended sRGB, so the window's black, or HDR and negative values in the headless
+/// test), at the size of `screen`: buffer uploads and the egui pass, recorded into `encoder`.
+/// Returns egui's own command buffers, to submit before `encoder`. The window's redraw and the
+/// headless window-screenshot test draw through here, so a test frame is composited exactly
+/// like a presented one.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the distinct GPU objects of one pass; the window owns them as separate fields"
+)]
 pub(crate) fn paint_canvas(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
@@ -277,6 +290,7 @@ pub(crate) fn paint_canvas(
     encoder: &mut wgpu::CommandEncoder,
     jobs: &[egui::ClippedPrimitive],
     screen: &egui_wgpu::ScreenDescriptor,
+    clear: wgpu::Color,
 ) -> Vec<wgpu::CommandBuffer> {
     let [width, height] = screen.size_in_pixels;
     present.prepare_canvas(device, queue, width, height);
@@ -289,7 +303,7 @@ pub(crate) fn paint_canvas(
             depth_slice: None,
             resolve_target: None,
             ops: wgpu::Operations {
-                load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                load: wgpu::LoadOp::Clear(clear),
                 store: wgpu::StoreOp::Store,
             },
         })],
@@ -363,8 +377,10 @@ mod tests {
     /// the float canvas through the window's own `paint_canvas`, the present pass captures it the
     /// way the window does after presenting, and the file writer saves the EXR and the PQ PNG.
     /// Oracles: the grey block (egui sRGB code 128) decodes to linear 0.2159 in the EXR and to
-    /// 0.2159 x 203 = 43.8 nits in the PQ PNG; the uncovered canvas stays black; the PNG carries
-    /// cICP 9/16/0/1 and both files have the window's size.
+    /// 0.2159 x 203 = 43.8 nits in the PQ PNG. The uncovered canvas holds the clear colour
+    /// (4.0, -0.1, 1.0) in canvas (extended sRGB) values: it must come through the real present
+    /// shader unclipped in the EXR (about 25 and -0.01) and as the PQ of its BT.2020 nits in the
+    /// PNG. The PNG carries cICP 9/16/0/1 and both files have the window's size.
     #[test]
     fn gpu_window_shot_writes_exr_and_pq_png() {
         let _gpu = crate::test_gpu::lock();
@@ -373,6 +389,7 @@ mod tests {
             gpu_info::request_max_device_blocking(&gpu.adapter, gpu.device.features())
                 .expect("wgpu device");
         let (w, h) = (96u32, 64u32);
+        let clear = [4.0f32, -0.1, 1.0];
         let ctx = egui::Context::default();
         let block = egui::Rect::from_min_max(egui::pos2(56.0, 16.0), egui::pos2(96.0, 64.0));
         let raw = egui::RawInput {
@@ -411,6 +428,12 @@ mod tests {
             &mut encoder,
             &jobs,
             &screen,
+            wgpu::Color {
+                r: f64::from(clear[0]),
+                g: f64::from(clear[1]),
+                b: f64::from(clear[2]),
+                a: 1.0,
+            },
         );
         queue.submit(buffers.into_iter().chain([encoder.finish()]));
 
@@ -455,11 +478,19 @@ mod tests {
         for c in image.pixels[at(80, 40)] {
             assert!((c - grey).abs() < 0.005, "grey block {c}, want {grey}");
         }
+        // The clear colour, decoded on the CPU: f16 canvas storage bounds the error.
+        let hdr = clear.map(|c| egui_display::transfer::eotf(half::f16::from_f32(c).to_f32()));
+        let got = image.pixels[at(4, 60)];
         assert!(
-            image.pixels[at(4, 60)].iter().all(|c| c.abs() < 1e-4),
-            "uncovered canvas is black: {:?}",
-            image.pixels[at(4, 60)]
+            hdr[0] > 20.0 && hdr[1] < 0.0,
+            "the oracle is HDR and negative: {hdr:?}"
         );
+        for (g, want) in got.iter().zip(hdr) {
+            assert!(
+                (g - want).abs() <= want.abs() * 2e-3 + 1e-5,
+                "clear colour {got:?}, want {hdr:?} unclipped"
+            );
+        }
 
         let decoder = png::Decoder::new(std::io::BufReader::new(std::fs::File::open(png).unwrap()));
         let mut reader = decoder.read_info().unwrap();
@@ -483,6 +514,21 @@ mod tests {
             "grey block at {nits} nits, want {}",
             grey * white
         );
+        // The HDR clear colour: PQ of its BT.2020 nits (negative ones black), not clipped at white.
+        let want = egui_display::rec2020_nits(hdr, white)
+            .map(|n| (egui_display::pq(n.clamp(0.0, 10_000.0)) * 65535.0).round() as u16);
+        let got: Vec<u16> = (0..3).map(|c| sample(4 * at(4, 60) + c)).collect();
+        // SDR white (203 nits) is code 38055; red sits near 3200 nits.
+        assert!(
+            want[0] > 50_000,
+            "the oracle is far above SDR white: {want:?}"
+        );
+        for (g, want) in got.iter().zip(want) {
+            assert!(
+                g.abs_diff(want) <= 8,
+                "clear colour codes {got:?}, want {want:?}"
+            );
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 }

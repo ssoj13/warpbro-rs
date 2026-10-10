@@ -1366,18 +1366,23 @@ impl Target {
         .map(|_| ())
     }
 
-    /// Display light, linear Rec.709, normalized to 100 nits (matching exr-view).
-    pub fn save_display_exr(&self, path: &std::path::Path) -> Result<(), String> {
+    /// Display light, linear Rec.709 (`render_service::write_display_exr`): `whiteLuminance` 100
+    /// for an HDR view's absolute light, `sdr_white_nits` for relative light.
+    pub fn save_display_exr(
+        &self,
+        path: &std::path::Path,
+        sdr_white_nits: f32,
+    ) -> Result<(), String> {
         if let Some(e) = &self.colour_error {
             return Err(format!("Colour transform failed: {e}"));
         }
-        crate::exr_io::write_rgb(
+        crate::render_service::write_display_exr(
             path,
             self.width,
             self.height,
             &self.light,
-            &crate::color::DISPLAY_PRIMS,
-            Some(100.0),
+            self.light_kind,
+            sdr_white_nits,
             true,
         )
     }
@@ -3011,7 +3016,10 @@ mod tests {
             "existing file without overwrite"
         );
         let exr_path = dir.join("display.exr");
-        target.save_display_exr(&exr_path).unwrap();
+        // An HDR view's absolute light: 1.0 = 100 nits whatever the SDR white.
+        target
+            .save_display_exr(&exr_path, crate::color::BT2408_SDR_WHITE_NITS)
+            .unwrap();
         assert_eq!(
             crate::exr_io::read_attr::<exr_core::attr::Chromaticities>(&exr_path, "chromaticities"),
             Some(exr_core::attr::Chromaticities::default())

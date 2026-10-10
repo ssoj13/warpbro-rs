@@ -44,7 +44,8 @@ pub struct ViewportRequest {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FrameFile {
     Png(PngEncoding),
-    /// Linear display light, display primaries, `whiteLuminance` 100 nits.
+    /// Linear display light, display primaries, `whiteLuminance` = the nits of its 1.0 in the
+    /// same frame's HDR10 PNG ([`write_display_exr`]).
     DisplayExr,
 }
 impl FrameFile {
@@ -83,6 +84,31 @@ pub struct Frame {
     pub sdr_bytes: Arc<Vec<u8>>,
     /// Extended-sRGB encoded RGBA32F, prepared with the requested output reference white.
     pub hdr_bytes: Arc<Vec<u8>>,
+}
+/// Write linear Rec.709 display light as the display EXR: float RGB, BT.709 `chromaticities`,
+/// `whiteLuminance` = the nits of the light's 1.0 in the same frame's HDR10 PNG (`hdr_scale`):
+/// 100 for an HDR view's absolute light, `sdr_white_nits` for relative light, so the EXR and
+/// the PNG agree on luminance. The one display-EXR writer: viewport snapshots, the CLI's
+/// `--display-exr` and window screenshots (`window_shot`).
+pub fn write_display_exr(
+    path: &Path,
+    width: usize,
+    height: usize,
+    light: &[[f32; 4]],
+    kind: crate::color::DisplayLight,
+    sdr_white_nits: f32,
+    overwrite: bool,
+) -> Result<(), String> {
+    let white = hdr_scale(kind, light, sdr_white_nits, PngEncoding::Hdr10).unit_nits;
+    crate::exr_io::write_rgb(
+        path,
+        width,
+        height,
+        light,
+        &crate::color::DISPLAY_PRIMS,
+        Some(white),
+        overwrite,
+    )
 }
 pub(crate) fn hdr_canvas_bytes(light: &[[f32; 4]], gain: f32) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(std::mem::size_of_val(light));
@@ -182,17 +208,18 @@ impl Frame {
             overwrite,
         )
     }
-    pub fn save_display_exr(&self, path: &Path) -> Result<(), String> {
+    /// The display EXR ([`write_display_exr`]); `sdr_white_nits` as in [`Self::save_png`].
+    pub fn save_display_exr(&self, path: &Path, sdr_white_nits: f32) -> Result<(), String> {
         if let Some(e) = &self.colour_error {
             return Err(format!("Colour transform failed: {e}"));
         }
-        crate::exr_io::write_rgb(
+        write_display_exr(
             path,
             self.width,
             self.height,
             &self.light,
-            &crate::color::DISPLAY_PRIMS,
-            Some(100.0),
+            self.light_kind,
+            sdr_white_nits,
             true,
         )
     }
@@ -203,7 +230,7 @@ impl Frame {
             FrameFile::Png(encoding) => self
                 .save_png(path, encoding, sdr_white_nits, true)
                 .map(|_| ()),
-            FrameFile::DisplayExr => self.save_display_exr(path),
+            FrameFile::DisplayExr => self.save_display_exr(path, sdr_white_nits),
         }
     }
 }
@@ -2119,7 +2146,11 @@ mod tests {
                 crate::color::BT2408_SDR_WHITE_NITS,
             )
             .unwrap();
-        assert!(exr.is_file());
+        // Relative (SDR view) light: 1.0 is the HDR10 PNG's SDR white, so the EXR says so.
+        assert_eq!(
+            crate::exr_io::read_attr::<f32>(&exr, "whiteLuminance"),
+            Some(crate::color::BT2408_SDR_WHITE_NITS)
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

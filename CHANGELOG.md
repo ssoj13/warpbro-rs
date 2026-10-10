@@ -10,7 +10,12 @@
   203 nits. Captured by the present pass from the frame after the request, read back and written on
   the file worker through the viewport snapshot's encoders (`exr_io::write_rgb`, `write_png`).
 - `FRAC_SNAP` uses the same capture request (no `ViewportCommand::Screenshot`, no blocking readback
-  on the window's thread); failures surface in the status line and the log.
+  on the window's thread); failures surface in the status line and the log, and a failed
+  `FRAC_SNAP` exits non-zero. `Ctrl+Shift+S` is a second binding (F12 is the Windows debugger
+  break key under an attached debugger); a request while one is armed is refused.
+- Display EXR (viewport snapshot, `--display-exr`): `whiteLuminance` is now the nits of 1.0 in the
+  same frame's HDR10 PNG (100 for absolute HDR-view light, the SDR white for relative light), no
+  longer always 100; one writer, `render_service::write_display_exr`.
 
 ### Render settings as graph nodes
 

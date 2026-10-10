@@ -207,11 +207,15 @@ Rules this keeps:
   value authored in ACEScg (the emissive preset) is stored as its BT.709 equivalent.
 - **Files say what they are:** scene-linear EXR is tagged AP1, display EXR BT.709, an HDR PNG carries
   `cICP` (and is named `.pq.png` / `.hlg.png`), an SDR PNG the `sRGB` chunk.
+- **Display EXR and HDR PNG agree on luminance** (`render_service::write_display_exr`): the display
+  EXR's `whiteLuminance` is the nits of 1.0 in the same frame's HDR10 PNG (`hdr_scale(..).unit_nits`):
+  100 for an HDR view's absolute light, the SDR white (monitor's on HDR, else BT.2408's 203) for
+  relative light.
 - **Window screenshots** (`src/window_shot.rs`) start from the composited egui-display canvas
   (extended sRGB, 1.0 = SDR reference white), captured as scRGB at 80-nit white, which is exactly the
   canvas decoded to linear BT.709. Reference white = the monitor's SDR white on an HDR output, else
-  BT.2408's 203 nits (`Monitor::sdr_white_nits`, shared with viewport snapshots). EXR: that linear light,
-  BT.709 `chromaticities`, `whiteLuminance` = the reference white. PQ PNG: BT.2020 nits through ST 2084
+  BT.2408's 203 nits (`Monitor::sdr_white_nits`, shared with viewport snapshots). EXR: that linear light
+  through the same display-EXR writer, BT.709 `chromaticities`, `whiteLuminance` = the reference white. PQ PNG: BT.2020 nits through ST 2084
   (`cICP` 9/16/0/1), so 1.0 lands on PQ 0.5807 at 203 nits.
 
 ## 6. Before and after the switch to ACEScg

@@ -126,6 +126,12 @@ const fn physical(command: Command, key: Key, modifiers: Modifiers) -> Binding {
 pub const GLOBAL: &[Binding] = &[
     binding(Command::ToggleUi, Key::Tab, Modifiers::NONE),
     binding(Command::WindowShot, Key::F12, Modifiers::NONE),
+    // F12 is Windows' debugger break key while a debugger is attached (UserDebuggerHotKey).
+    binding(
+        Command::WindowShot,
+        Key::S,
+        Modifiers::COMMAND.plus(Modifiers::SHIFT),
+    ),
     binding(Command::Undo, Key::Z, Modifiers::COMMAND),
     binding(
         Command::Redo,
@@ -613,6 +619,20 @@ mod tests {
             Some((Scope::Viewport, Command::Fit))
         );
         assert_eq!(resolve(Scope::Export, Key::F, None, Modifiers::NONE), None);
+        // The window screenshot wins over the timeline's Scale (S) in every panel.
+        for (key, modifiers) in [
+            (Key::F12, Modifiers::NONE),
+            (Key::S, Modifiers::COMMAND.plus(Modifiers::SHIFT)),
+        ] {
+            assert_eq!(
+                resolve(Scope::Timeline, key, None, modifiers),
+                Some((Scope::Global, Command::WindowShot))
+            );
+        }
+        assert_eq!(
+            resolve(Scope::Timeline, Key::S, None, Modifiers::NONE),
+            Some((Scope::Timeline, Command::Scale))
+        );
         assert_eq!(
             resolve(Scope::Timeline, Key::F, None, Modifiers::COMMAND),
             None

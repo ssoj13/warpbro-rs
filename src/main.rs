@@ -141,8 +141,11 @@ fn headless(out: Option<&str>, w: usize, h: usize, spp: u32, hdr: bool, display_
                 .expect("save png");
             if display_exr {
                 let exr = crate::render_service::FrameFile::DisplayExr.suffix();
-                t.save_display_exr(&dir.join(fs_name::frame_file(&stem, None, exr)))
-                    .expect("save display EXR");
+                t.save_display_exr(
+                    &dir.join(fs_name::frame_file(&stem, None, exr)),
+                    crate::color::BT2408_SDR_WHITE_NITS,
+                )
+                .expect("save display EXR");
             }
         }
     }

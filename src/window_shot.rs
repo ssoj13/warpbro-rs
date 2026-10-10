@@ -15,8 +15,9 @@
 //! monitor's SDR white when the window shows HDR (so the files are as bright as the screen), else
 //! ITU-R BT.2408's 203 nits ([`crate::color::BT2408_SDR_WHITE_NITS`]). The files go through the
 //! encoders the viewport snapshot uses:
-//! - EXR (`exr_io::write_rgb`): float RGB of that linear light, `chromaticities` BT.709 / D65,
-//!   `whiteLuminance` = the reference white, so value x whiteLuminance = nits on screen.
+//! - EXR (`render_service::write_display_exr`, the viewport's display EXR writer): float RGB of
+//!   that linear light, `chromaticities` BT.709 / D65, `whiteLuminance` = the reference white, so
+//!   value x whiteLuminance = nits on screen.
 //! - PQ PNG (`egui_display::export::write_png`, HDR10): 16-bit SMPTE ST 2084 of BT.2020 nits
 //!   (reference white at those nits), `cICP` 9/16/0/1, `mDCV` and a measured `cLLI`.
 //!
@@ -30,7 +31,7 @@ use egui_display::screenshot::{Capture, Pixels};
 use egui_display::{Output, Target};
 
 use crate::color::DisplayLight;
-use crate::render_service::{PngEncoding, hdr_scale, write_png};
+use crate::render_service::{PngEncoding, hdr_scale, write_display_exr, write_png};
 
 /// Which files a user's window screenshot writes (File menu, `F12` writes both).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,6 +133,11 @@ pub enum ShotError {
     Worker(String),
     /// A file encoder failed.
     Write { path: PathBuf, message: String },
+    /// Some files were written before `error` stopped the rest.
+    Partial {
+        written: Vec<PathBuf>,
+        error: Box<ShotError>,
+    },
 }
 
 impl fmt::Display for ShotError {
@@ -142,6 +148,10 @@ impl fmt::Display for ShotError {
             Self::Folder(e) => write!(f, "screenshot folder: {e}"),
             Self::Worker(e) => write!(f, "{e}"),
             Self::Write { path, message } => write!(f, "{}: {message}", path.display()),
+            Self::Partial { written, error } => {
+                let names: Vec<String> = written.iter().map(|p| p.display().to_string()).collect();
+                write!(f, "{error} (written: {})", names.join(", "))
+            }
         }
     }
 }
@@ -155,9 +165,18 @@ impl From<egui_display::CaptureError> for ShotError {
 }
 
 /// The linear light of a scRGB capture made for [`ShotKind::Linear`]: RGBA, linear BT.709, 1.0 =
-/// SDR reference white (see [`WindowShot::target`]). Any other pixel type or a sample count
-/// that does not match the size is an error, never a padded or guessed image.
+/// SDR reference white (see [`WindowShot::target`]). A capture for another output or another
+/// white (whose values are not the bare decoded canvas), any other pixel type, or a sample count
+/// that does not match the size is an error, never a rescaled, padded or guessed image.
 pub fn linear_light(capture: &Capture) -> Result<Vec<[f32; 4]>, ShotError> {
+    if capture.output != Output::Scrgb || capture.white_nits != egui_display::SCRGB_NITS {
+        return Err(ShotError::Pixels(format!(
+            "{:?} capture at {} nits white is not the linear canvas (scRGB at {} nits)",
+            capture.output,
+            capture.white_nits,
+            egui_display::SCRGB_NITS
+        )));
+    }
     let Pixels::RgbaF16(px) = &capture.pixels else {
         return Err(ShotError::Pixels(format!(
             "{:?} capture is not linear float",
@@ -183,7 +202,9 @@ pub fn linear_light(capture: &Capture) -> Result<Vec<[f32; 4]>, ShotError> {
 
 /// Write `files` of the linear `light` (`width` x `height`, see [`linear_light`]) as
 /// `dir/<stem>.window.exr` and `dir/<stem>.window.pq.png`, the canvas's 1.0 at `sdr_white_nits`.
-/// Returns the paths written. Existing files are refused (each shot has its own folder).
+/// Returns the paths written; when one file fails after another was written, the error is
+/// [`ShotError::Partial`] with the written paths. Existing files are refused (each shot has its
+/// own folder).
 pub fn write_linear(
     dir: &Path,
     stem: &str,
@@ -195,13 +216,13 @@ pub fn write_linear(
     let mut written = Vec::new();
     if files.exr() {
         let path = dir.join(crate::fs_name::frame_file(stem, None, EXR_SUFFIX));
-        crate::exr_io::write_rgb(
+        write_display_exr(
             &path,
             width,
             height,
             light,
-            &crate::color::DISPLAY_PRIMS,
-            Some(sdr_white_nits),
+            DisplayLight::Relative,
+            sdr_white_nits,
             false,
         )
         .map_err(|message| ShotError::Write {
@@ -215,7 +236,7 @@ pub fn write_linear(
         let encoding = PngEncoding::Hdr10;
         let scale = hdr_scale(DisplayLight::Relative, light, sdr_white_nits, encoding);
         // An HDR10 PNG never reads the SDR codes.
-        write_png(
+        let result = write_png(
             &path,
             width,
             height,
@@ -224,11 +245,18 @@ pub fn write_linear(
             encoding,
             scale,
             false,
-        )
-        .map_err(|message| ShotError::Write {
-            path: path.clone(),
-            message,
-        })?;
+        );
+        if let Err(message) = result {
+            let error = ShotError::Write { path, message };
+            return Err(if written.is_empty() {
+                error
+            } else {
+                ShotError::Partial {
+                    written,
+                    error: Box::new(error),
+                }
+            });
+        }
         written.push(path);
     }
     Ok(written)
@@ -421,43 +449,37 @@ mod tests {
         assert_eq!(light, vec![[0.5, 2.0, -0.25, 1.0], [0.0, 12.0, 1.0, 1.0]]);
         assert!(linear_light(&capture(Pixels::RgbaF16(vec![h(0.0); 4]))).is_err());
         assert!(linear_light(&capture(Pixels::Rgba8(vec![0; 8]))).is_err());
+        // Scaled by another white, or encoded for another output: not the bare canvas.
+        let px = Pixels::RgbaF16(vec![h(0.5); 8]);
+        let mut other_white = capture(px.clone());
+        other_white.white_nits = 240.0;
+        assert!(matches!(
+            linear_light(&other_white),
+            Err(ShotError::Pixels(_))
+        ));
+        let mut other_output = capture(px);
+        other_output.output = Output::Hdr10;
+        assert!(matches!(
+            linear_light(&other_output),
+            Err(ShotError::Pixels(_))
+        ));
     }
 
-    /// Linear shots capture scRGB at the scRGB white (the bare decoded canvas); a displayed shot
-    /// keeps the window's output and levels.
+    /// A PNG that fails after the EXR was written reports the EXR with the error.
     #[test]
-    fn shots_choose_their_capture() {
-        let shown = Target {
-            hdr: true,
-            white: 240.0,
-            peak: 800.0,
+    fn a_failed_png_after_the_exr_reports_the_exr() {
+        let dir = scratch("partial");
+        let light = vec![[0.5, 0.5, 0.5, 1.0]];
+        let png = dir.join("part.window.pq.png");
+        std::fs::write(&png, b"taken").unwrap();
+        let error = write_linear(&dir, "part", &light, (1, 1), WindowFiles::ExrAndPq, 203.0)
+            .expect_err("the PNG exists");
+        let ShotError::Partial { written, error } = error else {
+            panic!("partial result expected, got {error}");
         };
-        let linear = WindowShot {
-            kind: ShotKind::Linear {
-                root: PathBuf::new(),
-                stem: "s".into(),
-                files: WindowFiles::ExrAndPq,
-                sdr_white_nits: 240.0,
-            },
-            quit: false,
-        };
-        assert_eq!(linear.output(Output::Hdr10), Output::Scrgb);
-        let target = linear.target(shown);
-        assert_eq!(target.white, egui_display::SCRGB_NITS);
-        let canvas = 0.73;
-        let encoded = egui_display::encode(
-            [canvas; 3],
-            Output::Scrgb.encoding(wgpu::TextureFormat::Rgba16Float),
-            target,
-        );
-        assert_eq!(encoded[0], egui_display::transfer::eotf(canvas));
-        let displayed = WindowShot {
-            kind: ShotKind::Displayed {
-                path: PathBuf::from("x.png"),
-            },
-            quit: true,
-        };
-        assert_eq!(displayed.output(Output::Hdr10), Output::Hdr10);
-        assert_eq!(displayed.target(shown), shown);
+        assert_eq!(written, vec![dir.join("part.window.exr")]);
+        assert!(written[0].is_file());
+        assert!(matches!(*error, ShotError::Write { ref path, .. } if *path == png));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

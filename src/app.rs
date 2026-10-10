@@ -176,6 +176,8 @@ pub(crate) struct App {
     /// The armed window screenshot (`window_shot`) and whether a frame was drawn since it was
     /// requested: the window captures it only then, so a menu that asked for it is closed.
     window_shot: Option<(crate::window_shot::WindowShot, bool)>,
+    /// An error the window exits with (non-zero): a failed `FRAC_SNAP` (`take_fatal`).
+    fatal: Option<String>,
     /// Flight via cam-controls' inertial `SpaceFlight`, alive while RMB is held and
     /// while its momentum coasts after release.
     fly: Option<cam_controls::SpaceFlight>,
@@ -653,6 +655,7 @@ impl App {
                 (PathBuf::from(p), spp, false)
             }),
             window_shot: None,
+            fatal: None,
         }
         .with_snap_preset()
         .with_settings()
@@ -1183,16 +1186,15 @@ impl App {
         let ready = (!wait_thumbs || !thumbs_pending)
             && !self.showing_preview
             && self.frame.as_ref().is_some_and(|t| t.complete(spp));
-        if ready && !requested {
-            // The window's own signal through the one window-screenshot path; the window
-            // closes once the file is written (`window_event`).
-            self.window_shot = Some((
-                crate::window_shot::WindowShot {
-                    kind: crate::window_shot::ShotKind::Displayed { path },
-                    quit: true,
-                },
-                false,
-            ));
+        // The window's own signal through the one window-screenshot path; the window closes
+        // once the file is written (`window_event`). Behind an armed user shot it waits.
+        if ready
+            && !requested
+            && self.arm_window_shot(crate::window_shot::WindowShot {
+                kind: crate::window_shot::ShotKind::Displayed { path },
+                quit: true,
+            })
+        {
             self.snap = self.snap.take().map(|(path, spp, _)| (path, spp, true));
         }
         ctx.request_repaint();
@@ -1987,14 +1989,14 @@ impl App {
             Err(e) => e,
         };
     }
-    /// The window-screenshot choices of the File menu (`F12`: EXR + PQ PNG).
+    /// The window-screenshot choices of the File menu (`F12` / `Ctrl+Shift+S`: EXR + PQ PNG).
     fn window_shot_menu(&mut self, ui: &mut egui::Ui) {
         let hint = "The whole window as presented (viewport, panels, menus) at its physical \
             resolution. EXR: linear BT.709 light, 1.0 = SDR white, whiteLuminance in nits. PQ PNG: \
             16-bit ST 2084 / BT.2020 with cICP; SDR white at the monitor's (HDR) or 203 nits.";
         for files in crate::window_shot::WindowFiles::ALL {
             let label = if files == crate::window_shot::WindowFiles::ExrAndPq {
-                format!("{}    F12", files.label())
+                format!("{}    F12 / Ctrl+Shift+S", files.label())
             } else {
                 files.label().to_owned()
             };
@@ -2013,18 +2015,33 @@ impl App {
         files: crate::window_shot::WindowFiles,
         monitor: Monitor,
     ) {
-        self.window_shot = Some((
-            crate::window_shot::WindowShot {
-                kind: crate::window_shot::ShotKind::Linear {
-                    root: crate::out_root(),
-                    stem: crate::fs_name::stem(&self.scene.name),
-                    files,
-                    sdr_white_nits: monitor.sdr_white_nits(),
-                },
-                quit: false,
+        self.arm_window_shot(crate::window_shot::WindowShot {
+            kind: crate::window_shot::ShotKind::Linear {
+                root: crate::out_root(),
+                stem: crate::fs_name::stem(&self.scene.name),
+                files,
+                sdr_white_nits: monitor.sdr_white_nits(),
             },
-            false,
-        ));
+            quit: false,
+        });
+    }
+
+    /// Arm `shot` for the next frame. One shot is armed at a time: while one waits for its
+    /// frame, a new request is refused in the status line rather than replacing it (a
+    /// `FRAC_SNAP` quit shot in particular). Returns whether `shot` was armed.
+    fn arm_window_shot(&mut self, shot: crate::window_shot::WindowShot) -> bool {
+        if self.window_shot.is_some() {
+            log::warn!("Window screenshot refused: another one is waiting for its frame");
+            self.status = "A window screenshot is already pending".into();
+            return false;
+        }
+        self.window_shot = Some((shot, false));
+        true
+    }
+
+    /// The error the window must exit with, once (a failed `FRAC_SNAP`).
+    pub(crate) fn take_fatal(&mut self) -> Option<String> {
+        self.fatal.take()
     }
 
     /// The armed window screenshot, once a frame has been drawn since it was requested. The
@@ -2073,20 +2090,25 @@ impl App {
     }
 
     /// A finished window screenshot: the files or the error in the status line (and the log).
+    /// A quit shot (`FRAC_SNAP`) closes the window when it succeeded and makes the window exit
+    /// with its error (`take_fatal`) when it failed.
     fn window_event(&mut self, ctx: &egui::Context, event: crate::io_service::WindowEvent) {
         match event.result {
             Ok(paths) => {
                 let names: Vec<String> = paths.iter().map(|p| p.display().to_string()).collect();
                 log::info!("Window screenshot: {}", names.join(", "));
                 self.status = format!("Saved {}", names.join(", "));
+                if event.quit {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
             }
             Err(error) => {
                 log::error!("Window screenshot: {error}");
                 self.status = format!("Window screenshot failed: {error}");
+                if event.quit {
+                    self.fatal = Some(format!("FRAC_SNAP: {error}"));
+                }
             }
-        }
-        if event.quit {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
     fn step_viewport(&mut self, w: usize, h: usize, output_hdr: bool, white_nits: f32) {
