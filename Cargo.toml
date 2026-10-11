@@ -9,15 +9,15 @@ path = "src/main.rs"
 
 [features]
 default = []
-# Export the deterministic Direct kernels for OFX artifact builds only.
-# WarpBro uses Fast/Full path tracing; this avoids JIT-compiling unused entry points.
-ofx-direct = []
 
 [workspace]
-members = ["crates/fractal-materials"]
 
 [dependencies]
-fractal-materials = { path = "crates/fractal-materials" }
+# The fractal path tracer shared with ofx-rs: parameter ABI and sampling, the CUDA kernels
+# (built into this binary through #[cuda_module]) and the material presets.
+fractal-core = { git = "ssh://git@github.com/ssoj13/fractal-rs.git", branch = "main" }
+fractal-kernels = { git = "ssh://git@github.com/ssoj13/fractal-rs.git", branch = "main" }
+fractal-materials = { git = "ssh://git@github.com/ssoj13/fractal-rs.git", branch = "main" }
 playa-player = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "main", default-features = false }
 # OIDN for ACEScg input (AP1 autoexposure + firefly clamp).
 pt-denoise-oidn = { git = "ssh://git@github.com/ssoj13/render-rs.git", branch = "main" }

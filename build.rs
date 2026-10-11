@@ -1,4 +1,4 @@
-//! The kernels in `src/gpu.rs` are compiled to PTX by the cuda-oxide rustc backend, which only
+//! The kernels (fractal-rs `fractal-kernels`, linked in through `#[cuda_module]`) are compiled to PTX by the cuda-oxide rustc backend, which only
 //! `cargo oxide` enables. A plain `cargo build` would otherwise fail much later, at link time,
 //! with "undefined symbol: cuda_oxide_artifact_anchor_*"; stop early with the fix instead.
 

@@ -8,6 +8,9 @@
 //!   WarpBro --bench [W H SPP]                time every preset
 
 mod animation;
+// The parameter ABI is shared with the CUDA kernels and with ofx-rs through fractal-rs; host code
+// keeps addressing it as crate::params.
+use fractal_core::params;
 mod app;
 mod camera_orbit;
 mod camera_recorder;
@@ -20,7 +23,6 @@ mod fs_name;
 mod export;
 mod exr_io;
 mod file_dialogs;
-mod gpu;
 mod hotkeys;
 mod io_service;
 mod material_gallery;
@@ -28,10 +30,8 @@ mod materials;
 #[allow(dead_code)]
 mod ocio;
 mod palette;
-mod params;
 #[allow(dead_code)] // Integrated into CUDA after the unchanged-policy baseline is captured.
 mod path_convergence;
-mod path_sampling;
 mod presets;
 mod preview;
 mod render;
@@ -39,13 +39,11 @@ mod render_bench;
 mod render_profiles;
 mod render_profiles_ui;
 mod render_service;
-mod sampler;
 mod scene;
 mod templates;
 #[cfg(test)]
 mod test_gpu;
 mod transfer;
-mod transmission;
 mod window;
 mod window_shot;
 mod world;

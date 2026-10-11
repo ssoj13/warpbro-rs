@@ -1965,7 +1965,7 @@ pub(crate) fn inactive_reason<'a>(
                 .then(|| format!("The {family} formula has no Julia mode"));
         }
         let coloring = value("/coloring")?.as_str()?;
-        // gpu.rs trap3 / hit_palette: Radius reads none, TrapOrigin only the scale, TrapPlane
+        // fractal-kernels trap3 / hit_palette: Radius reads none, TrapOrigin only the scale, TrapPlane
         // all three, TrapPoint the point and the scale.
         let used = match coloring {
             "Radius" => false,

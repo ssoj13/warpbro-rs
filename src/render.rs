@@ -6,12 +6,12 @@ use std::time::Instant;
 
 use cuda_core::{CudaContext, CudaStream, DeviceBuffer, LaunchConfig1D};
 
-use crate::gpu::kernels;
 use crate::palette::{PaletteScheme, build_lut};
 use crate::params::*;
 #[cfg(test)]
 use crate::scene::MaterialModel;
 use crate::scene::Scene;
+use fractal_kernels::kernels;
 
 const BLOCK: u32 = 128;
 /// Threads of the `tally` reduction (a multiple of `BLOCK`): the out-of-steps readback is this
@@ -2412,10 +2412,11 @@ mod tests {
                 assert!((n.length() - 1.0).abs() < 1e-4);
                 hits += 1;
                 let (x, y) = ((i % w) as u32, (i / w) as u32);
-                let nx =
-                    2.0 * (x as f32 + crate::sampler::sample(x ^ 19, y, 0, 0)) / w as f32 - 1.0;
-                let ny =
-                    1.0 - 2.0 * (y as f32 + crate::sampler::sample(x ^ 19, y, 0, 1)) / h as f32;
+                let nx = 2.0 * (x as f32 + fractal_core::sampler::sample(x ^ 19, y, 0, 0))
+                    / w as f32
+                    - 1.0;
+                let ny = 1.0
+                    - 2.0 * (y as f32 + fractal_core::sampler::sample(x ^ 19, y, 0, 1)) / h as f32;
                 let ray = (forward + right * nx * p[P_HALF_W] + up * ny * p[P_HALF_H]).normalize();
                 if n.dot(-ray) > 0.999999 {
                     fallback += 1;

@@ -80,13 +80,13 @@ WarpBro is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX
 
 | ofx-rs / render-rs                                                                 | WarpBro                                                              |
 | ---------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| `fractal3d.wgsl`: estimates, march, normals, palette, sky                          | `src/gpu.rs`                                                         |
-| `pathtrace.wgsl` + render-rs `pt-integrator`                                       | `src/gpu.rs`, `trace_path`                                           |
+| `fractal3d.wgsl`: estimates, march, normals, palette, sky                          | `fractal-kernels`                                                    |
+| `pathtrace.wgsl` + render-rs `pt-integrator`                                       | `fractal-kernels`, `trace_path`                                      |
 | `fractal3d.rs`: presets, `Frames`, `max_distance`, footprint                       | `src/scene.rs`                                                       |
-| `uniform3d.rs`: the uniform layout                                                 | `src/params.rs`                                                      |
+| `uniform3d.rs`: the uniform layout                                                 | `fractal_core::params`                                               |
 | `ofx-gen/palette.rs`                                                               | `src/palette.rs`                                                     |
 | render-rs `standard-surface-bsdf`                                                  | SSH crate with opt-in `cuda-math` (`libm::*` → `f32` methods)        |
-| usd-rs `usd-mat-lib` presets, `usd-hd-pt` translator, `pt-material-ext` facing mix | `src/materials.rs`, `src/gpu.rs`                                     |
+| usd-rs `usd-mat-lib` presets, `usd-hd-pt` translator, `pt-material-ext` facing mix | `src/materials.rs`, `fractal-kernels`                                |
 | gitnexus-rs `cam-controls` / `cam-viewport` / `cam-controls-egui`                  | SSH crates (flight rig, horizon lock, shared fly bindings)           |
 
 ## Requirements
@@ -117,7 +117,7 @@ WarpBro is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX
   `pt-denoise-oidn` (ACEScg input), `standard-surface-bsdf` comes from the same render-rs with
   `cuda-math`. Our own repositories are SSH Git dependencies; third-party Git sources
   (burn, cubecl, ...) stay on the HTTPS URLs their crates declare.
-  The workspace material catalog lives in `crates/fractal-materials`.
+  The kernels, their parameter ABI and the material catalog live in the shared private repository `ssoj13/fractal-rs` (`fractal-kernels`, `fractal-core`, `fractal-materials`), also used by ofx-rs.
 
 ## Build and run
 
@@ -433,7 +433,7 @@ material previews and Gallery wait for it. Release archives avoid it on most GPU
   `CUDA_CACHE_MAXSIZE` must match between warm-up and use.
 
 The eight OFX Direct entry points (`direct_*`, about a quarter of the PTX) are built only with
-`cargo oxide build --features ofx-direct`; WarpBro never dispatches them. With
+fractal-kernels' `direct` feature, which WarpBro does not enable; it never dispatches them. With
 `RUST_LOG=info` the log records `context ready in` and `kernels ready in` (module
 `WarpBro::render`) separately.
 
@@ -487,7 +487,7 @@ The timings above predate this bridge, the World tracer and OIDN integration.
 ## Layout
 
 ```text
-src/gpu.rs        the kernels (#[cuda_module]): estimates, march, normals, lighting, integrator, tonemap
+fractal-rs        (dependency) fractal-kernels: the #[cuda_module] kernels; fractal-core: parameter ABI, sampler
 src/scene.rs      evaluated Scene, legacy serde, formulas, presets and parameter packing
 src/world.rs      Playa World document, canonical settings nodes, evaluator, commands and undo/redo
 src/render_profiles.rs   evaluated render/quality and viewport-policy contracts
@@ -495,7 +495,6 @@ src/render_profiles_ui.rs   named profile/template catalog and shared viewport b
 src/world_ui.rs   Outliner, object Attribute Editor and layered component Timeline
 src/presets.rs    five authored 250-frame animated World presets
 src/camera_orbit.rs   deterministic timeline integration of camera orbit speed
-src/params.rs     parameter-block slots shared by host and device
 src/render.rs     CUDA context, progressive targets, kernel dispatch, PNG output
 src/app.rs        the egui browser, shared Settings panel and viewport toolbar
 src/dock.rs       dockable panels, named layout manager and viewport toolbar
@@ -510,7 +509,7 @@ src/window.rs     winit/wgpu shell + egui-display float canvas and SDR/HDR swapc
 src/window_shot.rs  whole-window screenshots: request, linear canvas decode, EXR / PQ PNG writers
 src/palette.rs    the 14 palettes
 src/materials.rs  host adapter for the shared fractal-materials catalog
-crates/fractal-materials   renderer-independent material preset definitions
+fractal-rs        (dependency) fractal-materials: renderer-independent material presets
 src/preview.rs    bounded final/draft Playa RAM cache and playback state
 src/hotkeys.rs    global-first, panel-scoped command bindings
 standard-surface-bsdf   SSH dependency: Autodesk Standard Surface (MaterialX port, Apache-2.0)

@@ -171,7 +171,7 @@ sensitive to steps in the dark.
         │ vfx-ocio matrix; scene::put_rgb, palette::build_lut)    │ environment::Map::load
         ▼                                                         ▼
  ┌──────────────────────────── RENDER: linear ACEScg (AP1, ACES white) ────────────────────────────┐
- │ CUDA path tracer (gpu.rs): BSDF, NEE + MIS, environment importance sampling                       │
+ │ CUDA path tracer (fractal-kernels): BSDF, NEE + MIS, environment importance sampling              │
  │ luminance everywhere = AP1 Y row 0.2722 / 0.6741 / 0.0537 (SS_LUMA = color::LUMA)                 │
  │ accumulate -> OIDN (pt-denoise-oidn, AP1 autoexposure) -> exposure, saturation (AP1 luminance)    │
  └────────────────┬────────────────────────────────────────────────────────┬───────────────────────┘

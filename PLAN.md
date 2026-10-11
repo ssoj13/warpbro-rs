@@ -145,8 +145,8 @@ egui-widgets-rs. Topic docs (how things work) live in docs/; this file only trac
 
 - WarpBro: src/world.rs (graph document, commands, settings nodes), src/world_ui.rs (outliner,
   timeline, Attribute Editor), src/render_profiles*.rs (settings contracts and catalog UI),
-  src/app.rs (viewport routing, Render / Encode), src/export.rs, src/render.rs, src/gpu.rs
-  (kernels), src/render_service.rs, bootstrap.py (every build / check / CI entry), docs/.
+  src/app.rs (viewport routing, Render / Encode), src/export.rs, src/render.rs, fractal-rs
+  `fractal-kernels` (kernels), src/render_service.rs, bootstrap.py (every build / check / CI entry), docs/.
 - render-rs BSDF: crates/render-engine-pt/standard-surface-bsdf/src/{microfacet.rs,sample.rs,wgsl/microfacet.wgsl}.
 
 ## Findings worth keeping

@@ -208,7 +208,7 @@ impl Hybrid {
 const BOUND_FRAMING: f32 = 1.2;
 const REACH_MARGIN_FRAMES: f32 = 2.5;
 /// The march step budget of every preset. A budget, not a quality knob: a ray that runs out of
-/// steps is `Outcome::Unresolved` (the integrator's per-ray policy in `gpu.rs` `trace_path`),
+/// steps is `Outcome::Unresolved` (the integrator's per-ray policy in fractal-kernels `trace_path`),
 /// and only rays that need the steps pay for them. Measured
 /// on BUG1 frame 27: grazing rays need up to 889 steps; 256 left 37% of the hits as phantoms;
 /// primary rays cost 28% more at 4096, the full 6-bounce render the same.
@@ -936,7 +936,7 @@ impl Scene {
             _ => object_radius,
         };
         p[P_MAX_DISTANCE] = dist + length(c.target) + length(self.object.offset) + object_radius;
-        // Bounding sphere (see gpu.rs march): exact where the estimate itself says "outside".
+        // Bounding sphere (see fractal-kernels march): exact where the estimate itself says "outside".
         let clip_object = match self.formula {
             Formula::Mandelbulb(_) | Formula::QuaternionJulia(_) | Formula::Hybrid(_) => None, // set below from P_BAILOUT
             _ if self.formula.bound_radius() > 0.0 => Some(self.formula.bound_radius()),

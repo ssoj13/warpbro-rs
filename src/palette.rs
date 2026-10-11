@@ -143,7 +143,7 @@ fn gradient_color(gradient: Gradient, t: f32) -> [f32; 3] {
 }
 
 /// The 1024-entry ramp plus the interior colour, as `[r, g, b, 0]` rows: the layout the
-/// kernels read (`gpu.rs palette_color`), same as ofx-fractal's WGSL storage buffer.
+/// kernels read (fractal-kernels `palette_color`), same as ofx-fractal's WGSL storage buffer.
 pub fn build_lut(scheme: PaletteScheme) -> Vec<[f32; 4]> {
     let mut packed = Vec::with_capacity(PALETTE_SAMPLES + 1);
     for i in 0..PALETTE_SAMPLES {

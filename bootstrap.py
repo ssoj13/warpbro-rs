@@ -5,7 +5,7 @@ bootstrap.py - Unified local build/run/check script for WarpBro.
 Cross-platform-ish (Linux / WSL2), Python 3, stdlib only. Adapted from the gitnexus-rs
 bootstrap.
 
-WarpBro builds through cuda-oxide: its GPU kernels (src/gpu.rs) are Rust compiled to PTX by the
+WarpBro builds through cuda-oxide: its GPU kernels (fractal-rs `fractal-kernels`) are Rust compiled to PTX by the
 rustc_codegen_cuda backend, which `cargo oxide` enables. Builds warm the CUDA driver's JIT
 cache before reporting success, so the next workspace launch does not wait for a cold compile.
 Plain `cargo build` cannot link them (build.rs stops it with an explanation). This script checks the toolchain first, then drives

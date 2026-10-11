@@ -3932,8 +3932,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "fractal-core"
+version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#919f4c768874631fff4bca701213b5ec4e844743"
+dependencies = [
+ "standard-surface-bsdf",
+]
+
+[[package]]
+name = "fractal-kernels"
+version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#919f4c768874631fff4bca701213b5ec4e844743"
+dependencies = [
+ "cuda-core",
+ "cuda-device",
+ "cuda-host",
+ "fractal-core",
+ "standard-surface-bsdf",
+]
+
+[[package]]
 name = "fractal-materials"
 version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#919f4c768874631fff4bca701213b5ec4e844743"
 
 [[package]]
 name = "futures-channel"
@@ -9402,6 +9423,8 @@ dependencies = [
  "egui_dock",
  "env_logger",
  "exr-core",
+ "fractal-core",
+ "fractal-kernels",
  "fractal-materials",
  "glam",
  "gpu-info-rs",
