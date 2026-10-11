@@ -2868,7 +2868,7 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 [[package]]
 name = "deflate-rs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#3de88265fd866fd25fabf111e3c6dd1ac43f871c"
+source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#f7df644f2185552fda1fe3931dc64621ff7a239c"
 
 [[package]]
 name = "deflate64"
@@ -3734,7 +3734,7 @@ dependencies = [
 [[package]]
 name = "exr-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#3de88265fd866fd25fabf111e3c6dd1ac43f871c"
+source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#f7df644f2185552fda1fe3931dc64621ff7a239c"
 dependencies = [
  "codec-simd",
  "deflate-rs",
@@ -4826,7 +4826,7 @@ dependencies = [
 [[package]]
 name = "imath-rs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#3de88265fd866fd25fabf111e3c6dd1ac43f871c"
+source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#f7df644f2185552fda1fe3931dc64621ff7a239c"
 
 [[package]]
 name = "imgref"
