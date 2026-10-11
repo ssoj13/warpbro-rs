@@ -27,6 +27,7 @@ Commands:
     docs          Rebuild the README images in docs/ (needs uv for Pillow)
     i(nstall)     Copy the release binary to ~/.local/bin/WarpBro
     c(heck)       cargo fmt --check + cargo clippy
+    k(ernels)     Registers, local frame and spills per kernel (ptxas -v); --lines maps them to source
     ci            Hosted CI without a GPU: toolchain, check, tests (--skip cuda_ gpu_), build, dist/*.zip
     cl(ean)       cargo clean (+ stray *.ll / *.ptx dumps in the repo root)
     h(elp)        Print help
@@ -64,7 +65,7 @@ RELEASE_BIN = ROOT_DIR / "target" / "release" / BIN_NAME
 INSTALL_DIR = Path.home() / ".local" / "bin"
 
 CUDA_OXIDE_GIT = "ssh://git@github.com/ssoj13/cuda-rust-windows.git"
-CUDA_OXIDE_REV = "158229b5bacef244f27774e19e4f3b82c955f667"
+CUDA_OXIDE_REV = "a11d4cce888769a38ca4b085d0073b5d62de3839"
 RUST_COMPONENTS = ["rust-src", "rustc-dev", "rust-analyzer", "clippy", "rustfmt", "llvm-tools"]
 # Release builds (`--cubins`) also embed cubins for these GPUs (RTX 20/30/40/50), assembled
 # from the sm_75 PTX by cuda-oxide into one fat binary ahead of that PTX: those GPUs skip the
@@ -592,6 +593,118 @@ def run_ci(args: argparse.Namespace) -> int:
     return 0
 
 
+# =============================================================================
+# kernels: registers, local memory, spills
+# =============================================================================
+
+KERNEL_PTX = ROOT_DIR / "target" / "oxide-ptx" / "WarpBro.ptx"
+KERNEL_REPORT_DIR = ROOT_DIR / "target" / "oxide-ptx" / "kernels"
+
+
+def ptxas_kernel_stats(ptx: Path, arch: str, line_info: bool) -> tuple[dict[str, dict[str, int]], Path]:
+    """Assemble `ptx` for `arch` with `ptxas --verbose` and return, per entry point, its
+    registers, own stack frame and spill bytes, plus the cubin path. These are the numbers the
+    driver's JIT would produce for the same PTX and architecture."""
+    KERNEL_REPORT_DIR.mkdir(parents=True, exist_ok=True)
+    cubin = KERNEL_REPORT_DIR / f"{arch}.cubin"
+    cmd = ["ptxas", f"-arch={arch}", "-O3", "--verbose", *(["--generate-line-info"] if line_info else []),
+           str(ptx), "-o", str(cubin)]
+    code, output, _ = run(cmd, capture=True)
+    if code != 0:
+        raise RuntimeError(f"ptxas {arch} failed:\n{output}")
+    stats: dict[str, dict[str, int]] = {}
+    entry = current = None
+    for line in output.splitlines():
+        if m := re.search(r"Compiling entry function '(\w+)'", line):
+            entry = m.group(1)
+        elif m := re.search(r"Function properties for (\w+)", line):
+            current = m.group(1)
+        elif current and (m := re.search(r"(\d+) bytes stack frame, (\d+) bytes spill stores, (\d+) bytes spill loads", line)):
+            if current == entry:
+                stats[entry] = {"frame": int(m.group(1)), "st": int(m.group(2)), "ld": int(m.group(3)), "regs": 0}
+            current = None
+        elif entry in stats and (m := re.search(r"Used (\d+) registers", line)):
+            stats[entry]["regs"] = int(m.group(1))
+    return stats, cubin
+
+
+def local_memory_sites(cubin: Path) -> dict[str, list[tuple[int, int, str]]]:
+    """Every local load (LDL) and store (STL) of every function in `cubin`, attributed to the
+    innermost source line with its inlining chain (`nvdisasm --print-line-info-inline`).
+    Returns, per function, `(stores, loads, "file:line <- caller:line ...")`, busiest first."""
+    code, sass, _ = run(["nvdisasm", "--print-line-info-inline", "--print-code", str(cubin)], capture=True)
+    if code != 0:
+        raise RuntimeError(f"nvdisasm failed:\n{sass[:2000]}")
+    marker = re.compile(r'//## File "([^"]+)", line (\d+)((?: inlined at "[^"]+", line \d+)*)')
+    inlined = re.compile(r'inlined at "([^"]+)", line (\d+)')
+    access = re.compile(r"\b(STL|LDL)(?:\.\w+)*\s")
+    name = lambda path: Path(path.replace("\\\\", "\\")).name  # noqa: E731
+    counts: dict[str, dict[str, list[int]]] = {}
+    function, where, in_marker = None, "?", False
+    for line in sass.splitlines():
+        if m := re.match(r"^\s*\.text\.(\S+):", line):
+            function, in_marker = m.group(1), False
+        elif m := marker.search(line):
+            # A block of markers precedes an instruction; the first is the innermost.
+            if not in_marker:
+                where = " <- ".join([f"{name(m.group(1))}:{m.group(2)}",
+                                     *(f"{name(f)}:{n}" for f, n in inlined.findall(m.group(3)))])
+            in_marker = True
+        else:
+            in_marker = False
+            if function and (m := access.search(line)):
+                site = counts.setdefault(function, {}).setdefault(where, [0, 0])
+                site[0 if m.group(1) == "STL" else 1] += 1
+    return {f: sorted(((st, ld, w) for w, (st, ld) in sites.items()), key=lambda s: -(s[0] + s[1]))
+            for f, sites in counts.items()}
+
+
+def run_kernels(args: argparse.Namespace) -> int:
+    """Per-kernel registers, local-memory frame and spills of the embedded PTX, for each
+    architecture given (default: the release cubin set). `--lines` rebuilds with line tables and
+    attributes every local access to its source line; `--strict` fails when any kernel keeps a
+    local frame or spills."""
+    header("KERNELS")
+    archs = args.rest or CUBIN_ARCHS.split(",")
+    if args.build or args.lines:
+        env = build_env()
+        if args.lines:
+            # Line tables add .loc directives only; optimisation and register allocation are unchanged.
+            env["CUDA_OXIDE_DEBUG"] = "line-tables"
+        step("cargo oxide build" + (" (line tables)" if args.lines else ""))
+        code, _, elapsed = run(["cargo", "oxide", "build", *arch_args(args)], env=env)
+        if code != 0:
+            err("Build failed")
+            return code
+        ok(f"PTX built ({fmt_time(elapsed)})")
+    if not KERNEL_PTX.is_file():
+        err(f"{KERNEL_PTX.relative_to(ROOT_DIR)} not found: build first (b, or k --build)")
+        return 1
+    offenders: list[str] = []
+    for arch in archs:
+        stats, cubin = ptxas_kernel_stats(KERNEL_PTX, arch, args.lines)
+        print(f"\n  {arch}: {'kernel':24} {'regs':>4} {'frame':>6} {'spill st':>8} {'spill ld':>8}")
+        for kernel, s in sorted(stats.items(), key=lambda kv: (-kv[1]["frame"], kv[0])):
+            flag = "" if s["frame"] == 0 and s["st"] == 0 and s["ld"] == 0 else "  <-"
+            print(f"  {'':{len(arch) + 1}} {kernel:24} {s['regs']:4} {s['frame']:6} {s['st']:8} {s['ld']:8}{flag}")
+            if flag:
+                offenders.append(f"{arch}/{kernel}")
+        if args.lines:
+            report = KERNEL_REPORT_DIR / f"{arch}-local.txt"
+            sites = local_memory_sites(cubin)
+            with report.open("w", encoding="utf-8") as out:
+                for function, rows in sorted(sites.items(), key=lambda kv: -sum(a + b for a, b, _ in kv[1])):
+                    out.write(f"\n== {function}: STL={sum(r[0] for r in rows)} LDL={sum(r[1] for r in rows)}\n")
+                    out.writelines(f"  STL={st:4} LDL={ld:4}  {w}\n" for st, ld, w in rows)
+            step(f"local loads/stores by source line: {report.relative_to(ROOT_DIR)}")
+    print()
+    if offenders:
+        (err if args.strict else warn)(f"{len(offenders)} kernel/arch pairs keep local memory or spill")
+        return 1 if args.strict else 0
+    ok("No kernel keeps local memory or spills")
+    return 0
+
+
 def run_clean(_args: argparse.Namespace) -> int:
     header("CLEAN")
     code, _, elapsed = run(["cargo", "clean"])
@@ -628,6 +741,9 @@ COMMANDS
   docs    regenerate docs/ (README images, bench table)
   i       install to ~/.local/bin (copies the release binary; -f rebuilds)
   c       cargo fmt --check + cargo clippy --all-targets -D warnings
+  k       kernels: registers, local frame and spills per kernel (ptxas -v):  k [ARCH...]
+            --build   rebuild the PTX first     --lines   attribute local loads/stores to source lines
+            --strict  fail when a kernel keeps local memory or spills
   ci      what hosted CI runs (no GPU): d --fix, c, tests --skip cuda_ gpu_, build, dist/*.zip
   cl      cargo clean (+ *.ll / *.ptx dumps)
   h       help
@@ -652,9 +768,10 @@ EXAMPLES
   python bootstrap.py i
   python bootstrap.py ci
   python bootstrap.py b --cubins
+  python bootstrap.py k sm_86 --lines
 """
 
-COMMANDS = ["d", "b", "r", "g", "bench", "docs", "i", "c", "ci", "cl", "h"]
+COMMANDS = ["d", "b", "r", "g", "bench", "docs", "i", "c", "k", "ci", "cl", "h"]
 
 
 def main() -> int:
@@ -681,6 +798,9 @@ def main() -> int:
     parser.add_argument("--no-gpu", action="store_true", help="build without a GPU (no device check, no warmup)")
     parser.add_argument("--cubins", action="store_true",
                         help=f"b / ci: also embed cubins for {CUBIN_ARCHS} (release archives)")
+    parser.add_argument("--build", action="store_true", help="k: rebuild the PTX first")
+    parser.add_argument("--lines", action="store_true", help="k: map local loads/stores to source lines")
+    parser.add_argument("--strict", action="store_true", help="k: fail on local memory or spills")
     parser.add_argument("--fix", action="store_true", help="doctor: install missing user-level tools")
     parser.add_argument("-f", "--force", dest="force_install", action="store_true", help="install: rebuild first")
 
@@ -701,6 +821,7 @@ def main() -> int:
         "docs": run_docs,
         "i": run_install,
         "c": run_check,
+        "k": run_kernels,
         "ci": run_ci,
         "cl": run_clean,
     }

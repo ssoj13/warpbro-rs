@@ -2581,7 +2581,7 @@ dependencies = [
 [[package]]
 name = "cuda-artifact-finalizer"
 version = "0.2.1"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#158229b5bacef244f27774e19e4f3b82c955f667"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
 dependencies = [
  "libnvvm-sys",
  "nvjitlink-sys",
@@ -2593,7 +2593,7 @@ dependencies = [
 [[package]]
 name = "cuda-bindings"
 version = "0.4.0"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#158229b5bacef244f27774e19e4f3b82c955f667"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
 dependencies = [
  "bindgen",
  "libloading 0.8.9",
@@ -2606,7 +2606,7 @@ dependencies = [
 [[package]]
 name = "cuda-core"
 version = "0.4.0"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#158229b5bacef244f27774e19e4f3b82c955f667"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
 dependencies = [
  "anyhow",
  "cuda-bindings",
@@ -2618,7 +2618,7 @@ dependencies = [
 [[package]]
 name = "cuda-core-derive"
 version = "0.4.0"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#158229b5bacef244f27774e19e4f3b82c955f667"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2628,7 +2628,7 @@ dependencies = [
 [[package]]
 name = "cuda-device"
 version = "0.2.1"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#158229b5bacef244f27774e19e4f3b82c955f667"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
 dependencies = [
  "cuda-macros",
 ]
@@ -2636,7 +2636,7 @@ dependencies = [
 [[package]]
 name = "cuda-host"
 version = "0.2.1"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#158229b5bacef244f27774e19e4f3b82c955f667"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
 dependencies = [
  "cuda-artifact-finalizer",
  "cuda-core",
@@ -2652,7 +2652,7 @@ dependencies = [
 [[package]]
 name = "cuda-macros"
 version = "0.2.1"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#158229b5bacef244f27774e19e4f3b82c955f667"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2663,12 +2663,12 @@ dependencies = [
 [[package]]
 name = "cuda-target-spec"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#158229b5bacef244f27774e19e4f3b82c955f667"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
 
 [[package]]
 name = "cuda-toolkit-discovery"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#158229b5bacef244f27774e19e4f3b82c955f667"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
 
 [[package]]
 name = "cudarc"
@@ -4270,7 +4270,7 @@ dependencies = [
 [[package]]
 name = "gpu-info-rs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/gpu-info-rs.git?branch=main#b1780cdff32abad339128062cf3b795adb668c01"
+source = "git+ssh://git@github.com/ssoj13/gpu-info-rs.git?branch=main#5d345b3bc2a44e1ff2bcbbcfe2f9d89b9a66568c"
 dependencies = [
  "ash",
  "bytemuck",
@@ -5266,7 +5266,7 @@ checksum = "830d08ce1d1d941e6b30645f1a0eb5643013d835ce3779a5fc208261dbe10f55"
 [[package]]
 name = "lcms-rs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/lcms-rs.git?branch=main#27d17877d548f54fe7a107159c56118c117fd438"
+source = "git+ssh://git@github.com/ssoj13/lcms-rs.git?branch=main#9f84965c857331b7b7b7cef7c53aac132b72c8a7"
 
 [[package]]
 name = "lebe"
@@ -5346,7 +5346,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "libnvvm-sys"
 version = "0.2.1"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#158229b5bacef244f27774e19e4f3b82c955f667"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
 dependencies = [
  "cuda-target-spec",
  "cuda-toolkit-discovery",
@@ -5905,7 +5905,7 @@ dependencies = [
 [[package]]
 name = "nvjitlink-sys"
 version = "0.2.1"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#158229b5bacef244f27774e19e4f3b82c955f667"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
 dependencies = [
  "cuda-toolkit-discovery",
  "libloading 0.8.9",
@@ -6267,7 +6267,7 @@ dependencies = [
 [[package]]
 name = "oidn-model"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oidn-rs.git?branch=main#3022231ffeb66931d0643e8fb37d2c1f65b42ec5"
+source = "git+ssh://git@github.com/ssoj13/oidn-rs.git?branch=main#2dec776e0472cfd7e18afd5f9b52c91e86580644"
 dependencies = [
  "burn",
  "oidn-tza",
@@ -6277,7 +6277,7 @@ dependencies = [
 [[package]]
 name = "oidn-rs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oidn-rs.git?branch=main#3022231ffeb66931d0643e8fb37d2c1f65b42ec5"
+source = "git+ssh://git@github.com/ssoj13/oidn-rs.git?branch=main#2dec776e0472cfd7e18afd5f9b52c91e86580644"
 dependencies = [
  "burn",
  "bytemuck",
@@ -6291,7 +6291,7 @@ dependencies = [
 [[package]]
 name = "oidn-tza"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oidn-rs.git?branch=main#3022231ffeb66931d0643e8fb37d2c1f65b42ec5"
+source = "git+ssh://git@github.com/ssoj13/oidn-rs.git?branch=main#2dec776e0472cfd7e18afd5f9b52c91e86580644"
 dependencies = [
  "bytemuck",
  "bytes",
@@ -6856,7 +6856,7 @@ dependencies = [
 [[package]]
 name = "pt-denoise-oidn"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#73871a6cd74b52816ddd802bab265975d6a458ec"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#5a728cf2a1ae761585d65d9376767bd432c26251"
 dependencies = [
  "anyhow",
  "burn",
@@ -6872,7 +6872,7 @@ dependencies = [
 [[package]]
 name = "ptx-parse"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#158229b5bacef244f27774e19e4f3b82c955f667"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
 
 [[package]]
 name = "pulp"
@@ -7359,7 +7359,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "render-color"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#73871a6cd74b52816ddd802bab265975d6a458ec"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#5a728cf2a1ae761585d65d9376767bd432c26251"
 dependencies = [
  "log",
  "serde",
@@ -7417,7 +7417,7 @@ dependencies = [
 [[package]]
 name = "reserved-oxide-symbols"
 version = "0.2.1"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#158229b5bacef244f27774e19e4f3b82c955f667"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
 
 [[package]]
 name = "rgb"
@@ -8030,7 +8030,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 [[package]]
 name = "standard-surface-bsdf"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#73871a6cd74b52816ddd802bab265975d6a458ec"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#5a728cf2a1ae761585d65d9376767bd432c26251"
 dependencies = [
  "libm",
 ]
@@ -9194,7 +9194,7 @@ dependencies = [
 [[package]]
 name = "vfx-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#ea35cbaf88fa1ec289b5b14446f90cb3b68b409a"
+source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#66de97a226b99136cae0a291c6205cb9b9381a82"
 dependencies = [
  "half",
  "rayon",
@@ -9204,7 +9204,7 @@ dependencies = [
 [[package]]
 name = "vfx-icc"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#ea35cbaf88fa1ec289b5b14446f90cb3b68b409a"
+source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#66de97a226b99136cae0a291c6205cb9b9381a82"
 dependencies = [
  "bytemuck",
  "lcms-rs",
@@ -9256,7 +9256,7 @@ dependencies = [
 [[package]]
 name = "vfx-lut"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#ea35cbaf88fa1ec289b5b14446f90cb3b68b409a"
+source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#66de97a226b99136cae0a291c6205cb9b9381a82"
 dependencies = [
  "quick-xml 0.42.0",
  "thiserror 2.0.21",
@@ -9267,7 +9267,7 @@ dependencies = [
 [[package]]
 name = "vfx-math"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#ea35cbaf88fa1ec289b5b14446f90cb3b68b409a"
+source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#66de97a226b99136cae0a291c6205cb9b9381a82"
 dependencies = [
  "glam",
  "vfx-core",
@@ -9277,7 +9277,7 @@ dependencies = [
 [[package]]
 name = "vfx-ocio"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#ea35cbaf88fa1ec289b5b14446f90cb3b68b409a"
+source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#66de97a226b99136cae0a291c6205cb9b9381a82"
 dependencies = [
  "bytemuck",
  "glam",
@@ -9324,7 +9324,7 @@ dependencies = [
 [[package]]
 name = "vfx-transfer"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#ea35cbaf88fa1ec289b5b14446f90cb3b68b409a"
+source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#66de97a226b99136cae0a291c6205cb9b9381a82"
 dependencies = [
  "vfx-core",
 ]

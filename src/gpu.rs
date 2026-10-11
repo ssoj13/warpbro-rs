@@ -32,10 +32,10 @@ pub mod kernels {
     };
     use crate::transmission::{AIR, exit_distance, medium_after_scatter, volume_transmittance};
     use standard_surface_bsdf::ThinFilmEnergy;
-    use standard_surface_bsdf::sample::pdf_with;
-    use standard_surface_bsdf::sample::sample_with;
+    use standard_surface_bsdf::sample::{pdf_prepared, sample_prepared};
     use standard_surface_bsdf::surface::{
-        ShadingFrame, SurfaceInputs, eval_emission, eval_light, lobe_weights,
+        ShadingFrame, SurfaceInputs, eval_emission, eval_light_prepared, layers,
+        lobe_weights_prepared,
     };
 
     // =========================================================================
@@ -827,7 +827,6 @@ pub mod kernels {
 
     const RAY_PRIMARY: u32 = 0;
     const RAY_BOUNCE: u32 = 1;
-    const RAY_VISIBILITY: u32 = 2;
     /// The OFX Direct preview's camera ray: a primary ray whose unresolved result may stand in
     /// for the surface (Keinert, see `trace_direct`).
     const RAY_DIRECT: u32 = 3;
@@ -915,8 +914,84 @@ pub mod kernels {
         best
     }
 
+    /// The interval a ray marches over: `(t_enter, max_distance)`, or `None` when it misses the
+    /// bounding sphere. Outside the sphere every estimate is an exact "outside" (escape radius /
+    /// ball bound), so marching there only burns steps; Direct previews and OFX renders that
+    /// disable clipping march `[0, P_MAX_DISTANCE]`. Shared by [`march`] and
+    /// [`march_visibility`].
+    #[inline(always)]
+    fn march_span(ctx: Context<'_>, origin: V3, dir: V3) -> Option<(f32, f32)> {
+        let max_distance = pr(ctx, P_MAX_DISTANCE);
+        if global(P_DIRECT) != 0.0 || (global(P_OFX) != 0.0 && global(P_OFX_NO_CLIP) != 0.0) {
+            return Some((0.0, max_distance));
+        }
+        let oc = sub(origin, pv3(ctx, P_CLIP_CENTER));
+        let radius = pr(ctx, P_CLIP_RADIUS);
+        let b = dot(oc, dir);
+        let disc = b * b - (dot(oc, oc) - radius * radius);
+        if disc <= 0.0 {
+            return None;
+        }
+        let root = disc.sqrt();
+        let t_exit = -b + root;
+        if t_exit <= 0.0 {
+            return None;
+        }
+        Some(((-b - root).max(0.0), t_exit.min(max_distance)))
+    }
+
+    /// A shadow ray's march: only whether the segment toward the light is blocked.
+    ///
+    /// The same steps, footprint and step cap as a secondary [`march`], but it carries no hit
+    /// record: no orbit trap (estimates run with trap mode 0), no closest sample, no refinement
+    /// bracket. A hit ends it at once; `Unresolved` means the step budget ran out inside the
+    /// interval after at least one sample, exactly when [`march`] would report it. Keeping that
+    /// state out of the hot loop leaves its registers to the distance estimate.
+    #[inline(always)]
+    fn march_visibility<const F: u32>(
+        ctx: Context<'_>,
+        origin: V3,
+        dir: V3,
+        base: f32,
+        slope: f32,
+    ) -> Outcome {
+        let max_steps = pr(ctx, P_SECONDARY_STEPS) as u32;
+        // Secondary rays resolve a coarser surface (their footprint times P_SECONDARY_EPS).
+        let eps_scale = pr(ctx, P_SECONDARY_EPS);
+        let base = base * eps_scale;
+        let slope = slope * eps_scale;
+        let Some((t_enter, max_distance)) = march_span(ctx, origin, dir) else {
+            return Outcome::Miss;
+        };
+        let step_cap = 2.0 * (max_distance - t_enter) / STEP_CAP_STEPS;
+        let step_factor = pr(ctx, P_STEP_FACTOR);
+        let mut t = t_enter;
+        let mut sampled = false;
+        let mut i = 0u32;
+        while i < max_steps {
+            if t > max_distance {
+                break;
+            }
+            let point = add(origin, mul(dir, t));
+            let (d, _, _) = march_sample::<F>(ctx, point, 0);
+            let eps = footprint(base, slope, t, point);
+            if d < eps {
+                return Outcome::Hit;
+            }
+            sampled = true;
+            t += (step_factor * d).max(eps * 0.5).min(step_cap);
+            i += 1;
+        }
+        if sampled && t <= max_distance {
+            Outcome::Unresolved
+        } else {
+            Outcome::Miss
+        }
+    }
+
     /// Sphere-trace from `origin` along `dir` and report how it ended (`Outcome`); the caller
-    /// decides what an unresolved march means for its ray.
+    /// decides what an unresolved march means for its ray. Shadow rays use
+    /// [`march_visibility`].
     #[inline(always)]
     fn march<const F: u32>(
         ctx: Context<'_>,
@@ -948,29 +1023,10 @@ pub mod kernels {
         };
         let base = base * eps_scale;
         let slope = slope * eps_scale;
-        // Clip to the bounding sphere: outside it every estimate is exact "outside" (escape
-        // radius / ball bound), so marching there only burns steps.
-        let mut t_enter = 0.0;
-        let mut max_distance = pr(ctx, P_MAX_DISTANCE);
-        if global(P_DIRECT) == 0.0 && !(global(P_OFX) != 0.0 && global(P_OFX_NO_CLIP) != 0.0) {
-            let oc = sub(origin, pv3(ctx, P_CLIP_CENTER));
-            let radius = pr(ctx, P_CLIP_RADIUS);
-            let b = dot(oc, dir);
-            let disc = b * b - (dot(oc, oc) - radius * radius);
-            if disc <= 0.0 {
-                return miss;
-            }
-            let root = disc.sqrt();
-            let t_exit = -b + root;
-            if t_exit <= 0.0 {
-                return miss;
-            }
-            t_enter = (-b - root).max(0.0);
-            max_distance = t_exit.min(pr(ctx, P_MAX_DISTANCE));
-        }
-        let trap_mode = if kind == RAY_VISIBILITY {
-            0
-        } else if F == FAMILY_WORLD {
+        let Some((t_enter, max_distance)) = march_span(ctx, origin, dir) else {
+            return miss;
+        };
+        let trap_mode = if F == FAMILY_WORLD {
             1
         } else {
             pr(ctx, P_COLOR_MODE) as u32
@@ -1000,7 +1056,7 @@ pub mod kernels {
             let hit = if primary { d <= eps } else { d < eps };
             if hit {
                 let bracket = match outside {
-                    Some(bracket) if d <= 0.0 && kind != RAY_VISIBILITY => bracket,
+                    Some(bracket) if d <= 0.0 => bracket,
                     _ => return sample(point, trap, eps, object, d / eps),
                 };
                 // Stepped inside: bisect the bracket from the last outside sample.
@@ -1677,6 +1733,93 @@ pub mod kernels {
         }
     }
 
+    /// What one path vertex needs from its BSDF: the value and density toward the NEE light
+    /// sample (zero unless `light`), and the next direction with its weight.
+    ///
+    /// The material phase ([`full_scatter`], [`fast_scatter`]) produces it before the shadow
+    /// ray marches. The material's inputs, layers and lobe weights are dead once it returns,
+    /// so the march (the register-heaviest code of the kernel) never shares the register file
+    /// with them; only these few values cross it.
+    #[derive(Clone, Copy)]
+    struct Scatter {
+        /// `f(wo, ld) |cos|` toward the light sample.
+        light_f: V3,
+        /// The BSDF's density toward the light sample, for the MIS weight.
+        light_pdf: f32,
+        /// Next direction.
+        wi: V3,
+        /// `f |cos| / pdf` of `wi`.
+        weight: V3,
+        /// Density of `wi` (a probability for a delta lobe).
+        pdf: f32,
+        /// `wi` is a usable direction; otherwise the path ends.
+        ok: bool,
+        /// `wi` came from a delta lobe (no MIS).
+        delta: bool,
+        /// `wi` refracts through a transmissive surface.
+        crossed: bool,
+    }
+
+    /// The full (MaterialX Standard Surface) model's [`Scatter`]: the layers and lobe weights
+    /// are derived once and shared by the light evaluation, its pdf and the BSDF sample, the
+    /// same values the `_with` entry points would re-derive per call.
+    #[inline(always)]
+    fn full_scatter(
+        inputs: &SurfaceInputs,
+        frame: &ShadingFrame,
+        wo: V3,
+        ld: V3,
+        light: bool,
+        u: V3,
+    ) -> Scatter {
+        let shading = layers(inputs, frame, wo);
+        let weights = lobe_weights_prepared(inputs, &shading, wo);
+        let (light_f, light_pdf) = if light {
+            let lobes = eval_light_prepared(inputs, frame, &shading, wo, ld);
+            let f = add(add(lobes.base, lobes.specular), lobes.transmission);
+            let pdf = if max3(f) > 0.0 {
+                pdf_prepared(&shading, wo, ld, &weights)
+            } else {
+                0.0
+            };
+            (f, pdf)
+        } else {
+            ([0.0; 3], 0.0)
+        };
+        let s = sample_prepared(inputs, frame, &shading, wo, u, &weights);
+        Scatter {
+            light_f,
+            light_pdf,
+            wi: s.wi,
+            weight: s.weight,
+            pdf: s.pdf,
+            ok: s.valid,
+            delta: s.delta,
+            crossed: inputs.transmission > 0.0 && dot(s.wi, frame.n) < 0.0,
+        }
+    }
+
+    /// The fast model's [`Scatter`]: Lambert + one GGX lobe, never delta, never transmissive.
+    #[inline(always)]
+    fn fast_scatter(m: &Fast, n: V3, wo: V3, ld: V3, light: bool, u: V3) -> Scatter {
+        let (light_f, light_pdf) = if light {
+            fast_eval(m, n, wo, ld)
+        } else {
+            ([0.0; 3], 0.0)
+        };
+        let (wi, weight, pdf, ok) = fast_sample(m, n, wo, u);
+        Scatter {
+            light_f,
+            light_pdf,
+            wi,
+            weight,
+            pdf,
+            ok,
+            delta: false,
+            crossed: false,
+        }
+    }
+
     // =========================================================================
 
     // The CUDA macro must see kernel declarations inline to generate launchers.
@@ -1826,46 +1969,31 @@ pub mod kernels {
                 primary_normal = geo_n;
             }
 
-            let full_inputs;
-            let frame;
-            let fast;
+            // Emission, then Russian roulette: both read only this vertex and the path.
+            let full_inputs = if full {
+                surface_inputs(ctx, color, roughness, metal)
+            } else {
+                SurfaceInputs::MATERIALX_DEFAULT
+            };
+            let frame = ShadingFrame {
+                n: geo_n,
+                tangent: up,
+                inside,
+                curvature: 0.0,
+            };
             if full {
-                full_inputs = surface_inputs(ctx, color, roughness, metal);
-                frame = ShadingFrame {
-                    n: geo_n,
-                    tangent: up,
-                    inside,
-                    curvature: 0.0,
-                };
-                fast = Fast {
-                    albedo: [0.0; 3],
-                    f0: [0.0; 3],
-                    alpha: 0.0,
-                    diffuse_w: 0.0,
-                    spec_prob: 0.0,
-                };
                 radiance = add(
                     radiance,
                     had(throughput, eval_emission(&full_inputs, &frame, wo)),
                 );
-            } else {
-                full_inputs = SurfaceInputs::MATERIALX_DEFAULT;
-                frame = ShadingFrame {
-                    n: geo_n,
-                    tangent: up,
-                    inside: false,
-                    curvature: 0.0,
-                };
-                fast = fast_material(ctx, color, roughness, metal);
-                if pr(ctx, P_EMISSION) > 0.0 {
-                    radiance = add(
-                        radiance,
-                        had(
-                            throughput,
-                            mul(pv3(ctx, P_EMISSION_COLOR), pr(ctx, P_EMISSION)),
-                        ),
-                    );
-                }
+            } else if pr(ctx, P_EMISSION) > 0.0 {
+                radiance = add(
+                    radiance,
+                    had(
+                        throughput,
+                        mul(pv3(ctx, P_EMISSION_COLOR), pr(ctx, P_EMISSION)),
+                    ),
+                );
             }
 
             // Russian roulette after the first bounce.
@@ -1877,62 +2005,59 @@ pub mod kernels {
                 throughput = mul(throughput, 1.0 / p_continue);
             }
 
-            let weights = if full {
-                lobe_weights(&full_inputs, &frame, wo)
-            } else {
-                Default::default()
-            };
-
-            // NEE: one sun/sky sample, MIS-weighted against BSDF sampling.
+            // NEE samples one sun/sky direction, then the BSDF its next direction: the random
+            // numbers are drawn in this order (r1, r2, u). The material phase answers both
+            // before the shadow ray marches, so only `Scatter`'s few values cross that march.
             let r1 = rand(r);
             let r2 = rand(r);
             let (ld, lpdf) = env_sample(ctx, lut, r1, r2);
-            if lpdf > 0.0 && !inside && dot(ld, geo_n) > 0.0 {
-                let (f, bpdf) = if full {
-                    let lobes = eval_light(&full_inputs, &frame, wo, ld);
-                    let f = add(add(lobes.base, lobes.specular), lobes.transmission);
-                    let bpdf = if max3(f) > 0.0 {
-                        pdf_with(&full_inputs, &frame, wo, ld, &weights)
-                    } else {
-                        0.0
-                    };
-                    (f, bpdf)
-                } else {
-                    fast_eval(&fast, geo_n, wo, ld)
-                };
-                if max3(f) > 0.0 {
-                    let so = add(m.point, mul(geo_n, eps));
-                    let sb = slope * length(sub(so, cam));
-                    // An unresolved shadow ray counts as blocked: no light from an unknown path.
-                    let shadow = march::<F>(ctx, so, ld, RAY_VISIBILITY, sb, 0.0);
-                    unresolved |= shadow.outcome == Outcome::Unresolved;
-                    if shadow.outcome == Outcome::Miss {
-                        let w = power_heuristic(lpdf, bpdf);
-                        radiance = add(
-                            radiance,
-                            had(
-                                throughput,
-                                had(f, mul(env_radiance(ctx, lut, ld), w / lpdf)),
-                            ),
-                        );
-                    }
+            let light = lpdf > 0.0 && !inside && dot(ld, geo_n) > 0.0;
+            let u = [rand(r), rand(r), rand(r)];
+            let scatter = if full {
+                full_scatter(&full_inputs, &frame, wo, ld, light, u)
+            } else {
+                fast_scatter(
+                    &fast_material(ctx, color, roughness, metal),
+                    geo_n,
+                    wo,
+                    ld,
+                    light,
+                    u,
+                )
+            };
+            // NEE, MIS-weighted against BSDF sampling.
+            if light && max3(scatter.light_f) > 0.0 {
+                let so = add(m.point, mul(geo_n, eps));
+                let sb = slope * length(sub(so, cam));
+                // An unresolved shadow ray counts as blocked: no light from an unknown path.
+                let shadow = march_visibility::<F>(ctx, so, ld, sb, 0.0);
+                unresolved |= shadow == Outcome::Unresolved;
+                if shadow == Outcome::Miss {
+                    let w = power_heuristic(lpdf, scatter.light_pdf);
+                    radiance = add(
+                        radiance,
+                        had(
+                            throughput,
+                            had(scatter.light_f, mul(env_radiance(ctx, lut, ld), w / lpdf)),
+                        ),
+                    );
                 }
             }
 
-            let u = [rand(r), rand(r), rand(r)];
-            let (wi, weight, pdf, ok, delta) = if full {
-                let s = sample_with(&full_inputs, &frame, wo, u, &weights);
-                (s.wi, s.weight, s.pdf, s.valid, s.delta)
-            } else {
-                let (wi, weight, pdf, ok) = fast_sample(&fast, geo_n, wo, u);
-                (wi, weight, pdf, ok, false)
-            };
+            let Scatter {
+                wi,
+                weight,
+                pdf,
+                ok,
+                delta,
+                crossed,
+                ..
+            } = scatter;
             if !ok {
                 break;
             }
             throughput = had(throughput, weight);
             mis_bsdf_pdf = pdf;
-            let crossed = full && full_inputs.transmission > 0.0 && dot(wi, geo_n) < 0.0;
             // NEE never connects through an interface, so a transmitted escape has no
             // competing light-sampling strategy and must retain weight one.
             mis_env = !delta && !crossed;
