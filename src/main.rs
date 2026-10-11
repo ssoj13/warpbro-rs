@@ -40,6 +40,7 @@ mod render_profiles;
 mod render_profiles_ui;
 mod render_service;
 mod scene;
+mod takes;
 mod templates;
 #[cfg(test)]
 mod test_gpu;

@@ -1,5 +1,7 @@
-//! Wall-clock camera capture, mapped to document frames and reduced with the shared fitter.
+//! Bake of a recorded camera take into keyframes: samples are mapped to document frames and
+//! reduced with the shared fitter. The takes themselves live in `takes`.
 use crate::scene::{Camera, Scene};
+use crate::takes::Take;
 use crate::world::{NodeId, WorldDocument};
 use curves::{Fitter, Track, unwind_slice};
 use playa_engine::entities::anim::{Animation, Channel};
@@ -37,7 +39,9 @@ impl Default for Options {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+/// One recorded camera pose at `seconds` of the take's navigation clock.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Sample {
     pub seconds: f64,
     pub camera: Camera,
@@ -97,6 +101,27 @@ impl Recording {
                 camera: scene.camera,
             }],
         })
+    }
+
+    /// A bake of `take` over `document`: the take's timing overrides `options.timing`.
+    pub fn from_take(
+        document: &WorldDocument,
+        revision: u64,
+        take: &Take,
+        options: Options,
+    ) -> Result<Self, String> {
+        let first = take.samples.first().ok_or("The take has no samples")?;
+        let mut scene = Scene::preset(0);
+        scene.camera = first.camera;
+        let options = Options {
+            timing: take.timing,
+            ..options
+        };
+        let mut recording = Self::new(document, revision, take.start, &scene, options)?;
+        for sample in take.samples.iter().skip(1) {
+            recording.capture(sample.seconds, sample.camera)?;
+        }
+        Ok(recording)
     }
 
     pub fn capture(&mut self, seconds: f64, camera: Camera) -> Result<(), String> {
