@@ -429,8 +429,9 @@ pub struct Target {
     albedo: DeviceBuffer<[f32; 4]>,
     normal: DeviceBuffer<[f32; 4]>,
     /// Per pixel: [sum of squared sample luminance (adaptive sampling variance), samples with
-    /// an unresolved march].
-    stats: DeviceBuffer<[f32; 2]>,
+    /// an unresolved march, the camera-ray start the kernels cache (fractal-kernels
+    /// `cone_start`), 0]. Zeroed with every accumulation reset, which the start cache relies on.
+    stats: DeviceBuffer<[f32; 4]>,
     /// [out-of-steps samples, samples] partial sums (the `tally` kernel) and its host copy.
     tally: DeviceBuffer<[f64; 2]>,
     tally_host: Vec<[f64; 2]>,
@@ -777,7 +778,7 @@ impl Gpu {
                     table.extend(build_lut(*palette));
                 }
                 if let Some(env) = env {
-                    table.extend_from_slice(&env.texels);
+                    table.extend(env.map.gpu_entries());
                 }
                 if lut.len() != table.len() {
                     *lut = DeviceBuffer::zeroed(stream, table.len())
@@ -895,11 +896,16 @@ impl Gpu {
             target.colour_error = Some(error);
             return;
         }
-        if let Some(env) = env {
-            p[P_ENV_WIDTH] = env.width as f32;
-            p[P_ENV_HEIGHT] = env.height as f32;
-            p[P_ENV_MEAN] = env.mean_luminance;
-        }
+        // The environment block's slots, through the one packer ofx-rs uses too. The sun's
+        // radiance is the packed light's, so the sun/map balance follows what the kernels light.
+        let sun = std::array::from_fn(|c| p[P_LIGHT_COLOR + c] * p[P_LIGHT_INTENSITY]);
+        fractal_env::pack(
+            &mut p,
+            env.as_deref().map(|env| &env.map),
+            scene.environment.intensity.max(0.0),
+            scene.environment.rotation_degrees,
+            sun,
+        );
         p[P_SAMPLE_BEGIN] = target.samples as f32;
         p[P_SPP] = spp as f32;
         p[P_SEED] = seed as f32;
@@ -1300,13 +1306,14 @@ impl WorldUpload {
                 let mut packed = Scene::preset(FAMILY_BULB);
                 packed.lighting = *light;
                 let mut p = packed.pack(1, 1);
-                // Stable for zero/tiny angular radii; 1-cos(theta) cancels in f32.
-                let half_angle = (light.sun_angle * 0.5)
-                    .to_radians()
-                    .clamp(1e-4, std::f32::consts::PI);
-                let sine = (0.5 * half_angle).sin();
-                p[P_SUN_ONE_MINUS_COS] = 2.0 * sine * sine;
-                p[P_SUN_CONE_PDF] = 1.0 / (2.0 * std::f32::consts::PI * p[P_SUN_ONE_MINUS_COS]);
+                // The world kernels have no delta light: a zero angle keeps a minimal cone.
+                let (omc, pdf) = crate::scene::sun_cone(
+                    (light.sun_angle * 0.5)
+                        .to_radians()
+                        .clamp(1e-4, std::f32::consts::PI),
+                );
+                p[P_SUN_ONE_MINUS_COS] = omc;
+                p[P_SUN_CONE_PDF] = pdf;
                 if p[P_LIGHT_DIR..P_SKY_INTENSITY]
                     .iter()
                     .any(|v| !v.is_finite())

@@ -17,6 +17,7 @@ default = []
 # (built into this binary through #[cuda_module]) and the material presets.
 fractal-core = { git = "ssh://git@github.com/ssoj13/fractal-rs.git", branch = "main" }
 fractal-kernels = { git = "ssh://git@github.com/ssoj13/fractal-rs.git", branch = "main" }
+fractal-env = { git = "ssh://git@github.com/ssoj13/fractal-rs.git", branch = "main" }
 fractal-materials = { git = "ssh://git@github.com/ssoj13/fractal-rs.git", branch = "main" }
 playa-player = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "main", default-features = false }
 # OIDN for ACEScg input (AP1 autoexposure + firefly clamp).

@@ -1125,16 +1125,18 @@ impl Scene {
         );
         put_rgb(&mut p, P_LIGHT_COLOR, l.sun_color);
         p[P_LIGHT_INTENSITY] = l.sun_intensity;
-        let half_angle = (l.sun_angle * 0.5).to_radians().max(1.0e-4);
-        let omc = 1.0 - half_angle.cos();
+        // A sun angle of 0 is a point sun (the kernels' delta light), as in OFX.
+        let (omc, pdf) = sun_cone((l.sun_angle * 0.5).to_radians().max(0.0));
         p[P_SUN_ONE_MINUS_COS] = omc;
-        p[P_SUN_CONE_PDF] = 1.0 / (2.0 * std::f32::consts::PI * omc);
+        p[P_SUN_CONE_PDF] = pdf;
         p[P_SKY_INTENSITY] = l.sky_intensity;
         put_rgb(&mut p, P_SKY_HORIZON, l.sky_horizon);
         put_rgb(&mut p, P_SKY_ZENITH, l.sky_zenith);
         p[P_BACKGROUND] = l.background as u32 as f32;
-        p[P_ENV_INTENSITY] = self.environment.intensity.max(0.0);
-        p[P_ENV_ROTATION] = self.environment.rotation_degrees.to_radians();
+        // WarpBro shows the sun disc on camera misses (OFX does not).
+        p[P_CAMERA_SUN] = 1.0;
+        // Luminance weights of the working space (ACEScg).
+        put3(&mut p, P_LUMA, fractal_core::luma::Luma::AcesCg.weights());
 
         // --- material
         let m = &self.material;
@@ -1194,6 +1196,20 @@ pub fn normalize(a: [f32; 3]) -> [f32; 3] {
 }
 pub fn length(a: [f32; 3]) -> f32 {
     (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt()
+}
+/// A sun cone of `half_angle` radians: `1 - cos` (as `2 sin^2(half / 2)`, which keeps tiny
+/// cones exact in f32 where `1 - cos` cancels to 0) and the cone's uniform solid-angle pdf. A
+/// zero cone is a point sun: pdf 0, which the kernels treat as a delta light (the world kernels
+/// have none, so world lights clamp their angle above 0).
+pub fn sun_cone(half_angle: f32) -> (f32, f32) {
+    let sine = (0.5 * half_angle.min(std::f32::consts::PI)).sin();
+    let omc = 2.0 * sine * sine;
+    let pdf = if omc > 0.0 {
+        1.0 / (2.0 * std::f32::consts::PI * omc)
+    } else {
+        0.0
+    };
+    (omc, pdf)
 }
 fn put3(p: &mut [f32], i: usize, v: [f32; 3]) {
     p[i..i + 3].copy_from_slice(&v);
