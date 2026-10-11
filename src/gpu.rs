@@ -31,6 +31,10 @@ pub mod kernels {
         fast_spec_probability,
     };
     use crate::transmission::{AIR, exit_distance, medium_after_scatter, volume_transmittance};
+    // Every angle here is bounded far below sin_cos's 105615 (polar angles <= pi, sampled
+    // azimuths 2 pi u, Mandelbulb angles <= 64 * 8 * pi + 4 pi with the UI's power, angle-scale
+    // and phase ranges), so it gives libdevice's bits without the local-memory slow path.
+    use cuda_device::math::sin_cos;
     use standard_surface_bsdf::ThinFilmEnergy;
     use standard_surface_bsdf::sample::{pdf_prepared, sample_prepared};
     use standard_surface_bsdf::surface::{
@@ -248,8 +252,8 @@ pub mod kernels {
         *dr = growth * *dr + dr_constant;
         let a = theta * pr(ctx, P_BULB_THETA_POWER) + pr(ctx, P_BULB_THETA_PHASE);
         let b = phi * pr(ctx, P_BULB_PHI_POWER) + pr(ctx, P_BULB_PHI_PHASE);
-        let (sa, ca) = a.sin_cos();
-        let (sb, cb) = b.sin_cos();
+        let (sa, ca) = sin_cos(a);
+        let (sb, cb) = sin_cos(b);
         *z = add(mul([sa * cb, sa * sb, ca], magnitude), c);
         true
     }
@@ -1332,7 +1336,7 @@ pub mod kernels {
         let row = i / (pr(ctx, P_ENV_WIDTH) as usize);
         let t0 = PI * row as f32 / pr(ctx, P_ENV_HEIGHT);
         let t1 = PI * (row + 1) as f32 / pr(ctx, P_ENV_HEIGHT);
-        let omega = (2.0 * PI / pr(ctx, P_ENV_WIDTH)) * (t0.cos() - t1.cos());
+        let omega = (2.0 * PI / pr(ctx, P_ENV_WIDTH)) * (sin_cos(t0).1 - sin_cos(t1).1);
         probability / omega.max(1e-12)
     }
 
@@ -1361,7 +1365,7 @@ pub mod kernels {
         let lon = ((i % w) as f32 + jitter) / w as f32;
         let t0 = PI * (i / w) as f32 / h as f32;
         let t1 = PI * (i / w + 1) as f32 / h as f32;
-        let y = t0.cos() + (t1.cos() - t0.cos()) * v;
+        let y = sin_cos(t0).1 + (sin_cos(t1).1 - sin_cos(t0).1) * v;
         env_dir(lon, y, pr(ctx, P_ENV_ROTATION))
     }
 
@@ -1539,7 +1543,7 @@ pub mod kernels {
                     let (t, b) = basis(d);
                     let cos_t = 1.0 - (selector / weight) * light_slot(ctx, i, P_SUN_ONE_MINUS_COS);
                     let sin_t = (1.0 - cos_t * cos_t).max(0.0).sqrt();
-                    let (sp, cp) = (2.0 * PI * r2).sin_cos();
+                    let (sp, cp) = sin_cos(2.0 * PI * r2);
                     let dir = add(add(mul(t, sin_t * cp), mul(b, sin_t * sp)), mul(d, cos_t));
                     return (dir, env_pdf(ctx, lut, dir));
                 }
@@ -1552,7 +1556,7 @@ pub mod kernels {
             } else {
                 let z = 1.0 - 2.0 * u;
                 let radius = (1.0 - z * z).max(0.0).sqrt();
-                let (sp, cp) = (2.0 * PI * r2).sin_cos();
+                let (sp, cp) = sin_cos(2.0 * PI * r2);
                 [radius * cp, radius * sp, z]
             };
             return (dir, env_pdf(ctx, lut, dir));
@@ -1564,14 +1568,14 @@ pub mod kernels {
             let (t, b) = basis(d);
             let cos_t = 1.0 - (r1 / s) * pr(ctx, P_SUN_ONE_MINUS_COS);
             let sin_t = (1.0 - cos_t * cos_t).max(0.0).sqrt();
-            let (sp, cp) = (2.0 * PI * r2).sin_cos();
+            let (sp, cp) = sin_cos(2.0 * PI * r2);
             add(add(mul(t, sin_t * cp), mul(b, sin_t * sp)), mul(d, cos_t))
         } else if pr(ctx, P_ENV_WIDTH) > 0.0 {
             map_sample(ctx, lut, ((r1 - s) / (1.0 - s)).min(0.99999994), r2)
         } else {
             let z = 1.0 - 2.0 * ((r1 - s) / (1.0 - s));
             let r = (1.0 - z * z).max(0.0).sqrt();
-            let (sp, cp) = (2.0 * PI * r2).sin_cos();
+            let (sp, cp) = sin_cos(2.0 * PI * r2);
             [r * cp, r * sp, z]
         };
         (dir, env_pdf(ctx, lut, dir))
@@ -1671,7 +1675,7 @@ pub mod kernels {
             add(add(mul(t, local[0]), mul(b, local[1])), mul(n, local[2]))
         } else {
             let r = u[1].sqrt();
-            let (sp, cp) = (2.0 * PI * u[2]).sin_cos();
+            let (sp, cp) = sin_cos(2.0 * PI * u[2]);
             add(
                 add(mul(t, r * cp), mul(b, r * sp)),
                 mul(n, (1.0 - u[1]).max(0.0).sqrt()),
@@ -2200,7 +2204,7 @@ pub mod kernels {
             if !DIRECT && aperture > 0.0 {
                 // Thin lens: focus plane at P_FOCUS_DISTANCE along the view axis.
                 let focus = add(origin, mul(dir, pr(ctx, P_FOCUS_DISTANCE) / dot(dir, fwd)));
-                let (sa, ca) = (2.0 * PI * rand(&mut r)).sin_cos();
+                let (sa, ca) = sin_cos(2.0 * PI * rand(&mut r));
                 let rr = aperture * rand(&mut r).sqrt();
                 ro = add(origin, add(mul(right, rr * ca), mul(up, rr * sa)));
                 dir = normalize(sub(focus, ro));

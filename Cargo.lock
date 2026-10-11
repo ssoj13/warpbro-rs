@@ -6856,7 +6856,7 @@ dependencies = [
 [[package]]
 name = "pt-denoise-oidn"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#5a728cf2a1ae761585d65d9376767bd432c26251"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#c8d6a51f703d493ff080c4c80e7ff8120b0a0480"
 dependencies = [
  "anyhow",
  "burn",
@@ -7359,7 +7359,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "render-color"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#5a728cf2a1ae761585d65d9376767bd432c26251"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#c8d6a51f703d493ff080c4c80e7ff8120b0a0480"
 dependencies = [
  "log",
  "serde",
@@ -8030,8 +8030,9 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 [[package]]
 name = "standard-surface-bsdf"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#5a728cf2a1ae761585d65d9376767bd432c26251"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#c8d6a51f703d493ff080c4c80e7ff8120b0a0480"
 dependencies = [
+ "cuda-device",
  "libm",
 ]
 
