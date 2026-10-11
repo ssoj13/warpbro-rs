@@ -3934,7 +3934,7 @@ dependencies = [
 [[package]]
 name = "fractal-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#574d83ccb8701e27599b4eaefbd4d6ddf8cf0929"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#dada09db0a60a4a479b59801e86973cdcf2ed640"
 dependencies = [
  "standard-surface-bsdf",
 ]
@@ -3942,7 +3942,7 @@ dependencies = [
 [[package]]
 name = "fractal-env"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#574d83ccb8701e27599b4eaefbd4d6ddf8cf0929"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#dada09db0a60a4a479b59801e86973cdcf2ed640"
 dependencies = [
  "fractal-core",
  "pt-integrator",
@@ -3952,7 +3952,7 @@ dependencies = [
 [[package]]
 name = "fractal-kernels"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#574d83ccb8701e27599b4eaefbd4d6ddf8cf0929"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#dada09db0a60a4a479b59801e86973cdcf2ed640"
 dependencies = [
  "cuda-core",
  "cuda-device",
@@ -3964,7 +3964,7 @@ dependencies = [
 [[package]]
 name = "fractal-materials"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#574d83ccb8701e27599b4eaefbd4d6ddf8cf0929"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#dada09db0a60a4a479b59801e86973cdcf2ed640"
 
 [[package]]
 name = "futures-channel"

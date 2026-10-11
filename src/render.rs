@@ -2336,15 +2336,18 @@ mod tests {
         // from eps/2 to eps/64, at converged hits (4096 march steps) whose neighborhoods keep
         // the same escape iteration count. The old tetrahedral stencil errs 15..40 degrees here.
         // (The former points were closest samples of rays out of steps, not surface points.)
+        // The pixel-cone camera start (fractal-kernels `cone_start`) moves hits within their
+        // footprint band: over this frame every one of 69,529 hits stays within 2 eps of the
+        // march from t_enter (measured 2026-10-11, no skipped feature). Two former probes,
+        // (140,189) and (180,268), sit where the surface turns by 3.2 and 11.5 degrees inside
+        // that band, so they no longer probe the stencil, only the hit point; they are dropped.
         let references = [
             (316, 125, [-0.08490141, 0.18438966, -0.979_179_3]),
-            (140, 189, [0.83308777, 0.40453982, 0.37724303]),
             (215, 198, [0.212_273_2, 0.17521111, 0.96137462]),
             (155, 208, [0.67414312, -0.606_544_8, -0.42146708]),
             (259, 232, [0.81196077, 0.44119635, 0.38218516]),
             (280, 246, [0.850_794_4, -0.521_097_2, -0.067_872_08]),
             (366, 263, [0.028329306, -0.4778096, 0.878_006_5]),
-            (180, 268, [0.75667956, -0.027518156, -0.653_206_5]),
         ];
         let mut gpu = Gpu::new().unwrap();
         let mut target = gpu.target(384, 384);
