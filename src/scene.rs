@@ -390,6 +390,14 @@ pub struct Lighting {
     pub sky_zenith: [f32; 3],
     /// Show the sky behind the fractal (otherwise only its light).
     pub background: bool,
+    /// Show the sun disc in the background where camera rays miss (`P_CAMERA_SUN`); bounced
+    /// rays see the sun either way. A field added later: a scene without it shows the disc.
+    #[serde(default = "sun_disc_default")]
+    pub sun_disc: bool,
+}
+
+fn sun_disc_default() -> bool {
+    true
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -648,6 +656,7 @@ impl Default for Lighting {
             sky_horizon: [0.012, 0.02, 0.045],
             sky_zenith: [0.047, 0.075, 0.14],
             background: true,
+            sun_disc: true,
         }
     }
 }
@@ -1217,8 +1226,7 @@ impl Scene {
         put_rgb(&mut p, P_SKY_HORIZON, l.sky_horizon);
         put_rgb(&mut p, P_SKY_ZENITH, l.sky_zenith);
         p[P_BACKGROUND] = l.background as u32 as f32;
-        // WarpBro shows the sun disc on camera misses (OFX does not).
-        p[P_CAMERA_SUN] = 1.0;
+        p[P_CAMERA_SUN] = l.sun_disc as u32 as f32;
         // Luminance weights of the working space (ACEScg).
         put3(&mut p, P_LUMA, fractal_core::luma::Luma::AcesCg.weights());
 

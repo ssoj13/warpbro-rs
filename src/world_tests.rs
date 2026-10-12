@@ -3359,3 +3359,14 @@ fn a_copy_whose_take_is_gone_pastes_playing_none_and_a_release_joins_its_gesture
     assert!(e.undo());
     assert_eq!(e.document, bound, "one undo restores the take and the pose");
 }
+
+#[test]
+fn the_suns_disc_setting_reaches_the_camera_sun_parameter() {
+    let mut e = editor();
+    let sun = find(&e, WorldKind::DirectionalLight);
+    let packed =
+        |e: &WorldEditor| e.document.snapshot(0.0).unwrap().pack(8, 8)[crate::params::P_CAMERA_SUN];
+    assert_eq!(packed(&e), 1.0, "the disc shows by default");
+    set(&mut e, sun, "/lighting/sun_disc", json!(false), 0.0);
+    assert_eq!(packed(&e), 0.0);
+}

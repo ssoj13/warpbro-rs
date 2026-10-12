@@ -2182,6 +2182,9 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
         "/lighting/background" => {
             "Show the sky behind the fractal; off keeps its light but renders the background black."
         }
+        "/lighting/sun_disc" => {
+            "Show the sun disc in the background; off keeps its light and its reflections."
+        }
         "/material/model" => {
             "Fast: a quick metal / plastic model. Standard Surface: the full Autodesk Standard Surface (glass, coat, sheen, film); transmission always uses it."
         }
