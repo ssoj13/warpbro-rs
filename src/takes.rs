@@ -295,7 +295,8 @@ fn pose_at<P: Pose>(s: &[Sample<P>], seconds: f64) -> Option<P> {
 /// The part between `from` and `to` seconds, rebased to 0, the cut poses interpolated.
 fn trim<P: Pose>(s: &[Sample<P>], from: f64, to: f64) -> Result<Vec<Sample<P>>, String> {
     let (from, to) = (from.max(0.0), to.min(duration(s)));
-    if !(to > from) {
+    // Not greater includes NaN: nothing to keep.
+    if to.partial_cmp(&from) != Some(std::cmp::Ordering::Greater) {
         return Err("Trim keeps nothing".into());
     }
     let first = pose_at(s, from).ok_or("Empty take")?;
