@@ -51,7 +51,7 @@ impl Default for View {
 }
 
 /// What a row or toolbar asked for; applied after drawing (drawing borrows the document).
-enum Action {
+pub(super) enum Action {
     Select {
         id: u64,
         ctrl: bool,
@@ -75,7 +75,7 @@ enum Action {
     SetTiming(u64, Timing),
     Bake(u64),
 }
-enum Derive {
+pub(super) enum Derive {
     Trim(f64, f64),
     Speed(f64),
     Smooth(f64),
@@ -216,7 +216,8 @@ impl App {
                         continue;
                     };
                     let selected = self.takes_view.selection.contains(&id);
-                    let bound: Vec<String> = document.takes.bound_nodes(id).map(name_of).collect();
+                    let bound: Vec<String> =
+                        document.take_users(id).into_iter().map(name_of).collect();
                     let kind_icon = match take.kind() {
                         TakeKind::Camera => icons::CAMERA,
                         TakeKind::Transform => icons::MOVE,
@@ -425,7 +426,7 @@ impl App {
         }
     }
 
-    fn take_action(&mut self, action: Action) {
+    pub(super) fn take_action(&mut self, action: Action) {
         let fps = self.world.document.fps;
         let result: Result<(), String> = match action {
             Action::Select { id, ctrl, shift } => {
@@ -456,13 +457,19 @@ impl App {
                 Ok(())
             }
             Action::Delete(ids) => {
-                let count = ids.len();
+                let mut count = 0;
+                let mut refused = Ok(());
                 for id in ids {
-                    self.world.delete_take(id);
-                    self.takes_view.selection.remove(&id);
+                    match self.world.delete_take(id) {
+                        Ok(removed) => {
+                            count += usize::from(removed);
+                            self.takes_view.selection.remove(&id);
+                        }
+                        Err(error) => refused = Err(error),
+                    }
                 }
                 self.status = format!("Deleted {count} take(s)");
-                Ok(())
+                refused
             }
             Action::Copy(ids) => self.copy_takes(&ids),
             Action::Duplicate(ids) => {
@@ -648,7 +655,7 @@ impl App {
     fn take_targets(&self, id: u64) -> Result<Vec<NodeId>, String> {
         let document = &self.world.document;
         let take = document.takes.get(id).ok_or(format!("No take {id}"))?;
-        let bound: Vec<NodeId> = document.takes.bound_nodes(id).collect();
+        let bound = document.take_users(id);
         if !bound.is_empty() {
             return Ok(bound);
         }
@@ -674,22 +681,17 @@ impl App {
 
     /// Bind take `id` to its targets ([`Self::take_targets`]).
     fn bind_targets(&mut self, id: u64) -> Result<(), String> {
-        for node in self.take_targets(id)? {
-            self.world.bind_take(node, Some(id))?;
-        }
-        Ok(())
+        let targets = self.take_targets(id)?;
+        self.world.bind_take(&targets, Some(id))
     }
 
     /// Unbind take `id` everywhere when it drives anything, else bind it to its targets.
     fn toggle_binding(&mut self, id: u64) -> Result<(), String> {
-        let bound: Vec<NodeId> = self.world.document.takes.bound_nodes(id).collect();
+        let bound = self.world.document.take_users(id);
         if bound.is_empty() {
             return self.bind_targets(id);
         }
-        for node in bound {
-            self.world.bind_take(node, None)?;
-        }
-        Ok(())
+        self.world.bind_take(&bound, None)
     }
 
     /// New takes from the selected objects (transform takes) or, with none selected, from the

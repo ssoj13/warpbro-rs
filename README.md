@@ -65,11 +65,17 @@ Documentation: [render and quality profiles](docs/render-profiles.md), [workspac
   after release) is recorded as a take at the speed it was flown; there is no record button.
   - The Takes panel (next to the Outliner) keeps the 20 newest takes plus every pinned one; takes
     are saved with the scene, outside undo/redo.
-  - Binding a take makes it the scene camera, live in the viewport, playback and export;
-    navigating again releases it and continues from its pose. Play binds and plays from the
-    frame the gesture began on; "Fit work area" stretches it over the work area instead.
-  - "Bake to keys" keys the bound take onto the camera (chosen channels, reduction error) as one
-    undo step; keys outside its span remain. Takes export and import as clip files.
+  - Any camera or movable node plays a take through its own attributes (Attribute Editor, an
+    undoable edit saved with the node): **Take** picks one of the takes of its kind (camera takes
+    for cameras, transform takes recorded from manipulator drags for objects); **Take offset**
+    (frames) and **Take speed** (keyable: a ramp time-warps the motion smoothly, 0 holds,
+    negative plays backwards) retime it. The take replaces the node's keys in the viewport,
+    playback and export; navigating or dragging again detaches it and continues from its pose.
+    Bind / Play in the Takes panel attach it to the active camera or the selected objects (Play
+    also plays from the frame the gesture began on); "Fit work area" stretches it over the work
+    area instead. A take some node plays cannot be deleted until it is detached.
+  - "Bake to keys" keys the take onto the node (chosen channels, reduction error) and detaches it,
+    as one undo step; keys outside its span remain. Takes export and import as clip files.
   - Managing: filter by name or pinned, Ctrl / Shift multi-select, pin, copy / paste (Ctrl+C / V,
     through the system clipboard, so takes move between scenes), duplicate (Ctrl+D), delete
     (Delete). New takes come from the camera's timeline animation or the current pose.

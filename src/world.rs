@@ -13,7 +13,7 @@ use playa_graph::{Graph, Node, RustBox};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 /// The local `/transform` position, rotation (degrees, the attribute convention) and scale that
 /// put a node's pivot at world `pose` under its parent's world matrix `parent`: the inverse of
@@ -41,13 +41,36 @@ pub fn manip_tools(kind: WorldKind) -> [bool; 3] {
 const CLIPBOARD_KEY: &str = "warpbro_nodes";
 const CLIPBOARD_VERSION: u32 = 1;
 
-/// The node data of a `WorldDocument::copy_fragment` clipboard text; None for any other text.
-pub fn parse_clipboard(text: &str) -> Option<HashMap<String, Value>> {
+/// The nodes of a `WorldDocument::copy_fragment` clipboard text and the document they were
+/// copied from (its graph id; null in a text without one); None for any other text.
+pub fn parse_clipboard(text: &str) -> Option<(Value, HashMap<String, Value>)> {
     let value: Value = serde_json::from_str(text.trim()).ok()?;
     if value[CLIPBOARD_KEY].as_u64() != Some(u64::from(CLIPBOARD_VERSION)) {
         return None;
     }
-    serde_json::from_value(value["nodes"].clone()).ok()
+    let nodes = serde_json::from_value(value["nodes"].clone()).ok()?;
+    Some((value["document"].clone(), nodes))
+}
+
+/// The take a node plays: node data (`node["take"]`, a take id or null), shown and set as this
+/// attribute path like `/material_id`. Static: which take plays is not keyed.
+pub(crate) const TAKE_CLIP: &str = "/take/clip";
+/// Frames the take starts later than its own start frame (keyable).
+pub(crate) const TAKE_OFFSET: &str = "/take/offset";
+/// The take's playback rate (keyable; 0 holds, negative plays backwards): the time warp
+/// integrates it from the take's start (`WorldDocument::take_frame`).
+pub(crate) const TAKE_SPEED: &str = "/take/speed";
+
+/// The kind of take a node of `kind` plays: the camera's visible pose, or the local transform of
+/// a node the manipulator moves (`manip_tools`).
+pub fn take_kind(kind: WorldKind) -> Option<crate::takes::TakeKind> {
+    if kind == WorldKind::Camera {
+        Some(crate::takes::TakeKind::Camera)
+    } else if manip_tools(kind).contains(&true) {
+        Some(crate::takes::TakeKind::Transform)
+    } else {
+        None
+    }
 }
 
 pub(crate) const CAMERA_ORBIT_SPEED: &str = "/camera/orbit_speed_degrees";
@@ -119,6 +142,9 @@ pub struct WorldAttribute {
     pub keyable: bool,
     pub component: Option<usize>,
     pub choices: Vec<Value>,
+    /// Display names of `choices` (same order) where the values are ids; empty: the values name
+    /// themselves.
+    pub choice_labels: Vec<String>,
     /// Hard limits; the document clamps to them (`attribute_range`).
     pub range: Option<(f64, f64)>,
     /// The slider span (`attribute_slider`); components inherit their vector's.
@@ -445,8 +471,9 @@ impl WorldEditor {
     }
 
     /// Write baked keys as one undoable edit: inside `[first, last]` they replace the node's
-    /// keys, outside it the old keys remain; the work area grows to hold them. Returns the
-    /// samples, keys, largest sample error and last frame.
+    /// keys, outside it the old keys remain; the work area grows to hold them. A take the node
+    /// played is detached in the same edit, or it would hide the keys. Returns the samples, keys,
+    /// largest sample error and last frame.
     pub fn record_prepared(
         &mut self,
         prepared: crate::camera_recorder::Prepared,
@@ -483,6 +510,7 @@ impl WorldEditor {
                 attrs.set_anim(path, Some(animation));
             }
             editor.document.store_attrs(prepared.node, &attrs)?;
+            editor.document.attach_take(prepared.node, None)?;
             if prepared.extend_last > editor.document.last {
                 editor.document.set_last(prepared.extend_last)?;
             }
@@ -538,56 +566,51 @@ impl WorldEditor {
 
     /// Store a finished take (no undo step). Returns its id.
     pub fn add_take(&mut self, take: crate::takes::Take) -> u64 {
-        self.document.takes.add(take)
+        let used = self.document.takes_in_use();
+        self.document.takes.add(take, &used)
     }
 
-    /// Bind `node` to take `id` (its motion then comes from the take), or unbind it with None.
-    /// A camera take binds to a camera, a transform take to a node the manipulator moves
-    /// (`manip_tools`). The snapshot changes, so the revision does too.
-    pub fn bind_take(&mut self, node: NodeId, id: Option<u64>) -> Result<(), String> {
-        if self.document.takes.binding(node) == id {
-            return Ok(());
-        }
-        if let Some(id) = id {
-            let take = self.document.takes.get(id).ok_or(format!("No take {id}"))?;
-            let kind = self.document.info(node)?.kind;
-            let fits = match take.kind() {
-                crate::takes::TakeKind::Camera => kind == WorldKind::Camera,
-                crate::takes::TakeKind::Transform => manip_tools(kind).contains(&true),
-            };
-            if !fits {
-                return Err(format!(
-                    "Take \"{}\" cannot drive a {kind:?} node",
-                    take.name
-                ));
+    /// Play take `id` on `nodes` (None: play none) as one undoable edit: their `/take/clip`
+    /// (`WorldDocument::attach_take`).
+    pub fn bind_take(&mut self, nodes: &[NodeId], id: Option<u64>) -> Result<(), String> {
+        self.apply_edit(None, |editor| {
+            for node in nodes {
+                editor.document.assert_unlocked(*node)?;
+                editor.document.attach_take(*node, id)?;
             }
-        }
-        self.document.takes.bind(node, id)?;
-        self.revision = self.revision.wrapping_add(1);
-        Ok(())
+            Ok(())
+        })
     }
 
-    pub fn delete_take(&mut self, id: u64) -> bool {
-        let bound = self.document.takes.bound_nodes(id).next().is_some();
-        let removed = self.document.takes.remove(id);
-        if bound {
-            self.revision = self.revision.wrapping_add(1);
+    /// Delete a take no node plays (no undo step: takes are recordings, not edits). A played take
+    /// is refused: removing it would silently change the scene's motion.
+    pub fn delete_take(&mut self, id: u64) -> Result<bool, String> {
+        let users = self.document.take_users(id);
+        if !users.is_empty() {
+            let names: Vec<String> = users
+                .iter()
+                .filter_map(|n| self.document.info(*n).ok().map(|i| i.name))
+                .collect();
+            return Err(format!(
+                "Take {id} plays on {}: detach it first",
+                names.join(", ")
+            ));
         }
-        removed
+        Ok(self.document.takes.remove(id))
     }
 
-    /// Rename, pin or retime a take; a change to a bound take moves its nodes.
+    /// Rename, pin or retime a take; a change to a played take moves its nodes.
     pub fn edit_take(&mut self, id: u64, apply: impl FnOnce(&mut crate::takes::Take)) -> bool {
-        let bound = self.document.takes.bound_nodes(id).next().is_some();
-        let edited = self.document.takes.edit(id, apply);
-        if edited && bound {
+        let used = self.document.takes_in_use();
+        let edited = self.document.takes.edit(id, &used, apply);
+        if edited && used.contains(&id) {
             self.revision = self.revision.wrapping_add(1);
         }
         edited
     }
 
-    /// Key take `id` onto `node` as one undoable edit (keys outside its span remain), then
-    /// unbind the node: its keys now show the same motion. A camera take bakes onto the active
+    /// Key take `id` onto `node` as one undoable edit (keys outside its span remain) that also
+    /// detaches any take from the node (`record_prepared`): its keys now show the same motion. A camera take bakes onto the active
     /// camera through the navigation pose solver, a transform take onto `node`'s transform.
     pub fn bake_take(
         &mut self,
@@ -621,7 +644,6 @@ impl WorldEditor {
                 self.record_prepared(prepared)?
             }
         };
-        self.bind_take(node, None)?;
         Ok(summary)
     }
 
@@ -853,7 +875,14 @@ impl WorldEditor {
                 }
             }
             WorldCommand::Paste(text) => {
-                let nodes = parse_clipboard(&text).ok_or("The clipboard holds no WarpBro nodes")?;
+                let (source, mut nodes) =
+                    parse_clipboard(&text).ok_or("The clipboard holds no WarpBro nodes")?;
+                // Take ids are per document: copies from another scene play no take.
+                if source != json!(self.document.graph.id) {
+                    for data in nodes.values_mut() {
+                        data["take"] = Value::Null;
+                    }
+                }
                 self.insert_fragment(nodes)?;
             }
             WorldCommand::Rename { id, name } => {
@@ -1145,6 +1174,14 @@ impl WorldEditor {
                         )
                     };
                     return self.apply(WorldCommand::AssignMaterial { id, material });
+                }
+                if path == TAKE_CLIP {
+                    self.document.assert_unlocked(id)?;
+                    let clip = match &value {
+                        Value::Null => None,
+                        v => Some(v.as_u64().filter(|t| *t > 0).ok_or("Invalid take id")?),
+                    };
+                    return self.document.attach_take(id, clip);
                 }
                 if path != "/locked" {
                     self.document.assert_unlocked(id)?;
@@ -1635,6 +1672,9 @@ pub(crate) fn attribute_range(path: &str) -> Option<(f64, f64)> {
 pub(crate) fn attribute_label(path: &str) -> String {
     match path {
         "/material_id" => return "Material".into(),
+        TAKE_CLIP => return "Take".into(),
+        TAKE_OFFSET => return "Take offset".into(),
+        TAKE_SPEED => return "Take speed".into(),
         "/camera/f_number" => return "f-number".into(),
         "/formula/Hybrid/mandelbox/min_radius_ratio" => return "Mandelbox · Min ratio".into(),
         "/formula/Hybrid/mandelbox/rotation_degrees" => return "Mandelbox · Rotate".into(),
@@ -1677,6 +1717,12 @@ pub(crate) fn attribute_label(path: &str) -> String {
 /// the scene the app starts with. ONE source for every reset button; a path the fresh world's node
 /// does not have (another formula family's parameter) has none.
 pub(crate) fn attribute_default(kind: WorldKind, path: &str) -> Option<Value> {
+    // The time warp exists only on nodes a take was attached to: a fresh world has none.
+    match path {
+        TAKE_OFFSET => return Some(json!(0.0)),
+        TAKE_SPEED => return Some(json!(1.0)),
+        _ => {}
+    }
     static FRESH: LazyLock<HashMap<(WorldKind, String), Value>> = LazyLock::new(|| {
         let world = WorldDocument::from_scene(&Scene::preset(crate::params::FAMILY_BULB));
         let mut defaults = HashMap::new();
@@ -1811,6 +1857,8 @@ fn attribute_slider(path: &str) -> Option<Slider> {
         "/transform/position" | "/transform/pivot" => lin(-10.0, 10.0),
         "/transform/rotation_degrees" => lin(-180.0, 180.0),
         "/transform/scale" => log(0.01, 10.0),
+        TAKE_OFFSET => lin(-240.0, 240.0),
+        TAKE_SPEED => lin(-4.0, 4.0),
         "/camera/target" => lin(-5.0, 5.0),
         "/camera/f_number" => lin(0.0, 32.0),
         "/camera/sensor_height" => log(0.001, 0.1),
@@ -2027,6 +2075,13 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
         "/trap_axis" => "Orbit trap plane normal axis (Trap plane colouring).",
         "/trap_scale" => "How fast the trap distance runs through the palette.",
         "/material_id" => "The material this fractal is rendered with.",
+        TAKE_CLIP => {
+            "The take whose recorded motion this node plays instead of its keys (Takes panel)."
+        }
+        TAKE_OFFSET => "Frames the take starts after its recorded start frame.",
+        TAKE_SPEED => {
+            "Playback rate of the take: keyable, so it ramps (0 holds, negative plays back)."
+        }
         "/camera/target" => "The point the camera looks at and orbits.",
         "/mask/shape" => {
             "Sphere (radius Size X), Box (half extents Size) or Cells (cubes of edge Size X, a Density share removed)."
@@ -3097,20 +3152,141 @@ impl WorldDocument {
 }
 
 impl WorldDocument {
+    /// The take node `id` plays (`/take/clip`); None when it plays none.
+    pub fn take_clip(&self, id: NodeId) -> Result<Option<u64>, String> {
+        match &self.node(id)?["take"] {
+            Value::Null => Ok(None),
+            v => v
+                .as_u64()
+                .filter(|t| *t > 0)
+                .map(Some)
+                .ok_or_else(|| format!("Invalid take reference {v}")),
+        }
+    }
+
+    /// The ids of the takes nodes play: retention and deletion keep them.
+    pub fn takes_in_use(&self) -> Vec<u64> {
+        self.graph
+            .nodes
+            .values()
+            .filter_map(|data| data["take"].as_u64())
+            .collect()
+    }
+
+    /// The nodes that play take `take`.
+    pub fn take_users(&self, take: u64) -> Vec<NodeId> {
+        self.nodes()
+            .into_iter()
+            .map(|n| n.id)
+            .filter(|id| self.take_clip(*id).ok().flatten() == Some(take))
+            .collect()
+    }
+
+    /// Play take `clip` on node `id` (None: play none). The take must exist and be of the kind
+    /// the node plays ([`take_kind`]); attaching gives the node its time warp (`/take/offset` 0,
+    /// `/take/speed` 1) unless it has one already.
+    pub fn attach_take(&mut self, id: NodeId, clip: Option<u64>) -> Result<(), String> {
+        if let Some(clip) = clip {
+            let take = self.takes.get(clip).ok_or(format!("No take {clip}"))?;
+            let kind = self.info(id)?.kind;
+            if take_kind(kind) != Some(take.kind()) {
+                return Err(format!(
+                    "Take \"{}\" cannot drive a {kind:?} node",
+                    take.name
+                ));
+            }
+            let mut attrs = self.attrs(id)?;
+            let mut added = false;
+            for (path, value) in [(TAKE_OFFSET, 0.0), (TAKE_SPEED, 1.0)] {
+                if !attrs.contains(path) {
+                    attrs.set(path, to_attr(&json!(value)));
+                    added = true;
+                }
+            }
+            if added {
+                self.store_attrs(id, &attrs)?;
+            }
+        }
+        self.node_mut(id)?["take"] = json!(clip);
+        Ok(())
+    }
+
+    /// The take node `id` plays and the frame of the take's own timing it shows at document
+    /// `frame`: the time warp. The take starts on its start frame plus `/take/offset` and
+    /// advances by `/take/speed` per frame, integrated, so a keyed speed ramps the motion
+    /// smoothly instead of jumping along it:
+    /// `start + integral of speed(f) df from (start + offset) to frame`.
+    /// A take id the scene does not have is an error.
+    pub fn take_frame(
+        &self,
+        id: NodeId,
+        frame: f64,
+    ) -> Result<Option<(Arc<crate::takes::Take>, f64)>, String> {
+        let Some(clip) = self.take_clip(id)? else {
+            return Ok(None);
+        };
+        let take = self.takes.get(clip).cloned().ok_or_else(|| {
+            format!(
+                "{} plays take {clip}, which this scene does not have",
+                self.info(id).map(|i| i.name).unwrap_or_default()
+            )
+        })?;
+        let number = |path: &str, at: f64| -> Result<f64, String> {
+            self.attribute_value(id, path, at)?
+                .as_f64()
+                .filter(|v| v.is_finite())
+                .ok_or_else(|| format!("{path} must be a finite number"))
+        };
+        let begin = take.start + number(TAKE_OFFSET, frame)?;
+        let attrs = self.attrs(id)?;
+        let advanced = if attrs.is_animated(TAKE_SPEED) || attrs.conn(TAKE_SPEED).is_some() {
+            // Composite Simpson over steps of at most half a frame: exact for the cubic
+            // segments between keys.
+            let span = frame - begin;
+            let steps = 2 * ((span.abs() * 2.0).ceil() as usize / 2 + 1);
+            let h = span / steps as f64;
+            let mut sum = 0.0;
+            for i in 0..=steps {
+                let weight = if i == 0 || i == steps {
+                    1.0
+                } else if i % 2 == 1 {
+                    4.0
+                } else {
+                    2.0
+                };
+                sum += weight * number(TAKE_SPEED, begin + h * i as f64)?;
+            }
+            sum * h / 3.0
+        } else {
+            number(TAKE_SPEED, frame)? * (frame - begin)
+        };
+        let shown = take.start + advanced;
+        Ok(Some((take, shown)))
+    }
+
+    /// The local transform the transform take node `id` plays shows at `frame`; None when it
+    /// plays none, or a camera take (that one replaces the visible camera pose in `snapshot`,
+    /// not the node's transform).
+    pub fn take_trs(&self, id: NodeId, frame: f64) -> Result<Option<crate::takes::Trs>, String> {
+        Ok(self
+            .take_frame(id, frame)?
+            .and_then(|(take, shown)| take.trs_at(shown, self.first, self.last, self.fps)))
+    }
+
     /// The active camera's visible pose on every frame of the work area from its own animation,
-    /// a bound take ignored: the timeline motion as take poses ("Take from animation").
+    /// a take it plays ignored: the timeline motion as take poses ("Take from animation").
     pub fn camera_frames(&self) -> Result<Vec<crate::scene::Camera>, String> {
         let mut unbound = self.clone();
         if let Some(camera) = self.active_camera {
-            unbound.takes.bind(camera, None)?;
+            unbound.attach_take(camera, None)?;
         }
         (self.first..=self.last)
             .map(|frame| unbound.snapshot(f64::from(frame)).map(|scene| scene.camera))
             .collect()
     }
 
-    /// `node`'s local transform on every frame of the work area from its own animation (a bound
-    /// take ignored): its timeline motion as transform take poses.
+    /// `node`'s local transform on every frame of the work area from its own animation (a take
+    /// it plays ignored): its timeline motion as transform take poses.
     pub fn trs_frames(&self, node: NodeId) -> Result<Vec<crate::takes::Trs>, String> {
         (self.first..=self.last)
             .map(|frame| self.authored_trs(node, f64::from(frame)))
@@ -3383,9 +3559,11 @@ impl WorldDocument {
         if ids.is_empty() {
             return Err("Nothing selected to copy".into());
         }
-        serde_json::to_string(
-            &json!({ CLIPBOARD_KEY: CLIPBOARD_VERSION, "nodes": self.fragment(ids)? }),
-        )
+        serde_json::to_string(&json!({
+            CLIPBOARD_KEY: CLIPBOARD_VERSION,
+            "document": self.graph.id,
+            "nodes": self.fragment(ids)?,
+        }))
         .map_err(|e| e.to_string())
     }
     /// Every node with a material reference (fractals), in document order.
@@ -3481,10 +3659,38 @@ impl WorldDocument {
                 choices: self
                     .settings_choices(id, path)
                     .unwrap_or_else(|| attribute_choices(path)),
+                choice_labels: vec![],
                 range: attribute_range(path),
                 slider: attribute_slider(path),
                 color: is_color_attribute(path),
                 default: keyable.then(|| attribute_default(kind, path)).flatten(),
+            });
+        }
+        if let Some(plays) = take_kind(kind) {
+            let takes: Vec<&crate::takes::Take> = self
+                .takes
+                .list()
+                .iter()
+                .map(AsRef::as_ref)
+                .filter(|t| t.kind() == plays)
+                .collect();
+            out.push(WorldAttribute {
+                path: TAKE_CLIP.into(),
+                label: attribute_label(TAKE_CLIP),
+                value: self.node(id)?["take"].clone(),
+                frames: vec![],
+                keyable: false,
+                component: None,
+                choices: std::iter::once(Value::Null)
+                    .chain(takes.iter().map(|t| json!(t.id)))
+                    .collect(),
+                choice_labels: std::iter::once("None".to_owned())
+                    .chain(takes.iter().map(|t| t.name.clone()))
+                    .collect(),
+                range: None,
+                slider: None,
+                color: false,
+                default: Some(Value::Null),
             });
         }
         if self.supports_material(id) {
@@ -3501,6 +3707,7 @@ impl WorldDocument {
                     .filter(|n| n.kind == WorldKind::Material)
                     .map(|n| json!(n.id))
                     .collect(),
+                choice_labels: vec![],
                 range: None,
                 slider: None,
                 color: false,
@@ -3574,6 +3781,9 @@ impl WorldDocument {
         }
         if path == "/material_id" {
             return Ok(self.node(id)?["material"].clone());
+        }
+        if path == TAKE_CLIP {
+            return Ok(self.node(id)?["take"].clone());
         }
         if !visiting.insert((id, path.into())) {
             return Err("Attribute connection cycle".into());
@@ -4176,12 +4386,8 @@ impl WorldDocument {
                 .map(|v| std::array::from_fn(|i| v[i].as_f64().unwrap_or(default[i] as f64) as f32))
                 .unwrap_or(default))
         };
-        // A bound transform take replaces the node's own position, rotation and scale.
-        let bound = self
-            .takes
-            .bound(id)
-            .and_then(|take| take.trs_at(frame, self.first, self.last, self.fps));
-        let (p, r, s) = match bound {
+        // A transform take the node plays replaces its own position, rotation and scale.
+        let (p, r, s) = match self.take_trs(id, frame)? {
             Some(t) => (t.position, t.rotation_degrees, t.scale),
             None => (
                 vec("/transform/position", [0.0; 3])?,
@@ -4418,10 +4624,11 @@ impl WorldDocument {
                     .transform_point3(glam::Vec3::from(scene.camera.target))
                     .to_array();
             }
-            // A bound camera take is the visible pose itself: it replaces the evaluated camera.
-            if let Some(take) = self.takes.bound(id) {
+            // A camera take the camera plays is the visible pose itself: it replaces the
+            // evaluated camera.
+            if let Some((take, shown)) = self.take_frame(id, frame)? {
                 scene.camera = take
-                    .camera_at(frame, self.first, self.last, self.fps)
+                    .camera_at(shown, self.first, self.last, self.fps)
                     .ok_or_else(|| format!("Take \"{}\" is not a camera take", take.name))?;
             }
         }

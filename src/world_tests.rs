@@ -1728,7 +1728,7 @@ fn clipboard_copy_paste_and_duplicate_remap_ids_in_one_undo_step() {
     // A copy holds the material's UUID, not the material: once the material is gone the
     // reference is reported as unresolved and the paste clears it.
     let text = e.document.copy_fragment(&[pasted]).unwrap();
-    let nodes = parse_clipboard(&text).unwrap();
+    let nodes = parse_clipboard(&text).unwrap().1;
     assert!(e.document.unresolved_references(&nodes).is_empty());
     e.execute(WorldCommand::Delete(material)).unwrap();
     assert_eq!(e.document.unresolved_references(&nodes).len(), 1);
@@ -2850,7 +2850,7 @@ fn take_from(start: f64, cameras: &[crate::scene::Camera]) -> crate::takes::Take
 }
 
 #[test]
-fn a_bound_camera_take_drives_the_snapshot_and_survives_undo_redo_and_save() {
+fn a_played_camera_take_drives_the_snapshot_and_survives_undo_redo_and_save() {
     let mut e = editor();
     let camera = e.document.active_camera.unwrap();
     let base = e.document.snapshot(0.0).unwrap().camera;
@@ -2860,11 +2860,11 @@ fn a_bound_camera_take_drives_the_snapshot_and_survives_undo_redo_and_save() {
     let id = e.add_take(take_from(0.0, &[base, turned]));
     let fps = e.document.fps;
     let revision = e.revision();
-    e.bind_take(camera, Some(id)).unwrap();
+    e.bind_take(&[camera], Some(id)).unwrap();
     assert_ne!(
         e.revision(),
         revision,
-        "binding moves the camera: caches must refresh"
+        "attaching moves the camera: caches must refresh"
     );
     // One second into the take (KeepSpeed from frame 0) is its last pose.
     let shown = e.document.snapshot(fps).unwrap().camera;
@@ -2872,15 +2872,19 @@ fn a_bound_camera_take_drives_the_snapshot_and_survives_undo_redo_and_save() {
     assert!((shown.yaw_degrees - turned.yaw_degrees).abs() < 1e-3);
     // A camera take cannot drive a fractal.
     let frac = find(&e, WorldKind::Fractal);
-    assert!(e.bind_take(frac, Some(id)).is_err());
-    // Takes are not edits: equality ignores them, undo/redo keep them.
+    assert!(e.bind_take(&[frac], Some(id)).is_err());
+    // Recordings are not edits (undo/redo keep the takes); attaching one is.
     e.execute(WorldCommand::SetMark {
         slot: 1,
         frame: Some(5),
     })
     .unwrap();
     assert!(e.undo());
-    assert_eq!(e.document.takes.binding(camera), Some(id));
+    assert_eq!(e.document.take_clip(camera).unwrap(), Some(id));
+    assert!(e.undo());
+    assert_eq!(e.document.take_clip(camera).unwrap(), None);
+    assert_eq!(e.document.takes.list().len(), 1);
+    assert!(e.redo());
     assert!(e.redo());
     // Saved with the scene and loaded back bound.
     let json = serde_json::to_string(&e.document).unwrap();
@@ -2888,18 +2892,19 @@ fn a_bound_camera_take_drives_the_snapshot_and_survives_undo_redo_and_save() {
         .unwrap()
         .document
         .unwrap();
-    assert_eq!(doc.takes.binding(camera), Some(id));
+    assert_eq!(doc.take_clip(camera).unwrap(), Some(id));
     assert_eq!(
         doc.snapshot(fps).unwrap().camera,
         e.document.snapshot(fps).unwrap().camera
     );
-    // Unbound, the camera node shows again.
-    e.bind_take(camera, None).unwrap();
+    // A played take cannot be deleted; detached, it can, and the camera node shows again.
+    assert!(e.delete_take(id).unwrap_err().contains("detach"));
+    e.bind_take(&[camera], None).unwrap();
     assert_eq!(e.document.snapshot(fps).unwrap().camera, base);
 }
 
 #[test]
-fn a_bound_transform_take_moves_its_node_and_bakes_into_its_keys() {
+fn a_played_transform_take_moves_its_node_and_bakes_into_its_keys() {
     use crate::takes::{Take, Trs};
     let mut e = editor();
     let frac = find(&e, WorldKind::Fractal);
@@ -2919,23 +2924,26 @@ fn a_bound_transform_take_moves_its_node_and_bakes_into_its_keys() {
     .unwrap();
     let id = e.add_take(take);
     let before = e.document.clone();
-    e.bind_take(frac, Some(id)).unwrap();
+    e.bind_take(&[frac], Some(id)).unwrap();
     let world = |e: &WorldEditor, f: f64| e.document.manip_frame(frac, f).unwrap().0;
     let moved = world(&e, fps).transform_point3(glam::Vec3::ZERO);
     assert!((moved.x - 1.0).abs() < 1e-5, "{moved:?}");
-    assert_eq!(e.document, before, "binding is not an edit");
-    // Bake: keys reproduce the take, the binding is released, one undo step removes the keys.
+    let bound = e.document.clone();
+    assert_ne!(bound, before, "attaching is an edit");
+    // Bake: keys reproduce the take and the take is detached, in one undo step.
     let summary = e
         .bake_take(frac, id, crate::camera_recorder::Options::default())
         .unwrap();
     assert!(summary.1 > 0);
-    assert_eq!(e.document.takes.binding(frac), None);
+    assert_eq!(e.document.take_clip(frac).unwrap(), None);
     let keyed = e.document.authored_trs(frac, 2.0 * fps).unwrap();
     assert!((keyed.position[0] - 2.0).abs() < 1e-3, "{keyed:?}");
     assert!(
         (keyed.rotation_degrees[2] - 190.0).abs() < 1e-2,
         "continuous rotation: {keyed:?}"
     );
+    assert!(e.undo());
+    assert_eq!(e.document, bound);
     assert!(e.undo());
     assert_eq!(e.document, before);
     // The node's own animation as a take.
@@ -2952,7 +2960,7 @@ fn baking_a_camera_take_keys_the_camera_in_one_undo_and_releases_the_binding() {
     let mut zoomed = base;
     zoomed.fov_y_degrees = base.fov_y_degrees * 0.5;
     let id = e.add_take(take_from(0.0, &[base, zoomed]));
-    e.bind_take(camera, Some(id)).unwrap();
+    e.bind_take(&[camera], Some(id)).unwrap();
     let before = e.document.clone();
     let options = Options {
         transform: false,
@@ -2962,7 +2970,7 @@ fn baking_a_camera_take_keys_the_camera_in_one_undo_and_releases_the_binding() {
         ..Options::default()
     };
     e.bake_take(camera, id, options).unwrap();
-    assert_eq!(e.document.takes.binding(camera), None);
+    assert_eq!(e.document.take_clip(camera).unwrap(), None);
     let fps = e.document.fps;
     let keyed = e.document.snapshot(fps).unwrap().camera;
     assert!((keyed.fov_y_degrees - zoomed.fov_y_degrees).abs() < 1e-3);
@@ -3136,5 +3144,126 @@ fn masks_reach_the_fractals_of_their_scope_with_their_world_matrix() {
         object(&e).masks.len(),
         1,
         "a sibling in the subtree is masked"
+    );
+}
+
+/// A transform take whose x position equals its seconds (0..=10), played on the fractal.
+fn x_take(e: &mut WorldEditor) -> (NodeId, u64) {
+    use crate::takes::{Take, Trs};
+    let frac = find(e, WorldKind::Fractal);
+    let poses = (0..=10)
+        .map(|x| Trs {
+            position: [x as f32, 0.0, 0.0],
+            rotation_degrees: [0.0; 3],
+            scale: [1.0; 3],
+        })
+        .collect();
+    let id = e.add_take(Take::from_frames(0.0, 1.0, Some(frac), poses).unwrap());
+    e.bind_take(&[frac], Some(id)).unwrap();
+    (frac, id)
+}
+
+#[test]
+fn take_offset_and_speed_warp_the_take_and_a_keyed_speed_ramps_it() {
+    let mut e = editor();
+    let (frac, _) = x_take(&mut e);
+    let fps = e.document.fps;
+    let x = |e: &WorldEditor, f: f64| e.document.take_trs(frac, f).unwrap().unwrap().position[0];
+    // Attaching added the warp at its identity: one take second per document second.
+    assert!((x(&e, 2.0 * fps) - 2.0).abs() < 1e-5);
+    set(&mut e, frac, TAKE_OFFSET, json!(fps), 0.0);
+    assert!(
+        (x(&e, 2.0 * fps) - 1.0).abs() < 1e-5,
+        "starts a second later"
+    );
+    assert!(
+        x(&e, 0.5 * fps).abs() < 1e-6,
+        "held on its first pose before"
+    );
+    set(&mut e, frac, TAKE_OFFSET, json!(0.0), 0.0);
+    set(&mut e, frac, TAKE_SPEED, json!(2.0), 0.0);
+    assert!((x(&e, 2.0 * fps) - 4.0).abs() < 1e-5, "twice as fast");
+    set(&mut e, frac, TAKE_SPEED, json!(-1.0), 0.0);
+    assert!(
+        x(&e, fps).abs() < 1e-6,
+        "backwards from the start holds its first pose"
+    );
+    // A keyed ramp 0 -> 2: the shown take frame is the integral of the speed, so the motion
+    // speeds up smoothly; compare against a fine Riemann sum of the evaluated speed.
+    set(&mut e, frac, TAKE_SPEED, json!(0.0), 0.0);
+    e.execute(WorldCommand::Key {
+        id: frac,
+        path: TAKE_SPEED.into(),
+        frame: 0.0,
+    })
+    .unwrap();
+    set(&mut e, frac, TAKE_SPEED, json!(2.0), 4.0 * fps);
+    let at = 4.0 * fps;
+    let n = 40_000;
+    let h = at / f64::from(n);
+    let integral: f64 = (0..n)
+        .map(|i| {
+            let f = (f64::from(i) + 0.5) * h;
+            e.document
+                .attribute_value(frac, TAKE_SPEED, f)
+                .unwrap()
+                .as_f64()
+                .unwrap()
+                * h
+        })
+        .sum();
+    let (_, shown) = e.document.take_frame(frac, at).unwrap().unwrap();
+    assert!((shown - integral).abs() < 1e-3, "{shown} vs {integral}");
+    assert!(
+        (x(&e, at) - (integral / fps) as f32).abs() < 1e-3,
+        "the pose follows the warped frame"
+    );
+    let early = x(&e, fps);
+    let late = x(&e, 3.0 * fps) - x(&e, 2.0 * fps);
+    assert!(early < late, "the ramp accelerates: {early} then {late}");
+}
+
+#[test]
+fn the_take_row_lists_takes_of_the_nodes_kind_and_copies_keep_their_take_in_one_scene() {
+    let mut e = editor();
+    let (frac, id) = x_take(&mut e);
+    let camera = e.document.active_camera.unwrap();
+    let row = |e: &WorldEditor, node| {
+        e.document
+            .attributes(node, 0.0)
+            .unwrap()
+            .into_iter()
+            .find(|a| a.path == TAKE_CLIP)
+            .unwrap()
+    };
+    let take_row = row(&e, frac);
+    assert_eq!(take_row.value, json!(id));
+    assert_eq!(take_row.choices, vec![Value::Null, json!(id)]);
+    assert_eq!(
+        take_row.choice_labels,
+        vec!["None".to_owned(), format!("Take {id}")]
+    );
+    assert_eq!(
+        row(&e, camera).choices,
+        vec![Value::Null],
+        "a camera plays camera takes"
+    );
+    // Set through the Attribute Editor's path like any attribute, undoable.
+    set(&mut e, frac, TAKE_CLIP, Value::Null, 0.0);
+    assert_eq!(e.document.take_clip(frac).unwrap(), None);
+    assert!(e.undo());
+    assert_eq!(e.document.take_clip(frac).unwrap(), Some(id));
+    // A copy pasted into the same scene plays the same take; into another scene, none.
+    let text = e.document.copy_fragment(&[frac]).unwrap();
+    e.execute(WorldCommand::Paste(text.clone())).unwrap();
+    assert_eq!(
+        e.document.take_clip(e.selection.unwrap()).unwrap(),
+        Some(id)
+    );
+    let mut other = editor();
+    other.execute(WorldCommand::Paste(text)).unwrap();
+    assert_eq!(
+        other.document.take_clip(other.selection.unwrap()).unwrap(),
+        None
     );
 }

@@ -2918,15 +2918,20 @@ fn schema_editor(
     }
     if !attr.choices.is_empty() {
         let mut changed = false;
+        let label = |choice: &Value| {
+            attr.choices
+                .iter()
+                .position(|c| c == choice)
+                .and_then(|i| attr.choice_labels.get(i))
+                .cloned()
+                .unwrap_or_else(|| choice_label(&attr.path, choice))
+        };
         egui::ComboBox::from_id_salt(&attr.path)
-            .selected_text(choice_label(&attr.path, value))
+            .selected_text(label(value))
             .show_ui(ui, |ui| {
                 for choice in &attr.choices {
                     if ui
-                        .selectable_label(
-                            choice_selected(&attr.path, value, choice),
-                            choice_label(&attr.path, choice),
-                        )
+                        .selectable_label(choice_selected(&attr.path, value, choice), label(choice))
                         .clicked()
                         && !choice_selected(&attr.path, value, choice)
                     {

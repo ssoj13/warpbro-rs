@@ -81,44 +81,39 @@ fn frame_mapping_keeps_speed_or_fits_the_work_area() {
 }
 
 #[test]
-fn retention_keeps_pinned_and_bound_takes_and_bindings_follow_removal() {
+fn retention_keeps_pinned_takes_and_the_takes_nodes_play() {
     let mut takes = Takes::default();
-    let first = takes.add(take(&[0.0, 1.0]));
-    let second = takes.add(take(&[0.0, 2.0]));
-    assert!(takes.edit(first, |t| t.pinned = true));
-    takes.bind(node(1), Some(second)).unwrap();
+    let first = takes.add(take(&[0.0, 1.0]), &[]);
+    let second = takes.add(take(&[0.0, 2.0]), &[]);
+    assert!(takes.edit(first, &[], |t| t.pinned = true));
     for i in 0..(MAX_UNPINNED + 5) {
-        takes.add(take(&[0.0, 3.0 + i as f32]));
+        takes.add(take(&[0.0, 3.0 + i as f32]), &[second]);
     }
     assert!(takes.get(first).is_some(), "pinned take survives");
-    assert!(takes.get(second).is_some(), "bound take survives");
+    assert!(takes.get(second).is_some(), "a played take survives");
     assert_eq!(
         takes.list().iter().filter(|t| !t.pinned).count(),
         MAX_UNPINNED
     );
     assert_eq!(takes.list()[2].name, "Take 9");
-    assert_eq!(takes.bound(node(1)).map(|t| t.id), Some(second));
-    assert_eq!(takes.bound_nodes(second).collect::<Vec<_>>(), vec![node(1)]);
-    // Rebinding replaces, removal unbinds, a missing take cannot be bound.
-    takes.bind(node(1), Some(first)).unwrap();
-    assert_eq!(takes.binding(node(1)), Some(first));
     assert!(takes.remove(first));
-    assert_eq!(takes.binding(node(1)), None);
-    assert!(takes.bind(node(2), Some(first)).is_err());
+    assert!(!takes.remove(first));
 }
 
 #[test]
 fn takes_roundtrip_through_json_and_reject_inconsistent_data() {
     let mut takes = Takes::default();
-    let id = takes.add(take(&[0.0, 45.0, 90.0]));
-    takes.bind(node(3), Some(id)).unwrap();
+    let id = takes.add(take(&[0.0, 45.0, 90.0]), &[]);
     let json = serde_json::to_string(&takes).unwrap();
     let back: Takes = serde_json::from_str(&json).unwrap();
-    assert_eq!(back.bound(node(3)), takes.bound(node(3)));
+    assert_eq!(back.get(id), takes.get(id));
     assert_eq!(back.list().len(), 1);
-    let dangling = json.replace(&format!(",{id}]]"), ",7]]");
-    assert_ne!(dangling, json);
-    assert!(serde_json::from_str::<Takes>(&dangling).is_err());
+    let future = json.replace("\"next\":1", "\"next\":0");
+    assert_ne!(future, json);
+    assert!(
+        serde_json::from_str::<Takes>(&future).is_err(),
+        "an id beyond next"
+    );
 }
 
 #[test]

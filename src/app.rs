@@ -989,11 +989,14 @@ impl App {
                 rotation,
                 translation,
             ));
-            // The local pose the handles show: the bound take's, else the authored one.
-            let take = document
-                .takes
-                .bound(id)
-                .and_then(|t| t.trs_at(frame, document.first, document.last, document.fps));
+            // The local pose the handles show: the take the node plays, else the authored one.
+            let take = match document.take_trs(id, frame) {
+                Ok(take) => take,
+                Err(error) => {
+                    self.status = error;
+                    continue;
+                }
+            };
             let Some(shown) = take.or_else(|| document.authored_trs(id, frame).ok()) else {
                 continue;
             };
@@ -1069,7 +1072,7 @@ impl App {
                     self.status = error;
                 }
             }
-            if bound && let Err(error) = self.world.bind_take(id, None) {
+            if bound && let Err(error) = self.world.bind_take(&[id], None) {
                 self.status = error;
             }
             if let Ok(pose) = self.world.document.authored_trs(id, frame) {
@@ -1111,9 +1114,10 @@ impl App {
         });
         let camera = self.world.document.active_camera;
         if self.scene.camera != before
-            && let Some(camera) = camera.filter(|c| self.world.document.takes.binding(*c).is_some())
+            && let Some(camera) =
+                camera.filter(|c| matches!(self.world.document.take_clip(*c), Ok(Some(_))))
         {
-            if let Err(error) = self.world.bind_take(camera, None) {
+            if let Err(error) = self.world.bind_take(&[camera], None) {
                 self.status = error;
             }
             self.evaluated_world = None;
@@ -2511,7 +2515,7 @@ impl App {
             hotkeys::take_paste(ctx, |text| crate::world::parse_clipboard(text).is_some())
         {
             let unresolved = crate::world::parse_clipboard(&text)
-                .map(|nodes| self.world.document.unresolved_references(&nodes))
+                .map(|(_, nodes)| self.world.document.unresolved_references(&nodes))
                 .unwrap_or_default();
             self.world.finish_edit();
             self.status = match self.world.execute(crate::world::WorldCommand::Paste(text)) {
@@ -3389,16 +3393,15 @@ impl App {
             self.scene.camera.target = [0.0; 3];
         }
 
-        let ppp = ui.ctx().pixels_per_point();
-        let (w, h) = (
-            ((avail.x * ppp) as usize).max(16),
-            ((avail.y * ppp) as usize).max(16),
-        );
+        let (w, h) = viewport_pixels(avail, ui.ctx().pixels_per_point());
         let monitor = Monitor::read(ui.ctx());
         let (output_hdr, white) = (monitor.hdr, monitor.white_nits);
-        if self
-            .preview_key
-            .is_some_and(|key| key.width != w || key.height != h)
+        // A pass egui discards may lay the viewport out at another size: only the shown pass
+        // decides that the cached preview no longer fits.
+        if !ui.ctx().will_discard()
+            && self
+                .preview_key
+                .is_some_and(|key| key.width != w || key.height != h)
         {
             self.preview.cancel();
             self.preview_key = None;
@@ -3464,10 +3467,22 @@ struct PreviewKey {
     /// `f32::to_bits` of the display's SDR reference white (nits).
     white_nits_bits: u32,
     seed: u32,
+    /// The viewport in physical pixels (`viewport_pixels`), as the viewport compares it.
     width: usize,
     height: usize,
+    /// `f32::to_bits` of the Still profile's resolution scale (the render size per viewport pixel).
+    scale_bits: u32,
     /// The Still profile's sample target.
     samples: u32,
+}
+
+/// The viewport's size in physical pixels: the one measure the viewport renders at (scaled by the
+/// profile's resolution) and the cached preview is keyed by (`PreviewKey`).
+fn viewport_pixels(size: egui::Vec2, ppp: f32) -> (usize, usize) {
+    (
+        ((size.x * ppp) as usize).max(16),
+        ((size.y * ppp) as usize).max(16),
+    )
 }
 
 impl App {
@@ -3483,14 +3498,7 @@ impl App {
             .map(|selection| selection.effective);
         let extent = self
             .viewport_rect
-            .map(|rect| {
-                let scale = effective.as_ref().map_or(1.0, |r| r.resolution_scale);
-                let ppp = ctx.pixels_per_point();
-                (
-                    ((rect.width() * ppp).max(16.0) * scale).round() as usize,
-                    ((rect.height() * ppp).max(16.0) * scale).round() as usize,
-                )
-            })
+            .map(|rect| viewport_pixels(rect.size(), ctx.pixels_per_point()))
             .unwrap_or_else(|| {
                 (
                     self.request.as_ref().map_or(640, |r| r.width),
@@ -3505,6 +3513,10 @@ impl App {
             seed: self.seed,
             width: extent.0.max(1),
             height: extent.1.max(1),
+            scale_bits: effective
+                .as_ref()
+                .map_or(1.0f32, |r| r.resolution_scale)
+                .to_bits(),
             samples: effective.as_ref().map_or(0, |r| r.samples),
         }
     }
@@ -3717,6 +3729,10 @@ impl App {
     }
 
     fn process_preview_intent(&mut self, ctx: &egui::Context) {
+        // A discarded pass's layout is not the one shown: start on the pass that sizes the viewport.
+        if ctx.will_discard() {
+            return;
+        }
         match self.world_ui.take_preview_action() {
             Some(action) => self.begin_preview(action.first, action.last, action.mode, ctx),
             None if self.preview.position().is_none() && self.world_ui.playing => {
@@ -5725,5 +5741,85 @@ mod tests {
             .remove("roll_degrees");
         old["camera"].as_object_mut().unwrap().remove("free_flight");
         assert!(serde_json::from_value::<Scene>(old).is_err());
+    }
+
+    #[test]
+    fn play_attaches_the_take_and_the_camera_follows_it_while_playing() {
+        let _gpu_test = crate::test_gpu::lock();
+        let mut app = App::new();
+        // A Still profile that renders fast, at a resolution scale below 1: the scale once made
+        // the cached preview's size key disagree with the viewport and cancel playback at once.
+        let policy = app.world.document.viewport_policy(0.0).unwrap();
+        let still = app.world.document.render_quality(policy.still_id).unwrap();
+        for (path, value) in [
+            ("/quality/samples", serde_json::json!(1)),
+            ("/quality/resolution_scale", serde_json::json!(0.75)),
+        ] {
+            app.world
+                .execute(crate::world::WorldCommand::SetAttribute {
+                    id: still,
+                    path: path.into(),
+                    value,
+                    frame: 0.0,
+                })
+                .unwrap();
+        }
+        let camera = app.world.document.active_camera.unwrap();
+        let base = app.world.document.snapshot(0.0).unwrap().camera;
+        let mut turned = base;
+        turned.yaw_degrees += 40.0;
+        let id = app.world.add_take(
+            crate::takes::Take::from_frames(10.0, 1.0, Some(camera), vec![base, turned]).unwrap(),
+        );
+        let ctx = egui::Context::default();
+        let frame = |app: &mut App, i: u32| {
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1280.0, 720.0),
+                    )),
+                    time: Some(f64::from(i) / 30.0),
+                    predicted_dt: 1.0 / 30.0,
+                    ..Default::default()
+                },
+                |ui| app.ui(ui),
+            );
+        };
+        // The window's layout settles first, as it has long before anyone presses Play.
+        for i in 0..10 {
+            frame(&mut app, i);
+        }
+        app.take_action(takes_ui::Action::Play(id));
+        assert_eq!(app.world.document.take_clip(camera).unwrap(), Some(id));
+        assert_eq!(app.world_ui.playhead, 10);
+        assert!(app.world_ui.playing);
+        // Play advances as fast as the preview renders its frames: real time, bounded.
+        let started = std::time::Instant::now();
+        let mut i = 10;
+        while app.world_ui.playhead < 13 && started.elapsed().as_secs() < 60 {
+            assert!(app.world_ui.playing, "playback stopped: {}", app.status);
+            frame(&mut app, i);
+            i += 1;
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        assert!(
+            app.world_ui.playhead >= 13,
+            "the playhead advanced: {}",
+            app.world_ui.playhead
+        );
+        assert_eq!(
+            app.world.document.take_clip(camera).unwrap(),
+            Some(id),
+            "still attached"
+        );
+        // Cached playback presents the worker's frames (rendered through the same snapshot
+        // hook); paused, the viewport evaluates the playhead itself.
+        app.world_ui.playing = false;
+        frame(&mut app, i);
+        let head = f64::from(app.world_ui.playhead);
+        let expected = app.world.document.snapshot(head).unwrap().camera;
+        assert_ne!(expected, base, "the take moved the camera");
+        assert_eq!(app.scene.camera, expected, "the viewport shows the take");
     }
 }

@@ -5,11 +5,12 @@
 //! recorded by [`DragRecorder`]). Every operation on a take (interpolation, trim, speed, smoothing,
 //! split) is written once over the [`Pose`] trait. Finished takes live in the document's [`Takes`]
 //! store, saved with the scene but outside undo/redo and outside document equality: a take is a
-//! recording, not an edit. The store also holds the *bindings*: a node bound to a take of its kind
-//! takes its motion from the take instead of its keys (`WorldDocument::snapshot` for the active
-//! camera, `world_matrix` for transforms: the single pose hooks shared by viewport, playback
-//! cache and export). Bindings are per node UUID, so pasted copies of a node start unbound.
-//! "Bake to keys" turns a take into keyframes (`camera_recorder`).
+//! recording, not an edit. A node plays a take through its own attributes (`/take/clip`, the
+//! take's id; `/take/offset` and `/take/speed`, keyable: the time warp, `WorldDocument::take_frame`),
+//! so attaching is an ordinary undoable edit saved with the node. The poses replace the node's
+//! keys in `WorldDocument::snapshot` (the active camera) and `world_matrix` (transforms): the
+//! single pose hooks shared by viewport, playback cache and export. "Bake to keys" turns a take
+//! into keyframes (`camera_recorder`).
 use crate::camera_recorder::Timing;
 use crate::scene::Camera;
 use crate::world::NodeId;
@@ -17,7 +18,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// Unpinned takes kept; the oldest unpinned, unbound take beyond this is dropped.
+/// Unpinned takes kept; the oldest unpinned take no node plays beyond this is dropped.
 pub const MAX_UNPINNED: usize = 20;
 /// Version of the single-take clip file (`Take::to_clip`) and of the clipboard text.
 pub const CLIP_VERSION: u32 = 2;
@@ -345,12 +346,13 @@ pub struct Take {
     /// Stable key within the store; 0 until the take is added.
     pub id: u64,
     pub name: String,
-    /// Document frame the motion began on: where a bound take starts playing.
+    /// Document frame the motion began on: where an attached take starts playing (before the
+    /// node's `/take/offset`).
     pub start: f64,
     pub timing: Timing,
     /// Pinned takes are never dropped by retention.
     pub pinned: bool,
-    /// The node it was recorded on (shown in the Takes panel; bindings may differ).
+    /// The node it was recorded on (shown in the Takes panel; other nodes may play it).
     #[serde(default)]
     pub source: Option<NodeId>,
     /// Strictly increasing seconds from 0.
@@ -358,7 +360,7 @@ pub struct Take {
 }
 
 impl Take {
-    /// A take of `samples`, unnamed, unbound and without an id; validated.
+    /// A take of `samples`, unnamed and without an id; validated.
     pub fn new(
         start: f64,
         source: Option<NodeId>,
@@ -520,7 +522,7 @@ impl Take {
         serde_json::to_string_pretty(&Clip::of(self, fps)).map_err(|e| e.to_string())
     }
 
-    /// Parse a clip file; the take is unpinned, unbound and has no id until a store adds it.
+    /// Parse a clip file; the take is unpinned and has no id until a store adds it.
     pub fn from_clip(text: &str) -> Result<Self, String> {
         let clip: Clip =
             serde_json::from_str(text).map_err(|e| format!("Invalid take clip: {e}"))?;
@@ -552,7 +554,7 @@ pub fn from_clipboard(text: &str) -> Option<Result<Vec<Take>, String>> {
     )
 }
 
-/// The exchange format of one take (file and clipboard): no id, binding or source node, which
+/// The exchange format of one take (file and clipboard): no id or source node, which
 /// belong to the scene it came from.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -594,20 +596,19 @@ impl Clip {
     }
 }
 
-/// The takes of one document and the nodes bound to them.
+/// The takes of one document. Which nodes play them is node data (`/take/clip`), so every
+/// operation that can drop a take is told the ids in use (`WorldDocument::takes_in_use`).
 #[derive(Clone, Debug, Default)]
 pub struct Takes {
     /// Oldest first. `Arc` keeps document clones (undo snapshots, export jobs) cheap.
     list: Vec<Arc<Take>>,
-    /// Node -> take: the node's motion comes from the take (one take per node).
-    bindings: Vec<(NodeId, u64)>,
     /// Next id: ids are never reused, so a stale reference cannot hit another take.
     next: u64,
 }
 
 impl Takes {
     pub fn is_empty(&self) -> bool {
-        self.list.is_empty() && self.bindings.is_empty() && self.next == 0
+        self.list.is_empty() && self.next == 0
     }
     pub fn list(&self) -> &[Arc<Take>] {
         &self.list
@@ -615,47 +616,27 @@ impl Takes {
     pub fn get(&self, id: u64) -> Option<&Arc<Take>> {
         self.list.iter().find(|t| t.id == id)
     }
-    /// The take `node` is bound to.
-    pub fn binding(&self, node: NodeId) -> Option<u64> {
-        self.bindings
-            .iter()
-            .find(|(n, _)| *n == node)
-            .map(|(_, id)| *id)
-    }
-    /// The take that drives `node`, if one is bound.
-    pub fn bound(&self, node: NodeId) -> Option<&Take> {
-        self.binding(node)
-            .and_then(|id| self.get(id))
-            .map(Arc::as_ref)
-    }
-    /// The nodes bound to take `id`.
-    pub fn bound_nodes(&self, id: u64) -> impl Iterator<Item = NodeId> + '_ {
-        self.bindings
-            .iter()
-            .filter(move |(_, t)| *t == id)
-            .map(|(n, _)| *n)
-    }
-
-    /// Add a take (named "Take N" when unnamed) and apply retention. Returns its id.
-    pub fn add(&mut self, mut take: Take) -> u64 {
+    /// Add a take (named "Take N" when unnamed) and apply retention, keeping the takes in
+    /// `used`. Returns its id.
+    pub fn add(&mut self, mut take: Take, used: &[u64]) -> u64 {
         self.next += 1;
         take.id = self.next;
         if take.name.trim().is_empty() {
             take.name = format!("Take {}", take.id);
         }
         self.list.push(Arc::new(take));
-        self.trim();
+        self.trim(used);
         self.next
     }
 
-    /// Drop the oldest unpinned takes beyond [`MAX_UNPINNED`]. Bound takes are kept too: dropping
-    /// one would silently change the motion of the scene.
-    fn trim(&mut self) {
+    /// Drop the oldest unpinned takes beyond [`MAX_UNPINNED`]. Takes in `used` (played by a node)
+    /// are kept too: dropping one would silently change the motion of the scene.
+    fn trim(&mut self, used: &[u64]) {
         while self.list.iter().filter(|t| !t.pinned).count() > MAX_UNPINNED {
             let Some(index) = self
                 .list
                 .iter()
-                .position(|t| !t.pinned && !self.bindings.iter().any(|(_, id)| *id == t.id))
+                .position(|t| !t.pinned && !used.contains(&t.id))
             else {
                 break;
             };
@@ -663,36 +644,20 @@ impl Takes {
         }
     }
 
-    /// Remove a take and every binding to it.
+    /// Remove a take. The caller makes sure no node plays it (`WorldEditor::delete_take`).
     pub fn remove(&mut self, id: u64) -> bool {
         let before = self.list.len();
         self.list.retain(|t| t.id != id);
-        self.bindings.retain(|(_, t)| *t != id);
         self.list.len() != before
     }
 
-    /// Bind `node` to take `id`, or unbind it with None. The caller checks the take's kind fits
-    /// the node (`WorldEditor::bind_take`).
-    pub fn bind(&mut self, node: NodeId, id: Option<u64>) -> Result<(), String> {
-        if let Some(id) = id
-            && self.get(id).is_none()
-        {
-            return Err(format!("No take {id}"));
-        }
-        self.bindings.retain(|(n, _)| *n != node);
-        if let Some(id) = id {
-            self.bindings.push((node, id));
-        }
-        Ok(())
-    }
-
-    /// Mutate one take in place; false when it does not exist.
-    pub fn edit(&mut self, id: u64, apply: impl FnOnce(&mut Take)) -> bool {
+    /// Mutate one take in place (retention keeps `used`); false when it does not exist.
+    pub fn edit(&mut self, id: u64, used: &[u64], apply: impl FnOnce(&mut Take)) -> bool {
         let Some(take) = self.list.iter_mut().find(|t| t.id == id) else {
             return false;
         };
         apply(Arc::make_mut(take));
-        self.trim();
+        self.trim(used);
         true
     }
 }
@@ -700,22 +665,18 @@ impl Takes {
 #[derive(Serialize)]
 struct TakesOut<'a> {
     list: Vec<&'a Take>,
-    bindings: &'a [(NodeId, u64)],
     next: u64,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TakesIn {
     list: Vec<Take>,
-    #[serde(default)]
-    bindings: Vec<(NodeId, u64)>,
     next: u64,
 }
 impl Serialize for Takes {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         TakesOut {
             list: self.list.iter().map(Arc::as_ref).collect(),
-            bindings: &self.bindings,
             next: self.next,
         }
         .serialize(serializer)
@@ -733,18 +694,8 @@ impl<'de> Deserialize<'de> for Takes {
             }
             list.push(Arc::new(take));
         }
-        let mut bindings: Vec<(NodeId, u64)> = Vec::with_capacity(input.bindings.len());
-        for (node, id) in input.bindings {
-            if list.iter().all(|t| t.id != id) || bindings.iter().any(|(n, _)| *n == node) {
-                return Err(D::Error::custom(format!(
-                    "Invalid take binding to take {id}"
-                )));
-            }
-            bindings.push((node, id));
-        }
         Ok(Self {
             list,
-            bindings,
             next: input.next,
         })
     }
