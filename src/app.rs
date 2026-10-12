@@ -2494,7 +2494,7 @@ impl App {
         if let Some(frame) = self.renderer.take_latest_frame()
             && !frozen
             && !self.preview.displaying_preview()
-            && !(self.frame_from_cache && self.preview.position().is_some())
+            && !(self.frame_from_cache && self.preview.presents())
         {
             self.cache_completed_viewport(&frame, ctx);
             self.showing_preview = frame.preview;
@@ -3552,8 +3552,7 @@ impl App {
             self.world_ui.playing = false;
             self.showing_preview = false;
         }
-        if !self.preview.displaying_preview()
-            && !(self.frame_from_cache && self.preview.position().is_some())
+        if !self.preview.displaying_preview() && !(self.frame_from_cache && self.preview.presents())
         {
             self.step_viewport(w, h, output_hdr, white);
         }
@@ -3855,7 +3854,7 @@ impl App {
         }
         if let Some(position) = self.preview.position() {
             if self.world_ui.playhead != position {
-                self.preview.seek(self.world_ui.playhead);
+                self.preview.scrub(self.world_ui.playhead);
             }
             if self.world_ui.playing != self.preview.running() {
                 if self.world_ui.playing {
@@ -6043,5 +6042,58 @@ mod tests {
         assert_ne!(copy, second);
         assert!(app.world.undo());
         assert_eq!(app.world.document.graph.id, copy);
+    }
+
+    #[test]
+    fn scrubbing_after_a_completed_frame_renders_the_new_frame_live() {
+        let _gpu_test = crate::test_gpu::lock();
+        let mut app = App::new();
+        let policy = app.world.document.viewport_policy(0.0).unwrap();
+        let still = app.world.document.render_quality(policy.still_id).unwrap();
+        app.world
+            .execute(crate::world::WorldCommand::SetAttribute {
+                id: still,
+                path: "/quality/samples".into(),
+                value: serde_json::json!(2),
+                frame: 0.0,
+            })
+            .unwrap();
+        let ctx = egui::Context::default();
+        let frame = |app: &mut App, i: u32| {
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1280.0, 720.0),
+                    )),
+                    time: Some(f64::from(i) / 30.0),
+                    predicted_dt: 1.0 / 30.0,
+                    ..Default::default()
+                },
+                |ui| app.ui(ui),
+            );
+        };
+        // Render until the completed (denoised) frame is cached: the cache now has a position.
+        let started = std::time::Instant::now();
+        let mut i = 0;
+        while app.preview.position().is_none() && started.elapsed().as_secs() < 300 {
+            frame(&mut app, i);
+            i += 1;
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+        assert!(
+            app.preview.position().is_some(),
+            "the completed frame was cached"
+        );
+        // Scrub, paused, to a frame the cache does not hold: the live viewport renders it.
+        app.world_ui.seek(30);
+        frame(&mut app, i);
+        frame(&mut app, i + 1);
+        assert!(!app.preview.presents(), "the cache does not hold frame 30");
+        assert!(
+            app.request.as_ref().is_some_and(|r| r.active),
+            "the viewport renders live"
+        );
+        assert_eq!(app.viewport_stamp.map(|s| s.3), Some(30));
     }
 }

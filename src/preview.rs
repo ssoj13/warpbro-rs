@@ -333,6 +333,28 @@ impl PreviewController {
             self.awaiting_frame = true;
         }
     }
+    /// Move to `number` while scrubbing: a running transport or a resident frame seeks (the
+    /// frame shows at once); any other frame is left to the live viewport, which renders it
+    /// progressively and caches it once complete, instead of waiting here for the worker to
+    /// render it at full quality. The clock follows either way.
+    pub fn scrub(&mut self, number: u32) {
+        if self.running() || self.resident.contains(&number) {
+            self.seek(number);
+        } else if let (Some(request), Some(clock)) = (&self.request, &mut self.clock) {
+            clock.set_position((number.clamp(request.first, request.last) - request.first) as i32);
+            if matches!(self.pending, Some(Command::SeekPreview { .. })) {
+                self.pending = None;
+            }
+            self.awaiting_frame = false;
+        }
+    }
+
+    /// Whether the cache presents the viewport's frame: the transport runs, a frame is on its
+    /// way, or the frame at the position is resident. Otherwise the live viewport does.
+    pub fn presents(&self) -> bool {
+        self.displaying_preview() || self.position().is_some_and(|n| self.resident.contains(&n))
+    }
+
     pub fn cancel(&mut self) {
         self.begin = None;
         if let Some(request) = &self.request {
