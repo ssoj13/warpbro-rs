@@ -1450,6 +1450,22 @@ impl App {
         }
     }
 
+    /// File > Save: to the scene's file, or through the dialog for a scene that has none.
+    fn save_scene(&mut self) {
+        if let Some(path) = self.scene_file_path.clone() {
+            self.submit_scene_file(path, true);
+        } else {
+            self.scene_file_dialog(true);
+        }
+    }
+
+    /// File > New: everything cleared, the scene the app starts with loaded as a new document.
+    fn new_scene(&mut self) {
+        let scene = self.gallery[0].scene.clone();
+        self.load(scene, Load::New);
+        self.status = "New scene".into();
+    }
+
     /// Load `scene` as the editor's document: the same document again (`Load::Same`: a file
     /// opened, a reset) or a new one made from it (`Load::New`: a template, preset or bookmark,
     /// which gets its own identity: `WorldDocument::renew_identity`).
@@ -2113,18 +2129,19 @@ impl App {
             Err(e) => e,
         };
     }
-    /// The window-screenshot choices of the File menu (`F12` / `Ctrl+Shift+S`: EXR + PQ PNG).
+    /// The window-screenshot choices of the File menu (`F12`: EXR + PQ PNG).
     fn window_shot_menu(&mut self, ui: &mut egui::Ui) {
         let hint = "The whole window as presented (viewport, panels, menus) at its physical \
             resolution. EXR: linear BT.709 light, 1.0 = SDR white, whiteLuminance in nits. PQ PNG: \
             16-bit ST 2084 / BT.2020 with cICP; SDR white at the monitor's (HDR) or 203 nits.";
         for files in crate::window_shot::WindowFiles::ALL {
-            let label = if files == crate::window_shot::WindowFiles::ExrAndPq {
-                format!("{}    F12 / Ctrl+Shift+S", files.label())
+            use crate::hotkeys::{Command as Hotkey, Scope, menu_item};
+            let response = if files == crate::window_shot::WindowFiles::ExrAndPq {
+                menu_item(ui, files.label(), Scope::Global, Hotkey::WindowShot)
             } else {
-                files.label().to_owned()
+                ui.button(files.label())
             };
-            if ui.button(label).on_hover_text(hint).clicked() {
+            if response.on_hover_text(hint).clicked() {
                 self.request_window_shot(files, Monitor::read(ui.ctx()));
                 ui.close();
             }
@@ -2926,19 +2943,23 @@ impl App {
                 if !self.templates_requested {
                     self.refresh_templates();
                 }
-                if ui.button("Open scene…").clicked() {
+                use crate::hotkeys::{Command as Hotkey, Scope, menu_item};
+                if menu_item(ui, "New scene", Scope::Global, Hotkey::NewScene)
+                    .on_hover_text("Start over: the scene WarpBro opens with, nothing kept")
+                    .clicked()
+                {
+                    self.new_scene();
+                    ui.close();
+                }
+                if menu_item(ui, "Open scene…", Scope::Global, Hotkey::OpenScene).clicked() {
                     self.scene_file_dialog(false);
                     ui.close();
                 }
-                if ui.button("Save scene").clicked() {
-                    if let Some(path) = self.scene_file_path.clone() {
-                        self.submit_scene_file(path, true);
-                    } else {
-                        self.scene_file_dialog(true);
-                    }
+                if menu_item(ui, "Save scene", Scope::Global, Hotkey::SaveScene).clicked() {
+                    self.save_scene();
                     ui.close();
                 }
-                if ui.button("Save scene as…").clicked() {
+                if menu_item(ui, "Save scene as…", Scope::Global, Hotkey::SaveSceneAs).clicked() {
                     self.scene_file_dialog(true);
                     ui.close();
                 }
@@ -3016,11 +3037,12 @@ impl App {
                 self.window_shot_menu(ui);
             });
             ui.menu_button("Edit", |ui| {
-                if ui.button("Undo    Ctrl+Z").clicked() {
+                use crate::hotkeys::{Command as Hotkey, Scope, menu_item};
+                if menu_item(ui, "Undo", Scope::Global, Hotkey::Undo).clicked() {
                     self.world.undo();
                     ui.close();
                 }
-                if ui.button("Redo    Ctrl+Shift+Z").clicked() {
+                if menu_item(ui, "Redo", Scope::Global, Hotkey::Redo).clicked() {
                     self.world.redo();
                     ui.close();
                 }
@@ -3865,6 +3887,18 @@ impl App {
         // A window shot armed in an earlier frame is captured after this one.
         if let Some((_, drawn)) = &mut self.window_shot {
             *drawn = true;
+        }
+        if hotkeys::consume(&ctx, Scope::Global, Hotkey::NewScene) {
+            self.new_scene();
+        }
+        if hotkeys::consume(&ctx, Scope::Global, Hotkey::OpenScene) {
+            self.scene_file_dialog(false);
+        }
+        if hotkeys::consume(&ctx, Scope::Global, Hotkey::SaveScene) {
+            self.save_scene();
+        }
+        if hotkeys::consume(&ctx, Scope::Global, Hotkey::SaveSceneAs) {
+            self.scene_file_dialog(true);
         }
         if hotkeys::consume(&ctx, Scope::Global, Hotkey::WindowShot) {
             self.request_window_shot(

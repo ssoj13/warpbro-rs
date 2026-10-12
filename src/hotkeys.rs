@@ -60,6 +60,11 @@ pub enum Command {
     ToggleUi,
     /// Save a screenshot of the whole window (EXR + PQ PNG, `window_shot`).
     WindowShot,
+    /// File > New scene / Open / Save / Save as.
+    NewScene,
+    OpenScene,
+    SaveScene,
+    SaveSceneAs,
     Undo,
     Redo,
     Duplicate,
@@ -131,9 +136,11 @@ const fn physical(command: Command, key: Key, modifiers: Modifiers) -> Binding {
 pub const GLOBAL: &[Binding] = &[
     binding(Command::ToggleUi, Key::Tab, Modifiers::NONE),
     binding(Command::WindowShot, Key::F12, Modifiers::NONE),
-    // F12 is Windows' debugger break key while a debugger is attached (UserDebuggerHotKey).
+    binding(Command::NewScene, Key::N, Modifiers::COMMAND),
+    binding(Command::OpenScene, Key::O, Modifiers::COMMAND),
+    binding(Command::SaveScene, Key::S, Modifiers::COMMAND),
     binding(
-        Command::WindowShot,
+        Command::SaveSceneAs,
         Key::S,
         Modifiers::COMMAND.plus(Modifiers::SHIFT),
     ),
@@ -343,6 +350,24 @@ pub fn register(ui: &Ui, scope: Scope, rect: Rect) {
         ui.ctx().data_mut(|data| data.remove::<Scope>(owner_id()));
     }
 }
+/// The shortcut text of `command`'s first binding in `scope` ("Ctrl+S" / "⌘S"): menus show the
+/// binding table itself, never a copy of it.
+pub fn shortcut(ctx: &Context, scope: Scope, command: Command) -> Option<String> {
+    bindings(scope)
+        .iter()
+        .find(|b| b.command == command)
+        .map(|b| ctx.format_shortcut(&egui::KeyboardShortcut::new(b.modifiers, b.key)))
+}
+
+/// A menu item for `command`, labelled with its shortcut ([`shortcut`]).
+pub fn menu_item(ui: &mut Ui, text: &str, scope: Scope, command: Command) -> egui::Response {
+    let mut button = egui::Button::new(text);
+    if let Some(keys) = shortcut(ui.ctx(), scope, command) {
+        button = button.shortcut_text(keys);
+    }
+    ui.add(button)
+}
+
 /// Consume exactly one non-repeated command event, only in its owning scope.
 pub fn consume(ctx: &Context, scope: Scope, command: Command) -> bool {
     if ctx.text_edit_focused() || (scope != Scope::Global && active(ctx) != Some(scope)) {
@@ -646,14 +671,21 @@ mod tests {
             Some((Scope::Viewport, Command::Fit))
         );
         assert_eq!(resolve(Scope::Export, Key::F, None, Modifiers::NONE), None);
-        // The window screenshot wins over the timeline's Scale (S) in every panel.
-        for (key, modifiers) in [
-            (Key::F12, Modifiers::NONE),
-            (Key::S, Modifiers::COMMAND.plus(Modifiers::SHIFT)),
+        // The window screenshot and the scene file chords win in every panel.
+        for (key, modifiers, command) in [
+            (Key::F12, Modifiers::NONE, Command::WindowShot),
+            (Key::N, Modifiers::COMMAND, Command::NewScene),
+            (Key::O, Modifiers::COMMAND, Command::OpenScene),
+            (Key::S, Modifiers::COMMAND, Command::SaveScene),
+            (
+                Key::S,
+                Modifiers::COMMAND.plus(Modifiers::SHIFT),
+                Command::SaveSceneAs,
+            ),
         ] {
             assert_eq!(
                 resolve(Scope::Timeline, key, None, modifiers),
-                Some((Scope::Global, Command::WindowShot))
+                Some((Scope::Global, command))
             );
         }
         assert_eq!(

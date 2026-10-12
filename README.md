@@ -168,7 +168,8 @@ python bootstrap.py r                                  # build, warm the CUDA ca
 | hold right button | fly: mouse looks, WASD moves, R/Space up, C down, Q/E rolls (tilts under the lock), Shift x4, Alt x0.1, wheel speed |
 | double-click      | recentre                                                                                                   |
 | `Tab`             | hide the panels                                                                                            |
-| `F12`, `Ctrl+Shift+S` | window screenshot: the whole window as EXR + PQ PNG (see *Window screenshots*); under an attached debugger Windows takes `F12` as its break key, use `Ctrl+Shift+S` |
+| `F12` | window screenshot: the whole window as EXR + PQ PNG (see *Window screenshots*); under an attached debugger Windows takes `F12` as its break key, use File → *Window screenshot* |
+| `Ctrl+N`, `Ctrl+O`, `Ctrl+S`, `Ctrl+Shift+S` | new scene (the one WarpBro opens with, nothing kept), open, save, save as |
 | `Space`           | pause                                                                                                      |
 | backtick / tilde  | switch horizon lock / free flight                                                                          |
 
@@ -331,7 +332,7 @@ for an HDR view's absolute light, the SDR white above for an SDR view), so EXR a
 (display-referred, not a scene-linear master). HDR PNGs are
 named `*.pq.png` / `*.hlg.png`: in a viewer that ignores `cICP` they look washed out.
 
-**Window screenshots** (`F12` or `Ctrl+Shift+S`, or File → *Window screenshot: EXR + PQ PNG / EXR / PQ PNG*) save
+**Window screenshots** (`F12`, or File → *Window screenshot: EXR + PQ PNG / EXR / PQ PNG*) save
 the whole window - viewport, panels, menus, status line - at its physical resolution, from the
 frame presented right after the request (so the menu that asked is already closed). The present
 pass re-encodes that frame's float canvas offscreen; the file worker reads it back and writes
@@ -346,7 +347,7 @@ shows HDR (the file is as bright as the screen), else ITU-R BT.2408's **203 nits
   `cLLI` - the same writer as the viewport's HDR10 snapshot.
 
 `F12` is Windows' debugger break key while a debugger is attached to WarpBro (the OS takes it
-before the app); use `Ctrl+Shift+S` then. A second request while one waits for its frame is
+before the app); use the File menu then. A second request while one waits for its frame is
 refused in the status line. Errors (readback, folder, encoder; a PNG failing after the EXR names
 the EXR it wrote) show in the status line and the log; a failed `FRAC_SNAP` exits non-zero. `FRAC_SNAP` (README
 images) captures through the same path as the window's own signal (sRGB PNG on SDR).
