@@ -3904,6 +3904,13 @@ impl App {
         }
     }
 
+    /// A take picked on the timeline (its bar) becomes the Takes panel's selection.
+    fn process_picked_take(&mut self) {
+        if let Some(id) = self.world_ui.take_picked() {
+            self.select_take(id, false, false);
+        }
+    }
+
     fn process_preview_intent(&mut self, ctx: &egui::Context) {
         // A discarded pass's layout is not the one shown: start on the pass that sizes the viewport.
         if ctx.will_discard() {
@@ -4094,6 +4101,7 @@ impl App {
         self.snapshot_before = before;
         self.remember_material_targets();
         self.process_preview_intent(&ctx);
+        self.process_picked_take();
         self.world.finish_edit_unless(
             egui_attr_grid::edit_gesture(&ctx)
                 .or(camera_gesture)

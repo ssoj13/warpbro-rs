@@ -3487,6 +3487,23 @@ impl WorldDocument {
         Ok(Some((take, shown)))
     }
 
+    /// The work-area frames node `id`'s take plays on, `[start, end)`: those whose warped take
+    /// time lies within the take (held first / last poses are not playing). None when the node
+    /// plays no take, or none of it inside the work area. What the timeline draws as its bar.
+    pub fn take_span(&self, id: NodeId) -> Result<Option<(i64, i64)>, String> {
+        let mut span: Option<(u32, u32)> = None;
+        for frame in self.first..=self.last {
+            let Some((take, shown)) = self.take_frame(id, f64::from(frame))? else {
+                return Ok(None);
+            };
+            let seconds = take.seconds_at(shown, self.first, self.last, self.fps);
+            if (0.0..=take.duration()).contains(&seconds) {
+                span = Some(span.map_or((frame, frame), |(start, _)| (start, frame)));
+            }
+        }
+        Ok(span.map(|(start, last)| (i64::from(start), i64::from(last) + 1)))
+    }
+
     /// The local transform the transform take node `id` plays shows at `frame`; None when it
     /// plays none, or when it is a camera playing a camera take (that one replaces the visible
     /// camera pose in `snapshot`, not the node's transform). A camera take on another node is

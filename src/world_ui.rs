@@ -217,6 +217,8 @@ pub struct WorldUi {
     pub attribute_metrics: AttrMetrics,
     pub material_library_requested: bool,
     pub preview_action: Option<PreviewAction>,
+    /// A take picked on the timeline, for the Takes panel to select (`take_picked`).
+    picked_take: Option<u64>,
     pub playback_range: Option<(u32, u32)>,
     pub cached_frames: std::sync::Arc<[u32]>,
     pub cache_draft: bool,
@@ -265,6 +267,7 @@ impl Default for WorldUi {
             attribute_metrics: AttrMetrics::default(),
             material_library_requested: false,
             preview_action: None,
+            picked_take: None,
             playback_range: None,
             cached_frames: Default::default(),
             cache_draft: false,
@@ -300,6 +303,12 @@ impl Default for WorldUi {
 fn wid(id: NodeId) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     id.hash(&mut h);
+    h.finish()
+}
+/// The timeline id of the take bar of node `id` (on its Take lane), distinct from its own bar.
+fn take_wid(id: NodeId) -> u64 {
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (id, crate::world::TAKE_CLIP).hash(&mut h);
     h.finish()
 }
 /// What one timeline lane row is drawn from: its node, that node's attributes and the
@@ -435,6 +444,10 @@ fn tree(nodes: &[WorldNodeInfo], parent: Option<NodeId>, depth: usize) -> Vec<Tr
 impl WorldUi {
     pub fn take_preview_action(&mut self) -> Option<PreviewAction> {
         self.preview_action.take()
+    }
+    /// The take last picked on the timeline (its bar), once.
+    pub fn take_picked(&mut self) -> Option<u64> {
+        self.picked_take.take()
     }
     pub fn shortcuts_active(&self, ctx: &egui::Context) -> bool {
         !ctx.text_edit_focused()
@@ -1093,6 +1106,22 @@ impl WorldUi {
     fn lanes(&self, id: NodeId, attrs: &[WorldAttribute]) -> Vec<Lane> {
         let filter = self.property_filters.get(&id).copied().unwrap_or_default();
         let mut lanes = Vec::new();
+        // A node that plays a take shows it first: the Take row (its picker) carries the take's
+        // bar (lane 0, `timeline`), whatever the property filter.
+        if let Some(take) = attrs
+            .iter()
+            .find(|a| a.path == crate::world::TAKE_CLIP && !a.value.is_null())
+        {
+            lanes.push(Lane {
+                label: crate::world::attribute_label(&take.path),
+                path: Some(take.path.clone()),
+                value: take.value.clone(),
+                frames: vec![],
+                depth: 1,
+                group: false,
+                attr: Some(take.clone()),
+            });
+        }
         for group in ATTRIBUTE_GROUPS {
             let parents: Vec<_> = attrs
                 .iter()
@@ -1236,7 +1265,30 @@ impl WorldUi {
                         .collect::<Vec<_>>();
                     // Expanded only when there is something to show: the caret reads this too.
                     let expanded = self.expanded.contains(&n.id) && !props.is_empty();
-                    Track::new(n.name.clone(), vec![clip])
+                    let mut clips = vec![clip];
+                    // The take's bar on the Take lane (lane 0, `lanes`): where it plays.
+                    if ls.first().and_then(|l| l.path.as_deref()) == Some(crate::world::TAKE_CLIP) {
+                        match e.document.take_span(n.id) {
+                            Ok(Some((start, end))) => {
+                                let name = e
+                                    .document
+                                    .take_clip(n.id)
+                                    .ok()
+                                    .flatten()
+                                    .and_then(|id| e.document.takes.get(id))
+                                    .map(|take| take.name.clone())
+                                    .unwrap_or_default();
+                                clips.push(
+                                    Clip::new(take_wid(n.id), start, end - start, name)
+                                        .with_color(kind_color(n.kind))
+                                        .on_lane(0),
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(error) => self.error = Some(error),
+                        }
+                    }
+                    Track::new(n.name.clone(), clips)
                         .with_lanes(props)
                         .expanded(expanded)
                 })
@@ -1866,6 +1918,10 @@ impl WorldUi {
             } => {
                 if let Some(n) = nodes.iter().find(|n| wid(n.id) == id) {
                     self.select(e, n.id, additive, range, nodes);
+                } else if let Some(n) = nodes.iter().find(|n| take_wid(n.id) == id) {
+                    // A take's bar picks its node and the take (Takes panel).
+                    self.select(e, n.id, additive, range, nodes);
+                    self.picked_take = e.document.take_clip(n.id).ok().flatten();
                 }
             }
             TimelineAction::ClearSelection => {
@@ -1961,6 +2017,32 @@ impl WorldUi {
                 new_start,
                 new_track,
             } => {
+                // A take's bar slides the take: its offset moves by the drag.
+                if let Some(n) = nodes.iter().find(|n| take_wid(n.id) == id) {
+                    let frame = self.playhead as f64;
+                    let moved = e.document.take_span(n.id).and_then(|span| {
+                        let (start, _) = span.ok_or("The node plays no take")?;
+                        let offset = e
+                            .document
+                            .attribute_value(n.id, crate::world::TAKE_OFFSET, frame)?
+                            .as_f64()
+                            .ok_or("Take offset is not a number")?;
+                        Ok(offset + (new_start - start) as f64)
+                    });
+                    match moved {
+                        Ok(offset) => self.command(
+                            e,
+                            WorldCommand::SetAttribute {
+                                id: n.id,
+                                path: crate::world::TAKE_OFFSET.into(),
+                                value: json!(offset),
+                                frame,
+                            },
+                        ),
+                        Err(error) => self.error = Some(error),
+                    }
+                    return;
+                }
                 if let Some(n) = nodes.iter().find(|n| wid(n.id) == id) {
                     let mut ids = nodes.iter().map(|n| n.id).collect::<Vec<_>>();
                     if let Some(old) = ids.iter().position(|id| *id == n.id) {

@@ -3475,3 +3475,23 @@ fn the_viewport_kind_filter_hides_from_its_picture_and_extras_but_masks_still_cu
     assert!(e.undo());
     assert!(wires(&e) > 0, "the filter is an ordinary undoable edit");
 }
+
+#[test]
+fn a_takes_span_is_where_it_plays_under_its_warp() {
+    let mut e = editor();
+    let (frac, _) = x_take(&mut e);
+    let fps = e.document.fps;
+    let ten = (10.0 * fps) as i64;
+    // Ten seconds from frame 0 (the take holds its last pose after).
+    assert_eq!(
+        e.document.take_span(frac).unwrap(),
+        Some((0, ten.min(i64::from(e.document.last)) + 1))
+    );
+    set(&mut e, frac, TAKE_OFFSET, json!(24.0), 0.0);
+    set(&mut e, frac, TAKE_SPEED, json!(2.0), 0.0);
+    let (start, end) = e.document.take_span(frac).unwrap().unwrap();
+    assert_eq!(start, 24);
+    assert_eq!(end, 24 + ten / 2 + 1, "twice as fast: half the frames");
+    e.bind_take(&[frac], None, None).unwrap();
+    assert_eq!(e.document.take_span(frac).unwrap(), None);
+}

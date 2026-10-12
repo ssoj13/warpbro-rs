@@ -545,7 +545,7 @@ impl App {
 
     /// Plain click selects one take, Ctrl toggles it, Shift extends from the anchor over the
     /// visible (filtered) order.
-    fn select_take(&mut self, id: u64, ctrl: bool, shift: bool) {
+    pub(super) fn select_take(&mut self, id: u64, ctrl: bool, shift: bool) {
         if shift && let Some(anchor) = self.takes_view.anchor {
             let visible = self.visible_takes();
             let view = &mut self.takes_view;
