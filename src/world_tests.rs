@@ -2803,6 +2803,9 @@ fn check_template(text: &str) -> Result<serde_json::Map<String, Value>, String> 
                         .map_err(|e| e.to_string())
                 }
                 WorldKind::RenderSettings => doc.effective_render(node.id, frame).map(drop),
+                WorldKind::Mask => serde_json::from_value::<crate::scene::Mask>(typed("mask"))
+                    .map(drop)
+                    .map_err(|e| e.to_string()),
                 WorldKind::Group
                 | WorldKind::QualitySettings
                 | WorldKind::ViewportSettings
@@ -3079,5 +3082,59 @@ fn curve_effects_filter_rotations_simplify_curves_and_undo_in_one_step() {
             effect: curves::Effect::EulerFilter { middle: Some(1) },
         })
         .is_err()
+    );
+}
+
+#[test]
+fn masks_reach_the_fractals_of_their_scope_with_their_world_matrix() {
+    let mut e = editor();
+    let fractal = find(&e, WorldKind::Fractal);
+    e.execute(WorldCommand::Create {
+        kind: WorldKind::Mask,
+        name: "Mask".into(),
+        parent: None,
+    })
+    .unwrap();
+    let mask = e.selection.unwrap();
+    set(
+        &mut e,
+        mask,
+        "/transform/position",
+        json!([1.5, 0.0, 0.0]),
+        0.0,
+    );
+    set(&mut e, mask, "/mask/shape", json!("Box"), 0.0);
+    set(&mut e, mask, "/mask/invert", json!(true), 0.0);
+    let object = |e: &WorldEditor| e.document.snapshot(0.0).unwrap().objects[0].clone();
+    let masks = object(&e).masks;
+    assert_eq!(masks.len(), 1, "a root mask reaches every fractal");
+    assert_eq!(masks[0].mask.shape, crate::scene::MaskShape::Box);
+    assert!(masks[0].mask.invert);
+    assert_eq!(masks[0].world[3][..3], [1.5, 0.0, 0.0]);
+    e.execute(WorldCommand::Create {
+        kind: WorldKind::Group,
+        name: "Elsewhere".into(),
+        parent: None,
+    })
+    .unwrap();
+    let group = e.selection.unwrap();
+    e.execute(WorldCommand::Reparent {
+        id: mask,
+        parent: Some(group),
+    })
+    .unwrap();
+    assert!(
+        object(&e).masks.is_empty(),
+        "a mask scopes its parent's subtree"
+    );
+    e.execute(WorldCommand::Reparent {
+        id: fractal,
+        parent: Some(group),
+    })
+    .unwrap();
+    assert_eq!(
+        object(&e).masks.len(),
+        1,
+        "a sibling in the subtree is masked"
     );
 }

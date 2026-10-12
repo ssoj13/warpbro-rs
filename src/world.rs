@@ -31,7 +31,7 @@ pub fn local_pose(parent: glam::Mat4, pose: glam::Mat4) -> ([f32; 3], [f32; 3], 
 /// has no place or size. A camera moves by navigation; settings and environments have no place.
 pub fn manip_tools(kind: WorldKind) -> [bool; 3] {
     match kind {
-        WorldKind::Fractal | WorldKind::Group => [true, true, true],
+        WorldKind::Fractal | WorldKind::Group | WorldKind::Mask => [true, true, true],
         WorldKind::DirectionalLight => [false, true, false],
         _ => [false, false, false],
     }
@@ -66,6 +66,9 @@ pub enum WorldKind {
     ViewportSettings,
     /// Export encode recipe (`export::OutputSettings`): format, codec, colour, size.
     OutputSettings,
+    /// A shape the fractals in its scope are intersected with (`scene::Mask`): inside a fractal
+    /// (Outliner parent) it sections that fractal, at the root every fractal.
+    Mask,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1569,6 +1572,7 @@ fn attribute_choices(path: &str) -> Vec<Value> {
             "Verdant", "Copper", "Neon", "RoseGold", "Twilight",
         ],
         "/coloring" => &["Radius", "TrapOrigin", "TrapPlane", "TrapPoint"],
+        "/mask/shape" => &["Sphere", "Box", "Cells"],
         "/render/denoise/mode" => &["Color", "ColorAlbedo", "ColorAlbedoNormal"],
         "/render/denoise/quality" => &["Fast", "Balanced", "High"],
         "/material/model" => &["Fast", "StandardSurface"],
@@ -1592,6 +1596,9 @@ pub(crate) fn attribute_range(path: &str) -> Option<(f64, f64)> {
         };
     }
     match path {
+        "/mask/size" => Some((1.0e-6, 1.0e6)),
+        "/mask/density" => Some((0.0, 1.0)),
+        "/mask/seed" => Some((0.0, 16_777_215.0)),
         "/viewport/target_fps" => Some((1.0, 240.0)),
         "/viewport/settle_delay_ms" => Some((0.0, 10000.0)),
         "/viewport/batch_budget_ms" => Some((0.1, 1000.0)),
@@ -2021,6 +2028,15 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
         "/trap_scale" => "How fast the trap distance runs through the palette.",
         "/material_id" => "The material this fractal is rendered with.",
         "/camera/target" => "The point the camera looks at and orbits.",
+        "/mask/shape" => {
+            "Sphere (radius Size X), Box (half extents Size) or Cells (cubes of edge Size X, a Density share removed)."
+        }
+        "/mask/size" => {
+            "Sphere radius (X), box half extents, or cell edge (X), in the mask's own space."
+        }
+        "/mask/density" => "Cells: the share of cells removed, 0 keeps all, 1 removes all.",
+        "/mask/seed" => "Cells: which cells are removed.",
+        "/mask/invert" => "Cut the shape away instead of keeping only what is inside it.",
         "/camera/yaw_degrees" => "Camera heading around world up.",
         "/camera/pitch_degrees" => "Camera tilt up / down.",
         "/camera/roll_degrees" => "Camera roll around the view axis.",
@@ -2318,6 +2334,7 @@ fn branches(kind: WorldKind) -> &'static [&'static str] {
         WorldKind::QualitySettings => &["quality"],
         WorldKind::ViewportSettings => &["viewport"],
         WorldKind::OutputSettings => &["output"],
+        WorldKind::Mask => &["mask"],
     }
 }
 fn discover(value: &Value, path: &str, attrs: &mut Attrs) {
@@ -4130,6 +4147,19 @@ impl WorldDocument {
         Ok((world * glam::Mat4::from_translation(pivot), parent))
     }
 
+    /// `node` is `ancestor` or lies in its subtree.
+    fn descends(&self, node: NodeId, ancestor: NodeId) -> bool {
+        let mut current = Some(node);
+        for _ in 0..=self.graph.nodes.len() {
+            match current {
+                Some(id) if id == ancestor => return true,
+                Some(id) => current = self.info(id).ok().and_then(|n| n.parent),
+                None => return false,
+            }
+        }
+        false
+    }
+
     fn world_matrix(
         &self,
         id: NodeId,
@@ -4462,12 +4492,32 @@ impl WorldDocument {
             scene.lighting.sky_intensity = 0.0;
             scene.lighting.background = false;
         }
+        // Visible masks with their scope: the subtree of their parent, the whole scene at the root.
+        let mut masks = Vec::new();
+        for node in nodes.iter().filter(|n| n.kind == WorldKind::Mask) {
+            if !self.visible_at(node.id, frame, &mut HashSet::new())? {
+                continue;
+            }
+            let mask: crate::scene::Mask =
+                serde_json::from_value(self.evaluated_node(node.id, frame)?["mask"].clone())
+                    .map_err(|e| e.to_string())?;
+            let world = self
+                .world_matrix(node.id, frame, &mut HashSet::new())?
+                .to_cols_array_2d();
+            masks.push((node.parent, crate::scene::MaskInstance { mask, world }));
+        }
         for node in nodes {
             if node.kind != WorldKind::Fractal
                 || !self.visible_at(node.id, frame, &mut HashSet::new())?
                 || (solo && !node.solo)
             {
                 continue;
+            }
+            let mut in_scope = Vec::new();
+            for (scope, mask) in &masks {
+                if scope.is_none_or(|s| self.descends(node.id, s)) {
+                    in_scope.push(*mask);
+                }
             }
             let mut object: Scene = serde_json::from_value(self.evaluated_node(node.id, frame)?)
                 .map_err(|e| e.to_string())?;
@@ -4496,6 +4546,7 @@ impl WorldDocument {
                     .to_cols_array_2d(),
             );
             object.name = node.name;
+            object.masks = in_scope;
             scene.objects.push(object);
         }
         if let Some(first) = scene.objects.first() {

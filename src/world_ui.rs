@@ -323,6 +323,7 @@ fn kind_label(k: WorldKind) -> &'static str {
         WorldKind::QualitySettings => "Quality Settings",
         WorldKind::ViewportSettings => "Viewport Settings",
         WorldKind::OutputSettings => "Output Settings",
+        WorldKind::Mask => "Mask",
     }
 }
 fn kind_icon(k: WorldKind) -> &'static str {
@@ -336,6 +337,7 @@ fn kind_icon(k: WorldKind) -> &'static str {
         WorldKind::RenderSettings | WorldKind::QualitySettings => ph::GEAR,
         WorldKind::ViewportSettings => ph::MONITOR,
         WorldKind::OutputSettings => ph::FILE,
+        WorldKind::Mask => ph::CUT,
     }
 }
 fn kind_color(k: WorldKind) -> Color32 {
@@ -350,6 +352,7 @@ fn kind_color(k: WorldKind) -> Color32 {
         WorldKind::QualitySettings => Color32::from_rgb(145, 175, 105),
         WorldKind::ViewportSettings => Color32::from_rgb(100, 180, 210),
         WorldKind::OutputSettings => Color32::from_rgb(210, 160, 90),
+        WorldKind::Mask => Color32::from_rgb(176, 120, 200),
     }
 }
 /// Title tint of an Attribute Editor section: the node-kind colour where the section is that
@@ -684,6 +687,7 @@ impl WorldUi {
                     WorldKind::DirectionalLight,
                     WorldKind::Environment,
                     WorldKind::Group,
+                    WorldKind::Mask,
                     WorldKind::Material,
                     WorldKind::RenderSettings,
                     WorldKind::QualitySettings,

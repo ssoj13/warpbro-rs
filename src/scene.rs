@@ -327,6 +327,50 @@ pub struct Camera {
     pub focus_distance: f32,
 }
 
+/// The shape of a scene mask (`WorldKind::Mask`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MaskShape {
+    /// Radius `size.x`.
+    #[default]
+    Sphere,
+    /// Half extents `size`.
+    Box,
+    /// A grid of cubes of edge `size.x`, a `density` share of them removed (by `seed`): the
+    /// fractal thinned out in space.
+    Cells,
+}
+
+/// A scene mask: the shape fractals in its scope are intersected with (kept inside, or with
+/// `invert` cut away inside). Its place, turn and stretch are its node's transform.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Mask {
+    pub shape: MaskShape,
+    pub size: [f32; 3],
+    /// Cells: the share of cells removed, 0 (none) .. 1 (all).
+    pub density: f32,
+    pub seed: u32,
+    pub invert: bool,
+}
+impl Default for Mask {
+    fn default() -> Self {
+        Self {
+            shape: MaskShape::Sphere,
+            size: [1.0; 3],
+            density: 0.5,
+            seed: 0,
+            invert: false,
+        }
+    }
+}
+
+/// A mask as an object meets it: its settings and its world matrix at the frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaskInstance {
+    pub mask: Mask,
+    pub world: [[f32; 4]; 4],
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ObjectTransform {
     pub offset: [f32; 3],
@@ -497,6 +541,12 @@ pub struct Scene {
     pub lights: Vec<Lighting>,
     #[serde(skip)]
     pub object_world: Option<[[f32; 4]; 4]>,
+    /// The scene masks this object is intersected with (resolved by `WorldDocument::snapshot`).
+    #[serde(skip)]
+    pub masks: Vec<MaskInstance>,
+    /// A Mask node's settings: its authoring branch (`WorldKind::Mask`).
+    #[serde(default)]
+    pub mask: Mask,
     /// Frozen document carried only by exports/bookmark entries, never CUDA requests.
     #[serde(skip)]
     pub document: Option<Box<crate::world::WorldDocument>>,
@@ -733,6 +783,8 @@ impl Scene {
             objects: Vec::new(),
             lights: Vec::new(),
             object_world: None,
+            masks: Vec::new(),
+            mask: Mask::default(),
             document: None,
             animation: Default::default(),
             environment: Default::default(),

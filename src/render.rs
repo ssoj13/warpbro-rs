@@ -58,6 +58,7 @@ struct PreparationInputs {
     render: crate::scene::Render,
     environment: crate::environment::Environment,
     objects: Vec<PreparationInputs>,
+    masks: Vec<crate::scene::MaskInstance>,
     lights: Vec<crate::scene::Lighting>,
 }
 fn preparation_render(scene: &Scene, root: bool) -> crate::scene::Render {
@@ -71,8 +72,13 @@ fn preparation_render(scene: &Scene, root: bool) -> crate::scene::Render {
     render
 }
 fn same_material(a: &crate::scene::Material, b: &crate::scene::Material) -> bool {
+    // The pattern has no `..`: a new material field does not compile until it is compared here
+    // or named next to `preset` (a UI label) as not reaching the upload.
     macro_rules! equal {
-        ($($field:ident),+ $(,)?) => { true $(&& a.$field == b.$field)+ };
+        ($($field:ident),+ $(,)?) => {{
+            let crate::scene::Material { $($field: _,)+ preset: _ } = a;
+            true $(&& a.$field == b.$field)+
+        }};
     }
     equal!(
         model,
@@ -109,55 +115,113 @@ fn same_material(a: &crate::scene::Material, b: &crate::scene::Material) -> bool
     )
 }
 impl PreparationInputs {
+    // Both functions destructure `Scene` without `..`: a new scene field does not compile until
+    // it is either part of the key or listed as not reaching the GPU upload, so the cache can
+    // never silently reuse an upload that is missing it.
     fn new(scene: &Scene, root: bool) -> Self {
+        let Scene {
+            world_render,
+            camera_reference,
+            objects,
+            lights,
+            object_world,
+            masks,
+            formula,
+            julia,
+            object,
+            camera,
+            lighting,
+            material,
+            palette,
+            coloring,
+            trap_point,
+            trap_axis,
+            trap_scale,
+            render: _,
+            environment,
+            // Authoring and display state: never packed into the upload (`mask` reaches it
+            // resolved, as `masks`).
+            mask: _,
+            document: _,
+            animation: _,
+            name: _,
+            colour: _,
+        } = scene;
         Self {
-            world_render: scene.world_render,
-            camera_reference: scene.camera_reference,
-            object_world: scene.object_world,
-            formula: scene.formula,
-            julia: scene.julia,
-            object: scene.object,
-            camera: scene.camera,
-            lighting: scene.lighting,
-            material: scene.material.clone(),
-            palette: scene.palette,
-            coloring: scene.coloring,
-            trap_point: scene.trap_point,
-            trap_axis: scene.trap_axis,
-            trap_scale: scene.trap_scale,
+            world_render: *world_render,
+            camera_reference: *camera_reference,
+            object_world: *object_world,
+            formula: *formula,
+            julia: *julia,
+            object: *object,
+            camera: *camera,
+            lighting: *lighting,
+            material: material.clone(),
+            palette: *palette,
+            coloring: *coloring,
+            trap_point: *trap_point,
+            trap_axis: *trap_axis,
+            trap_scale: *trap_scale,
             render: preparation_render(scene, root),
-            environment: scene.environment.clone(),
-            objects: scene
-                .objects
+            environment: environment.clone(),
+            objects: objects
                 .iter()
                 .map(|object| Self::new(object, false))
                 .collect(),
-            lights: scene.lights.clone(),
+            masks: masks.clone(),
+            lights: lights.clone(),
         }
     }
     fn matches(&self, scene: &Scene, root: bool) -> bool {
-        self.world_render == scene.world_render
-            && self.camera_reference == scene.camera_reference
-            && self.object_world == scene.object_world
-            && self.formula == scene.formula
-            && self.julia == scene.julia
-            && self.object == scene.object
-            && self.camera == scene.camera
-            && self.lighting == scene.lighting
-            && same_material(&self.material, &scene.material)
-            && self.palette == scene.palette
-            && self.coloring == scene.coloring
-            && self.trap_point == scene.trap_point
-            && self.trap_axis == scene.trap_axis
-            && self.trap_scale == scene.trap_scale
+        let Scene {
+            world_render,
+            camera_reference,
+            objects,
+            lights,
+            object_world,
+            masks,
+            formula,
+            julia,
+            object,
+            camera,
+            lighting,
+            material,
+            palette,
+            coloring,
+            trap_point,
+            trap_axis,
+            trap_scale,
+            render: _,
+            environment,
+            mask: _,
+            document: _,
+            animation: _,
+            name: _,
+            colour: _,
+        } = scene;
+        self.world_render == *world_render
+            && self.camera_reference == *camera_reference
+            && self.object_world == *object_world
+            && self.formula == *formula
+            && self.julia == *julia
+            && self.object == *object
+            && self.camera == *camera
+            && self.lighting == *lighting
+            && same_material(&self.material, material)
+            && self.palette == *palette
+            && self.coloring == *coloring
+            && self.trap_point == *trap_point
+            && self.trap_axis == *trap_axis
+            && self.trap_scale == *trap_scale
             && self.render == preparation_render(scene, root)
-            && self.environment == scene.environment
-            && self.lights == scene.lights
-            && self.objects.len() == scene.objects.len()
+            && self.environment == *environment
+            && self.lights == *lights
+            && self.masks == *masks
+            && self.objects.len() == objects.len()
             && self
                 .objects
                 .iter()
-                .zip(&scene.objects)
+                .zip(objects)
                 .all(|(input, object)| input.matches(object, false))
     }
 }
@@ -1158,6 +1222,9 @@ pub(crate) fn scene_trace_data(scene: &Scene) -> Vec<f32> {
             values.push(0.0);
         }
         values.extend(build_lut(object.palette).into_iter().flatten());
+        for m in &object.masks {
+            values.extend(mask_row(m).unwrap_or([f32::NAN; MASK_STRIDE]));
+        }
     }
     for light in &scene.lights {
         let mut packed = Scene::preset(FAMILY_BULB);
@@ -1229,6 +1296,51 @@ fn inverse_object(object: &Scene, index: usize) -> Result<glam::Mat4, String> {
     Ok(inverse)
 }
 
+/// A mask's kernel row (`fractal_core::params` `M_*`): its world-to-mask inverse affine, the
+/// conservative distance scale (as for objects), shape, invert, size, density and seed.
+fn mask_row(m: &crate::scene::MaskInstance) -> Result<[f32; MASK_STRIDE], String> {
+    use crate::scene::MaskShape;
+    let matrix = glam::Mat4::from_cols_array_2d(&m.world);
+    let inverse = matrix.inverse();
+    if !inverse.is_finite() || matrix.determinant().abs() <= f32::MIN_POSITIVE {
+        return Err("a mask transform has no finite inverse".into());
+    }
+    let mask = m.mask;
+    if mask.size.iter().any(|v| !(v.is_finite() && *v > 0.0))
+        || !(0.0..=1.0).contains(&mask.density)
+    {
+        return Err("a mask needs a positive size and a density in 0..1".into());
+    }
+    let cols = inverse.to_cols_array_2d();
+    let mut row = [0.0f32; MASK_STRIDE];
+    for r in 0..3 {
+        for (c, column) in cols.iter().enumerate() {
+            row[M_INVERSE + r * 4 + c] = column[r];
+        }
+    }
+    // ||A^-1||2 <= sqrt(||A^-1||1 ||A^-1||inf): a lower bound of the stretch, as for objects.
+    let norm1 = (0..3)
+        .map(|c| (0..3).map(|r| cols[c][r].abs()).sum::<f32>())
+        .fold(0.0f32, f32::max);
+    let norm_inf = (0..3)
+        .map(|r| (0..3).map(|c| cols[c][r].abs()).sum::<f32>())
+        .fold(0.0f32, f32::max);
+    row[M_SCALE] = 1.0 / (norm1.sqrt() * norm_inf.sqrt());
+    row[M_SHAPE] = match mask.shape {
+        MaskShape::Sphere => MASK_SPHERE,
+        MaskShape::Box => MASK_BOX,
+        MaskShape::Cells => MASK_CELLS,
+    } as f32;
+    row[M_INVERT] = f32::from(u8::from(mask.invert));
+    row[M_SIZE..M_SIZE + 3].copy_from_slice(&mask.size);
+    row[M_DENSITY] = mask.density;
+    row[M_SEED] = mask.seed as f32;
+    if !row.iter().all(|v| v.is_finite()) || row[M_SCALE] <= 0.0 {
+        return Err("a mask transform is unusable".into());
+    }
+    Ok(row)
+}
+
 #[cfg(test)]
 pub(crate) fn validate_world(scene: &Scene) -> Result<(), String> {
     if scene.world_render {
@@ -1287,6 +1399,20 @@ impl WorldUpload {
                     ));
                 }
                 objects.extend(tangent.to_array());
+                if object.masks.len() > MAX_MASKS {
+                    return Err(format!(
+                        "World object {index} has {} masks; at most {MAX_MASKS} reach one object",
+                        object.masks.len()
+                    ));
+                }
+                objects.push(object.masks.len() as f32);
+                for slot in 0..MAX_MASKS {
+                    match object.masks.get(slot) {
+                        Some(m) => objects
+                            .extend(mask_row(m).map_err(|e| format!("World object {index}: {e}"))?),
+                        None => objects.extend([0.0; MASK_STRIDE]),
+                    }
+                }
                 let cols = matrix.to_cols_array_2d();
                 let upper = (0..3)
                     .map(|c| (0..3).map(|r| cols[c][r] * cols[c][r]).sum::<f32>())
@@ -1643,6 +1769,13 @@ mod tests {
         let single = cache.get(&scene, 32, 24).unwrap();
         assert!(single.single_fast_bulb);
         assert!(Arc::ptr_eq(&single, &cache.get(&scene, 32, 24).unwrap()));
+        // Masks are part of the upload: a new mask must rebuild, never reuse the unmasked world.
+        scene.objects[0].masks.push(crate::scene::MaskInstance {
+            mask: crate::scene::Mask::default(),
+            world: glam::Mat4::IDENTITY.to_cols_array_2d(),
+        });
+        assert!(!Arc::ptr_eq(&single, &cache.get(&scene, 32, 24).unwrap()));
+        scene.objects[0].masks.clear();
         scene.objects[0].formula = crate::scene::Formula::preset(FAMILY_QUAT);
         assert!(!cache.get(&scene, 32, 24).unwrap().single_fast_bulb);
         scene.objects.push(world_object(
@@ -2797,6 +2930,60 @@ mod tests {
             reflected > direct + 0.01,
             "Secondary rays must see emissive sibling: {direct} -> {reflected}"
         );
+    }
+
+    #[test]
+    fn cuda_world_masks_section_keep_or_cut_and_cells_thin_out() {
+        use crate::scene::{Mask, MaskInstance, MaskShape};
+        let _gpu_test = crate::test_gpu::lock();
+        let mut gpu = Gpu::new().unwrap();
+        let mut target = gpu.target(32, 24);
+        let mut scene = dark_world();
+        scene
+            .objects
+            .push(world_object(FAMILY_BULB, [0.0; 3], [1.0; 3], [1.0; 3]));
+        let mut lit = |scene: &Scene| {
+            gpu.step(&mut target, scene, 4, 0, None, false);
+            assert!(target.colour_error.is_none(), "{:?}", target.colour_error);
+            gpu.scene_linear(&target)
+                .iter()
+                .filter(|p| p[0] > 0.01)
+                .count()
+        };
+        let whole = lit(&scene);
+        assert!(whole > 50, "the bulb must fill part of the frame: {whole}");
+        // A box keeping the y > 0 half space (across the image, so the cut face never fills the old
+        // silhouette), then the same box inverted: each keeps part of the bulb.
+        let half = MaskInstance {
+            mask: Mask {
+                shape: MaskShape::Box,
+                size: [10.0; 3],
+                ..Mask::default()
+            },
+            world: glam::Mat4::from_translation(glam::Vec3::Y * 10.0).to_cols_array_2d(),
+        };
+        let mut masked = scene.clone();
+        masked.objects[0].masks = vec![half];
+        let kept = lit(&masked);
+        masked.objects[0].masks[0].mask.invert = true;
+        let cut = lit(&masked);
+        for part in [kept, cut] {
+            assert!(
+                part > whole / 5 && part < whole * 4 / 5,
+                "a half-space mask keeps part of the bulb: {kept} / {cut} of {whole}"
+            );
+        }
+        // Cells removing every cell leave nothing.
+        masked.objects[0].masks = vec![MaskInstance {
+            mask: Mask {
+                shape: MaskShape::Cells,
+                size: [0.25; 3],
+                density: 1.0,
+                ..Mask::default()
+            },
+            world: glam::Mat4::IDENTITY.to_cols_array_2d(),
+        }];
+        assert_eq!(lit(&masked), 0, "density 1 removes every cell");
     }
 
     #[test]
