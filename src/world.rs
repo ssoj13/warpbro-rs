@@ -430,7 +430,7 @@ impl WorldEditor {
         self.record_edit(before, gesture);
         Ok(())
     }
-    /// Commit a capture as one undoable edit, preserving keys outside its recorded interval.
+    /// Commit a camera capture as one undoable edit, preserving keys outside its recorded interval.
     pub fn record_camera(
         &mut self,
         recording: &crate::camera_recorder::Recording,
@@ -438,17 +438,26 @@ impl WorldEditor {
         if self.document != recording.document || self.revision() != recording.revision {
             return Err("The document changed during camera recording".into());
         }
-        let prepared = recording.prepare()?;
+        self.record_prepared(recording.prepare()?)
+    }
+
+    /// Write baked keys as one undoable edit: inside `[first, last]` they replace the node's
+    /// keys, outside it the old keys remain; the work area grows to hold them. Returns the
+    /// samples, keys, largest sample error and last frame.
+    pub fn record_prepared(
+        &mut self,
+        prepared: crate::camera_recorder::Prepared,
+    ) -> Result<(usize, usize, f64, u32), String> {
         self.apply_edit(None, |editor| {
-            editor.document.assert_unlocked(prepared.camera)?;
-            let mut attrs = editor.document.attrs(prepared.camera)?;
+            editor.document.assert_unlocked(prepared.node)?;
+            let mut attrs = editor.document.attrs(prepared.node)?;
             for (path, mut animation) in prepared.channels.clone() {
                 if !attrs.contains(path) {
-                    return Err(format!("Missing camera channel {path}"));
+                    return Err(format!("Missing channel {path}"));
                 }
                 if let Some(previous) = attrs.anim(path) {
                     if previous.channels.len() != animation.channels.len() {
-                        return Err(format!("Camera channel {path} changed shape"));
+                        return Err(format!("Channel {path} changed shape"));
                     }
                     for (channel, old) in animation.channels.iter_mut().zip(&previous.channels) {
                         let mut keys: Vec<_> = old
@@ -470,7 +479,7 @@ impl WorldEditor {
                 attrs.set_conn(path, None);
                 attrs.set_anim(path, Some(animation));
             }
-            editor.document.store_attrs(prepared.camera, &attrs)?;
+            editor.document.store_attrs(prepared.node, &attrs)?;
             if prepared.extend_last > editor.document.last {
                 editor.document.set_last(prepared.extend_last)?;
             }
@@ -529,19 +538,34 @@ impl WorldEditor {
         self.document.takes.add(take)
     }
 
-    /// Bind `id` as the camera of the scene, or unbind with None. The snapshot changes, so the
-    /// revision does too.
-    pub fn set_current_take(&mut self, id: Option<u64>) -> Result<(), String> {
-        if self.document.takes.current_id() == id {
+    /// Bind `node` to take `id` (its motion then comes from the take), or unbind it with None.
+    /// A camera take binds to a camera, a transform take to a node the manipulator moves
+    /// (`manip_tools`). The snapshot changes, so the revision does too.
+    pub fn bind_take(&mut self, node: NodeId, id: Option<u64>) -> Result<(), String> {
+        if self.document.takes.binding(node) == id {
             return Ok(());
         }
-        self.document.takes.set_current(id)?;
+        if let Some(id) = id {
+            let take = self.document.takes.get(id).ok_or(format!("No take {id}"))?;
+            let kind = self.document.info(node)?.kind;
+            let fits = match take.kind() {
+                crate::takes::TakeKind::Camera => kind == WorldKind::Camera,
+                crate::takes::TakeKind::Transform => manip_tools(kind).contains(&true),
+            };
+            if !fits {
+                return Err(format!(
+                    "Take \"{}\" cannot drive a {kind:?} node",
+                    take.name
+                ));
+            }
+        }
+        self.document.takes.bind(node, id)?;
         self.revision = self.revision.wrapping_add(1);
         Ok(())
     }
 
     pub fn delete_take(&mut self, id: u64) -> bool {
-        let bound = self.document.takes.current_id() == Some(id);
+        let bound = self.document.takes.bound_nodes(id).next().is_some();
         let removed = self.document.takes.remove(id);
         if bound {
             self.revision = self.revision.wrapping_add(1);
@@ -549,14 +573,53 @@ impl WorldEditor {
         removed
     }
 
-    /// Rename, pin or retime a take; a change to the bound take moves the camera.
+    /// Rename, pin or retime a take; a change to a bound take moves its nodes.
     pub fn edit_take(&mut self, id: u64, apply: impl FnOnce(&mut crate::takes::Take)) -> bool {
-        let bound = self.document.takes.current_id() == Some(id);
+        let bound = self.document.takes.bound_nodes(id).next().is_some();
         let edited = self.document.takes.edit(id, apply);
         if edited && bound {
             self.revision = self.revision.wrapping_add(1);
         }
         edited
+    }
+
+    /// Key take `id` onto `node` as one undoable edit (keys outside its span remain), then
+    /// unbind the node: its keys now show the same motion. A camera take bakes onto the active
+    /// camera through the navigation pose solver, a transform take onto `node`'s transform.
+    pub fn bake_take(
+        &mut self,
+        node: NodeId,
+        id: u64,
+        options: crate::camera_recorder::Options,
+    ) -> Result<(usize, usize, f64, u32), String> {
+        self.finish_edit();
+        let take = self
+            .document
+            .takes
+            .get(id)
+            .cloned()
+            .ok_or(format!("No take {id}"))?;
+        let summary = match take.kind() {
+            crate::takes::TakeKind::Camera => {
+                if self.document.active_camera != Some(node) {
+                    return Err("A camera take bakes onto the active camera".into());
+                }
+                let recording = crate::camera_recorder::Recording::from_take(
+                    &self.document,
+                    self.revision(),
+                    &take,
+                    options,
+                )?;
+                self.record_camera(&recording)?
+            }
+            crate::takes::TakeKind::Transform => {
+                let prepared =
+                    crate::camera_recorder::bake_transform(&self.document, node, &take, options)?;
+                self.record_prepared(prepared)?
+            }
+        };
+        self.bind_take(node, None)?;
+        Ok(summary)
     }
 
     #[cfg(test)]
@@ -3021,10 +3084,38 @@ impl WorldDocument {
     /// a bound take ignored: the timeline motion as take poses ("Take from animation").
     pub fn camera_frames(&self) -> Result<Vec<crate::scene::Camera>, String> {
         let mut unbound = self.clone();
-        unbound.takes.set_current(None)?;
+        if let Some(camera) = self.active_camera {
+            unbound.takes.bind(camera, None)?;
+        }
         (self.first..=self.last)
             .map(|frame| unbound.snapshot(f64::from(frame)).map(|scene| scene.camera))
             .collect()
+    }
+
+    /// `node`'s local transform on every frame of the work area from its own animation (a bound
+    /// take ignored): its timeline motion as transform take poses.
+    pub fn trs_frames(&self, node: NodeId) -> Result<Vec<crate::takes::Trs>, String> {
+        (self.first..=self.last)
+            .map(|frame| self.authored_trs(node, f64::from(frame)))
+            .collect()
+    }
+
+    /// `node`'s local transform at `frame` from its attributes and keys.
+    pub fn authored_trs(&self, node: NodeId, frame: f64) -> Result<crate::takes::Trs, String> {
+        let vec = |path: &str, default: [f32; 3]| -> Result<[f32; 3], String> {
+            let v = self.attribute_value(node, path, frame)?;
+            Ok(v.as_array()
+                .filter(|v| v.len() == 3)
+                .map(|v| {
+                    std::array::from_fn(|i| v[i].as_f64().unwrap_or(f64::from(default[i])) as f32)
+                })
+                .unwrap_or(default))
+        };
+        Ok(crate::takes::Trs {
+            position: vec("/transform/position", [0.0; 3])?,
+            rotation_degrees: vec("/transform/rotation_degrees", [0.0; 3])?,
+            scale: vec("/transform/scale", [1.0; 3])?,
+        })
     }
 
     /// Move the work area's last frame. Growing it also grows every node span that reached the
@@ -4055,9 +4146,20 @@ impl WorldDocument {
                 .map(|v| std::array::from_fn(|i| v[i].as_f64().unwrap_or(default[i] as f64) as f32))
                 .unwrap_or(default))
         };
-        let p = vec("/transform/position", [0.0; 3])?;
-        let r = vec("/transform/rotation_degrees", [0.0; 3])?.map(|v| v.to_radians());
-        let s = vec("/transform/scale", [1.0; 3])?;
+        // A bound transform take replaces the node's own position, rotation and scale.
+        let bound = self
+            .takes
+            .bound(id)
+            .and_then(|take| take.trs_at(frame, self.first, self.last, self.fps));
+        let (p, r, s) = match bound {
+            Some(t) => (t.position, t.rotation_degrees, t.scale),
+            None => (
+                vec("/transform/position", [0.0; 3])?,
+                vec("/transform/rotation_degrees", [0.0; 3])?,
+                vec("/transform/scale", [1.0; 3])?,
+            ),
+        };
+        let r = r.map(|v| v.to_radians());
         let pivot = vec("/transform/pivot", [0.0; 3])?;
         let local = glam::Mat4::from_cols_array_2d(
             &playa_engine::entities::transform::build_model_matrix(p, r, s, pivot)
@@ -4286,11 +4388,11 @@ impl WorldDocument {
                     .transform_point3(glam::Vec3::from(scene.camera.target))
                     .to_array();
             }
-            // A bound take is the visible pose itself: it replaces the evaluated camera.
-            if let Some(take) = self.takes.current() {
+            // A bound camera take is the visible pose itself: it replaces the evaluated camera.
+            if let Some(take) = self.takes.bound(id) {
                 scene.camera = take
-                    .pose_at_frame(frame, self.first, self.last, self.fps)
-                    .ok_or_else(|| format!("Take \"{}\" has no samples", take.name))?;
+                    .camera_at(frame, self.first, self.last, self.fps)
+                    .ok_or_else(|| format!("Take \"{}\" is not a camera take", take.name))?;
             }
         }
         if let Some(id) = self.active_environment.filter(|id| {

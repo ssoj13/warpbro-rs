@@ -134,6 +134,8 @@ pub(crate) struct App {
     gizmo: egui_gizmo::Gizmo,
     /// The manipulator drag in progress: its edits share one undo step.
     gizmo_gesture: Option<u64>,
+    /// Records each manipulator drag as transform takes of the dragged nodes.
+    drag_recorder: crate::takes::DragRecorder,
     /// Splitter state of the three Settings > Controls grids.
     prefs_grids: [AttrGridState; 3],
     dock: egui_dock::DockState<dock::Panel>,
@@ -613,6 +615,7 @@ impl App {
             tool: ViewTool::Select,
             gizmo: egui_gizmo::Gizmo::new(egui_gizmo::GizmoConfig::default()),
             gizmo_gesture: None,
+            drag_recorder: Default::default(),
             prefs_grids: Default::default(),
             dock: dock::default_layout(),
             panels_to_open: Vec::new(),
@@ -953,7 +956,8 @@ impl App {
         } else {
             self.world.selected.clone()
         };
-        // (node, parent world matrix, world scale, authored rotation), in the order of `targets`.
+        // (node, parent world matrix, world scale, shown local pose, bound to a take), in the
+        // order of `targets`.
         let mut edited = Vec::new();
         let mut targets = Vec::new();
         for id in selected {
@@ -985,16 +989,19 @@ impl App {
                 rotation,
                 translation,
             ));
-            let authored = document
-                .attribute_value(id, "/transform/rotation_degrees", frame)
-                .ok()
-                .and_then(|v| serde_json::from_value::<[f32; 3]>(v).ok())
-                .unwrap_or([0.0; 3]);
-            edited.push((id, parent, scale, authored));
+            // The local pose the handles show: the bound take's, else the authored one.
+            let take = document
+                .takes
+                .bound(id)
+                .and_then(|t| t.trs_at(frame, document.first, document.last, document.fps));
+            let Some(shown) = take.or_else(|| document.authored_trs(id, frame).ok()) else {
+                continue;
+            };
+            edited.push((id, parent, scale, shown, take.is_some()));
         }
         let Some(tool) = tool.filter(|_| !targets.is_empty() && rect.height() > 0.0) else {
             self.gizmo.clear_hover();
-            self.gizmo_gesture = None;
+            self.end_drag();
             return;
         };
         let (view, projection) = self.scene.camera_matrices(rect.width() / rect.height());
@@ -1012,12 +1019,13 @@ impl App {
             ..Default::default()
         });
         let Some((_, moved)) = self.gizmo.interact(ui, &targets) else {
-            self.gizmo_gesture = None;
+            self.end_drag();
             return;
         };
         let gesture = egui::Id::new("viewport_gizmo").value();
         self.gizmo_gesture = Some(gesture);
-        for ((id, parent, scale, authored), t) in edited.into_iter().zip(moved) {
+        let mut dragged = Vec::new();
+        for ((id, parent, scale, shown, bound), t) in edited.into_iter().zip(moved) {
             let scale = if self.tool == ViewTool::Scale {
                 t.scale
             } else {
@@ -1026,28 +1034,60 @@ impl App {
             let pose =
                 glam::Mat4::from_scale_rotation_translation(scale, t.rotation, t.translation);
             let (position, rotation, scale) = crate::world::local_pose(parent, pose);
-            // The equivalent angles nearest the authored ones (both Euler solutions, whole
+            // The equivalent angles nearest the shown ones (both Euler solutions, whole
             // turns): no flip at +-180, and the turns of the value and its keys are kept.
-            let rotation = curves::nearest_euler(rotation, authored, Some(1));
-            let (path, value) = match self.tool {
+            let rotation = curves::nearest_euler(rotation, shown.rotation_degrees, Some(1));
+            let edited_channel = match self.tool {
                 ViewTool::Move => ("/transform/position", position),
                 ViewTool::Rotate => ("/transform/rotation_degrees", rotation),
                 ViewTool::Scale => ("/transform/scale", scale),
                 ViewTool::Select => continue,
             };
-            if let Err(error) = self.world.execute_edit(
-                crate::world::WorldCommand::SetAttribute {
-                    id,
-                    path: path.into(),
-                    value: serde_json::json!(value),
-                    frame,
-                },
-                Some(gesture),
-            ) {
+            // A node a take drives is released by the drag, which continues from the take's
+            // pose: the whole pose is authored, not just the edited channel, or the other two
+            // would jump back to the node's own values.
+            let all = [
+                ("/transform/position", position),
+                ("/transform/rotation_degrees", rotation),
+                ("/transform/scale", scale),
+            ];
+            let writes: &[(&str, [f32; 3])] = if bound {
+                &all
+            } else {
+                std::slice::from_ref(&edited_channel)
+            };
+            for &(path, value) in writes {
+                if let Err(error) = self.world.execute_edit(
+                    crate::world::WorldCommand::SetAttribute {
+                        id,
+                        path: path.into(),
+                        value: serde_json::json!(value),
+                        frame,
+                    },
+                    Some(gesture),
+                ) {
+                    self.status = error;
+                }
+            }
+            if bound && let Err(error) = self.world.bind_take(id, None) {
                 self.status = error;
             }
+            if let Ok(pose) = self.world.document.authored_trs(id, frame) {
+                dragged.push((id, pose));
+            }
         }
+        self.drag_recorder
+            .sample(f64::from(nav_dt(ui.ctx())), frame, &dragged);
         ui.ctx().request_repaint();
+    }
+
+    /// A manipulator drag ended: its transform takes go to the document.
+    fn end_drag(&mut self) {
+        if self.gizmo_gesture.take().is_some() {
+            for take in self.drag_recorder.finish() {
+                self.world.add_take(take);
+            }
+        }
     }
 
     /// Feed this frame's navigation to the take recorder. Any camera change while a take drives
@@ -1069,14 +1109,20 @@ impl App {
                 || self.orbit.rig.has_inertia()
                 || ctx.input(|i| i.pointer.any_down()),
         });
-        if self.scene.camera != before && self.world.document.takes.current_id().is_some() {
-            if let Err(error) = self.world.set_current_take(None) {
+        let camera = self.world.document.active_camera;
+        if self.scene.camera != before
+            && let Some(camera) = camera.filter(|c| self.world.document.takes.binding(*c).is_some())
+        {
+            if let Err(error) = self.world.bind_take(camera, None) {
                 self.status = error;
             }
             self.evaluated_world = None;
         }
         if let Some(take) = update.finished {
-            self.world.add_take(take);
+            self.world.add_take(crate::takes::Take {
+                source: camera,
+                ..take
+            });
         }
         // The settle time runs on frames: keep them coming until the gesture is cut.
         if self.takes_recorder.recording() {

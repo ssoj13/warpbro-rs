@@ -1,21 +1,26 @@
-//! Camera takes: every viewport navigation gesture is recorded as a take on the navigation clock.
+//! Takes: recorded motion of any node, on the clock it was performed at.
 //!
-//! A [`Recorder`] watches the viewport camera frame by frame and cuts a [`Take`] from the first
-//! move until the input has ended and the camera has come to rest. Finished takes live in the
-//! document's [`Takes`] store (saved with the scene, outside undo/redo and outside document
-//! equality: a take is a recording, not an edit). The store can bind one take as *current*; the
-//! document then resolves the active camera from it (`WorldDocument::snapshot`, the single pose
-//! hook shared by viewport, playback cache and export). "Bake to keys" turns a take into camera
-//! keyframes through `camera_recorder::Recording`.
-use crate::camera_recorder::{Sample, Timing};
+//! A take is a list of timed poses of one kind ([`Poses`]): a camera's visible pose (viewport
+//! navigation, recorded by [`Recorder`]) or a node's local transform ([`Trs`]: manipulator drags,
+//! recorded by [`DragRecorder`]). Every operation on a take (interpolation, trim, speed, smoothing,
+//! split) is written once over the [`Pose`] trait. Finished takes live in the document's [`Takes`]
+//! store, saved with the scene but outside undo/redo and outside document equality: a take is a
+//! recording, not an edit. The store also holds the *bindings*: a node bound to a take of its kind
+//! takes its motion from the take instead of its keys (`WorldDocument::snapshot` for the active
+//! camera, `world_matrix` for transforms: the single pose hooks shared by viewport, playback
+//! cache and export). Bindings are per node UUID, so pasted copies of a node start unbound.
+//! "Bake to keys" turns a take into keyframes (`camera_recorder`).
+use crate::camera_recorder::Timing;
 use crate::scene::Camera;
+use crate::world::NodeId;
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// Unpinned takes kept; the oldest unpinned take beyond this is dropped.
+/// Unpinned takes kept; the oldest unpinned, unbound take beyond this is dropped.
 pub const MAX_UNPINNED: usize = 20;
-/// Version of the single-take clip file (`Take::to_clip`).
-pub const CLIP_VERSION: u32 = 1;
+/// Version of the single-take clip file (`Take::to_clip`) and of the clipboard text.
+pub const CLIP_VERSION: u32 = 2;
 /// A gesture ends once no input is held and the camera has not moved for this long. It also
 /// merges the separate ticks of a mouse wheel into one take.
 const SETTLE_SECS: f64 = 0.3;
@@ -26,54 +31,420 @@ const MAX_SAMPLES: usize = 36_000;
 /// Marker of WarpBro takes on the system clipboard, so other text is never pasted as takes.
 const CLIPBOARD_KEY: &str = "warpbro_takes";
 
-/// One recorded navigation gesture.
+/// A pose a take records: what interpolation, averaging and validation need.
+pub trait Pose: Copy + PartialEq + std::fmt::Debug + Serialize + DeserializeOwned {
+    /// All values finite.
+    fn finite(&self) -> bool;
+    /// The pose `t` of the way from `self` to `other`: rotation by quaternion slerp, written as
+    /// the Euler angles nearest `self`'s (no flip at +-180), the rest linearly.
+    fn blend(&self, other: &Self, t: f32) -> Self;
+    /// The mean of `samples` (non-empty); rotation by the normalized mean of hemisphere-aligned
+    /// quaternions, written nearest `like`'s angles.
+    fn mean(samples: &[Sample<Self>], like: &Self) -> Self;
+}
+
+/// One pose at `seconds` of the take's clock.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sample<P> {
+    pub seconds: f64,
+    pub pose: P,
+}
+
+/// A node's local transform (`/transform/*`; rotation in the attribute convention: degrees,
+/// Playa's clockwise-positive ZYX).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Trs {
+    pub position: [f32; 3],
+    pub rotation_degrees: [f32; 3],
+    pub scale: [f32; 3],
+}
+
+impl Trs {
+    /// The rotation as a quaternion: `playa_engine`'s `build_model_matrix` convention.
+    fn quat(&self) -> glam::Quat {
+        let [x, y, z] = self.rotation_degrees.map(f32::to_radians);
+        glam::Quat::from_euler(glam::EulerRot::ZYX, -z, -y, -x)
+    }
+
+    /// `q` written as rotation degrees nearest `near` (both Euler solutions, whole turns).
+    fn with_quat(mut self, q: glam::Quat, near: [f32; 3]) -> Self {
+        let (z, y, x) = q.to_euler(glam::EulerRot::ZYX);
+        self.rotation_degrees = curves::nearest_euler(
+            [-x.to_degrees(), -y.to_degrees(), -z.to_degrees()],
+            near,
+            Some(1),
+        );
+        self
+    }
+}
+
+impl Pose for Trs {
+    fn finite(&self) -> bool {
+        [self.position, self.rotation_degrees, self.scale]
+            .iter()
+            .flatten()
+            .all(|v| v.is_finite())
+    }
+    fn blend(&self, other: &Self, t: f32) -> Self {
+        let lerp = |a: [f32; 3], b: [f32; 3]| std::array::from_fn(|i| a[i] + (b[i] - a[i]) * t);
+        let out = Trs {
+            position: lerp(self.position, other.position),
+            scale: lerp(self.scale, other.scale),
+            ..*self
+        };
+        if self.rotation_degrees == other.rotation_degrees {
+            return out;
+        }
+        out.with_quat(self.quat().slerp(other.quat(), t), self.rotation_degrees)
+    }
+    fn mean(samples: &[Sample<Self>], like: &Self) -> Self {
+        let n = samples.len().max(1) as f32;
+        let avg = |f: &dyn Fn(&Trs) -> [f32; 3]| {
+            let sum = samples.iter().fold([0.0; 3], |acc, s| {
+                let v = f(&s.pose);
+                std::array::from_fn(|i| acc[i] + v[i])
+            });
+            sum.map(|v| v / n)
+        };
+        let q = mean_quat(samples.iter().map(|s| s.pose.quat()), like.quat());
+        Trs {
+            position: avg(&|p| p.position),
+            scale: avg(&|p| p.scale),
+            ..*like
+        }
+        .with_quat(q, like.rotation_degrees)
+    }
+}
+
+impl Pose for Camera {
+    fn finite(&self) -> bool {
+        self.target.iter().all(|v| v.is_finite())
+            && [
+                self.yaw_degrees,
+                self.pitch_degrees,
+                self.roll_degrees,
+                self.distance,
+                self.fov_y_degrees,
+                self.f_number,
+                self.sensor_height,
+                self.focus_distance,
+            ]
+            .iter()
+            .all(|v| v.is_finite())
+    }
+    fn blend(&self, other: &Self, t: f32) -> Self {
+        let lerp = |x: f32, y: f32| x + (y - x) * t;
+        let mut c = *self;
+        c.target = std::array::from_fn(|i| lerp(self.target[i], other.target[i]));
+        c.distance = lerp(self.distance, other.distance);
+        c.fov_y_degrees = lerp(self.fov_y_degrees, other.fov_y_degrees);
+        c.f_number = lerp(self.f_number, other.f_number);
+        c.sensor_height = lerp(self.sensor_height, other.sensor_height);
+        c.focus_distance = lerp(self.focus_distance, other.focus_distance);
+        if (self.yaw_degrees, self.pitch_degrees, self.roll_degrees)
+            != (other.yaw_degrees, other.pitch_degrees, other.roll_degrees)
+        {
+            set_orientation(
+                &mut c,
+                self.orientation().slerp(other.orientation(), t),
+                self,
+            );
+        }
+        c
+    }
+    fn mean(samples: &[Sample<Self>], like: &Self) -> Self {
+        let n = samples.len().max(1) as f32;
+        let avg = |f: &dyn Fn(&Camera) -> f32| samples.iter().map(|s| f(&s.pose)).sum::<f32>() / n;
+        let q = mean_quat(
+            samples.iter().map(|s| s.pose.orientation()),
+            like.orientation(),
+        );
+        let mut out = Camera {
+            target: std::array::from_fn(|k| avg(&|c| c.target[k])),
+            distance: avg(&|c| c.distance),
+            fov_y_degrees: avg(&|c| c.fov_y_degrees),
+            f_number: avg(&|c| c.f_number),
+            sensor_height: avg(&|c| c.sensor_height),
+            focus_distance: avg(&|c| c.focus_distance),
+            ..*like
+        };
+        set_orientation(&mut out, q, like);
+        out
+    }
+}
+
+/// The normalized mean of quaternions, each first turned into `reference`'s hemisphere.
+fn mean_quat(qs: impl Iterator<Item = glam::Quat>, reference: glam::Quat) -> glam::Quat {
+    qs.map(|q| if q.dot(reference) < 0.0 { -q } else { q })
+        .fold(glam::Quat::from_xyzw(0.0, 0.0, 0.0, 0.0), |a, q| a + q)
+        .normalize()
+}
+
+/// Write the rotation `q` into `camera`'s yaw / pitch / roll (Euler YXZ) as the angles nearest
+/// `near`'s by whole turns: no flip at +-180 between neighbouring poses, the turns of a yaw past
+/// +-180 kept (`curves::nearest_euler`; turns only, the pitch is limited to +-90).
+fn set_orientation(camera: &mut Camera, q: glam::Quat, near: &Camera) {
+    let (yaw, pitch, roll) = q.to_euler(glam::EulerRot::YXZ);
+    let [yaw, pitch, roll] = curves::nearest_euler(
+        [yaw.to_degrees(), -pitch.to_degrees(), roll.to_degrees()],
+        [near.yaw_degrees, near.pitch_degrees, near.roll_degrees],
+        None,
+    );
+    (
+        camera.yaw_degrees,
+        camera.pitch_degrees,
+        camera.roll_degrees,
+    ) = (yaw, pitch, roll);
+}
+
+/// The poses of a take, one kind per take.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "samples", rename_all = "snake_case")]
+pub enum Poses {
+    /// A camera's visible pose and lens (viewport navigation).
+    Camera(Vec<Sample<Camera>>),
+    /// A node's local transform (manipulator drags, a node's animation).
+    Transform(Vec<Sample<Trs>>),
+}
+
+/// What a take can drive: a camera, or the transform of a placed node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TakeKind {
+    Camera,
+    Transform,
+}
+
+impl From<Vec<Sample<Camera>>> for Poses {
+    fn from(samples: Vec<Sample<Camera>>) -> Self {
+        Self::Camera(samples)
+    }
+}
+impl From<Vec<Sample<Trs>>> for Poses {
+    fn from(samples: Vec<Sample<Trs>>) -> Self {
+        Self::Transform(samples)
+    }
+}
+
+/// `$e` over the samples of either kind, its result rewrapped in the same kind.
+macro_rules! map_poses {
+    ($poses:expr, $s:ident => $e:expr) => {
+        match $poses {
+            Poses::Camera($s) => Poses::Camera($e),
+            Poses::Transform($s) => Poses::Transform($e),
+        }
+    };
+}
+/// `$e` over the samples of either kind.
+macro_rules! on_poses {
+    ($poses:expr, $s:ident => $e:expr) => {
+        match $poses {
+            Poses::Camera($s) => $e,
+            Poses::Transform($s) => $e,
+        }
+    };
+}
+
+fn duration<P>(s: &[Sample<P>]) -> f64 {
+    s.last().map_or(0.0, |s| s.seconds)
+}
+
+fn check<P: Pose>(s: &[Sample<P>]) -> Result<(), &'static str> {
+    if s.len() < 2 {
+        return Err("needs at least two samples");
+    }
+    if s.first().is_some_and(|s| s.seconds != 0.0) {
+        return Err("time must start at 0");
+    }
+    if s.windows(2).any(|w| {
+        w[0].seconds.partial_cmp(&w[1].seconds) != Some(std::cmp::Ordering::Less)
+            || !w[1].seconds.is_finite()
+    }) {
+        return Err("sample times must increase");
+    }
+    if s.iter().any(|s| !s.pose.finite()) {
+        return Err("values must be finite");
+    }
+    Ok(())
+}
+
+/// The pose at `seconds`, held at the first / last pose outside the take.
+fn pose_at<P: Pose>(s: &[Sample<P>], seconds: f64) -> Option<P> {
+    let (first, last) = (s.first()?, s.last()?);
+    if seconds <= first.seconds {
+        return Some(first.pose);
+    }
+    if seconds >= last.seconds {
+        return Some(last.pose);
+    }
+    let hi = s.partition_point(|x| x.seconds <= seconds);
+    let a = s.get(hi.checked_sub(1)?)?;
+    let b = s.get(hi)?;
+    let t = ((seconds - a.seconds) / (b.seconds - a.seconds)) as f32;
+    Some(a.pose.blend(&b.pose, t))
+}
+
+/// The part between `from` and `to` seconds, rebased to 0, the cut poses interpolated.
+fn trim<P: Pose>(s: &[Sample<P>], from: f64, to: f64) -> Result<Vec<Sample<P>>, String> {
+    let (from, to) = (from.max(0.0), to.min(duration(s)));
+    if !(to > from) {
+        return Err("Trim keeps nothing".into());
+    }
+    let first = pose_at(s, from).ok_or("Empty take")?;
+    let last = pose_at(s, to).ok_or("Empty take")?;
+    let mut out = vec![Sample {
+        seconds: 0.0,
+        pose: first,
+    }];
+    out.extend(
+        s.iter()
+            .filter(|x| x.seconds > from && x.seconds < to)
+            .map(|x| Sample {
+                seconds: x.seconds - from,
+                pose: x.pose,
+            }),
+    );
+    out.push(Sample {
+        seconds: to - from,
+        pose: last,
+    });
+    Ok(out)
+}
+
+fn retime<P: Pose>(s: &[Sample<P>], speed: f64) -> Vec<Sample<P>> {
+    s.iter()
+        .map(|x| Sample {
+            seconds: x.seconds / speed,
+            pose: x.pose,
+        })
+        .collect()
+}
+
+/// Every interior pose the mean of the poses within `window` seconds around it.
+fn smooth<P: Pose>(s: &[Sample<P>], window: f64) -> Vec<Sample<P>> {
+    let mut out = s.to_vec();
+    let half = window.max(0.0) * 0.5;
+    let n = s.len();
+    if half <= 0.0 || n < 3 {
+        return out;
+    }
+    for (i, o) in out.iter_mut().enumerate().take(n - 1).skip(1) {
+        let t = s[i].seconds;
+        let lo = s.partition_point(|x| x.seconds < t - half);
+        let hi = s.partition_point(|x| x.seconds <= t + half);
+        o.pose = P::mean(&s[lo..hi], &s[i].pose);
+    }
+    out
+}
+
+/// One recorded motion.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Take {
     /// Stable key within the store; 0 until the take is added.
     pub id: u64,
     pub name: String,
-    /// Document frame the gesture began on: where a bound take starts playing.
+    /// Document frame the motion began on: where a bound take starts playing.
     pub start: f64,
     pub timing: Timing,
     /// Pinned takes are never dropped by retention.
     pub pinned: bool,
-    /// Strictly increasing seconds from 0, every pose the visible camera had.
-    pub samples: Vec<Sample>,
+    /// The node it was recorded on (shown in the Takes panel; bindings may differ).
+    #[serde(default)]
+    pub source: Option<NodeId>,
+    /// Strictly increasing seconds from 0.
+    pub poses: Poses,
 }
 
 impl Take {
-    pub fn duration(&self) -> f64 {
-        self.samples.last().map_or(0.0, |s| s.seconds)
+    /// A take of `samples`, unnamed, unbound and without an id; validated.
+    pub fn new(
+        start: f64,
+        source: Option<NodeId>,
+        poses: impl Into<Poses>,
+    ) -> Result<Self, String> {
+        Take {
+            id: 0,
+            name: String::new(),
+            start,
+            timing: Timing::KeepSpeed,
+            pinned: false,
+            source,
+            poses: poses.into(),
+        }
+        .checked()
     }
 
-    /// Reject samples that cannot drive a camera: too few, unordered or non-finite.
+    /// A take through `poses`, one per frame from `start` at `fps` (a node's timeline animation).
+    pub fn from_frames<P: Pose>(
+        start: f64,
+        fps: f64,
+        source: Option<NodeId>,
+        poses: Vec<P>,
+    ) -> Result<Self, String>
+    where
+        Poses: From<Vec<Sample<P>>>,
+    {
+        if !(fps.is_finite() && fps > 0.0) {
+            return Err("Invalid frame rate".into());
+        }
+        let samples: Vec<Sample<P>> = poses
+            .into_iter()
+            .enumerate()
+            .map(|(i, pose)| Sample {
+                seconds: i as f64 / fps,
+                pose,
+            })
+            .collect();
+        Self::new(start, source, samples)
+    }
+
+    /// A still take of `pose` from frame `start`: a pose bookmark (two equal poses one frame
+    /// apart, the least a take holds).
+    pub fn still<P: Pose>(
+        pose: P,
+        start: f64,
+        fps: f64,
+        source: Option<NodeId>,
+    ) -> Result<Self, String>
+    where
+        Poses: From<Vec<Sample<P>>>,
+    {
+        Self::from_frames(start, fps, source, vec![pose, pose])
+    }
+
+    pub fn kind(&self) -> TakeKind {
+        match self.poses {
+            Poses::Camera(_) => TakeKind::Camera,
+            Poses::Transform(_) => TakeKind::Transform,
+        }
+    }
+
+    pub fn duration(&self) -> f64 {
+        on_poses!(&self.poses, s => duration(s))
+    }
+
+    pub fn len(&self) -> usize {
+        on_poses!(&self.poses, s => s.len())
+    }
+
+    /// Reject samples that cannot drive anything: too few, unordered or non-finite.
     pub fn checked(self) -> Result<Self, String> {
-        let bad = |what: &str| Err(format!("Invalid take \"{}\": {what}", self.name));
-        if self.samples.len() < 2 {
-            return bad("needs at least two samples");
+        let problem = if self.start.is_finite() {
+            on_poses!(&self.poses, s => check(s).err())
+        } else {
+            Some("start frame is not finite")
+        };
+        match problem {
+            Some(what) => Err(format!("Invalid take \"{}\": {what}", self.name)),
+            None => Ok(self),
         }
-        if !self.start.is_finite() {
-            return bad("start frame is not finite");
-        }
-        if self.samples.first().is_some_and(|s| s.seconds != 0.0) {
-            return bad("time must start at 0");
-        }
-        if self.samples.windows(2).any(|w| {
-            w[0].seconds.partial_cmp(&w[1].seconds) != Some(std::cmp::Ordering::Less)
-                || !w[1].seconds.is_finite()
-        }) {
-            return bad("sample times must increase");
-        }
-        if self.samples.iter().any(|s| !camera_finite(&s.camera)) {
-            return bad("camera values must be finite");
-        }
-        Ok(self)
     }
 
     /// Seconds into the take that document `frame` shows: wall speed from `start` at the document
     /// rate (`KeepSpeed`) or the whole take stretched over the work area (`FitWorkArea`). The same
-    /// mapping as the bake (`Recording::prepare`).
+    /// mapping as the bake (`camera_recorder`).
     pub fn seconds_at(&self, frame: f64, first: u32, last: u32, fps: f64) -> f64 {
         match self.timing {
             Timing::KeepSpeed => (frame - self.start) / fps,
@@ -88,103 +459,29 @@ impl Take {
         }
     }
 
-    /// The camera at `seconds`: rotation by quaternion slerp (no Euler wrap jumps), target and
-    /// lens linearly. Held at the first / last pose outside the take.
-    pub fn pose_at(&self, seconds: f64) -> Option<Camera> {
-        let (first, last) = (self.samples.first()?, self.samples.last()?);
-        if seconds <= first.seconds {
-            return Some(first.camera);
+    /// The camera a document at (`first`..`last`, `fps`) shows on `frame`; None for a transform take.
+    pub fn camera_at(&self, frame: f64, first: u32, last: u32, fps: f64) -> Option<Camera> {
+        match &self.poses {
+            Poses::Camera(s) => pose_at(s, self.seconds_at(frame, first, last, fps)),
+            Poses::Transform(_) => None,
         }
-        if seconds >= last.seconds {
-            return Some(last.camera);
+    }
+
+    /// The local transform on `frame`; None for a camera take.
+    pub fn trs_at(&self, frame: f64, first: u32, last: u32, fps: f64) -> Option<Trs> {
+        match &self.poses {
+            Poses::Transform(s) => pose_at(s, self.seconds_at(frame, first, last, fps)),
+            Poses::Camera(_) => None,
         }
-        let hi = self.samples.partition_point(|s| s.seconds <= seconds);
-        let a = self.samples.get(hi.checked_sub(1)?)?;
-        let b = self.samples.get(hi)?;
-        let t = ((seconds - a.seconds) / (b.seconds - a.seconds)) as f32;
-        Some(blend(&a.camera, &b.camera, t))
-    }
-
-    /// The camera a document at (`first`..`last`, `fps`) shows on `frame`.
-    pub fn pose_at_frame(&self, frame: f64, first: u32, last: u32, fps: f64) -> Option<Camera> {
-        self.pose_at(self.seconds_at(frame, first, last, fps))
-    }
-
-    /// Versioned single-take clip file for exchange between scenes.
-    pub fn to_clip(&self, fps: f64) -> Result<String, String> {
-        serde_json::to_string_pretty(&Clip::of(self, fps)).map_err(|e| e.to_string())
-    }
-
-    /// Parse a clip file; the take is unpinned and has no id until a store adds it.
-    pub fn from_clip(text: &str) -> Result<Self, String> {
-        let clip: Clip =
-            serde_json::from_str(text).map_err(|e| format!("Invalid take clip: {e}"))?;
-        clip.take()
-    }
-}
-
-impl Take {
-    /// A still take of `camera` from frame `start`: a camera bookmark (two equal poses one
-    /// frame apart, the least a take holds).
-    pub fn still(camera: Camera, start: f64, fps: f64) -> Result<Self, String> {
-        Self::from_frames(start, fps, vec![camera, camera])
-    }
-
-    /// A take through `poses`, one per frame from `start` at `fps`: the timeline animation of a
-    /// camera as a take.
-    pub fn from_frames(start: f64, fps: f64, poses: Vec<Camera>) -> Result<Self, String> {
-        if !(fps.is_finite() && fps > 0.0) {
-            return Err("Invalid frame rate".into());
-        }
-        Take {
-            id: 0,
-            name: String::new(),
-            start,
-            timing: Timing::KeepSpeed,
-            pinned: false,
-            samples: poses
-                .into_iter()
-                .enumerate()
-                .map(|(i, camera)| Sample {
-                    seconds: i as f64 / fps,
-                    camera,
-                })
-                .collect(),
-        }
-        .checked()
     }
 
     /// The part between `from` and `to` seconds, rebased to 0. The cut poses are interpolated,
     /// and the start frame moves with the cut (`from` seconds at `fps`), so the kept motion
     /// still plays on the frames it played on.
     pub fn trimmed(&self, from: f64, to: f64, fps: f64) -> Result<Self, String> {
-        let from = from.max(0.0);
-        let to = to.min(self.duration());
-        if !(to > from) {
-            return Err("Trim keeps nothing".into());
-        }
-        let first = self.pose_at(from).ok_or("Empty take")?;
-        let last = self.pose_at(to).ok_or("Empty take")?;
-        let mut samples = vec![Sample {
-            seconds: 0.0,
-            camera: first,
-        }];
-        samples.extend(
-            self.samples
-                .iter()
-                .filter(|s| s.seconds > from && s.seconds < to)
-                .map(|s| Sample {
-                    seconds: s.seconds - from,
-                    camera: s.camera,
-                }),
-        );
-        samples.push(Sample {
-            seconds: to - from,
-            camera: last,
-        });
         Take {
-            start: self.start + from * fps,
-            samples,
+            start: self.start + from.max(0.0) * fps,
+            poses: map_poses!(&self.poses, s => trim(s, from, to)?),
             ..self.clone()
         }
         .checked()
@@ -195,30 +492,20 @@ impl Take {
         if !(speed.is_finite() && speed > 0.0) {
             return Err("Speed must be positive".into());
         }
-        let mut take = self.clone();
-        for sample in &mut take.samples {
-            sample.seconds /= speed;
+        Take {
+            poses: map_poses!(&self.poses, s => retime(s, speed)),
+            ..self.clone()
         }
-        take.checked()
+        .checked()
     }
 
-    /// Hand shake removed: every pose becomes the mean of the poses within `window` seconds
-    /// around it (rotation by the normalized mean of hemisphere-aligned quaternions, accurate
-    /// for the small angles one window spans). The first and last poses stay.
+    /// Shake removed: every pose the mean of the poses within `window` seconds around it. The
+    /// first and last poses stay.
     pub fn smoothed(&self, window: f64) -> Self {
-        let mut take = self.clone();
-        let half = window.max(0.0) * 0.5;
-        let n = self.samples.len();
-        if half <= 0.0 || n < 3 {
-            return take;
+        Take {
+            poses: map_poses!(&self.poses, s => smooth(s, window)),
+            ..self.clone()
         }
-        for (i, out) in take.samples.iter_mut().enumerate().take(n - 1).skip(1) {
-            let t = self.samples[i].seconds;
-            let lo = self.samples.partition_point(|s| s.seconds < t - half);
-            let hi = self.samples.partition_point(|s| s.seconds <= t + half);
-            out.camera = mean(&self.samples[lo..hi], &self.samples[i].camera);
-        }
-        take
     }
 
     /// Cut at `seconds` into two takes; the second starts on the frame the cut played on.
@@ -227,50 +514,18 @@ impl Take {
         let tail = self.trimmed(seconds, self.duration(), fps)?;
         Ok((head, tail))
     }
-}
 
-/// The mean pose of `samples` (non-empty); discrete fields come from `like`.
-fn mean(samples: &[Sample], like: &Camera) -> Camera {
-    let n = samples.len().max(1) as f32;
-    let avg = |f: &dyn Fn(&Camera) -> f32| samples.iter().map(|s| f(&s.camera)).sum::<f32>() / n;
-    let reference = like.orientation();
-    let q = samples
-        .iter()
-        .map(|s| {
-            let q = s.camera.orientation();
-            if q.dot(reference) < 0.0 { -q } else { q }
-        })
-        .fold(glam::Quat::from_xyzw(0.0, 0.0, 0.0, 0.0), |a, q| a + q)
-        .normalize();
-    let mut out = Camera {
-        target: std::array::from_fn(|k| avg(&|c| c.target[k])),
-        distance: avg(&|c| c.distance),
-        fov_y_degrees: avg(&|c| c.fov_y_degrees),
-        f_number: avg(&|c| c.f_number),
-        sensor_height: avg(&|c| c.sensor_height),
-        focus_distance: avg(&|c| c.focus_distance),
-        ..*like
-    };
-    set_orientation(&mut out, q, like);
-    out
-}
+    /// Versioned single-take clip file for exchange between scenes.
+    pub fn to_clip(&self, fps: f64) -> Result<String, String> {
+        serde_json::to_string_pretty(&Clip::of(self, fps)).map_err(|e| e.to_string())
+    }
 
-/// Write the rotation `q` into `camera`'s yaw / pitch / roll (Euler YXZ) as the angles nearest
-/// `near`'s by whole turns: no flip at +-180 between neighbouring poses, the turns of a yaw past
-/// +-180 kept (`curves::nearest_euler`, the Euler filter's rule).
-fn set_orientation(camera: &mut Camera, q: glam::Quat, near: &Camera) {
-    let (yaw, pitch, roll) = q.to_euler(glam::EulerRot::YXZ);
-    let [yaw, pitch, roll] = curves::nearest_euler(
-        [yaw.to_degrees(), -pitch.to_degrees(), roll.to_degrees()],
-        [near.yaw_degrees, near.pitch_degrees, near.roll_degrees],
-        // Whole turns only: the pitch is limited to +-90, the second solution would leave it.
-        None,
-    );
-    (
-        camera.yaw_degrees,
-        camera.pitch_degrees,
-        camera.roll_degrees,
-    ) = (yaw, pitch, roll);
+    /// Parse a clip file; the take is unpinned, unbound and has no id until a store adds it.
+    pub fn from_clip(text: &str) -> Result<Self, String> {
+        let clip: Clip =
+            serde_json::from_str(text).map_err(|e| format!("Invalid take clip: {e}"))?;
+        clip.take()
+    }
 }
 
 /// Takes on the system clipboard: the clip format, many at once.
@@ -297,7 +552,8 @@ pub fn from_clipboard(text: &str) -> Option<Result<Vec<Take>, String>> {
     )
 }
 
-/// The on-disk single-take exchange format.
+/// The exchange format of one take (file and clipboard): no id, binding or source node, which
+/// belong to the scene it came from.
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Clip {
@@ -307,7 +563,7 @@ struct Clip {
     name: String,
     start: f64,
     timing: Timing,
-    samples: Vec<Sample>,
+    poses: Poses,
 }
 
 impl Clip {
@@ -318,11 +574,10 @@ impl Clip {
             name: take.name.clone(),
             start: take.start,
             timing: take.timing,
-            samples: take.samples.clone(),
+            poses: take.poses.clone(),
         }
     }
 
-    /// The take of a clip: unpinned, without an id until a store adds it.
     fn take(self) -> Result<Take, String> {
         if self.version != CLIP_VERSION {
             return Err(format!(
@@ -331,64 +586,28 @@ impl Clip {
             ));
         }
         Take {
-            id: 0,
             name: self.name,
-            start: self.start,
             timing: self.timing,
-            pinned: false,
-            samples: self.samples,
+            ..Take::new(self.start, None, self.poses)?
         }
         .checked()
     }
 }
 
-fn camera_finite(c: &Camera) -> bool {
-    c.target.iter().all(|v| v.is_finite())
-        && [
-            c.yaw_degrees,
-            c.pitch_degrees,
-            c.roll_degrees,
-            c.distance,
-            c.fov_y_degrees,
-            c.f_number,
-            c.sensor_height,
-            c.focus_distance,
-        ]
-        .iter()
-        .all(|v| v.is_finite())
-}
-
-/// Interpolate two poses; an unchanged orientation keeps its exact Euler angles.
-fn blend(a: &Camera, b: &Camera, t: f32) -> Camera {
-    let lerp = |x: f32, y: f32| x + (y - x) * t;
-    let mut c = *a;
-    c.target = std::array::from_fn(|i| lerp(a.target[i], b.target[i]));
-    c.distance = lerp(a.distance, b.distance);
-    c.fov_y_degrees = lerp(a.fov_y_degrees, b.fov_y_degrees);
-    c.f_number = lerp(a.f_number, b.f_number);
-    c.sensor_height = lerp(a.sensor_height, b.sensor_height);
-    c.focus_distance = lerp(a.focus_distance, b.focus_distance);
-    if (a.yaw_degrees, a.pitch_degrees, a.roll_degrees)
-        != (b.yaw_degrees, b.pitch_degrees, b.roll_degrees)
-    {
-        set_orientation(&mut c, a.orientation().slerp(b.orientation(), t), a);
-    }
-    c
-}
-
-/// The takes of one document plus the binding of the current one.
+/// The takes of one document and the nodes bound to them.
 #[derive(Clone, Debug, Default)]
 pub struct Takes {
     /// Oldest first. `Arc` keeps document clones (undo snapshots, export jobs) cheap.
     list: Vec<Arc<Take>>,
-    current: Option<u64>,
+    /// Node -> take: the node's motion comes from the take (one take per node).
+    bindings: Vec<(NodeId, u64)>,
     /// Next id: ids are never reused, so a stale reference cannot hit another take.
     next: u64,
 }
 
 impl Takes {
     pub fn is_empty(&self) -> bool {
-        self.list.is_empty() && self.current.is_none() && self.next == 0
+        self.list.is_empty() && self.bindings.is_empty() && self.next == 0
     }
     pub fn list(&self) -> &[Arc<Take>] {
         &self.list
@@ -396,12 +615,25 @@ impl Takes {
     pub fn get(&self, id: u64) -> Option<&Arc<Take>> {
         self.list.iter().find(|t| t.id == id)
     }
-    pub fn current_id(&self) -> Option<u64> {
-        self.current
+    /// The take `node` is bound to.
+    pub fn binding(&self, node: NodeId) -> Option<u64> {
+        self.bindings
+            .iter()
+            .find(|(n, _)| *n == node)
+            .map(|(_, id)| *id)
     }
-    /// The take that drives the active camera, if one is bound.
-    pub fn current(&self) -> Option<&Take> {
-        self.current.and_then(|id| self.get(id)).map(Arc::as_ref)
+    /// The take that drives `node`, if one is bound.
+    pub fn bound(&self, node: NodeId) -> Option<&Take> {
+        self.binding(node)
+            .and_then(|id| self.get(id))
+            .map(Arc::as_ref)
+    }
+    /// The nodes bound to take `id`.
+    pub fn bound_nodes(&self, id: u64) -> impl Iterator<Item = NodeId> + '_ {
+        self.bindings
+            .iter()
+            .filter(move |(_, t)| *t == id)
+            .map(|(n, _)| *n)
     }
 
     /// Add a take (named "Take N" when unnamed) and apply retention. Returns its id.
@@ -416,14 +648,14 @@ impl Takes {
         self.next
     }
 
-    /// Drop the oldest unpinned takes beyond [`MAX_UNPINNED`]. The bound take is kept too: dropping
-    /// it would silently change the camera of the scene.
+    /// Drop the oldest unpinned takes beyond [`MAX_UNPINNED`]. Bound takes are kept too: dropping
+    /// one would silently change the motion of the scene.
     fn trim(&mut self) {
         while self.list.iter().filter(|t| !t.pinned).count() > MAX_UNPINNED {
             let Some(index) = self
                 .list
                 .iter()
-                .position(|t| !t.pinned && Some(t.id) != self.current)
+                .position(|t| !t.pinned && !self.bindings.iter().any(|(_, id)| *id == t.id))
             else {
                 break;
             };
@@ -431,23 +663,26 @@ impl Takes {
         }
     }
 
-    /// Remove a take; unbinds it when current.
+    /// Remove a take and every binding to it.
     pub fn remove(&mut self, id: u64) -> bool {
         let before = self.list.len();
         self.list.retain(|t| t.id != id);
-        if self.current == Some(id) {
-            self.current = None;
-        }
+        self.bindings.retain(|(_, t)| *t != id);
         self.list.len() != before
     }
 
-    pub fn set_current(&mut self, id: Option<u64>) -> Result<(), String> {
+    /// Bind `node` to take `id`, or unbind it with None. The caller checks the take's kind fits
+    /// the node (`WorldEditor::bind_take`).
+    pub fn bind(&mut self, node: NodeId, id: Option<u64>) -> Result<(), String> {
         if let Some(id) = id
             && self.get(id).is_none()
         {
             return Err(format!("No take {id}"));
         }
-        self.current = id;
+        self.bindings.retain(|(n, _)| *n != node);
+        if let Some(id) = id {
+            self.bindings.push((node, id));
+        }
         Ok(())
     }
 
@@ -465,21 +700,22 @@ impl Takes {
 #[derive(Serialize)]
 struct TakesOut<'a> {
     list: Vec<&'a Take>,
-    current: Option<u64>,
+    bindings: &'a [(NodeId, u64)],
     next: u64,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TakesIn {
     list: Vec<Take>,
-    current: Option<u64>,
+    #[serde(default)]
+    bindings: Vec<(NodeId, u64)>,
     next: u64,
 }
 impl Serialize for Takes {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         TakesOut {
             list: self.list.iter().map(Arc::as_ref).collect(),
-            current: self.current,
+            bindings: &self.bindings,
             next: self.next,
         }
         .serialize(serializer)
@@ -497,21 +733,24 @@ impl<'de> Deserialize<'de> for Takes {
             }
             list.push(Arc::new(take));
         }
-        if input
-            .current
-            .is_some_and(|id| list.iter().all(|t| t.id != id))
-        {
-            return Err(D::Error::custom("The current take does not exist"));
+        let mut bindings: Vec<(NodeId, u64)> = Vec::with_capacity(input.bindings.len());
+        for (node, id) in input.bindings {
+            if list.iter().all(|t| t.id != id) || bindings.iter().any(|(n, _)| *n == node) {
+                return Err(D::Error::custom(format!(
+                    "Invalid take binding to take {id}"
+                )));
+            }
+            bindings.push((node, id));
         }
         Ok(Self {
             list,
-            current: input.current,
+            bindings,
             next: input.next,
         })
     }
 }
 
-/// What the recorder needs from one UI frame.
+/// What the navigation recorder needs from one UI frame.
 pub struct Tick {
     /// Navigation clock step: the dt the flight and orbit rigs integrate with.
     pub dt: f64,
@@ -529,19 +768,21 @@ pub struct Tick {
 pub struct Update {
     /// A gesture began this frame.
     pub started: bool,
-    /// A gesture ended and produced this take.
+    /// A gesture ended and produced this take (a camera take, its source unset).
     pub finished: Option<Take>,
 }
 
 struct Live {
-    take: Take,
+    start: f64,
+    samples: Vec<Sample<Camera>>,
     clock: f64,
     idle: f64,
     /// Index of the last sample that differs from its predecessor: the take ends there.
     moved: usize,
 }
 
-/// Cuts navigation gestures into takes; one instance per app.
+/// Cuts viewport navigation gestures into camera takes; one instance per app. A gesture runs
+/// from the first move until the input has ended and the camera has come to rest.
 #[derive(Default)]
 pub struct Recorder {
     live: Option<Live>,
@@ -564,23 +805,17 @@ impl Recorder {
         let Some(live) = &mut self.live else {
             if moved {
                 self.live = Some(Live {
-                    take: Take {
-                        id: 0,
-                        name: String::new(),
-                        start: t.frame,
-                        timing: Timing::KeepSpeed,
-                        pinned: false,
-                        samples: vec![
-                            Sample {
-                                seconds: 0.0,
-                                camera: t.before,
-                            },
-                            Sample {
-                                seconds: t.dt,
-                                camera: t.after,
-                            },
-                        ],
-                    },
+                    start: t.frame,
+                    samples: vec![
+                        Sample {
+                            seconds: 0.0,
+                            pose: t.before,
+                        },
+                        Sample {
+                            seconds: t.dt,
+                            pose: t.after,
+                        },
+                    ],
                     clock: t.dt,
                     idle: 0.0,
                     moved: 1,
@@ -590,17 +825,17 @@ impl Recorder {
             return update;
         };
         live.clock += t.dt;
-        live.take.samples.push(Sample {
+        live.samples.push(Sample {
             seconds: live.clock,
-            camera: t.after,
+            pose: t.after,
         });
         if moved {
             live.idle = 0.0;
-            live.moved = live.take.samples.len() - 1;
+            live.moved = live.samples.len() - 1;
         } else {
             live.idle += t.dt;
         }
-        if (!t.held && live.idle >= SETTLE_SECS) || live.take.samples.len() >= MAX_SAMPLES {
+        if (!t.held && live.idle >= SETTLE_SECS) || live.samples.len() >= MAX_SAMPLES {
             update.finished = self.finish();
         }
         update
@@ -608,10 +843,67 @@ impl Recorder {
 
     /// End the gesture now, dropping the still tail. None when it was too short to keep.
     fn finish(&mut self) -> Option<Take> {
-        let live = self.live.take()?;
-        let mut take = live.take;
-        take.samples.truncate(live.moved + 1);
-        (take.duration() >= MIN_SECS).then_some(take)
+        let mut live = self.live.take()?;
+        live.samples.truncate(live.moved + 1);
+        (duration(&live.samples) >= MIN_SECS)
+            .then(|| Take::new(live.start, None, live.samples).ok())
+            .flatten()
+    }
+}
+
+/// Records manipulator drags: each dragged node's local transform every frame of the drag,
+/// cut into one transform take per node when the drag ends.
+#[derive(Default)]
+pub struct DragRecorder {
+    start: f64,
+    clock: f64,
+    live: Vec<(NodeId, Vec<Sample<Trs>>)>,
+}
+
+impl DragRecorder {
+    /// One frame of a drag: the dragged nodes' local transforms after this frame's edit. The
+    /// first call starts the drag at document frame `frame`.
+    pub fn sample(&mut self, dt: f64, frame: f64, poses: &[(NodeId, Trs)]) {
+        if self.live.is_empty() {
+            self.start = frame;
+            self.clock = 0.0;
+        } else {
+            self.clock += dt;
+        }
+        for &(node, pose) in poses {
+            let sample = Sample {
+                seconds: self.clock,
+                pose,
+            };
+            match self.live.iter_mut().find(|(n, _)| *n == node) {
+                Some((_, samples)) => samples.push(sample),
+                None => self.live.push((node, vec![sample])),
+            }
+        }
+    }
+
+    /// The drag ended: one take per node that moved for at least the minimum gesture time
+    /// (rebased to its own first sample, its still head and tail dropped).
+    pub fn finish(&mut self) -> Vec<Take> {
+        let start = self.start;
+        std::mem::take(&mut self.live)
+            .into_iter()
+            .filter_map(|(node, samples)| {
+                let first = samples.windows(2).position(|w| w[0].pose != w[1].pose)?;
+                let last = samples.windows(2).rposition(|w| w[0].pose != w[1].pose)? + 1;
+                let t0 = samples[first].seconds;
+                let kept: Vec<_> = samples[first..=last]
+                    .iter()
+                    .map(|s| Sample {
+                        seconds: s.seconds - t0,
+                        pose: s.pose,
+                    })
+                    .collect();
+                (duration(&kept) >= MIN_SECS)
+                    .then(|| Take::new(start, Some(node), kept).ok())
+                    .flatten()
+            })
+            .collect()
     }
 }
 
@@ -636,258 +928,5 @@ fn still(a: &Camera, b: &Camera) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn cam(yaw: f32) -> Camera {
-        Camera {
-            yaw_degrees: yaw,
-            ..Camera::default_fov(50.0)
-        }
-    }
-    fn take(yaws: &[f32]) -> Take {
-        Take {
-            id: 0,
-            name: String::new(),
-            start: 10.0,
-            timing: Timing::KeepSpeed,
-            pinned: false,
-            samples: yaws
-                .iter()
-                .enumerate()
-                .map(|(i, y)| Sample {
-                    seconds: i as f64,
-                    camera: cam(*y),
-                })
-                .collect(),
-        }
-    }
-
-    #[test]
-    fn pose_interpolates_rotation_by_slerp_across_the_wrap_and_holds_outside() {
-        let t = take(&[170.0, -170.0]);
-        let mid = t.pose_at(0.5).unwrap();
-        // Shortest arc passes through 180 degrees, never through 0.
-        assert!(mid.orientation().dot(cam(180.0).orientation()).abs() > 0.99999);
-        assert_eq!(t.pose_at(-1.0).unwrap(), cam(170.0));
-        assert_eq!(t.pose_at(9.0).unwrap(), cam(-170.0));
-        let mut moved = take(&[0.0, 0.0]);
-        moved.samples[1].camera.distance = 4.0;
-        moved.samples[0].camera.distance = 2.0;
-        assert_eq!(moved.pose_at(0.5).unwrap().distance, 3.0);
-    }
-
-    #[test]
-    fn frame_mapping_keeps_speed_or_fits_the_work_area() {
-        let mut t = take(&[0.0, 90.0]);
-        // KeepSpeed: one second at 24 fps after the start frame.
-        assert_eq!(t.seconds_at(34.0, 0, 239, 24.0), 1.0);
-        assert_eq!(t.seconds_at(22.0, 0, 239, 24.0), 0.5);
-        t.timing = Timing::FitWorkArea;
-        assert_eq!(t.seconds_at(239.0, 0, 239, 24.0), 1.0);
-        assert!((t.seconds_at(119.5, 0, 239, 24.0) - 0.5).abs() < 1e-9);
-    }
-
-    #[test]
-    fn retention_keeps_pinned_and_current_and_drops_the_oldest_unpinned() {
-        let mut takes = Takes::default();
-        let first = takes.add(take(&[0.0, 1.0]));
-        let second = takes.add(take(&[0.0, 2.0]));
-        assert!(takes.edit(first, |t| t.pinned = true));
-        takes.set_current(Some(second)).unwrap();
-        for i in 0..(MAX_UNPINNED + 5) {
-            takes.add(take(&[0.0, 3.0 + i as f32]));
-        }
-        assert!(takes.get(first).is_some(), "pinned take survives");
-        assert!(takes.get(second).is_some(), "bound take survives");
-        assert_eq!(
-            takes.list().iter().filter(|t| !t.pinned).count(),
-            MAX_UNPINNED
-        );
-        // The six oldest droppable takes (ids 3..=8) went first.
-        assert_eq!(takes.list()[2].name, "Take 9");
-        assert!(takes.remove(second));
-        assert_eq!(takes.current_id(), None);
-        assert!(takes.set_current(Some(second)).is_err());
-    }
-
-    #[test]
-    fn takes_roundtrip_through_json_and_reject_inconsistent_data() {
-        let mut takes = Takes::default();
-        let id = takes.add(take(&[0.0, 45.0, 90.0]));
-        takes.set_current(Some(id)).unwrap();
-        let json = serde_json::to_string(&takes).unwrap();
-        let back: Takes = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.current(), takes.current());
-        assert_eq!(back.list().len(), 1);
-        let broken = json.replace("\"current\":1", "\"current\":7");
-        assert!(serde_json::from_str::<Takes>(&broken).is_err());
-        let one_sample = serde_json::to_string(&TakesOut {
-            list: vec![&take(&[0.0])],
-            current: None,
-            next: 1,
-        })
-        .unwrap();
-        assert!(serde_json::from_str::<Takes>(&one_sample).is_err());
-    }
-
-    #[test]
-    fn clip_roundtrips_and_rejects_other_versions() {
-        let mut t = take(&[0.0, 30.0]);
-        t.name = "Fly-by".into();
-        let text = t.to_clip(24.0).unwrap();
-        let back = Take::from_clip(&text).unwrap();
-        assert_eq!(
-            (back.name.as_str(), back.id, back.pinned),
-            ("Fly-by", 0, false)
-        );
-        assert_eq!(back.samples, t.samples);
-        let future = text.replace("\"version\": 1", "\"version\": 2");
-        assert!(Take::from_clip(&future).unwrap_err().contains("version"));
-        assert!(Take::from_clip("{}").is_err());
-    }
-
-    #[test]
-    fn trim_split_and_retime_keep_the_motion_where_it_played() {
-        // Yaw 0, 10, 20, 30, 40 at 0..4 s from frame 10.
-        let t = take(&[0.0, 10.0, 20.0, 30.0, 40.0]);
-        let cut = t.trimmed(1.5, 3.0, 24.0).unwrap();
-        assert_eq!(cut.duration(), 1.5);
-        assert!(
-            (cut.samples[0].camera.yaw_degrees - 15.0).abs() < 1e-3,
-            "interpolated cut pose"
-        );
-        assert_eq!(
-            cut.start,
-            10.0 + 1.5 * 24.0,
-            "the kept motion stays on its frames"
-        );
-        assert!((cut.samples.last().unwrap().camera.yaw_degrees - 30.0).abs() < 1e-3);
-        assert!(t.trimmed(3.0, 3.0, 24.0).is_err());
-        let (head, tail) = t.split(1.0, 24.0).unwrap();
-        assert_eq!((head.duration(), tail.duration()), (1.0, 3.0));
-        assert_eq!(tail.start, 10.0 + 24.0);
-        assert_eq!(tail.samples[0].camera, head.samples.last().unwrap().camera);
-        let fast = t.retimed(2.0).unwrap();
-        assert_eq!(fast.duration(), 2.0);
-        assert!(t.retimed(0.0).is_err());
-    }
-
-    #[test]
-    fn smoothing_removes_jitter_and_keeps_the_ends() {
-        let yaws: Vec<f32> = (0..41)
-            .map(|i| i as f32 + if i % 2 == 0 { 0.5 } else { -0.5 })
-            .collect();
-        let t = take(&yaws);
-        let s = t.smoothed(8.0);
-        assert_eq!(s.samples[0].camera, t.samples[0].camera);
-        assert_eq!(s.samples[40].camera, t.samples[40].camera);
-        let jitter = |k: &Take| {
-            k.samples[5..36]
-                .windows(3)
-                .map(|w| {
-                    (w[0].camera.yaw_degrees + w[2].camera.yaw_degrees
-                        - 2.0 * w[1].camera.yaw_degrees)
-                        .abs()
-                })
-                .fold(0.0f32, f32::max)
-        };
-        assert!(
-            jitter(&s) < 0.25 * jitter(&t),
-            "{} vs {}",
-            jitter(&s),
-            jitter(&t)
-        );
-    }
-
-    #[test]
-    fn stills_and_frames_make_takes_and_the_clipboard_roundtrips() {
-        let still = Take::still(cam(30.0), 5.0, 24.0).unwrap();
-        assert_eq!(still.samples.len(), 2);
-        assert_eq!(still.pose_at(0.5).unwrap(), cam(30.0));
-        let anim = Take::from_frames(0.0, 24.0, vec![cam(0.0), cam(1.0), cam(2.0)]).unwrap();
-        assert!((anim.duration() - 2.0 / 24.0).abs() < 1e-12);
-        let mut named = take(&[0.0, 9.0]);
-        named.name = "Orbit".into();
-        let text = to_clipboard(&[&named, &still], 24.0).unwrap();
-        let back = from_clipboard(&text).unwrap().unwrap();
-        assert_eq!(back.len(), 2);
-        assert_eq!((back[0].name.as_str(), back[0].id), ("Orbit", 0));
-        assert!(
-            from_clipboard("{\"warpbro_nodes\":1}").is_none(),
-            "other text is not takes"
-        );
-        assert!(from_clipboard("plain text").is_none());
-        assert!(
-            from_clipboard(&text.replace("\"warpbro_takes\":1", "\"warpbro_takes\":9"))
-                .unwrap()
-                .is_err()
-        );
-    }
-
-    fn tick(recorder: &mut Recorder, before: Camera, after: Camera, held: bool) -> Update {
-        recorder.tick(&Tick {
-            dt: 1.0 / 60.0,
-            before,
-            after,
-            frame: 7.0,
-            held,
-        })
-    }
-
-    #[test]
-    fn a_gesture_runs_from_the_first_move_through_the_coast_and_trims_the_still_tail() {
-        let mut r = Recorder::default();
-        let mut yaw = 0.0;
-        // Idle frames never start a take.
-        assert!(!tick(&mut r, cam(0.0), cam(0.0), false).started);
-        let mut started = false;
-        for _ in 0..30 {
-            let next = yaw + 1.0;
-            let up = tick(&mut r, cam(yaw), cam(next), true);
-            started |= up.started;
-            assert!(up.finished.is_none());
-            yaw = next;
-        }
-        assert!(started);
-        // Released: input is gone but the camera has to settle first.
-        let mut finished = None;
-        for i in 0..60 {
-            let up = tick(&mut r, cam(yaw), cam(yaw), false);
-            if up.finished.is_some() {
-                assert!(i >= 17, "ended after the 0.3 s settle, not before");
-                finished = up.finished;
-                break;
-            }
-        }
-        let take = finished.expect("take finished");
-        assert_eq!(take.start, 7.0);
-        assert_eq!(
-            take.samples.len(),
-            31,
-            "one initial pose + 30 moves; tail trimmed"
-        );
-        assert_eq!(take.samples[0].camera, cam(0.0));
-        assert_eq!(take.samples[30].camera, cam(30.0));
-        assert!((take.duration() - 30.0 / 60.0).abs() < 1e-9);
-        // The recorder is free for the next gesture.
-        assert!(tick(&mut r, cam(30.0), cam(31.0), true).started);
-    }
-
-    #[test]
-    fn held_input_keeps_a_still_gesture_alive_and_tiny_jumps_are_discarded() {
-        let mut r = Recorder::default();
-        tick(&mut r, cam(0.0), cam(1.0), true);
-        for _ in 0..120 {
-            assert!(tick(&mut r, cam(1.0), cam(1.0), true).finished.is_none());
-        }
-        // A single-frame jump (Home / Fit) is shorter than the minimum.
-        let mut r = Recorder::default();
-        tick(&mut r, cam(0.0), cam(90.0), false);
-        let mut finished = None;
-        for _ in 0..30 {
-            finished = finished.or(tick(&mut r, cam(90.0), cam(90.0), false).finished);
-        }
-        assert!(finished.is_none());
-    }
-}
+#[path = "takes_tests.rs"]
+mod tests;

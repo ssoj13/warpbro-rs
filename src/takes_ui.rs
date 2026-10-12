@@ -5,8 +5,9 @@
 //! non-destructive edits (trim, speed, smooth, split: each makes a new take, since takes have no
 //! undo). Bake to keys keys the bound take onto the camera as one undo step.
 use super::App;
-use crate::camera_recorder::{Recording, Timing};
-use crate::takes::Take;
+use crate::camera_recorder::Timing;
+use crate::takes::{Take, TakeKind};
+use crate::world::NodeId;
 use egui_phosphor::regular as ph;
 use egui_widgets_config::icons;
 use std::collections::BTreeSet;
@@ -57,7 +58,8 @@ enum Action {
         shift: bool,
     },
     Pin(Vec<u64>, bool),
-    Bind(Option<u64>),
+    /// Bind the take to its targets, or unbind it everywhere when it is bound.
+    Bind(u64),
     Play(u64),
     Rename(u64, String),
     Delete(Vec<u64>),
@@ -135,14 +137,14 @@ impl App {
             ui.separator();
             if ui
                 .button(ph::FILM_SLATE)
-                .on_hover_text("New take from the camera's timeline animation (work area)")
+                .on_hover_text("New takes from the timeline animation (work area) of the selected objects, or of the active camera")
                 .clicked()
             {
                 actions.push(Action::FromAnimation);
             }
             if ui
                 .button(icons::CAMERA)
-                .on_hover_text("New still take of the current camera pose")
+                .on_hover_text("New still takes of the current pose of the selected objects, or of the camera")
                 .clicked()
             {
                 actions.push(Action::FromPose);
@@ -199,8 +201,9 @@ impl App {
 
     fn takes_list(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let visible = self.visible_takes();
-        let current = self.world.document.takes.current_id();
         let fps = self.world.document.fps;
+        let document = &self.world.document;
+        let name_of = |node: NodeId| document.info(node).map(|n| n.name).unwrap_or_default();
         if self.world.document.takes.list().is_empty() {
             ui.label("Every viewport navigation gesture is recorded here as a take.");
         }
@@ -213,8 +216,19 @@ impl App {
                         continue;
                     };
                     let selected = self.takes_view.selection.contains(&id);
-                    let bound = current == Some(id);
+                    let bound: Vec<String> = document.takes.bound_nodes(id).map(name_of).collect();
+                    let kind_icon = match take.kind() {
+                        TakeKind::Camera => icons::CAMERA,
+                        TakeKind::Transform => icons::MOVE,
+                    };
                     ui.horizontal(|ui| {
+                        ui.label(kind_icon).on_hover_text(match (take.kind(), take.source) {
+                            (TakeKind::Camera, _) => "Camera take: a camera's pose and lens".to_owned(),
+                            (TakeKind::Transform, Some(node)) => {
+                                format!("Transform take, recorded on {}", name_of(node))
+                            }
+                            (TakeKind::Transform, None) => "Transform take".to_owned(),
+                        });
                         if ui
                             .selectable_label(take.pinned, ph::PUSH_PIN)
                             .on_hover_text("Pinned takes are never dropped (20 newest unpinned are kept)")
@@ -222,12 +236,17 @@ impl App {
                         {
                             actions.push(Action::Pin(vec![id], !take.pinned));
                         }
+                        let linked = !bound.is_empty();
                         if ui
-                            .selectable_label(bound, if bound { icons::LINK } else { ph::LINK_BREAK })
-                            .on_hover_text("Drive the scene camera with this take")
+                            .selectable_label(linked, if linked { icons::LINK } else { ph::LINK_BREAK })
+                            .on_hover_text(if linked {
+                                format!("Drives {} (click: unbind)", bound.join(", "))
+                            } else {
+                                "Bind: a camera take drives the active camera, a transform take the selected objects (or the one it was recorded on)".to_owned()
+                            })
                             .clicked()
                         {
-                            actions.push(Action::Bind((!bound).then_some(id)));
+                            actions.push(Action::Bind(id));
                         }
                         if ui.button(icons::PLAY).on_hover_text("Bind and play from its start").clicked() {
                             actions.push(Action::Play(id));
@@ -261,14 +280,14 @@ impl App {
                             "{:.1} s · frame {:.0} · {}",
                             take.duration(),
                             take.start,
-                            take.samples.len()
+                            take.len()
                         ))
                         .on_hover_text(format!(
                             "{:.2} s from frame {:.1} ({:.1} frames at {fps} fps), {} samples",
                             take.duration(),
                             take.start,
                             take.duration() * fps,
-                            take.samples.len()
+                            take.len()
                         ));
                     });
                 }
@@ -391,19 +410,18 @@ impl App {
                 "Reduction error: maximum absolute error at the samples, in each channel's units",
             );
         });
-        let bound = self.world.document.takes.current_id();
         if ui
             .add_enabled(
-                bound.is_some(),
+                take.is_some(),
                 egui::Button::new(format!("{} Bake to keys", icons::RECORD)),
             )
             .on_hover_text(
-                "Key the bound take onto the camera (one undo); keys outside its span remain",
+                "Key the selected take onto the nodes it drives (else its targets, as Bind), one undo each; keys outside its span remain",
             )
             .clicked()
-            && let Some(id) = bound
+            && let Some(take) = &take
         {
-            actions.push(Action::Bake(id));
+            actions.push(Action::Bake(take.id));
         }
     }
 
@@ -420,8 +438,8 @@ impl App {
                 }
                 Ok(())
             }
-            Action::Bind(id) => self.world.set_current_take(id),
-            Action::Play(id) => self.world.set_current_take(Some(id)).map(|()| {
+            Action::Bind(id) => self.toggle_binding(id),
+            Action::Play(id) => self.bind_targets(id).map(|()| {
                 if let Some(take) = self.world.document.takes.get(id) {
                     let (first, last) = (self.world.document.first, self.world.document.last);
                     self.world_ui
@@ -468,33 +486,8 @@ impl App {
                 self.take_dialog(None);
                 Ok(())
             }
-            Action::FromAnimation => {
-                let start = f64::from(self.world.document.first);
-                self.world
-                    .document
-                    .camera_frames()
-                    .and_then(|poses| Take::from_frames(start, fps, poses))
-                    .map(|take| {
-                        self.add_takes(
-                            vec![Take {
-                                name: "Animation".into(),
-                                ..take
-                            }],
-                            "Recorded",
-                        )
-                    })
-            }
-            Action::FromPose => {
-                Take::still(self.scene.camera, f64::from(self.world_ui.playhead), fps).map(|take| {
-                    self.add_takes(
-                        vec![Take {
-                            name: "Pose".into(),
-                            ..take
-                        }],
-                        "Recorded",
-                    )
-                })
-            }
+            Action::FromAnimation => self.takes_from_selection(true),
+            Action::FromPose => self.takes_from_selection(false),
             Action::Derive(id, derive) => {
                 let Some(take) = self.world.document.takes.get(id).cloned() else {
                     return;
@@ -632,27 +625,140 @@ impl App {
         }
     }
 
-    /// Key the take onto the active camera as one undoable edit, then release the binding: the
-    /// keys now show the same motion. The playhead stays where it is.
+    /// The placed objects among the selected nodes: what a transform take binds to and is made of.
+    fn selected_objects(&self) -> Vec<NodeId> {
+        let selected: Vec<NodeId> = if self.world.selected.is_empty() {
+            self.world.selection.into_iter().collect()
+        } else {
+            self.world.selected.clone()
+        };
+        selected
+            .into_iter()
+            .filter(|id| {
+                self.world.document.info(*id).is_ok_and(|n| {
+                    n.kind != crate::world::WorldKind::Camera
+                        && crate::world::manip_tools(n.kind).contains(&true)
+                })
+            })
+            .collect()
+    }
+
+    /// The nodes a take drives when bound: the nodes already bound to it; else the active camera
+    /// for a camera take, the selected objects (or the one it was recorded on) for a transform take.
+    fn take_targets(&self, id: u64) -> Result<Vec<NodeId>, String> {
+        let document = &self.world.document;
+        let take = document.takes.get(id).ok_or(format!("No take {id}"))?;
+        let bound: Vec<NodeId> = document.takes.bound_nodes(id).collect();
+        if !bound.is_empty() {
+            return Ok(bound);
+        }
+        let targets = match take.kind() {
+            TakeKind::Camera => document.active_camera.into_iter().collect(),
+            TakeKind::Transform => {
+                let selected = self.selected_objects();
+                if selected.is_empty() {
+                    take.source.into_iter().collect()
+                } else {
+                    selected
+                }
+            }
+        };
+        if targets.is_empty() {
+            return Err(match take.kind() {
+                TakeKind::Camera => "No active camera to drive".into(),
+                TakeKind::Transform => "Select the objects the take should drive".into(),
+            });
+        }
+        Ok(targets)
+    }
+
+    /// Bind take `id` to its targets ([`Self::take_targets`]).
+    fn bind_targets(&mut self, id: u64) -> Result<(), String> {
+        for node in self.take_targets(id)? {
+            self.world.bind_take(node, Some(id))?;
+        }
+        Ok(())
+    }
+
+    /// Unbind take `id` everywhere when it drives anything, else bind it to its targets.
+    fn toggle_binding(&mut self, id: u64) -> Result<(), String> {
+        let bound: Vec<NodeId> = self.world.document.takes.bound_nodes(id).collect();
+        if bound.is_empty() {
+            return self.bind_targets(id);
+        }
+        for node in bound {
+            self.world.bind_take(node, None)?;
+        }
+        Ok(())
+    }
+
+    /// New takes from the selected objects (transform takes) or, with none selected, from the
+    /// active camera: their timeline animation over the work area (`animation`), or their
+    /// current pose as a still take.
+    fn takes_from_selection(&mut self, animation: bool) -> Result<(), String> {
+        let document = &self.world.document;
+        let fps = document.fps;
+        let (first, playhead) = (f64::from(document.first), f64::from(self.world_ui.playhead));
+        let name = if animation { "Animation" } else { "Pose" };
+        let objects = self.selected_objects();
+        let mut made = Vec::new();
+        if objects.is_empty() {
+            let take = if animation {
+                Take::from_frames(
+                    first,
+                    fps,
+                    document.active_camera,
+                    document.camera_frames()?,
+                )?
+            } else {
+                Take::still(self.scene.camera, playhead, fps, document.active_camera)?
+            };
+            made.push(take);
+        }
+        for node in objects {
+            let take = if animation {
+                Take::from_frames(first, fps, Some(node), document.trs_frames(node)?)?
+            } else {
+                Take::still(
+                    document.authored_trs(node, playhead)?,
+                    playhead,
+                    fps,
+                    Some(node),
+                )?
+            };
+            made.push(take);
+        }
+        let made = made
+            .into_iter()
+            .map(|t| Take {
+                name: name.into(),
+                ..t
+            })
+            .collect();
+        self.add_takes(made, "Recorded");
+        Ok(())
+    }
+
+    /// Key take `id` onto the nodes it drives (else its targets) as one undoable edit each, then
+    /// release the bindings: the keys now show the same motion. The playhead stays where it is.
     fn bake_take(&mut self, id: u64) {
-        self.world.finish_edit();
-        let Some(take) = self.world.document.takes.get(id).cloned() else {
+        let Some(name) = self.world.document.takes.get(id).map(|t| t.name.clone()) else {
             return;
         };
-        let result = Recording::from_take(
-            &self.world.document,
-            self.world.revision(),
-            &take,
-            self.recorder_options,
-        )
-        .and_then(|recording| self.world.record_camera(&recording))
-        .and_then(|summary| self.world.set_current_take(None).map(|()| summary));
+        let result = self.take_targets(id).and_then(|targets| {
+            let mut total = (0, 0, 0.0f64);
+            for node in targets {
+                let (samples, keys, error, _) =
+                    self.world.bake_take(node, id, self.recorder_options)?;
+                total = (total.0 + samples, total.1 + keys, total.2.max(error));
+            }
+            Ok(total)
+        });
         self.evaluated_world = None;
         self.status = match result {
-            Ok((samples, keys, error, _)) => format!(
-                "Baked {}: {samples} samples -> {keys} keys (sample error {error:.6})",
-                take.name
-            ),
+            Ok((samples, keys, error)) => {
+                format!("Baked {name}: {samples} samples -> {keys} keys (sample error {error:.6})")
+            }
             Err(error) => format!("Bake failed: {error}"),
         };
     }

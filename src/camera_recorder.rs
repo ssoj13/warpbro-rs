@@ -1,7 +1,9 @@
-//! Bake of a recorded camera take into keyframes: samples are mapped to document frames and
-//! reduced with the shared fitter. The takes themselves live in `takes`.
+//! Bake of a take into keyframes: samples are mapped to document frames and reduced with the
+//! shared fitter. A camera take goes through the camera's navigation pose solver ([`Recording`]),
+//! a transform take writes its node's `/transform` channels ([`bake_transform`]). The takes
+//! themselves live in `takes`.
 use crate::scene::{Camera, Scene};
-use crate::takes::Take;
+use crate::takes::{Poses, Sample, Take};
 use crate::world::{NodeId, WorldDocument};
 use curves::{Fitter, Track, nearest_euler};
 use playa_engine::entities::anim::{Animation, Channel};
@@ -39,25 +41,18 @@ impl Default for Options {
     }
 }
 
-/// One recorded camera pose at `seconds` of the take's navigation clock.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Sample {
-    pub seconds: f64,
-    pub camera: Camera,
-}
-
 pub struct Recording {
     pub document: WorldDocument,
     pub camera: NodeId,
     pub revision: u64,
     pub start_frame: f64,
     pub options: Options,
-    pub samples: Vec<Sample>,
+    pub samples: Vec<Sample<Camera>>,
 }
 
+/// Keys ready to write onto `node` over `[first, last]` (`WorldEditor::record_prepared`).
 pub struct Prepared {
-    pub camera: NodeId,
+    pub node: NodeId,
     pub channels: BTreeMap<&'static str, Animation>,
     pub first: f64,
     pub last: f64,
@@ -98,28 +93,32 @@ impl Recording {
             options,
             samples: vec![Sample {
                 seconds: 0.0,
-                camera: scene.camera,
+                pose: scene.camera,
             }],
         })
     }
 
-    /// A bake of `take` over `document`: the take's timing overrides `options.timing`.
+    /// A bake of the camera take `take` over `document`: the take's timing overrides
+    /// `options.timing`.
     pub fn from_take(
         document: &WorldDocument,
         revision: u64,
         take: &Take,
         options: Options,
     ) -> Result<Self, String> {
-        let first = take.samples.first().ok_or("The take has no samples")?;
+        let Poses::Camera(samples) = &take.poses else {
+            return Err("Not a camera take".into());
+        };
+        let first = samples.first().ok_or("The take has no samples")?;
         let mut scene = Scene::preset(0);
-        scene.camera = first.camera;
+        scene.camera = first.pose;
         let options = Options {
             timing: take.timing,
             ..options
         };
         let mut recording = Self::new(document, revision, take.start, &scene, options)?;
-        for sample in take.samples.iter().skip(1) {
-            recording.capture(sample.seconds, sample.camera)?;
+        for sample in samples.iter().skip(1) {
+            recording.capture(sample.seconds, sample.pose)?;
         }
         Ok(recording)
     }
@@ -130,9 +129,12 @@ impl Recording {
             return Err("Camera recording time must increase".into());
         }
         if seconds == previous.seconds {
-            self.samples.last_mut().unwrap().camera = camera;
+            self.samples.last_mut().unwrap().pose = camera;
         } else {
-            self.samples.push(Sample { seconds, camera });
+            self.samples.push(Sample {
+                seconds,
+                pose: camera,
+            });
         }
         Ok(())
     }
@@ -142,26 +144,17 @@ impl Recording {
         if self.samples.len() < 2 || duration <= 0.0 {
             return Err("Record more than one camera sample".into());
         }
-        let (first, last) = match self.options.timing {
-            Timing::KeepSpeed => (
-                self.start_frame,
-                self.start_frame + duration * self.document.fps,
-            ),
-            Timing::FitWorkArea => (
-                f64::from(self.document.first),
-                f64::from(self.document.last),
-            ),
-        };
-        if !last.is_finite() || last > f64::from(u32::MAX - 1) || last <= first {
-            return Err(
-                "Camera recording needs a nonempty work area within the frame limit".into(),
-            );
-        }
+        let (first, last) = frame_span(
+            self.options.timing,
+            self.start_frame,
+            duration,
+            &self.document,
+        )?;
         let mut data: BTreeMap<&'static str, Vec<Vec<(f64, f64)>>> = BTreeMap::new();
         let mut scene = Scene::preset(0);
         for sample in &self.samples {
             let frame = first + (last - first) * (sample.seconds / duration);
-            scene.camera = sample.camera;
+            scene.camera = sample.pose;
             for (path, value) in self
                 .document
                 .camera_navigation_pose(self.camera, &scene, frame)?
@@ -188,28 +181,9 @@ impl Recording {
                 append(&mut data, "/transform/scale", frame, &scale)?;
             }
         }
-        let mut fitter = Fitter::new();
-        let mut channels = BTreeMap::new();
-        let mut key_count = 0;
-        let mut max_error: f64 = 0.0;
-        for (path, mut components) in data {
-            if path == "/transform/rotation_degrees" {
-                continuous_rotation(&mut components)?;
-            }
-            let mut animation = Animation::with_arity(components.len());
-            for (index, samples) in components.into_iter().enumerate() {
-                let mut track = Track::new();
-                let stats = fitter
-                    .fit(&samples, self.options.tolerance, &mut track)
-                    .map_err(|e| e.to_string())?;
-                max_error = max_error.max(stats.max_err);
-                key_count += stats.keys;
-                animation.channels[index] = Channel::from_track(track);
-            }
-            channels.insert(path, animation);
-        }
+        let (channels, key_count, max_error) = fit_channels(data, self.options.tolerance)?;
         Ok(Prepared {
-            camera: self.camera,
+            node: self.camera,
             channels,
             first,
             last,
@@ -219,6 +193,103 @@ impl Recording {
             max_error,
         })
     }
+}
+
+/// Keys of the transform take `take` on `node`'s `/transform` position, rotation and scale (all
+/// three: the bake's Translate / Rotate / Scale switch), mapped to frames like a camera take.
+pub fn bake_transform(
+    document: &WorldDocument,
+    node: NodeId,
+    take: &Take,
+    options: Options,
+) -> Result<Prepared, String> {
+    let Poses::Transform(samples) = &take.poses else {
+        return Err("Not a transform take".into());
+    };
+    if !options.transform {
+        return Err("Select Translate / Rotate / Scale to bake a transform take".into());
+    }
+    if !options.tolerance.is_finite() || options.tolerance < 0.0 {
+        return Err("Invalid bake tolerance".into());
+    }
+    document.assert_unlocked(node)?;
+    let duration = take.duration();
+    let (first, last) = frame_span(take.timing, take.start, duration, document)?;
+    let mut data: BTreeMap<&'static str, Vec<Vec<(f64, f64)>>> = BTreeMap::new();
+    for sample in samples {
+        let frame = first + (last - first) * (sample.seconds / duration);
+        let p = sample.pose;
+        for (path, value) in [
+            ("/transform/position", p.position),
+            ("/transform/rotation_degrees", p.rotation_degrees),
+            ("/transform/scale", p.scale),
+        ] {
+            append(&mut data, path, frame, &serde_json::json!(value))?;
+        }
+    }
+    let (channels, key_count, max_error) = fit_channels(data, options.tolerance)?;
+    Ok(Prepared {
+        node,
+        channels,
+        first,
+        last,
+        extend_last: document.last.max(last.ceil() as u32),
+        sample_count: samples.len(),
+        key_count,
+        max_error,
+    })
+}
+
+/// The document frames a take of `duration` seconds from frame `start` plays over: at recorded
+/// speed (`KeepSpeed`) or stretched over the work area (`FitWorkArea`); `Take::seconds_at` is
+/// its inverse.
+fn frame_span(
+    timing: Timing,
+    start: f64,
+    duration: f64,
+    document: &WorldDocument,
+) -> Result<(f64, f64), String> {
+    if duration <= 0.0 || !document.fps.is_finite() || document.fps <= 0.0 {
+        return Err("A take needs a positive duration and frame rate".into());
+    }
+    let (first, last) = match timing {
+        Timing::KeepSpeed => (start, start + duration * document.fps),
+        Timing::FitWorkArea => (f64::from(document.first), f64::from(document.last)),
+    };
+    if !last.is_finite() || last > f64::from(u32::MAX - 1) || last <= first {
+        return Err("A take needs a nonempty work area within the frame limit".into());
+    }
+    Ok((first, last))
+}
+
+/// Per-frame samples (path -> components -> (frame, value)) fitted to animations within
+/// `tolerance`, rotations kept continuous first. Returns the animations, the key count and the
+/// largest sample error.
+fn fit_channels(
+    data: BTreeMap<&'static str, Vec<Vec<(f64, f64)>>>,
+    tolerance: f64,
+) -> Result<(BTreeMap<&'static str, Animation>, usize, f64), String> {
+    let mut fitter = Fitter::new();
+    let mut channels = BTreeMap::new();
+    let mut key_count = 0;
+    let mut max_error: f64 = 0.0;
+    for (path, mut components) in data {
+        if path == "/transform/rotation_degrees" {
+            continuous_rotation(&mut components)?;
+        }
+        let mut animation = Animation::with_arity(components.len());
+        for (index, samples) in components.into_iter().enumerate() {
+            let mut track = Track::new();
+            let stats = fitter
+                .fit(&samples, tolerance, &mut track)
+                .map_err(|e| e.to_string())?;
+            max_error = max_error.max(stats.max_err);
+            key_count += stats.keys;
+            animation.channels[index] = Channel::from_track(track);
+        }
+        channels.insert(path, animation);
+    }
+    Ok((channels, key_count, max_error))
 }
 
 fn append(
@@ -298,7 +369,7 @@ mod tests {
             f_number: false,
             ..r.options
         };
-        let mut camera = r.samples[0].camera;
+        let mut camera = r.samples[0].pose;
         for i in 1..=24 {
             camera.fov_y_degrees += 1.0;
             r.capture(f64::from(i) / 24.0, camera).unwrap();
@@ -317,7 +388,7 @@ mod tests {
     #[test]
     fn keep_speed_extends_work_area_and_rotation_crosses_wrap_continuously() {
         let mut r = recording(Timing::KeepSpeed);
-        let mut camera = r.samples[0].camera;
+        let mut camera = r.samples[0].pose;
         for i in 1..=12 {
             camera.roll_degrees = 170.0 + i as f32 * 3.0;
             r.capture(f64::from(i), camera).unwrap();

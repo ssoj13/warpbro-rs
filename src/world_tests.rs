@@ -2843,26 +2843,13 @@ fn templates_reference_document() {
 }
 
 fn take_from(start: f64, cameras: &[crate::scene::Camera]) -> crate::takes::Take {
-    crate::takes::Take {
-        id: 0,
-        name: String::new(),
-        start,
-        timing: crate::camera_recorder::Timing::KeepSpeed,
-        pinned: false,
-        samples: cameras
-            .iter()
-            .enumerate()
-            .map(|(i, camera)| crate::camera_recorder::Sample {
-                seconds: i as f64,
-                camera: *camera,
-            })
-            .collect(),
-    }
+    crate::takes::Take::from_frames(start, 1.0, None, cameras.to_vec()).unwrap()
 }
 
 #[test]
-fn a_bound_take_drives_the_snapshot_camera_and_survives_undo_redo_and_save() {
+fn a_bound_camera_take_drives_the_snapshot_and_survives_undo_redo_and_save() {
     let mut e = editor();
+    let camera = e.document.active_camera.unwrap();
     let base = e.document.snapshot(0.0).unwrap().camera;
     let mut turned = base;
     turned.yaw_degrees += 30.0;
@@ -2870,7 +2857,7 @@ fn a_bound_take_drives_the_snapshot_camera_and_survives_undo_redo_and_save() {
     let id = e.add_take(take_from(0.0, &[base, turned]));
     let fps = e.document.fps;
     let revision = e.revision();
-    e.set_current_take(Some(id)).unwrap();
+    e.bind_take(camera, Some(id)).unwrap();
     assert_ne!(
         e.revision(),
         revision,
@@ -2880,6 +2867,9 @@ fn a_bound_take_drives_the_snapshot_camera_and_survives_undo_redo_and_save() {
     let shown = e.document.snapshot(fps).unwrap().camera;
     assert!((shown.distance - turned.distance).abs() < 1e-6);
     assert!((shown.yaw_degrees - turned.yaw_degrees).abs() < 1e-3);
+    // A camera take cannot drive a fractal.
+    let frac = find(&e, WorldKind::Fractal);
+    assert!(e.bind_take(frac, Some(id)).is_err());
     // Takes are not edits: equality ignores them, undo/redo keep them.
     e.execute(WorldCommand::SetMark {
         slot: 1,
@@ -2887,34 +2877,80 @@ fn a_bound_take_drives_the_snapshot_camera_and_survives_undo_redo_and_save() {
     })
     .unwrap();
     assert!(e.undo());
-    assert_eq!(e.document.takes.current_id(), Some(id));
+    assert_eq!(e.document.takes.binding(camera), Some(id));
     assert!(e.redo());
-    assert_eq!(e.document.takes.list().len(), 1);
     // Saved with the scene and loaded back bound.
     let json = serde_json::to_string(&e.document).unwrap();
-    let loaded = crate::io_service::decode_scene(&json).unwrap();
-    let doc = loaded.document.unwrap();
-    assert_eq!(doc.takes.current_id(), Some(id));
+    let doc = crate::io_service::decode_scene(&json)
+        .unwrap()
+        .document
+        .unwrap();
+    assert_eq!(doc.takes.binding(camera), Some(id));
     assert_eq!(
         doc.snapshot(fps).unwrap().camera,
         e.document.snapshot(fps).unwrap().camera
     );
     // Unbound, the camera node shows again.
-    e.set_current_take(None).unwrap();
+    e.bind_take(camera, None).unwrap();
     assert_eq!(e.document.snapshot(fps).unwrap().camera, base);
 }
 
 #[test]
-fn baking_a_take_keys_the_camera_in_one_undo_and_releases_the_binding() {
-    use crate::camera_recorder::{Options, Recording};
+fn a_bound_transform_take_moves_its_node_and_bakes_into_its_keys() {
+    use crate::takes::{Take, Trs};
     let mut e = editor();
+    let frac = find(&e, WorldKind::Fractal);
+    let fps = e.document.fps;
+    let at = |x: f32, z: f32| Trs {
+        position: [x, 0.0, 0.0],
+        rotation_degrees: [0.0, 0.0, z],
+        scale: [1.0; 3],
+    };
+    // Two seconds: x 0 -> 2, z 170 -> 190 written as -170 (a decomposer's wrap).
+    let take = Take::from_frames(
+        0.0,
+        1.0,
+        Some(frac),
+        vec![at(0.0, 170.0), at(1.0, 180.0), at(2.0, -170.0)],
+    )
+    .unwrap();
+    let id = e.add_take(take);
+    let before = e.document.clone();
+    e.bind_take(frac, Some(id)).unwrap();
+    let world = |e: &WorldEditor, f: f64| e.document.manip_frame(frac, f).unwrap().0;
+    let moved = world(&e, fps).transform_point3(glam::Vec3::ZERO);
+    assert!((moved.x - 1.0).abs() < 1e-5, "{moved:?}");
+    assert_eq!(e.document, before, "binding is not an edit");
+    // Bake: keys reproduce the take, the binding is released, one undo step removes the keys.
+    let summary = e
+        .bake_take(frac, id, crate::camera_recorder::Options::default())
+        .unwrap();
+    assert!(summary.1 > 0);
+    assert_eq!(e.document.takes.binding(frac), None);
+    let keyed = e.document.authored_trs(frac, 2.0 * fps).unwrap();
+    assert!((keyed.position[0] - 2.0).abs() < 1e-3, "{keyed:?}");
+    assert!(
+        (keyed.rotation_degrees[2] - 190.0).abs() < 1e-2,
+        "continuous rotation: {keyed:?}"
+    );
+    assert!(e.undo());
+    assert_eq!(e.document, before);
+    // The node's own animation as a take.
+    let frames = e.document.trs_frames(frac).unwrap();
+    assert_eq!(frames.len() as u32, e.document.last - e.document.first + 1);
+}
+
+#[test]
+fn baking_a_camera_take_keys_the_camera_in_one_undo_and_releases_the_binding() {
+    use crate::camera_recorder::Options;
+    let mut e = editor();
+    let camera = e.document.active_camera.unwrap();
     let base = e.document.snapshot(0.0).unwrap().camera;
     let mut zoomed = base;
     zoomed.fov_y_degrees = base.fov_y_degrees * 0.5;
     let id = e.add_take(take_from(0.0, &[base, zoomed]));
-    e.set_current_take(Some(id)).unwrap();
+    e.bind_take(camera, Some(id)).unwrap();
     let before = e.document.clone();
-    let take = e.document.takes.get(id).unwrap().clone();
     let options = Options {
         transform: false,
         focus: false,
@@ -2922,9 +2958,8 @@ fn baking_a_take_keys_the_camera_in_one_undo_and_releases_the_binding() {
         zoom: true,
         ..Options::default()
     };
-    let recording = Recording::from_take(&e.document, e.revision(), &take, options).unwrap();
-    e.record_camera(&recording).unwrap();
-    e.set_current_take(None).unwrap();
+    e.bake_take(camera, id, options).unwrap();
+    assert_eq!(e.document.takes.binding(camera), None);
     let fps = e.document.fps;
     let keyed = e.document.snapshot(fps).unwrap().camera;
     assert!((keyed.fov_y_degrees - zoomed.fov_y_degrees).abs() < 1e-3);
