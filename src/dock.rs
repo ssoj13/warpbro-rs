@@ -15,9 +15,10 @@ pub(super) enum Panel {
     Timeline,
     Outliner,
     MaterialLibrary,
+    Takes,
 }
 impl Panel {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::Viewport,
         Self::Gallery,
         Self::Bookmarks,
@@ -28,6 +29,7 @@ impl Panel {
         Self::Timeline,
         Self::Outliner,
         Self::MaterialLibrary,
+        Self::Takes,
     ];
     fn title(self) -> &'static str {
         match self {
@@ -41,16 +43,18 @@ impl Panel {
             Self::Export => "Render / Encode",
             Self::Timeline => "Timeline",
             Self::Outliner => "Outliner",
+            Self::Takes => "Takes",
         }
     }
 }
 
 pub(super) fn default_layout() -> DockState<Panel> {
     let mut state = DockState::new(vec![Panel::Viewport]);
-    let [workspace, left] =
-        state
-            .main_surface_mut()
-            .split_left(NodeIndex::root(), 0.25, vec![Panel::Outliner]);
+    let [workspace, left] = state.main_surface_mut().split_left(
+        NodeIndex::root(),
+        0.25,
+        vec![Panel::Outliner, Panel::Takes],
+    );
     let [_, materials] =
         state
             .main_surface_mut()
@@ -143,6 +147,7 @@ impl TabViewer for Viewer<'_> {
             Panel::Export => Scope::Export,
             Panel::Outliner => Scope::Outliner,
             Panel::MaterialLibrary => Scope::MaterialLibrary,
+            Panel::Takes => Scope::Takes,
         };
         crate::hotkeys::register(ui, scope, ui.max_rect());
         ui.push_id(*tab, |ui| match tab {
@@ -153,6 +158,7 @@ impl TabViewer for Viewer<'_> {
             Panel::Export => self.app.export_ui(ui),
             Panel::Timeline => self.app.world_ui.timeline(ui, &mut self.app.world),
             Panel::Outliner => self.app.world_ui.outliner(ui, &mut self.app.world),
+            Panel::Takes => self.app.takes_panel(ui),
             Panel::Gallery | Panel::Bookmarks | Panel::Materials => {
                 self.app.tab = match tab {
                     Panel::Bookmarks => Tab::Bookmarks,
@@ -699,7 +705,7 @@ mod tests {
         let blob = layout_blob(&state, &egui::Context::default()).unwrap();
         let restored = egui_dock_layout::from_blob::<Panel>(&blob).unwrap();
         assert!(valid_layout(&restored));
-        assert_eq!(restored.iter_all_tabs().count(), 8);
+        assert_eq!(restored.iter_all_tabs().count(), 9);
     }
     #[test]
     fn floating_geometry_survives_a_new_egui_context() {

@@ -17,6 +17,8 @@ use std::sync::Arc;
 
 #[path = "dock.rs"]
 mod dock;
+#[path = "takes_ui.rs"]
+mod takes_ui;
 
 const THUMB_W: usize = 224;
 const THUMB_H: usize = 126;
@@ -119,8 +121,14 @@ pub(crate) struct App {
     pub display: egui_display::DisplayPrefs,
     colour: crate::ocio::State,
     prefs: egui_prefs2::PrefsPanelState,
+    /// Channels, tolerance and timing of "Bake to keys" (Takes panel; saved with the settings).
     recorder_options: crate::camera_recorder::Options,
-    camera_recording: Option<(Instant, crate::camera_recorder::Recording)>,
+    /// Cuts every viewport navigation gesture into a take (`crate::takes`).
+    takes_recorder: crate::takes::Recorder,
+    /// The flight or orbit rig moved the camera this frame: only navigation makes takes.
+    navigated: bool,
+    /// The take whose name field is being edited (Takes panel).
+    take_rename: Option<(u64, String)>,
     /// Splitter state of the three Settings > Controls grids.
     prefs_grids: [AttrGridState; 3],
     dock: egui_dock::DockState<dock::Panel>,
@@ -133,6 +141,8 @@ pub(crate) struct App {
     viewport_rect: Option<egui::Rect>,
     config_picker: egui_file_dialog::FileDialog,
     scene_picker: Option<(crate::templates::FileAction, egui_file_dialog::FileDialog)>,
+    /// Export (Some take id) or import (None) dialog of the Takes panel.
+    take_picker: Option<(Option<u64>, egui_file_dialog::FileDialog)>,
     scene_file_path: Option<PathBuf>,
     scene_file_sequence: u64,
     scene_file_pending: Option<(u64, u64, crate::templates::FileAction)>,
@@ -317,17 +327,15 @@ pub(crate) enum SettingsPage {
     Controls,
     Fonts,
     Animation,
-    CameraRecorder,
     Render,
 }
 impl SettingsPage {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 6] = [
         Self::Display,
         Self::Color,
         Self::Controls,
         Self::Fonts,
         Self::Animation,
-        Self::CameraRecorder,
         Self::Render,
     ];
     fn category(self) -> egui_prefs2::Category<'static> {
@@ -339,9 +347,6 @@ impl SettingsPage {
             Self::Fonts => egui_prefs2::Category::new(ph::TEXT, "Fonts"),
             Self::Animation => egui_prefs2::Category::new(ph::MEDIA, "Animation"),
             Self::Render => egui_prefs2::Category::new(ph::GEAR, "Render & Viewport"),
-            Self::CameraRecorder => {
-                egui_prefs2::Category::new(egui_widgets_config::icons::RECORD, "Camera recorder")
-            }
         }
     }
     /// The page named `name` (case-insensitive tab label).
@@ -599,7 +604,9 @@ impl App {
             colour: crate::ocio::State::new(scene.colour.clone()),
             prefs: Default::default(),
             recorder_options: Default::default(),
-            camera_recording: None,
+            takes_recorder: Default::default(),
+            navigated: false,
+            take_rename: None,
             prefs_grids: Default::default(),
             dock: dock::default_layout(),
             panels_to_open: Vec::new(),
@@ -611,6 +618,7 @@ impl App {
             viewport_rect: None,
             config_picker: egui_file_dialog::FileDialog::new(),
             scene_picker: None,
+            take_picker: None,
             scene_file_path: None,
             scene_file_sequence: 0,
             scene_file_pending: None,
@@ -810,7 +818,6 @@ impl App {
                         self.profile_ui_actions(actions);
                     }
                     SettingsPage::Fonts => self.fonts_ui(ui),
-                    SettingsPage::CameraRecorder => self.camera_recorder_ui(ui),
                     SettingsPage::Animation => {
                         egui_prefs2::section_header(ui, "Keys");
                         ui.horizontal(|ui| {
@@ -894,8 +901,6 @@ impl App {
                 changed = true;
             } else if category == 3 {
                 self.fonts = Default::default();
-            } else if category == SettingsPage::CameraRecorder as usize {
-                self.recorder_options = Default::default();
             } else if category == SettingsPage::Animation as usize {
                 self.world_ui.new_key = curves::Tan::Smooth;
             } else if category == SettingsPage::Render as usize {
@@ -921,121 +926,37 @@ impl App {
         self.apply_colour_change(changed);
     }
 
-    fn camera_recorder_ui(&mut self, ui: &mut egui::Ui) {
-        use crate::camera_recorder::{Recording, Timing};
-        egui_prefs2::section_header(ui, "Capture channels");
-        ui.add_enabled_ui(self.camera_recording.is_none(), |ui| {
-            ui.checkbox(
-                &mut self.recorder_options.transform,
-                "Translate / Rotate / Scale",
-            );
-            ui.checkbox(&mut self.recorder_options.focus, "Focus");
-            ui.checkbox(&mut self.recorder_options.zoom, "Zoom");
-            ui.checkbox(&mut self.recorder_options.f_number, "f-number");
-            egui_prefs2::section_header(ui, "Timing");
-            ui.radio_value(
-                &mut self.recorder_options.timing,
-                Timing::KeepSpeed,
-                "Keep speed - extend work area",
-            );
-            ui.radio_value(
-                &mut self.recorder_options.timing,
-                Timing::FitWorkArea,
-                "Fit to work area",
-            );
-            ui.horizontal(|ui| {
-                ui.label("Reduction error");
-                ui.add(
-                    egui::DragValue::new(&mut self.recorder_options.tolerance)
-                        .range(0.0..=1.0)
-                        .speed(0.0001),
-                );
-            })
-            .response
-            .on_hover_text(
-                "Maximum absolute error at captured samples, in each channel's authored units.",
-            );
+    /// Feed this frame's navigation to the take recorder. A gesture that starts while a take
+    /// drives the camera releases the take first: navigation continues from the take's pose and
+    /// is authored on the camera node (`navigate_camera`) like any other.
+    fn record_take(&mut self, ctx: &egui::Context, before: crate::scene::Camera) {
+        let after = if self.navigated {
+            self.scene.camera
+        } else {
+            before
+        };
+        let update = self.takes_recorder.tick(&crate::takes::Tick {
+            dt: f64::from(nav_dt(ctx)),
+            before,
+            after,
+            frame: f64::from(self.world_ui.playhead),
+            held: self.fly.is_some()
+                || self.orbit.rig.has_inertia()
+                || ctx.input(|i| i.pointer.any_down()),
         });
-        if let Some((start, recording)) = &self.camera_recording {
-            ui.label(format!(
-                "Recording {:.1} s - {} samples",
-                start.elapsed().as_secs_f64(),
-                recording.samples.len()
-            ));
-            ui.horizontal(|ui| {
-                ui.label("Focus");
-                ui.add(
-                    egui::DragValue::new(&mut self.scene.camera.focus_distance)
-                        .range(0.0..=f32::MAX)
-                        .speed(0.01),
-                );
-            });
-            ui.horizontal(|ui| {
-                ui.label("Vertical FOV, degrees");
-                ui.add(
-                    egui::DragValue::new(&mut self.scene.camera.fov_y_degrees).range(1.0..=179.0),
-                );
-            });
-            ui.horizontal(|ui| {
-                ui.label("f-number (0 = pinhole)");
-                ui.add(
-                    egui::DragValue::new(&mut self.scene.camera.f_number)
-                        .range(0.0..=64.0)
-                        .speed(0.1),
-                );
-            });
-            if ui.button("Stop and apply").clicked() {
-                let (start, mut recording) = self.camera_recording.take().unwrap();
-                let result = recording
-                    .capture(start.elapsed().as_secs_f64(), self.scene.camera)
-                    .and_then(|_| self.world.record_camera(&recording));
-                self.status = match result {
-                    Ok((samples, keys, error, last)) => {
-                        self.world_ui.seek(last);
-                        format!(
-                            "Camera recorded: {samples} samples -> {keys} keys (sample error {error:.6})"
-                        )
-                    }
-                    Err(error) => format!("Camera recording failed: {error}"),
-                };
-                self.fly = None;
-                self.orbit = Default::default();
-                self.orbit_written = None;
-                self.evaluated_world = None;
-            }
-            if ui.button("Cancel recording").clicked() {
-                self.camera_recording = None;
-                self.fly = None;
-                self.orbit = Default::default();
-                self.orbit_written = None;
-                self.evaluated_world = None;
-                self.status = "Camera recording cancelled".into();
-            }
-        } else if ui.button("Start recording").clicked() {
-            self.preview.cancel();
-            self.preview_key = None;
-            self.world_ui.playing = false;
-            self.world.finish_edit();
-            self.evaluated_world = None;
-            if let Err(error) = self.refresh_scene() {
+        if update.started && self.world.document.takes.current_id().is_some() {
+            if let Err(error) = self.world.set_current_take(None) {
                 self.status = error;
-                return;
             }
-            match Recording::new(
-                &self.world.document,
-                self.world.revision(),
-                f64::from(self.world_ui.playhead),
-                &self.scene,
-                self.recorder_options,
-            ) {
-                Ok(recording) => {
-                    self.camera_recording = Some((Instant::now(), recording));
-                    self.status = "Recording camera navigation".into();
-                }
-                Err(error) => self.status = error,
-            }
+            self.evaluated_world = None;
         }
-        ui.label("Selected channels replace keys in the captured interval; keys outside it remain. One undo restores the capture.");
+        if let Some(take) = update.finished {
+            self.world.add_take(take);
+        }
+        // The settle time runs on frames: keep them coming until the gesture is cut.
+        if self.takes_recorder.recording() {
+            ctx.request_repaint();
+        }
     }
 
     fn apply_colour_change(&mut self, changed: bool) {
@@ -1335,7 +1256,7 @@ impl App {
     }
 
     fn load(&mut self, mut scene: Scene) {
-        self.camera_recording = None;
+        self.takes_recorder.cancel();
         self.preview.cancel();
         self.preview_key = None;
         self.scene_file_path = None;
@@ -2362,6 +2283,16 @@ impl App {
         while let Some(event) = self.io.poll_window() {
             self.window_event(ctx, event);
         }
+        while let Some(result) = self.io.poll_take() {
+            self.status = match result {
+                Ok(take) => {
+                    let id = self.world.add_take(take);
+                    let name = self.world.document.takes.get(id).map(|t| t.name.clone());
+                    format!("Imported take {}", name.unwrap_or_default())
+                }
+                Err(error) => format!("Take import failed: {error}"),
+            };
+        }
     }
     pub(crate) fn gui_fps(&self) -> u32 {
         self.gui_fps.clamp(15, 240)
@@ -2560,7 +2491,7 @@ impl App {
             resp.rect.width().max(1.0) as u32,
             resp.rect.height().max(1.0) as u32,
         );
-        let dt = ui.input(|i| i.stable_dt).clamp(1.0e-4, 0.1);
+        let dt = nav_dt(ui.ctx());
         if held {
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
             ui.ctx()
@@ -2612,6 +2543,7 @@ impl App {
         cam.roll_degrees = roll.to_degrees();
         let target = pose.eye + pose.forward() * dist;
         cam.target = [target.x, target.y, target.z];
+        self.navigated = true;
         if !held && !moving {
             self.fly = None;
         }
@@ -2686,7 +2618,7 @@ impl App {
         let rig = &mut self.orbit.rig;
         let coasting = rig.has_inertia();
         if coasting {
-            rig.update_dynamics(ui.input(|i| i.stable_dt).clamp(1.0e-4, 0.1));
+            rig.update_dynamics(nav_dt(ui.ctx()));
         }
         // Write back only real changes: a still drag must not restart the progressive render.
         let pose = rig.pose;
@@ -2696,6 +2628,7 @@ impl App {
             cam.pitch_degrees = pitch.to_degrees();
             cam.target = pose.target.to_array();
             cam.distance = pose.distance / radius;
+            self.navigated = true;
         }
         self.orbit_written = rig.has_inertia().then_some(*cam);
         if coasting || frame.request_repaint {
@@ -3594,11 +3527,6 @@ impl App {
     }
 
     fn process_preview_intent(&mut self, ctx: &egui::Context) {
-        if self.camera_recording.is_some() {
-            self.world_ui.playing = false;
-            self.world_ui.take_preview_action();
-            return;
-        }
         match self.world_ui.take_preview_action() {
             Some(action) => self.begin_preview(action.first, action.last, action.mode, ctx),
             None if self.preview.position().is_none() && self.world_ui.playing => {
@@ -3617,19 +3545,6 @@ impl App {
     }
 
     fn refresh_scene(&mut self) -> Result<(), String> {
-        if let Some((_, recording)) = &self.camera_recording {
-            if self.world.revision() == recording.revision
-                && self.world.document.graph.id == recording.document.graph.id
-            {
-                return Ok(());
-            }
-            self.camera_recording = None;
-            self.fly = None;
-            self.orbit = Default::default();
-            self.orbit_written = None;
-            self.evaluated_world = None;
-            self.status = "Camera recording cancelled because the document changed".into();
-        }
         // Cached playback presents worker-owned frames; keep the frozen scene instead
         // of rebuilding serialized world data on every clock tick. An edit or paused
         // navigation evaluates the current pose before any authoring takes place.
@@ -3660,9 +3575,10 @@ impl App {
     }
     pub(crate) fn ui(&mut self, root: &mut egui::Ui) {
         let ctx = root.ctx().clone();
-        let recording_frame = self.camera_recording.is_some();
+        self.navigated = false;
         self.apply_fonts(&ctx);
         self.update_scene_picker(&ctx);
+        self.update_take_picker(&ctx);
         self.colour.poll();
         self.world.new_key = self.world_ui.new_key;
         let dt = ctx.input(|i| i.stable_dt).max(1.0e-4);
@@ -3736,8 +3652,11 @@ impl App {
             });
         if let Some(before) = before.as_ref()
             && self.load_revision == edit_origin
-            && !recording_frame
-            && self.camera_recording.is_none()
+        {
+            self.record_take(&ctx, before.camera);
+        }
+        if let Some(before) = before.as_ref()
+            && self.load_revision == edit_origin
             && (self.scene.camera != before.camera
                 || self.scene.render != before.render
                 || self.scene.colour != before.colour)
@@ -3779,15 +3698,6 @@ impl App {
             }
         }
         self.snapshot_before = before;
-        if let Some((start, recording)) = &mut self.camera_recording {
-            if let Err(error) = recording.capture(start.elapsed().as_secs_f64(), self.scene.camera)
-            {
-                self.status = error;
-                self.camera_recording = None;
-                self.evaluated_world = None;
-            }
-            ctx.request_repaint();
-        }
         self.remember_material_targets();
         self.process_preview_intent(&ctx);
         self.world
@@ -3809,6 +3719,12 @@ impl App {
 #[allow(dead_code)]
 fn exists(p: &Path) -> bool {
     p.exists()
+}
+
+/// The navigation clock step: what the flight and orbit rigs integrate with, and what takes
+/// are timed by, so a played take moves at the speed it was flown.
+fn nav_dt(ctx: &egui::Context) -> f32 {
+    ctx.input(|i| i.stable_dt).clamp(1.0e-4, 0.1)
 }
 
 #[cfg(test)]

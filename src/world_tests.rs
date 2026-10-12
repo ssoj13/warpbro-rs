@@ -2841,3 +2841,123 @@ fn templates_reference_document() {
     let doc = WorldDocument::from_scene(&Scene::preset(0));
     std::fs::write(out, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
 }
+
+fn take_from(start: f64, cameras: &[crate::scene::Camera]) -> crate::takes::Take {
+    crate::takes::Take {
+        id: 0,
+        name: String::new(),
+        start,
+        timing: crate::camera_recorder::Timing::KeepSpeed,
+        pinned: false,
+        samples: cameras
+            .iter()
+            .enumerate()
+            .map(|(i, camera)| crate::camera_recorder::Sample {
+                seconds: i as f64,
+                camera: *camera,
+            })
+            .collect(),
+    }
+}
+
+#[test]
+fn a_bound_take_drives_the_snapshot_camera_and_survives_undo_redo_and_save() {
+    let mut e = editor();
+    let base = e.document.snapshot(0.0).unwrap().camera;
+    let mut turned = base;
+    turned.yaw_degrees += 30.0;
+    turned.distance *= 2.0;
+    let id = e.add_take(take_from(0.0, &[base, turned]));
+    let fps = e.document.fps;
+    let revision = e.revision();
+    e.set_current_take(Some(id)).unwrap();
+    assert_ne!(
+        e.revision(),
+        revision,
+        "binding moves the camera: caches must refresh"
+    );
+    // One second into the take (KeepSpeed from frame 0) is its last pose.
+    let shown = e.document.snapshot(fps).unwrap().camera;
+    assert!((shown.distance - turned.distance).abs() < 1e-6);
+    assert!((shown.yaw_degrees - turned.yaw_degrees).abs() < 1e-3);
+    // Takes are not edits: equality ignores them, undo/redo keep them.
+    e.execute(WorldCommand::SetMark {
+        slot: 1,
+        frame: Some(5),
+    })
+    .unwrap();
+    assert!(e.undo());
+    assert_eq!(e.document.takes.current_id(), Some(id));
+    assert!(e.redo());
+    assert_eq!(e.document.takes.list().len(), 1);
+    // Saved with the scene and loaded back bound.
+    let json = serde_json::to_string(&e.document).unwrap();
+    let loaded = crate::io_service::decode_scene(&json).unwrap();
+    let doc = loaded.document.unwrap();
+    assert_eq!(doc.takes.current_id(), Some(id));
+    assert_eq!(
+        doc.snapshot(fps).unwrap().camera,
+        e.document.snapshot(fps).unwrap().camera
+    );
+    // Unbound, the camera node shows again.
+    e.set_current_take(None).unwrap();
+    assert_eq!(e.document.snapshot(fps).unwrap().camera, base);
+}
+
+#[test]
+fn baking_a_take_keys_the_camera_in_one_undo_and_releases_the_binding() {
+    use crate::camera_recorder::{Options, Recording};
+    let mut e = editor();
+    let base = e.document.snapshot(0.0).unwrap().camera;
+    let mut zoomed = base;
+    zoomed.fov_y_degrees = base.fov_y_degrees * 0.5;
+    let id = e.add_take(take_from(0.0, &[base, zoomed]));
+    e.set_current_take(Some(id)).unwrap();
+    let before = e.document.clone();
+    let take = e.document.takes.get(id).unwrap().clone();
+    let options = Options {
+        transform: false,
+        focus: false,
+        f_number: false,
+        zoom: true,
+        ..Options::default()
+    };
+    let recording = Recording::from_take(&e.document, e.revision(), &take, options).unwrap();
+    e.record_camera(&recording).unwrap();
+    e.set_current_take(None).unwrap();
+    let fps = e.document.fps;
+    let keyed = e.document.snapshot(fps).unwrap().camera;
+    assert!((keyed.fov_y_degrees - zoomed.fov_y_degrees).abs() < 1e-3);
+    assert!(e.undo());
+    assert_eq!(e.document, before, "the bake is one undo step");
+    assert_eq!(e.document.takes.list().len(), 1, "undo keeps the take");
+}
+
+#[test]
+fn growing_the_work_area_extends_spans_ending_between_the_old_and_new_end() {
+    let mut e = editor();
+    let frac = find(&e, WorldKind::Fractal);
+    let light = find(&e, WorldKind::DirectionalLight);
+    let last = e.document.last;
+    // A span made while the work area was longer: it ends past the current end.
+    set(&mut e, frac, "/end", json!(f64::from(last) + 11.0), 0.0);
+    // A span that ends before the current end stays as authored.
+    set(&mut e, light, "/end", json!(f64::from(last) - 4.0), 0.0);
+    e.execute(WorldCommand::SetTimeRange {
+        first: e.document.first,
+        last: last + 40,
+        fps: e.document.fps,
+    })
+    .unwrap();
+    let end = |e: &WorldEditor, id| e.document.nodes().iter().find(|n| n.id == id).unwrap().end;
+    assert_eq!(end(&e, frac), f64::from(last) + 41.0);
+    assert_eq!(end(&e, light), f64::from(last) - 4.0);
+    // Shrinking never cuts spans.
+    e.execute(WorldCommand::SetTimeRange {
+        first: e.document.first,
+        last,
+        fps: e.document.fps,
+    })
+    .unwrap();
+    assert_eq!(end(&e, frac), f64::from(last) + 41.0);
+}

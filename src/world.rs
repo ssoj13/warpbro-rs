@@ -56,10 +56,19 @@ pub struct WorldDocument {
     pub fps: f64,
     /// Numbered time marks (After Effects composition markers): slot 0-9 -> frame.
     pub marks: BTreeMap<u8, u32>,
+    /// Recorded navigation takes. Saved with the scene, but outside undo/redo and outside
+    /// equality: a take is a recording, not an edit (`crate::takes`).
+    #[serde(default, skip_serializing_if = "crate::takes::Takes::is_empty")]
+    pub takes: crate::takes::Takes,
 }
 impl PartialEq for WorldDocument {
     fn eq(&self, other: &Self) -> bool {
-        serde_json::to_value(self).ok() == serde_json::to_value(other).ok()
+        let edits = |d: &Self| {
+            let mut value = serde_json::to_value(d).ok()?;
+            value.as_object_mut()?.remove("takes");
+            Some(value)
+        };
+        edits(self) == edits(other)
     }
 }
 #[derive(Clone, Debug)]
@@ -430,20 +439,7 @@ impl WorldEditor {
             }
             editor.document.store_attrs(prepared.camera, &attrs)?;
             if prepared.extend_last > editor.document.last {
-                let old_end = f64::from(editor.document.last) + 1.0;
-                for node in editor.document.nodes() {
-                    let mut attrs = editor.document.attrs(node.id)?;
-                    if !attrs.is_animated("/end")
-                        && attrs.get("/end").cloned().map(attr_json) == Some(json!(old_end))
-                    {
-                        attrs.set(
-                            "/end",
-                            to_attr(&json!(f64::from(prepared.extend_last) + 1.0)),
-                        );
-                        editor.document.store_attrs(node.id, &attrs)?;
-                    }
-                }
-                editor.document.last = prepared.extend_last;
+                editor.document.set_last(prepared.extend_last)?;
             }
             Ok(())
         })?;
@@ -458,6 +454,7 @@ impl WorldEditor {
     pub fn undo(&mut self) -> bool {
         self.finish_edit();
         if let Some((d, s, selected)) = self.undo.pop() {
+            let d = self.keep_takes(d);
             self.redo.push((
                 std::mem::replace(&mut self.document, d),
                 self.selection,
@@ -474,6 +471,7 @@ impl WorldEditor {
     pub fn redo(&mut self) -> bool {
         self.finish_edit();
         if let Some((d, s, selected)) = self.redo.pop() {
+            let d = self.keep_takes(d);
             self.undo.push((
                 std::mem::replace(&mut self.document, d),
                 self.selection,
@@ -487,6 +485,47 @@ impl WorldEditor {
             false
         }
     }
+    /// A history snapshot carrying the live takes: undo/redo restore edits, never recordings.
+    fn keep_takes(&self, mut document: WorldDocument) -> WorldDocument {
+        document.takes = self.document.takes.clone();
+        document
+    }
+
+    /// Store a finished take (no undo step). Returns its id.
+    pub fn add_take(&mut self, take: crate::takes::Take) -> u64 {
+        self.document.takes.add(take)
+    }
+
+    /// Bind `id` as the camera of the scene, or unbind with None. The snapshot changes, so the
+    /// revision does too.
+    pub fn set_current_take(&mut self, id: Option<u64>) -> Result<(), String> {
+        if self.document.takes.current_id() == id {
+            return Ok(());
+        }
+        self.document.takes.set_current(id)?;
+        self.revision = self.revision.wrapping_add(1);
+        Ok(())
+    }
+
+    pub fn delete_take(&mut self, id: u64) -> bool {
+        let bound = self.document.takes.current_id() == Some(id);
+        let removed = self.document.takes.remove(id);
+        if bound {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        removed
+    }
+
+    /// Rename, pin or retime a take; a change to the bound take moves the camera.
+    pub fn edit_take(&mut self, id: u64, apply: impl FnOnce(&mut crate::takes::Take)) -> bool {
+        let bound = self.document.takes.current_id() == Some(id);
+        let edited = self.document.takes.edit(id, apply);
+        if edited && bound {
+            self.revision = self.revision.wrapping_add(1);
+        }
+        edited
+    }
+
     #[cfg(test)]
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
@@ -754,7 +793,7 @@ impl WorldEditor {
                     return Err("Invalid animation time range".into());
                 }
                 self.document.first = first;
-                self.document.last = last;
+                self.document.set_last(last)?;
                 self.document.fps = fps;
             }
             WorldCommand::SetMark { slot, frame } => {
@@ -2850,6 +2889,34 @@ impl WorldDocument {
 }
 
 impl WorldDocument {
+    /// Move the work area's last frame. Growing it also grows every node span that reached the
+    /// old end or beyond it but stops short of the new one (a non-animated `/end` in
+    /// `[old_end, new_end)`), so nothing that was visible at the old end vanishes in the added
+    /// frames. Equality alone missed spans ending between the two (made while the work area was
+    /// longer), and the scene then changed after a camera recording grew the work area.
+    pub fn set_last(&mut self, last: u32) -> Result<(), String> {
+        if last > self.last {
+            let old_end = f64::from(self.last) + 1.0;
+            let new_end = f64::from(last) + 1.0;
+            for node in self.nodes() {
+                let mut attrs = self.attrs(node.id)?;
+                let end = attrs
+                    .get("/end")
+                    .cloned()
+                    .map(attr_json)
+                    .and_then(|v| v.as_f64());
+                if !attrs.is_animated("/end")
+                    && end.is_some_and(|end| (old_end..new_end).contains(&end))
+                {
+                    attrs.set("/end", to_attr(&json!(new_end)));
+                    self.store_attrs(node.id, &attrs)?;
+                }
+            }
+        }
+        self.last = last;
+        Ok(())
+    }
+
     pub fn from_scene(scene: &Scene) -> Self {
         if let Some(world) = &scene.document {
             return (**world).clone();
@@ -2870,6 +2937,7 @@ impl WorldDocument {
             last: scene.animation.last,
             fps: scene.animation.fps,
             marks: BTreeMap::new(),
+            takes: Default::default(),
         };
         document
             .seed_settings(scene)
@@ -4054,6 +4122,12 @@ impl WorldDocument {
                 scene.camera.target = m
                     .transform_point3(glam::Vec3::from(scene.camera.target))
                     .to_array();
+            }
+            // A bound take is the visible pose itself: it replaces the evaluated camera.
+            if let Some(take) = self.takes.current() {
+                scene.camera = take
+                    .pose_at_frame(frame, self.first, self.last, self.fps)
+                    .ok_or_else(|| format!("Take \"{}\" has no samples", take.name))?;
             }
         }
         if let Some(id) = self.active_environment.filter(|id| {

@@ -61,6 +61,15 @@ Documentation: [render and quality profiles](docs/render-profiles.md), [workspac
   - H restores the loaded preset/bookmark's camera; F frames the fractal's declared bounds
     (or a 10×10×10 box), including object scale/offset/rotation.
   - Settings → Controls adjusts mouse sensitivity and flight speed, saved between runs.
+- **Camera takes:** every navigation gesture (flight, orbit, pan, zoom, including the coast
+  after release) is recorded as a take at the speed it was flown; there is no record button.
+  - The Takes panel (next to the Outliner) keeps the 20 newest takes plus every pinned one; takes
+    are saved with the scene, outside undo/redo.
+  - Binding a take makes it the scene camera, live in the viewport, playback and export;
+    navigating again releases it and continues from its pose. Play binds and plays from the
+    frame the gesture began on; "Fit work area" stretches it over the work area instead.
+  - "Bake to keys" keys the bound take onto the camera (chosen channels, reduction error) as one
+    undo step; keys outside its span remain. Takes export and import as clip files.
 - **The browser:**
   - an 18-preset gallery with GPU-rendered thumbnails;
   - bookmarks (scenes saved as JSON);

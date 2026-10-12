@@ -52,6 +52,7 @@ pub enum Scope {
     Export,
     Outliner,
     MaterialLibrary,
+    Takes,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

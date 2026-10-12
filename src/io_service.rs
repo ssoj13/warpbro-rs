@@ -60,6 +60,10 @@ pub enum Command {
         path: PathBuf,
         document: Box<crate::world::WorldDocument>,
     },
+    /// Read a take clip file (`takes::Take::from_clip`); the result arrives from `poll_take`.
+    OpenTake {
+        path: PathBuf,
+    },
 }
 /// A finished window screenshot ([`Command::SaveWindow`]): the files written, or why none were.
 pub struct WindowEvent {
@@ -92,6 +96,7 @@ pub struct IoService {
     scene_events: mpsc::Receiver<SceneEvent>,
     template_events: mpsc::Receiver<Result<Vec<crate::templates::Entry>, String>>,
     window_events: mpsc::Receiver<WindowEvent>,
+    take_events: mpsc::Receiver<Result<crate::takes::Take, String>>,
 }
 impl IoService {
     pub fn spawn() -> Self {
@@ -100,6 +105,7 @@ impl IoService {
         let (scene_done, scene_events) = mpsc::channel();
         let (template_done, template_events) = mpsc::channel();
         let (window_done, window_events) = mpsc::channel();
+        let (take_done, take_events) = mpsc::channel();
         let settings = Arc::new(Mutex::new(None::<(PathBuf, String)>));
         let pending = settings.clone();
         thread::Builder::new()
@@ -163,6 +169,15 @@ impl IoService {
                                 .map(|_| None);
                             deliver(&scene_done, SceneEvent { id, path, result }, describe_scene);
                         }
+                        Ok(Command::OpenTake { path }) => {
+                            let result = std::fs::read_to_string(&path)
+                                .map_err(|error| format!("{}: {error}", path.display()))
+                                .and_then(|text| crate::takes::Take::from_clip(&text));
+                            deliver(&take_done, result, |result| match result {
+                                Ok(take) => format!("take {}", take.name),
+                                Err(error) => error.clone(),
+                            });
+                        }
                         Ok(Command::RefreshTemplates { directory }) => {
                             deliver(
                                 &template_done,
@@ -207,6 +222,7 @@ impl IoService {
             scene_events,
             template_events,
             window_events,
+            take_events,
         }
     }
     pub fn send(&self, cmd: Command) -> Result<(), String> {
@@ -225,6 +241,9 @@ impl IoService {
     }
     pub fn poll_window(&self) -> Option<WindowEvent> {
         self.window_events.try_recv().ok()
+    }
+    pub fn poll_take(&self) -> Option<Result<crate::takes::Take, String>> {
+        self.take_events.try_recv().ok()
     }
     pub fn poll(&self) -> Option<Result<String, String>> {
         self.events.try_recv().ok()

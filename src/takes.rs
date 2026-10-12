@@ -57,11 +57,10 @@ impl Take {
         if self.samples.first().is_some_and(|s| s.seconds != 0.0) {
             return bad("time must start at 0");
         }
-        if self
-            .samples
-            .windows(2)
-            .any(|w| w[0].seconds.partial_cmp(&w[1].seconds) != Some(std::cmp::Ordering::Less) || !w[1].seconds.is_finite())
-        {
+        if self.samples.windows(2).any(|w| {
+            w[0].seconds.partial_cmp(&w[1].seconds) != Some(std::cmp::Ordering::Less)
+                || !w[1].seconds.is_finite()
+        }) {
             return bad("sample times must increase");
         }
         if self.samples.iter().any(|s| !camera_finite(&s.camera)) {
@@ -124,7 +123,8 @@ impl Take {
 
     /// Parse a clip file; the take is unpinned and has no id until a store adds it.
     pub fn from_clip(text: &str) -> Result<Self, String> {
-        let clip: Clip = serde_json::from_str(text).map_err(|e| format!("Invalid take clip: {e}"))?;
+        let clip: Clip =
+            serde_json::from_str(text).map_err(|e| format!("Invalid take clip: {e}"))?;
         if clip.version != CLIP_VERSION {
             return Err(format!(
                 "Unsupported take clip version {} (expected {CLIP_VERSION})",
@@ -315,7 +315,10 @@ impl<'de> Deserialize<'de> for Takes {
             }
             list.push(Arc::new(take));
         }
-        if input.current.is_some_and(|id| list.iter().all(|t| t.id != id)) {
+        if input
+            .current
+            .is_some_and(|id| list.iter().all(|t| t.id != id))
+        {
             return Err(D::Error::custom("The current take does not exist"));
         }
         Ok(Self {
@@ -366,6 +369,11 @@ impl Recorder {
     /// Abandon a gesture in progress (the document was replaced).
     pub fn cancel(&mut self) {
         self.live = None;
+    }
+
+    /// A gesture is being recorded.
+    pub fn recording(&self) -> bool {
+        self.live.is_some()
     }
 
     pub fn tick(&mut self, t: &Tick) -> Update {
@@ -431,7 +439,10 @@ fn still(a: &Camera, b: &Camera) -> bool {
     let eps = 1.0e-6 * a.distance.abs().max(f32::MIN_POSITIVE);
     let near = |x: f32, y: f32, tol: f32| (x - y).abs() <= tol;
     a.free_flight == b.free_flight
-        && a.target.iter().zip(&b.target).all(|(x, y)| near(*x, *y, eps))
+        && a.target
+            .iter()
+            .zip(&b.target)
+            .all(|(x, y)| near(*x, *y, eps))
         && near(a.distance, b.distance, eps)
         && near(a.yaw_degrees, b.yaw_degrees, 1.0e-4)
         && near(a.pitch_degrees, b.pitch_degrees, 1.0e-4)
@@ -507,7 +518,10 @@ mod tests {
         }
         assert!(takes.get(first).is_some(), "pinned take survives");
         assert!(takes.get(second).is_some(), "bound take survives");
-        assert_eq!(takes.list().iter().filter(|t| !t.pinned).count(), MAX_UNPINNED);
+        assert_eq!(
+            takes.list().iter().filter(|t| !t.pinned).count(),
+            MAX_UNPINNED
+        );
         // The six oldest droppable takes (ids 3..=8) went first.
         assert_eq!(takes.list()[2].name, "Take 9");
         assert!(takes.remove(second));
@@ -541,7 +555,10 @@ mod tests {
         t.name = "Fly-by".into();
         let text = t.to_clip(24.0).unwrap();
         let back = Take::from_clip(&text).unwrap();
-        assert_eq!((back.name.as_str(), back.id, back.pinned), ("Fly-by", 0, false));
+        assert_eq!(
+            (back.name.as_str(), back.id, back.pinned),
+            ("Fly-by", 0, false)
+        );
         assert_eq!(back.samples, t.samples);
         let future = text.replace("\"version\": 1", "\"version\": 2");
         assert!(Take::from_clip(&future).unwrap_err().contains("version"));
@@ -585,7 +602,11 @@ mod tests {
         }
         let take = finished.expect("take finished");
         assert_eq!(take.start, 7.0);
-        assert_eq!(take.samples.len(), 31, "one initial pose + 30 moves; tail trimmed");
+        assert_eq!(
+            take.samples.len(),
+            31,
+            "one initial pose + 30 moves; tail trimmed"
+        );
         assert_eq!(take.samples[0].camera, cam(0.0));
         assert_eq!(take.samples[30].camera, cam(30.0));
         assert!((take.duration() - 30.0 / 60.0).abs() < 1e-9);
