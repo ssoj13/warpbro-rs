@@ -3474,46 +3474,103 @@ impl WorldDocument {
     /// time lies within the take (held first / last poses are not playing). None when the node
     /// plays no take, or none of it inside the work area. What the timeline draws as its bar.
     ///
-    /// One pass over the work area: with a keyed speed and a static offset, each frame's take
-    /// frame is the previous one's plus the speed integrated over that one frame (Simpson), not
-    /// a fresh integral from the start; an animated offset moves the start, so each frame is
-    /// warped on its own (`take_frame`).
+    /// Linear in the work area whatever is keyed: the take frame at `f` is
+    /// `anchor + C(f) - C(anchor + offset(f))` (`take_frame`), with `C` the speed's running
+    /// integral tabulated once on half frames (Simpson) over every point it is asked at.
     pub fn take_span(&self, id: NodeId) -> Result<Option<(i64, i64)>, String> {
-        let Some((take, mut shown)) = self.take_frame(id, f64::from(self.first))? else {
+        let Some(clip) = self.take_clip(id)? else {
             return Ok(None);
         };
+        let take = self
+            .takes
+            .get(clip)
+            .cloned()
+            .ok_or_else(|| format!("No take {clip}"))?;
         let attrs = self.attrs(id)?;
-        let incremental = attrs.is_animated(TAKE_SPEED)
-            && attrs.conn(TAKE_SPEED).is_none()
-            && !attrs.is_animated(TAKE_OFFSET)
-            && attrs.conn(TAKE_OFFSET).is_none();
-        let speed = |at: f64| -> Result<f64, String> {
-            attrs
-                .eval_at(TAKE_SPEED, at)
-                .map(attr_json)
-                .and_then(|v| v.as_f64())
-                .filter(|v| v.is_finite())
-                .ok_or_else(|| format!("{TAKE_SPEED} must be a finite number"))
-        };
-        let mut span: Option<(u32, u32)> = None;
-        for frame in self.first..=self.last {
-            if frame > self.first {
-                let f = f64::from(frame);
-                shown = if incremental {
-                    shown + (speed(f - 1.0)? + 4.0 * speed(f - 0.5)? + speed(f)?) / 6.0
+        // One reader per attribute: the keyed curve directly, a connection through its source.
+        let number = |path: &'static str| {
+            let connected = attrs.conn(path).is_some();
+            let attrs = &attrs;
+            move |at: f64| -> Result<f64, String> {
+                let value = if connected {
+                    self.attribute_value(id, path, at)?
                 } else {
-                    match self.take_frame(id, f)? {
-                        Some((_, shown)) => shown,
-                        None => return Ok(None),
-                    }
+                    attrs
+                        .eval_at(path, at)
+                        .map(attr_json)
+                        .ok_or_else(|| format!("Unavailable parameter {path}"))?
                 };
+                value
+                    .as_f64()
+                    .filter(|v| v.is_finite())
+                    .ok_or_else(|| format!("{path} must be a finite number"))
             }
+        };
+        let (offset, speed) = (number(TAKE_OFFSET), number(TAKE_SPEED));
+        let anchor = take.play_start(self.first);
+        let frames: Vec<f64> = (self.first..=self.last).map(f64::from).collect();
+        let begins = frames
+            .iter()
+            .map(|f| Ok(anchor + offset(*f)?))
+            .collect::<Result<Vec<f64>, String>>()?;
+        let shown: Vec<f64> = if attrs.is_animated(TAKE_SPEED) || attrs.conn(TAKE_SPEED).is_some() {
+            const H: f64 = 0.5;
+            let lo = begins
+                .iter()
+                .chain(&frames)
+                .copied()
+                .fold(f64::INFINITY, f64::min)
+                .floor();
+            let hi = begins
+                .iter()
+                .chain(&frames)
+                .copied()
+                .fold(f64::NEG_INFINITY, f64::max)
+                .ceil();
+            let steps = ((hi - lo) / H).ceil() as usize;
+            // Running integral at lo + k H, and the speed there (reused by the next step).
+            let mut table = Vec::with_capacity(steps + 1);
+            table.push(0.0);
+            let mut left = speed(lo)?;
+            for k in 0..steps {
+                let x = lo + k as f64 * H;
+                let right = speed(x + H)?;
+                let step = (left + 4.0 * speed(x + H * 0.5)? + right) * H / 6.0;
+                table.push(table[k] + step);
+                left = right;
+            }
+            let integral = |x: f64| -> Result<f64, String> {
+                let k = (((x - lo) / H).floor() as usize).min(steps);
+                let x0 = lo + k as f64 * H;
+                let rest = x - x0;
+                let partial = if rest > 0.0 {
+                    (speed(x0)? + 4.0 * speed(x0 + rest * 0.5)? + speed(x)?) * rest / 6.0
+                } else {
+                    0.0
+                };
+                Ok(table[k] + partial)
+            };
+            frames
+                .iter()
+                .zip(&begins)
+                .map(|(f, begin)| Ok(anchor + integral(*f)? - integral(*begin)?))
+                .collect::<Result<_, String>>()?
+        } else {
+            frames
+                .iter()
+                .zip(&begins)
+                .map(|(f, begin)| Ok(anchor + speed(*f)? * (f - begin)))
+                .collect::<Result<_, String>>()?
+        };
+        let mut span: Option<(i64, i64)> = None;
+        for (frame, shown) in frames.iter().zip(shown) {
             let seconds = take.seconds_at(shown, self.first, self.last, self.fps);
             if (0.0..=take.duration()).contains(&seconds) {
+                let frame = *frame as i64;
                 span = Some(span.map_or((frame, frame), |(start, _)| (start, frame)));
             }
         }
-        Ok(span.map(|(start, last)| (i64::from(start), i64::from(last) + 1)))
+        Ok(span.map(|(start, last)| (start, last + 1)))
     }
 
     /// The local transform the transform take node `id` plays shows at `frame`; None when it

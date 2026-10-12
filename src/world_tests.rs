@@ -3514,6 +3514,26 @@ fn a_takes_span_is_where_it_plays_under_its_warp() {
         e.document.take_span(frac).unwrap(),
         Some((per_frame[0], per_frame[per_frame.len() - 1] + 1))
     );
+    // A keyed offset too: still the same frames as warping each one on its own.
+    e.execute(WorldCommand::Key {
+        id: frac,
+        path: TAKE_OFFSET.into(),
+        frame: 0.0,
+    })
+    .unwrap();
+    set(&mut e, frac, TAKE_OFFSET, json!(30.0), 200.0);
+    let per_frame = (e.document.first..=e.document.last)
+        .filter(|f| {
+            let (take, shown) = e.document.take_frame(frac, f64::from(*f)).unwrap().unwrap();
+            let s = take.seconds_at(shown, e.document.first, e.document.last, fps);
+            (0.0..=take.duration()).contains(&s)
+        })
+        .map(i64::from)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        e.document.take_span(frac).unwrap(),
+        Some((per_frame[0], per_frame[per_frame.len() - 1] + 1))
+    );
     e.bind_take(&[frac], None, None).unwrap();
     assert_eq!(e.document.take_span(frac).unwrap(), None);
 }
