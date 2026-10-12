@@ -242,19 +242,35 @@ fn mean(samples: &[Sample], like: &Camera) -> Camera {
         })
         .fold(glam::Quat::from_xyzw(0.0, 0.0, 0.0, 0.0), |a, q| a + q)
         .normalize();
-    let (yaw, pitch, roll) = q.to_euler(glam::EulerRot::YXZ);
-    Camera {
+    let mut out = Camera {
         target: std::array::from_fn(|k| avg(&|c| c.target[k])),
         distance: avg(&|c| c.distance),
         fov_y_degrees: avg(&|c| c.fov_y_degrees),
         f_number: avg(&|c| c.f_number),
         sensor_height: avg(&|c| c.sensor_height),
         focus_distance: avg(&|c| c.focus_distance),
-        yaw_degrees: yaw.to_degrees(),
-        pitch_degrees: -pitch.to_degrees(),
-        roll_degrees: roll.to_degrees(),
         ..*like
-    }
+    };
+    set_orientation(&mut out, q, like);
+    out
+}
+
+/// Write the rotation `q` into `camera`'s yaw / pitch / roll (Euler YXZ) as the angles nearest
+/// `near`'s by whole turns: no flip at +-180 between neighbouring poses, the turns of a yaw past
+/// +-180 kept (`curves::nearest_euler`, the Euler filter's rule).
+fn set_orientation(camera: &mut Camera, q: glam::Quat, near: &Camera) {
+    let (yaw, pitch, roll) = q.to_euler(glam::EulerRot::YXZ);
+    let [yaw, pitch, roll] = curves::nearest_euler(
+        [yaw.to_degrees(), -pitch.to_degrees(), roll.to_degrees()],
+        [near.yaw_degrees, near.pitch_degrees, near.roll_degrees],
+        // Whole turns only: the pitch is limited to +-90, the second solution would leave it.
+        None,
+    );
+    (
+        camera.yaw_degrees,
+        camera.pitch_degrees,
+        camera.roll_degrees,
+    ) = (yaw, pitch, roll);
 }
 
 /// Takes on the system clipboard: the clip format, many at once.
@@ -355,11 +371,7 @@ fn blend(a: &Camera, b: &Camera, t: f32) -> Camera {
     if (a.yaw_degrees, a.pitch_degrees, a.roll_degrees)
         != (b.yaw_degrees, b.pitch_degrees, b.roll_degrees)
     {
-        let q = a.orientation().slerp(b.orientation(), t);
-        let (yaw, pitch, roll) = q.to_euler(glam::EulerRot::YXZ);
-        c.yaw_degrees = yaw.to_degrees();
-        c.pitch_degrees = -pitch.to_degrees();
-        c.roll_degrees = roll.to_degrees();
+        set_orientation(&mut c, a.orientation().slerp(b.orientation(), t), a);
     }
     c
 }

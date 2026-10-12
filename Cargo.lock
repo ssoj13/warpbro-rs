@@ -2688,7 +2688,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 [[package]]
 name = "curves"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/curves-rs.git?branch=main#169ded7299f85d1f2b2472c5f579679993c9c222"
+source = "git+ssh://git@github.com/ssoj13/curves-rs.git?branch=main#ada2822fe7eae5a7badeb5622be4f8db2a6a3d7a"
 dependencies = [
  "serde",
 ]

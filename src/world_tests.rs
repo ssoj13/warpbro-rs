@@ -2961,3 +2961,88 @@ fn growing_the_work_area_extends_spans_ending_between_the_old_and_new_end() {
     .unwrap();
     assert_eq!(end(&e, frac), f64::from(last) + 41.0);
 }
+
+#[test]
+fn curve_effects_filter_rotations_simplify_curves_and_undo_in_one_step() {
+    let mut e = editor();
+    let frac = find(&e, WorldKind::Fractal);
+    // A turn about z keyed in the wrapped range: 170 -> -170 is a 340 degree jump back.
+    for (frame, z) in [(0.0, 150.0), (10.0, 170.0), (20.0, -170.0), (30.0, -150.0)] {
+        e.document
+            .set_attribute(
+                frac,
+                "/transform/rotation_degrees",
+                json!([0.0, 0.0, z]),
+                frame,
+                true,
+                Tan::Linear,
+            )
+            .unwrap();
+    }
+    let before = e.document.clone();
+    e.execute(WorldCommand::CurveEffect {
+        targets: vec![(frac, "/transform/rotation_degrees/2".into())],
+        effect: curves::Effect::EulerFilter { middle: Some(1) },
+    })
+    .unwrap();
+    let z = |e: &WorldEditor, f: f64| {
+        e.document
+            .attribute_value(frac, "/transform/rotation_degrees", f)
+            .unwrap()[2]
+            .as_f64()
+            .unwrap()
+    };
+    assert!((z(&e, 20.0) - 190.0).abs() < 1e-6, "{}", z(&e, 20.0));
+    assert!(
+        (z(&e, 15.0) - 180.0).abs() < 1e-6,
+        "the turn goes forward through 180"
+    );
+    assert!(e.undo());
+    assert_eq!(e.document, before, "one undo step");
+    // Simplify: a densely keyed straight line keeps its shape with two keys.
+    for f in 0..=40 {
+        e.document
+            .set_attribute(
+                frac,
+                "/transform/position",
+                json!([f as f64 * 0.5, 0.0, 0.0]),
+                f64::from(f),
+                true,
+                Tan::Linear,
+            )
+            .unwrap();
+    }
+    e.execute(WorldCommand::CurveEffect {
+        targets: vec![(frac, "/transform/position/0".into())],
+        effect: curves::Effect::Simplify {
+            tolerance: 1e-6,
+            max_keys: None,
+        },
+    })
+    .unwrap();
+    let keys = e
+        .document
+        .attrs(frac)
+        .unwrap()
+        .anim("/transform/position")
+        .unwrap()
+        .channels[0]
+        .keys()
+        .len();
+    assert!(keys <= 3, "{keys} keys");
+    let x = e
+        .document
+        .attribute_value(frac, "/transform/position", 13.0)
+        .unwrap()[0]
+        .as_f64()
+        .unwrap();
+    assert!((x - 6.5).abs() < 1e-6);
+    // The Euler filter needs a rotation.
+    assert!(
+        e.execute(WorldCommand::CurveEffect {
+            targets: vec![(frac, "/transform/position/0".into())],
+            effect: curves::Effect::EulerFilter { middle: Some(1) },
+        })
+        .is_err()
+    );
+}

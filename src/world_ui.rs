@@ -146,6 +146,24 @@ struct OutlinerCache {
     model: OutlinerModel,
     config: OutlinerConfig,
 }
+/// The Effects menu's parameters (session state).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct EffectParams {
+    tolerance: f64,
+    max_keys: usize,
+    iterations: u32,
+    strength: f64,
+}
+impl Default for EffectParams {
+    fn default() -> Self {
+        Self {
+            tolerance: 0.01,
+            max_keys: 0,
+            iterations: 4,
+            strength: 0.5,
+        }
+    }
+}
 #[derive(Default)]
 struct TimelineCache {
     document: Option<NodeId>,
@@ -191,6 +209,8 @@ pub struct WorldUi {
     pub looping: bool,
     /// Hide shy nodes from the timeline (After Effects "Hide shy layers"); the Outliner keeps them.
     pub hide_shy: bool,
+    /// Parameters of the timeline's curve effects (Effects menu).
+    effects: EffectParams,
     pub attribute_label_width: f32,
     /// Authored outline/canvas split; narrow panels only clamp its drawn width.
     pub timeline_outline_width: f32,
@@ -239,6 +259,7 @@ impl Default for WorldUi {
             new_key: Tan::Smooth,
             looping: true,
             hide_shy: true,
+            effects: EffectParams::default(),
             attribute_label_width: 180.0,
             timeline_outline_width: 340.0,
             attribute_metrics: AttrMetrics::default(),
@@ -2078,6 +2099,9 @@ impl WorldUi {
                         .text("Zoom"),
                 );
             });
+            ui.menu_button("Effects", |ui| self.effects_menu(ui, e))
+                .response
+                .on_hover_text("Whole-curve effects on the curves of the selected keys (one undo each)");
             ui.menu_button("Interpolation", |ui| {
                 for kind in Tan::ALL {
                     if ui
@@ -2115,6 +2139,68 @@ impl WorldUi {
             self.playhead = self.playhead.clamp(e.document.first, e.document.last);
         }
     }
+    /// The Effects menu: Simplify, Smooth and Euler filter (`curves::Effect`) with their
+    /// parameters, applied as one `WorldCommand::CurveEffect` to the curves of the selected keys.
+    fn effects_menu(&mut self, ui: &mut egui::Ui, e: &mut WorldEditor) {
+        let mut targets: Vec<(NodeId, String)> = Vec::new();
+        for k in &self.keys {
+            if !targets
+                .iter()
+                .any(|(id, path)| *id == k.node && *path == k.path)
+            {
+                targets.push((k.node, k.path.clone()));
+            }
+        }
+        let any = !targets.is_empty();
+        if !any {
+            ui.weak("Select keys: an effect edits their curves.");
+        }
+        let p = &mut self.effects;
+        let mut chosen = None;
+        egui::Grid::new("curve_effects").num_columns(3).show(ui, |ui| {
+            ui.label("Simplify");
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut p.tolerance).range(0.0..=1.0e3).speed(0.001).prefix("error "))
+                    .on_hover_text("Largest allowed change of the curve, in the channel's units");
+                ui.add(egui::DragValue::new(&mut p.max_keys).range(0..=100_000).prefix("max keys "))
+                    .on_hover_text("0: no limit. Otherwise the smallest error that fits in this many keys");
+            });
+            if ui.add_enabled(any, egui::Button::new("Apply")).clicked() {
+                chosen = Some(curves::Effect::Simplify {
+                    tolerance: p.tolerance,
+                    max_keys: (p.max_keys > 0).then_some(p.max_keys),
+                });
+            }
+            ui.end_row();
+            ui.label("Smooth");
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut p.iterations).range(1..=1000).prefix("iterations "));
+                ui.add(egui::DragValue::new(&mut p.strength).range(0.0..=1.0).speed(0.01).prefix("strength "));
+            });
+            if ui.add_enabled(any, egui::Button::new("Apply")).clicked() {
+                chosen = Some(curves::Effect::Smooth {
+                    iterations: p.iterations,
+                    strength: p.strength,
+                });
+            }
+            ui.end_row();
+            ui.label("Euler filter");
+            ui.weak("rotation flips and turns");
+            if ui
+                .add_enabled(any, egui::Button::new("Apply"))
+                .on_hover_text("Rewrites the selected rotations to the equivalent angles nearest each previous moment")
+                .clicked()
+            {
+                chosen = Some(curves::Effect::EulerFilter { middle: Some(1) });
+            }
+            ui.end_row();
+        });
+        if let Some(effect) = chosen {
+            self.command(e, WorldCommand::CurveEffect { targets, effect });
+            ui.close();
+        }
+    }
+
     fn edit_attribute(
         &mut self,
         ui: &mut egui::Ui,

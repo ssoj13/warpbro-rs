@@ -184,6 +184,15 @@ pub enum WorldCommand {
         frames: Vec<f64>,
         kind: Tan,
     },
+    /// A whole-curve effect (`curves::Effect`: Simplify, Smooth, Euler filter) on the animation
+    /// of `targets` (node, attribute or component path), one undo step. Simplify and Smooth edit
+    /// each continuous channel; discrete ones (choices, switches) are left alone. The Euler filter
+    /// edits the rotation each target belongs to: `/transform/rotation_degrees` (ZYX, y the
+    /// middle angle) or a camera's yaw / pitch / roll (whole turns only: the pitch is limited).
+    CurveEffect {
+        targets: Vec<(NodeId, String)>,
+        effect: curves::Effect<f64>,
+    },
     SetMetadata {
         id: NodeId,
         path: String,
@@ -1184,8 +1193,102 @@ impl WorldEditor {
                 }
                 self.document.store_attrs(id, &attrs)?;
             }
+            WorldCommand::CurveEffect { targets, effect } => self.curve_effect(targets, effect)?,
         }
         self.document.rebuild_children();
+        Ok(())
+    }
+
+    fn curve_effect(
+        &mut self,
+        targets: Vec<(NodeId, String)>,
+        effect: curves::Effect<f64>,
+    ) -> Result<(), String> {
+        const CAMERA_ROTATION: [&str; 3] = [
+            "/camera/yaw_degrees",
+            "/camera/pitch_degrees",
+            "/camera/roll_degrees",
+        ];
+        const ROTATION: &str = "/transform/rotation_degrees";
+        let error = |e: curves::KeysError| e.to_string();
+        if let curves::Effect::EulerFilter { .. } = effect {
+            let mut rotations: Vec<(NodeId, bool)> = Vec::new();
+            for (id, path) in &targets {
+                let camera = CAMERA_ROTATION.contains(&path.as_str());
+                if (camera || path.starts_with(ROTATION)) && !rotations.contains(&(*id, camera)) {
+                    rotations.push((*id, camera));
+                }
+            }
+            if rotations.is_empty() {
+                return Err("Euler filter: select keys of a rotation".into());
+            }
+            for (id, camera) in rotations {
+                self.document.assert_unlocked(id)?;
+                let mut attrs = self.document.attrs(id)?;
+                if camera {
+                    let mut tracks = CAMERA_ROTATION
+                        .iter()
+                        .map(|path| {
+                            attrs
+                                .anim(path)
+                                .and_then(|a| a.channels.first())
+                                .map(|c| c.track().clone())
+                        })
+                        .collect::<Option<Vec<_>>>()
+                        .ok_or("Euler filter: animate yaw, pitch and roll")?;
+                    curves::Effect::EulerFilter { middle: None }
+                        .apply(&mut tracks)
+                        .map_err(error)?;
+                    for (path, track) in CAMERA_ROTATION.iter().zip(tracks) {
+                        if let Some(channel) =
+                            attrs.anim_mut(path).and_then(|a| a.channels.first_mut())
+                        {
+                            channel.replace_track(track);
+                        }
+                    }
+                } else {
+                    let anim = attrs
+                        .anim_mut(ROTATION)
+                        .filter(|a| a.channels.len() == 3)
+                        .ok_or("Euler filter: animate the rotation")?;
+                    let mut tracks: Vec<_> =
+                        anim.channels.iter().map(|c| c.track().clone()).collect();
+                    curves::Effect::EulerFilter { middle: Some(1) }
+                        .apply(&mut tracks)
+                        .map_err(error)?;
+                    for (channel, track) in anim.channels.iter_mut().zip(tracks) {
+                        channel.replace_track(track);
+                    }
+                }
+                self.document.store_attrs(id, &attrs)?;
+            }
+            return Ok(());
+        }
+        for (id, path) in targets {
+            self.document.assert_unlocked(id)?;
+            let component = self.document.component_path(id, &path)?;
+            let parent = component
+                .as_ref()
+                .map_or(path.as_str(), |(p, _)| p.as_str())
+                .to_owned();
+            if component.is_none() && self.document.is_discrete(id, &parent)? {
+                continue;
+            }
+            let mut attrs = self.document.attrs(id)?;
+            let Some(anim) = attrs.anim_mut(&parent) else {
+                continue;
+            };
+            for (index, channel) in anim.channels.iter_mut().enumerate() {
+                if component.as_ref().is_some_and(|(_, i)| *i != index) {
+                    continue;
+                }
+                let mut tracks = [channel.track().clone()];
+                effect.apply(&mut tracks).map_err(error)?;
+                let [track] = tracks;
+                channel.replace_track(track);
+            }
+            self.document.store_attrs(id, &attrs)?;
+        }
         Ok(())
     }
     /// Author viewport navigation on the active Camera layer, without implicit key creation.
@@ -3720,11 +3823,12 @@ impl WorldDocument {
         let rotation = (desired_local * scaled_canonical.inverse()).normalize();
         let (z, y, x) = rotation.to_euler(glam::EulerRot::ZYX);
         // Playa uses clockwise-positive ZYX rotation, unlike Camera's YXZ orbit basis.
-        let mut degrees = [-x.to_degrees(), -y.to_degrees(), -z.to_degrees()];
-        let previous = vector("/transform/rotation_degrees")?;
-        for (angle, previous) in degrees.iter_mut().zip(previous.to_array()) {
-            *angle = previous + (*angle - previous + 180.0).rem_euclid(360.0) - 180.0;
-        }
+        // The equivalent nearest the authored rotation: both Euler solutions and whole turns.
+        let degrees = curves::nearest_euler(
+            [-x.to_degrees(), -y.to_degrees(), -z.to_degrees()],
+            vector("/transform/rotation_degrees")?.to_array(),
+            Some(1),
+        );
         let target = Vec3::from(after.camera.target);
         if !target.is_finite() {
             return Err("Invalid camera target".into());

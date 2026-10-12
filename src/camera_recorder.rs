@@ -3,7 +3,7 @@
 use crate::scene::{Camera, Scene};
 use crate::takes::Take;
 use crate::world::{NodeId, WorldDocument};
-use curves::{Fitter, Track, unwind_slice};
+use curves::{Fitter, Track, nearest_euler};
 use playa_engine::entities::anim::{Animation, Channel};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -192,16 +192,12 @@ impl Recording {
         let mut channels = BTreeMap::new();
         let mut key_count = 0;
         let mut max_error: f64 = 0.0;
-        for (path, components) in data {
+        for (path, mut components) in data {
+            if path == "/transform/rotation_degrees" {
+                continuous_rotation(&mut components)?;
+            }
             let mut animation = Animation::with_arity(components.len());
-            for (index, mut samples) in components.into_iter().enumerate() {
-                if path == "/transform/rotation_degrees" {
-                    let mut values: Vec<_> = samples.iter().map(|s| s.1).collect();
-                    unwind_slice(&mut values, 360.0).map_err(|e| e.to_string())?;
-                    for (sample, value) in samples.iter_mut().zip(values) {
-                        sample.1 = value;
-                    }
-                }
+            for (index, samples) in components.into_iter().enumerate() {
                 let mut track = Track::new();
                 let stats = fitter
                     .fit(&samples, self.options.tolerance, &mut track)
@@ -250,6 +246,25 @@ fn append(
             return Err("Recorded camera values must be finite".into());
         }
         samples.push((frame, value));
+    }
+    Ok(())
+}
+
+/// Rotation samples (`/transform/rotation_degrees`: x, y, z, Playa's ZYX order, y the middle
+/// rotation) rewritten so each sample is the equivalent of its angles nearest the previous one
+/// (`curves::nearest_euler`: both Euler solutions and whole turns), the same rule as the Euler
+/// filter: no 180 / 360 degree flips between samples. The components share their sample times.
+fn continuous_rotation(components: &mut [Vec<(f64, f64)>]) -> Result<(), String> {
+    let [x, y, z] = components else {
+        return Err("Rotation needs three components".into());
+    };
+    if x.len() != y.len() || x.len() != z.len() {
+        return Err("Rotation components have different samples".into());
+    }
+    for i in 1..x.len() {
+        let previous = [x[i - 1].1, y[i - 1].1, z[i - 1].1];
+        let [a, b, c] = nearest_euler([x[i].1, y[i].1, z[i].1], previous, Some(1));
+        (x[i].1, y[i].1, z[i].1) = (a, b, c);
     }
     Ok(())
 }

@@ -953,7 +953,7 @@ impl App {
         } else {
             self.world.selected.clone()
         };
-        // (node, parent world matrix, world scale), in the order of `targets`.
+        // (node, parent world matrix, world scale, authored rotation), in the order of `targets`.
         let mut edited = Vec::new();
         let mut targets = Vec::new();
         for id in selected {
@@ -985,7 +985,12 @@ impl App {
                 rotation,
                 translation,
             ));
-            edited.push((id, parent, scale));
+            let authored = document
+                .attribute_value(id, "/transform/rotation_degrees", frame)
+                .ok()
+                .and_then(|v| serde_json::from_value::<[f32; 3]>(v).ok())
+                .unwrap_or([0.0; 3]);
+            edited.push((id, parent, scale, authored));
         }
         let Some(tool) = tool.filter(|_| !targets.is_empty() && rect.height() > 0.0) else {
             self.gizmo.clear_hover();
@@ -1012,7 +1017,7 @@ impl App {
         };
         let gesture = egui::Id::new("viewport_gizmo").value();
         self.gizmo_gesture = Some(gesture);
-        for ((id, parent, scale), t) in edited.into_iter().zip(moved) {
+        for ((id, parent, scale, authored), t) in edited.into_iter().zip(moved) {
             let scale = if self.tool == ViewTool::Scale {
                 t.scale
             } else {
@@ -1021,6 +1026,9 @@ impl App {
             let pose =
                 glam::Mat4::from_scale_rotation_translation(scale, t.rotation, t.translation);
             let (position, rotation, scale) = crate::world::local_pose(parent, pose);
+            // The equivalent angles nearest the authored ones (both Euler solutions, whole
+            // turns): no flip at +-180, and the turns of the value and its keys are kept.
+            let rotation = curves::nearest_euler(rotation, authored, Some(1));
             let (path, value) = match self.tool {
                 ViewTool::Move => ("/transform/position", position),
                 ViewTool::Rotate => ("/transform/rotation_degrees", rotation),
