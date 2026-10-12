@@ -175,6 +175,19 @@ pub(crate) struct App {
     last_scene: Scene,
     /// Evaluated selected-profile scene; invalidated by graph revision, time or profile.
     viewport_scene: Option<(playa_graph::NodeId, u64, u64, Scene)>,
+    /// The viewport extras and what they were built for (document, revision, playhead,
+    /// selection, aspect): `App::draw_overlays`.
+    #[allow(clippy::type_complexity)]
+    overlays: Option<(
+        (
+            playa_graph::NodeId,
+            u64,
+            u64,
+            Vec<crate::world::NodeId>,
+            u32,
+        ),
+        Vec<crate::overlay::Wire>,
+    )>,
     /// The profile binding sent with the last viewport request; the toolbar shows and edits it.
     viewport_render: Option<crate::render_profiles::ViewportRender>,
     /// Viewport A/B: raw samples instead of the denoised image (view state, not the scene).
@@ -590,6 +603,7 @@ impl App {
             origin: scene.clone(),
             last_scene: scene.clone(),
             viewport_scene: None,
+            overlays: None,
             viewport_render: None,
             scene: scene.clone(),
             world: crate::world::WorldEditor::new(crate::world::WorldDocument::from_scene(&scene)),
@@ -941,50 +955,68 @@ impl App {
     /// the local pose under the parent, one undo step per drag, keyed like any edit at the
     /// playhead. The edits change the scene, so the viewport switches to its Moving profile
     /// while dragging, as during navigation.
-    /// The fractals a Bounds display shows (`render_profiles::Display::Bounds`): each one's cube,
-    /// drawn over the image through the viewport camera, edges cut at the camera plane.
-    fn draw_bounds(&self, ui: &egui::Ui, rect: egui::Rect) {
-        let Some(bounds) = self
+    /// Draw the viewport's extras (`overlay::extras`, cached per document state, playhead,
+    /// selection and aspect) and the cubes of a Bounds display over the image.
+    fn draw_overlays(&mut self, ui: &egui::Ui, rect: egui::Rect) {
+        let frame = f64::from(self.world_ui.playhead);
+        let aspect = rect.width() / rect.height().max(1.0);
+        let selected: Vec<_> = if self.world.selected.is_empty() {
+            self.world.selection.into_iter().collect()
+        } else {
+            self.world.selected.clone()
+        };
+        let key = (
+            playa_graph::NodeId(self.world.document.graph.id),
+            self.world.revision(),
+            frame.to_bits(),
+            selected,
+            aspect.to_bits(),
+        );
+        if self
+            .overlays
+            .as_ref()
+            .is_none_or(|(cached, _)| *cached != key)
+        {
+            let document = &self.world.document;
+            let wires = document.viewport_policy(frame).and_then(|policy| {
+                crate::overlay::extras(document, frame, &policy, &key.3, aspect)
+            });
+            match wires {
+                Ok(wires) => self.overlays = Some((key, wires)),
+                Err(error) => {
+                    self.overlays = None;
+                    self.status = error;
+                    return;
+                }
+            }
+        }
+        let (view, projection) = self.scene.camera_matrices(aspect);
+        let clip = projection * view;
+        let painter = ui.painter_at(rect);
+        let visuals = ui.visuals();
+        let plain = egui::Stroke::new(1.0, visuals.widgets.noninteractive.fg_stroke.color);
+        let selected = egui::Stroke::new(1.5, visuals.selection.stroke.color);
+        let bounds = self
             .viewport_scene
             .as_ref()
-            .map(|cached| &cached.3.bounds)
-            .filter(|bounds| !bounds.is_empty())
-        else {
-            return;
-        };
-        let (view, projection) = self.scene.camera_matrices(rect.width() / rect.height());
-        let painter = ui.painter_at(rect);
-        let stroke = egui::Stroke::new(1.0, ui.visuals().selection.stroke.color);
-        let screen = |p: glam::Vec4| {
-            let ndc = p.truncate() / p.w;
-            egui::pos2(
-                rect.left() + (ndc.x * 0.5 + 0.5) * rect.width(),
-                rect.top() + (0.5 - ndc.y * 0.5) * rect.height(),
-            )
-        };
-        const NEAR: f32 = 1.0e-6;
-        for b in bounds {
-            let clip = projection * view * glam::Mat4::from_cols_array_2d(&b.world);
-            let corner = |i: usize| {
-                let side = |bit: usize| if i & bit != 0 { b.half } else { -b.half };
-                clip * glam::Vec4::new(side(1), side(2), side(4), 1.0)
-            };
-            for i in 0..8 {
-                for bit in [1, 2, 4] {
-                    if i & bit != 0 {
-                        continue;
+            .map(|cached| cached.3.bounds.as_slice())
+            .unwrap_or_default();
+        let wires = self
+            .overlays
+            .iter()
+            .flat_map(|(_, wires)| wires.iter().cloned());
+        for wire in wires.chain(crate::overlay::bounds(bounds)) {
+            for [a, b] in crate::overlay::project(&wire, clip, rect) {
+                match wire.style {
+                    crate::overlay::Style::Plain => {
+                        painter.line_segment([a, b], plain);
                     }
-                    let (mut a, mut c) = (corner(i), corner(i | bit));
-                    if a.w <= NEAR && c.w <= NEAR {
-                        continue;
+                    crate::overlay::Style::Selected => {
+                        painter.line_segment([a, b], selected);
                     }
-                    // The part in front of the camera only.
-                    if a.w <= NEAR {
-                        a = c + (a - c) * ((c.w - NEAR) / (c.w - a.w));
-                    } else if c.w <= NEAR {
-                        c = a + (c - a) * ((a.w - NEAR) / (a.w - c.w));
+                    crate::overlay::Style::Cut => {
+                        painter.extend(egui::Shape::dashed_line(&[a, b], plain, 6.0, 4.0));
                     }
-                    painter.line_segment([screen(a), screen(c)], stroke);
                 }
             }
         }
@@ -1005,6 +1037,13 @@ impl App {
         } else {
             self.world.selected.clone()
         };
+        let policy = match document.viewport_policy(frame) {
+            Ok(policy) => policy,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
         // (node, parent world matrix, world scale, shown local pose, bound to a take), in the
         // order of `targets`.
         let mut edited = Vec::new();
@@ -1020,7 +1059,14 @@ impl App {
                 ViewTool::Rotate => turns,
                 ViewTool::Scale => scales,
             };
-            if info.locked || !takes_tool {
+            // The viewport manipulates only what it shows and lets pick (its kind filter).
+            if info.locked
+                || !takes_tool
+                || !policy.selectable.contains(info.kind)
+                || !document
+                    .shows(id, info.kind, frame, policy.shown)
+                    .unwrap_or(false)
+            {
                 continue;
             }
             let Ok((pose, parent)) = document.manip_frame(id, frame) else {
@@ -2361,11 +2407,11 @@ impl App {
             .as_ref()
             .is_none_or(|cached| (cached.0, cached.1, cached.2) != profile_key)
         {
-            match self
-                .world
-                .document
-                .snapshot_with_render_profile(effective.profile, f64::from(self.world_ui.playhead))
-            {
+            match self.world.document.snapshot_with_render_profile(
+                effective.profile,
+                f64::from(self.world_ui.playhead),
+                crate::world::View::Viewport,
+            ) {
                 Ok(scene) => {
                     self.viewport_scene = Some((profile_key.0, profile_key.1, profile_key.2, scene))
                 }
@@ -3541,7 +3587,7 @@ impl App {
                 },
             ));
         }
-        self.draw_bounds(ui, rect);
+        self.draw_overlays(ui, rect);
         self.manipulate(ui, rect);
         if self.export.is_running() {
             let text = format!("Rendering · {}", self.export.status);
@@ -4478,7 +4524,7 @@ mod tests {
         let manual = edited.document.viewport_policy(0.0).unwrap().manual_id;
         let expected = edited
             .document
-            .snapshot_with_render_profile(manual, 0.0)
+            .snapshot_with_render_profile(manual, 0.0, crate::world::View::Viewport)
             .unwrap()
             .objects;
         assert_ne!(expected, previous);

@@ -2422,14 +2422,14 @@ fn profile_fast_materials_are_evaluated_only_and_preserve_transmission_and_geome
     let saved = e.document.clone();
     let fast = e
         .document
-        .snapshot_with_render_profile(policy.moving_id, 0.0)
+        .snapshot_with_render_profile(policy.moving_id, 0.0, View::Viewport)
         .unwrap();
     assert_eq!(fast.objects[0].material.model, MaterialModel::Fast);
     assert_eq!(fast.objects[0].render.iterations, scene.render.iterations);
     assert_eq!(fast.objects[0].render.max_bounces, 2);
     let full = e
         .document
-        .snapshot_with_render_profile(policy.still_id, 0.0)
+        .snapshot_with_render_profile(policy.still_id, 0.0, View::Viewport)
         .unwrap();
     assert_eq!(
         full.objects[0].material.model,
@@ -2444,7 +2444,7 @@ fn profile_fast_materials_are_evaluated_only_and_preserve_transmission_and_geome
     );
     assert_eq!(
         e.document
-            .snapshot_with_render_profile(policy.still_id, 0.0)
+            .snapshot_with_render_profile(policy.still_id, 0.0, View::Viewport)
             .unwrap()
             .objects[0]
             .material
@@ -2454,7 +2454,7 @@ fn profile_fast_materials_are_evaluated_only_and_preserve_transmission_and_geome
     set(&mut e, material, "/material/transmission", json!(0.75), 0.0);
     assert_eq!(
         e.document
-            .snapshot_with_render_profile(policy.moving_id, 0.0)
+            .snapshot_with_render_profile(policy.moving_id, 0.0, View::Viewport)
             .unwrap()
             .objects[0]
             .material
@@ -3378,7 +3378,7 @@ fn display_modes_thin_trace_direct_or_show_bounds_on_their_profile_only() {
     let output = e.document.output_render_profile().unwrap();
     let shown = |e: &WorldEditor, profile| {
         e.document
-            .snapshot_with_render_profile(profile, 0.0)
+            .snapshot_with_render_profile(profile, 0.0, View::Viewport)
             .unwrap()
     };
     let full = shown(&e, still);
@@ -3404,7 +3404,74 @@ fn display_modes_thin_trace_direct_or_show_bounds_on_their_profile_only() {
     // The thinning is a share: the document holds it to 0..1.
     set(&mut e, still, "/render/thinning", json!(1.5), 0.0);
     assert_eq!(
-        e.document.attribute_value(still, "/render/thinning", 0.0).unwrap(),
+        e.document
+            .attribute_value(still, "/render/thinning", 0.0)
+            .unwrap(),
         json!(1.0)
     );
+}
+
+#[test]
+fn the_viewport_kind_filter_hides_from_its_picture_and_extras_but_masks_still_cut() {
+    let mut e = editor();
+    let viewport = e.document.viewport_settings_id().unwrap();
+    let still = e.document.viewport_policy(0.0).unwrap().still_id;
+    for (kind, name) in [
+        (WorldKind::Mask, "Mask"),
+        (WorldKind::Group, "Locator"),
+        (WorldKind::Camera, "Other"),
+    ] {
+        e.execute(WorldCommand::Create {
+            kind,
+            name: name.into(),
+            parent: None,
+        })
+        .unwrap();
+    }
+    let picture = |e: &WorldEditor, view| {
+        e.document
+            .snapshot_with_render_profile(still, 0.0, view)
+            .unwrap()
+    };
+    let wires = |e: &WorldEditor| {
+        let policy = e.document.viewport_policy(0.0).unwrap();
+        crate::overlay::extras(&e.document, 0.0, &policy, &[], 1.5)
+            .unwrap()
+            .len()
+    };
+    let all = wires(&e);
+    assert!(all > 0, "mask, locator, camera and sun draw extras");
+    assert!(
+        picture(&e, View::Viewport)
+            .objects
+            .iter()
+            .all(|o| o.masks.len() == 1)
+    );
+    // Masks hidden: their wires go, their cut stays.
+    set(&mut e, viewport, "/viewport/show/mask", json!(false), 0.0);
+    assert!(wires(&e) < all);
+    assert!(
+        picture(&e, View::Viewport)
+            .objects
+            .iter()
+            .all(|o| o.masks.len() == 1)
+    );
+    // Fractals and lights hidden: gone from the viewport, not from an output.
+    set(
+        &mut e,
+        viewport,
+        "/viewport/show/fractal",
+        json!(false),
+        0.0,
+    );
+    set(&mut e, viewport, "/viewport/show/light", json!(false), 0.0);
+    let shown = picture(&e, View::Viewport);
+    assert!(shown.objects.is_empty() && shown.lights.is_empty());
+    let output = picture(&e, View::Output);
+    assert!(!output.objects.is_empty() && !output.lights.is_empty());
+    // Extras off: nothing drawn.
+    set(&mut e, viewport, "/viewport/extras", json!(false), 0.0);
+    assert_eq!(wires(&e), 0);
+    assert!(e.undo());
+    assert!(wires(&e) > 0, "the filter is an ordinary undoable edit");
 }

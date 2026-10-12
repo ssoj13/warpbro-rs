@@ -408,6 +408,32 @@ fn sun_disc_default() -> bool {
     true
 }
 
+impl Camera {
+    /// Eye position, orientation and distance (scene units) of this camera whose distance is in
+    /// framing radii of `reference`: the eye looks along -Z of the orientation at the target.
+    pub fn eye(&self, reference: f32) -> (glam::Vec3, glam::Quat, f32) {
+        let distance = self.distance * reference;
+        let orientation = self.orientation();
+        let fwd = orientation * -glam::Vec3::Z;
+        (
+            glam::Vec3::from_array(self.target) - fwd * distance,
+            orientation,
+            distance,
+        )
+    }
+}
+
+impl Lighting {
+    /// Unit direction toward the sun from its azimuth (around +Y, from +Z) and elevation.
+    pub fn direction(&self) -> glam::Vec3 {
+        let (az, el) = (
+            self.sun_azimuth.to_radians(),
+            self.sun_elevation.to_radians(),
+        );
+        glam::Vec3::new(az.sin() * el.cos(), el.sin(), az.cos() * el.cos())
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MaterialModel {
     Fast,
@@ -970,17 +996,9 @@ impl Scene {
     /// units: the one camera the kernels render ([`Self::pack`]) and viewport overlays
     /// ([`Self::camera_matrices`]) draw over.
     pub fn camera_eye(&self) -> (glam::Vec3, glam::Quat, f32) {
-        let c = &self.camera;
-        let dist = c.distance
-            * self
-                .camera_reference
-                .unwrap_or(self.formula.framing_radius());
-        let orientation = c.orientation();
-        let fwd = orientation * -glam::Vec3::Z;
-        (
-            glam::Vec3::from_array(c.target) - fwd * dist,
-            orientation,
-            dist,
+        self.camera.eye(
+            self.camera_reference
+                .unwrap_or(self.formula.framing_radius()),
         )
     }
 
@@ -1222,12 +1240,7 @@ impl Scene {
 
         // --- light
         let l = &self.lighting;
-        let (az, el) = (l.sun_azimuth.to_radians(), l.sun_elevation.to_radians());
-        put3(
-            &mut p,
-            P_LIGHT_DIR,
-            [el.cos() * az.sin(), el.sin(), el.cos() * az.cos()],
-        );
+        put3(&mut p, P_LIGHT_DIR, l.direction().to_array());
         put_rgb(&mut p, P_LIGHT_COLOR, l.sun_color);
         p[P_LIGHT_INTENSITY] = l.sun_intensity;
         // A sun angle of 0 is a point sun (the kernels' delta light), as in OFX.

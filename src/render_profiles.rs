@@ -123,6 +123,45 @@ impl EffectiveRender {
         Ok(())
     }
 }
+/// The scene node kinds a viewport filters, each with the name of its attributes
+/// (`/viewport/show/<name>`, `/viewport/select/<name>`) and its label.
+pub const VIEW_KINDS: [(crate::world::WorldKind, &str, &str); 6] = {
+    use crate::world::WorldKind::*;
+    [
+        (Fractal, "fractal", "Fractals"),
+        (Mask, "mask", "Masks"),
+        (Group, "group", "Groups"),
+        (Camera, "camera", "Cameras"),
+        (DirectionalLight, "light", "Lights"),
+        (Environment, "environment", "Environment"),
+    ]
+};
+
+/// A set of the [`VIEW_KINDS`]: what a viewport shows or lets pick (Blender's per-viewport
+/// `object_type_exclude_viewport` / `_select`, held as the kinds included). Kinds a viewport does
+/// not filter (settings, materials) are always in it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Kinds(u8);
+impl Kinds {
+    pub const ALL: Self = Self(u8::MAX);
+    fn bit(kind: crate::world::WorldKind) -> Option<u8> {
+        VIEW_KINDS
+            .iter()
+            .position(|(k, ..)| *k == kind)
+            .map(|i| 1 << i)
+    }
+    pub fn contains(self, kind: crate::world::WorldKind) -> bool {
+        Self::bit(kind).is_none_or(|bit| self.0 & bit != 0)
+    }
+    pub fn with(self, kind: crate::world::WorldKind, on: bool) -> Self {
+        match Self::bit(kind) {
+            Some(bit) if on => Self(self.0 | bit),
+            Some(bit) => Self(self.0 & !bit),
+            None => self,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ViewportPolicy {
     pub mode: ViewportMode,
@@ -134,6 +173,11 @@ pub struct ViewportPolicy {
     pub batch_budget_ms: f32,
     pub paused: bool,
     pub frozen: bool,
+    /// The kinds the viewport shows (render and extras) and lets pick (the manipulator).
+    pub shown: Kinds,
+    pub selectable: Kinds,
+    /// Draw the extras: wires of masks, group locators, cameras and lights (`overlay`).
+    pub extras: bool,
 }
 impl ViewportPolicy {
     /// The binding the viewport renders: Auto follows motion between Moving and Still,
@@ -184,7 +228,11 @@ pub(crate) fn render_values(render: &Value, quality: NodeId) -> Value {
     Value::Object(values)
 }
 pub(crate) fn viewport_values(moving: NodeId, still: NodeId) -> Value {
-    json!({"mode":ViewportMode::Auto,"moving_id":moving,"still_id":still,"manual_id":still,"target_fps":30.0,"settle_delay_ms":180.0,"batch_budget_ms":8.0,"paused":false,"frozen":false})
+    let all: serde_json::Map<String, Value> = VIEW_KINDS
+        .iter()
+        .map(|(_, name, _)| ((*name).to_owned(), json!(true)))
+        .collect();
+    json!({"mode":ViewportMode::Auto,"moving_id":moving,"still_id":still,"manual_id":still,"target_fps":30.0,"settle_delay_ms":180.0,"batch_budget_ms":8.0,"paused":false,"frozen":false,"show":all,"select":all,"extras":true})
 }
 /// The `/output/*` attribute edits that turn recipe `before` into `after` on OutputSettings
 /// node `id`: one command per changed field, so an edit touches only what the form changed.

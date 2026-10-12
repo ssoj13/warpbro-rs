@@ -29,6 +29,7 @@ mod material_gallery;
 mod materials;
 #[allow(dead_code)]
 mod ocio;
+mod overlay;
 mod palette;
 #[allow(dead_code)] // Integrated into CUDA after the unchanged-policy baseline is captured.
 mod path_convergence;

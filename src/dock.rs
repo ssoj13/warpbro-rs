@@ -435,6 +435,9 @@ impl App {
                     self.tool = tool;
                 }
             }
+            ui.menu_button(ph::VISIBLE, |ui| self.visibility_menu(ui))
+                .response
+                .on_hover_text("Visibility and selectability of node kinds in the viewport");
             ui.separator();
             let frame = f64::from(self.world_ui.playhead);
             // The binding the viewport actually renders; step_viewport is its only producer.
@@ -548,6 +551,72 @@ impl App {
         });
         self.toolbar = state;
         response
+    }
+}
+
+impl super::App {
+    /// The viewport's kind filter (Blender's "Selectability & Visibility" popover): an eye and a
+    /// pick toggle per node kind and the extras switch. It holds nothing itself: each toggle
+    /// edits the ViewportSettings node's attribute, one undo step, as the Attribute Editor does.
+    fn visibility_menu(&mut self, ui: &mut egui::Ui) {
+        use egui_widgets_config::icons as ph;
+        let frame = f64::from(self.world_ui.playhead);
+        let (id, policy) = match self
+            .world
+            .document
+            .viewport_settings_id()
+            .and_then(|id| Ok((id, self.world.document.viewport_policy(frame)?)))
+        {
+            Ok(found) => found,
+            Err(error) => {
+                ui.label(error);
+                return;
+            }
+        };
+        let mut edit = None;
+        egui::Grid::new("viewport_visibility").show(ui, |ui| {
+            for (kind, name, label) in crate::render_profiles::VIEW_KINDS {
+                ui.label(label);
+                let shown = policy.shown.contains(kind);
+                if ui
+                    .selectable_label(shown, if shown { ph::VISIBLE } else { ph::HIDDEN })
+                    .on_hover_text("Show in the viewport")
+                    .clicked()
+                {
+                    edit = Some((format!("/viewport/show/{name}"), !shown));
+                }
+                let pick = policy.selectable.contains(kind);
+                if ui
+                    .add_enabled(shown, egui::Button::selectable(pick, ph::SELECT))
+                    .on_hover_text("Selectable in the viewport (the manipulator)")
+                    .clicked()
+                {
+                    edit = Some((format!("/viewport/select/{name}"), !pick));
+                }
+                ui.end_row();
+            }
+        });
+        ui.separator();
+        let mut extras = policy.extras;
+        if ui
+            .checkbox(&mut extras, "Extras")
+            .on_hover_text("Mask shapes, group locators, the other cameras and the lights")
+            .changed()
+        {
+            edit = Some(("/viewport/extras".into(), extras));
+        }
+        if let Some((path, value)) = edit
+            && let Err(error) = self
+                .world
+                .execute(crate::world::WorldCommand::SetAttribute {
+                    id,
+                    path,
+                    value: serde_json::json!(value),
+                    frame,
+                })
+        {
+            self.status = error;
+        }
     }
 }
 

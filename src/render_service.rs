@@ -944,7 +944,11 @@ fn step_preview(
             let request = &session.cache.request;
             let scene = if let Some(document) = &request.scene.document {
                 match request.render_profile {
-                    Some(profile) => document.snapshot_with_render_profile(profile, number as f64),
+                    Some(profile) => document.snapshot_with_render_profile(
+                        profile,
+                        number as f64,
+                        crate::world::View::Viewport,
+                    ),
                     None => document.snapshot(number as f64),
                 }
             } else {

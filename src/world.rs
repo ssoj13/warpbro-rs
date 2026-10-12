@@ -76,6 +76,14 @@ pub fn take_kind(kind: WorldKind) -> Option<crate::takes::TakeKind> {
 pub(crate) const CAMERA_ORBIT_SPEED: &str = "/camera/orbit_speed_degrees";
 pub(crate) const CAMERA_ORBIT_PHASE: &str = "/camera/orbit_phase_degrees";
 
+/// What a scene is evaluated for: an output (export, Output profile) shows every node kind, the
+/// viewport only the kinds its ViewportSettings show (`WorldDocument::shown_kinds`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum View {
+    Output,
+    Viewport,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WorldKind {
     Fractal,
@@ -1910,6 +1918,7 @@ fn attribute_slider(path: &str) -> Option<Slider> {
         "/transform/position" | "/transform/pivot" => lin(-10.0, 10.0),
         "/transform/rotation_degrees" => lin(-180.0, 180.0),
         "/transform/scale" => log(0.01, 10.0),
+        "/render/thinning" => lin(0.0, 1.0),
         TAKE_OFFSET => lin(-240.0, 240.0),
         TAKE_SPEED => lin(-4.0, 4.0),
         "/camera/target" => lin(-5.0, 5.0),
@@ -2026,6 +2035,15 @@ fn formula_hint(family: &str, field: &str) -> Option<&'static str> {
 /// their tail, so a Hybrid's Mandelbulb / Mandelbox / KIFS step shares the standalone text.
 /// None: the label says it all.
 pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
+    // The viewport's kind filter: one hint per switch family, whatever the kind.
+    if path.starts_with("/viewport/show/") {
+        return Some(
+            "Show this kind of node in the viewport: off leaves it out of the viewport's picture and extras (a mask keeps cutting). Exports show everything.",
+        );
+    }
+    if path.starts_with("/viewport/select/") {
+        return Some("Let the viewport's manipulator take this kind of node.");
+    }
     if let Some(tail) = path.strip_prefix("/quality/") {
         return match tail {
             "samples" => Some(
@@ -2065,6 +2083,9 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
         }
         "/render/quality_id" => {
             "The QualitySettings node shared by this render profile. Editing that node affects every profile that references its UUID; templates must be instantiated before use."
+        }
+        "/viewport/extras" => {
+            "Draw the extras over the image: mask shapes, group locators, the other cameras and the lights."
         }
         "/viewport/mode" => {
             "Auto uses Moving during navigation, playback, or scene edits and Still after the settle delay. Locked always uses Manual."
@@ -3020,7 +3041,7 @@ impl WorldDocument {
         &self,
         frame: f64,
     ) -> Result<crate::render_profiles::ViewportPolicy, String> {
-        use crate::render_profiles::{ViewportMode, ViewportPolicy};
+        use crate::render_profiles::{Kinds, ViewportMode, ViewportPolicy};
         if !frame.is_finite() {
             return Err("Invalid viewport policy time".into());
         }
@@ -3045,6 +3066,20 @@ impl WorldDocument {
         };
         let mode: ViewportMode =
             serde_json::from_value(value("/viewport/mode")?).map_err(|e| e.to_string())?;
+        // A viewport saved before the kind filter has none of these: it shows everything.
+        let attrs = self.attrs(id)?;
+        let flag = |path: &str| -> Result<bool, String> {
+            if attrs.contains(path) {
+                boolean(path)
+            } else {
+                Ok(true)
+            }
+        };
+        let (mut shown, mut selectable) = (Kinds::ALL, Kinds::ALL);
+        for (kind, name, _) in crate::render_profiles::VIEW_KINDS {
+            shown = shown.with(kind, flag(&format!("/viewport/show/{name}"))?);
+            selectable = selectable.with(kind, flag(&format!("/viewport/select/{name}"))?);
+        }
         Ok(ViewportPolicy {
             mode,
             moving_id: reference("/viewport/moving_id")?,
@@ -3055,6 +3090,9 @@ impl WorldDocument {
             batch_budget_ms: number("/viewport/batch_budget_ms", 0.1, 1000.0)?,
             paused: boolean("/viewport/paused")?,
             frozen: boolean("/viewport/frozen")?,
+            shown,
+            selectable,
+            extras: flag("/viewport/extras")?,
         })
     }
     pub fn viewport_render(
@@ -4621,6 +4659,79 @@ impl WorldDocument {
             Ok(local)
         }
     }
+    /// Camera node `id`'s visible pose at `frame` and the framing radius its distance is in:
+    /// its attributes, orbit, transform (parents included) and the take it plays. What the
+    /// active camera renders (`snapshot`) and what the viewport draws of the others (`overlay`).
+    pub fn camera_pose(
+        &self,
+        id: NodeId,
+        frame: f64,
+    ) -> Result<(crate::scene::Camera, f32), String> {
+        let v = self.evaluated_node(id, frame)?;
+        let mut camera: crate::scene::Camera =
+            serde_json::from_value(v["camera"].clone()).map_err(|e| e.to_string())?;
+        let reference: crate::scene::Formula =
+            serde_json::from_value(self.node(id)?["gpu"]["formula"].clone())
+                .map_err(|e| e.to_string())?;
+        camera.yaw_degrees += self.camera_orbit_angle(id, frame)?;
+        let m = self.world_matrix(id, frame, &mut HashSet::new())?;
+        if m != glam::Mat4::IDENTITY {
+            let orientation = camera.orientation();
+            let back = m.transform_vector3(orientation * glam::Vec3::Z);
+            let scale = back.length();
+            let back = back.normalize_or_zero();
+            let up = m.transform_vector3(orientation * glam::Vec3::Y);
+            let right = up.cross(back).normalize_or_zero();
+            let up = back.cross(right).normalize_or_zero();
+            if scale <= 0.0 || right.length_squared() == 0.0 {
+                return Err("Camera transform is singular".into());
+            }
+            let q = glam::Quat::from_mat3(&glam::Mat3::from_cols(right, up, back));
+            let (yaw, pitch, roll) = q.to_euler(glam::EulerRot::YXZ);
+            camera.yaw_degrees = yaw.to_degrees();
+            camera.pitch_degrees = -pitch.to_degrees();
+            camera.roll_degrees = roll.to_degrees();
+            camera.distance *= scale;
+            camera.target = m
+                .transform_point3(glam::Vec3::from(camera.target))
+                .to_array();
+        }
+        // A camera take the camera plays is the visible pose itself: it replaces the evaluated
+        // camera.
+        if let Some((take, shown)) = self.take_frame(id, frame)? {
+            camera = take
+                .camera_at(shown, self.first, self.last, self.fps)
+                .ok_or_else(|| format!("Take \"{}\" is not a camera take", take.name))?;
+        }
+        Ok((camera, reference.framing_radius()))
+    }
+
+    /// Sun node `id`'s light at `frame`, its direction turned by its transform (parents
+    /// included) into world azimuth / elevation.
+    pub fn sun_light(&self, id: NodeId, frame: f64) -> Result<crate::scene::Lighting, String> {
+        let v = self.evaluated_node(id, frame)?;
+        let mut light: crate::scene::Lighting =
+            serde_json::from_value(v["lighting"].clone()).map_err(|e| e.to_string())?;
+        let d = self
+            .world_matrix(id, frame, &mut HashSet::new())?
+            .transform_vector3(light.direction())
+            .normalize_or_zero();
+        light.sun_elevation = d.y.clamp(-1.0, 1.0).asin().to_degrees();
+        light.sun_azimuth = d.x.atan2(d.z).to_degrees();
+        Ok(light)
+    }
+
+    /// Node `id`'s object-to-world matrix at `frame` (parents included).
+    pub fn node_world(&self, id: NodeId, frame: f64) -> Result<glam::Mat4, String> {
+        self.world_matrix(id, frame, &mut HashSet::new())
+    }
+
+    /// A mask node's settings at `frame`.
+    pub fn mask(&self, id: NodeId, frame: f64) -> Result<crate::scene::Mask, String> {
+        serde_json::from_value(self.evaluated_node(id, frame)?["mask"].clone())
+            .map_err(|e| e.to_string())
+    }
+
     fn visible_at(
         &self,
         id: NodeId,
@@ -4771,12 +4882,43 @@ impl WorldDocument {
     }
 
     pub fn snapshot(&self, frame: f64) -> Result<Scene, String> {
-        self.snapshot_with_render_profile(self.output_render_profile()?, frame)
+        self.snapshot_with_render_profile(self.output_render_profile()?, frame, View::Output)
     }
+
+    /// Whether node `id` (of `kind`) takes part in a picture at `frame`: visible over its span
+    /// with its parents, and of a kind `shown` includes. The one test of renders, the viewport,
+    /// its extras and its manipulator (Blender's `BKE_object_is_visible_in_viewport`).
+    pub fn shows(
+        &self,
+        id: NodeId,
+        kind: WorldKind,
+        frame: f64,
+        shown: crate::render_profiles::Kinds,
+    ) -> Result<bool, String> {
+        Ok(shown.contains(kind) && self.visible_at(id, frame, &mut HashSet::new())?)
+    }
+
+    /// The node kinds a picture of `view` at `frame` includes: all of them in an output, the
+    /// ones the viewport shows in the viewport (`ViewportPolicy::shown`).
+    pub fn shown_kinds(
+        &self,
+        view: View,
+        frame: f64,
+    ) -> Result<crate::render_profiles::Kinds, String> {
+        Ok(match view {
+            View::Output => crate::render_profiles::Kinds::ALL,
+            View::Viewport => self.viewport_policy(frame)?.shown,
+        })
+    }
+
+    /// The scene `view` renders at `frame` through render profile `profile`. A kind the viewport
+    /// hides leaves a viewport picture (fractals, lights, the environment); a mask's cut is its
+    /// fractal's shape and stays (as a Boolean modifier does when its cutter is hidden).
     pub fn snapshot_with_render_profile(
         &self,
         profile: NodeId,
         frame: f64,
+        view: View,
     ) -> Result<Scene, String> {
         self.require_live_settings(profile, WorldKind::RenderSettings)?;
         if self.graph.format_version != playa_graph::SUBNET_FORMAT_VERSION {
@@ -4807,49 +4949,17 @@ impl WorldDocument {
         scene.world_render = true;
         scene.object_world = None;
         let nodes = self.nodes();
+        let shown = self.shown_kinds(view, frame)?;
         if let Some(id) = self.active_camera {
-            let v = self.evaluated_node(id, frame)?;
-            scene.camera =
-                serde_json::from_value(v["camera"].clone()).map_err(|e| e.to_string())?;
-            let reference: crate::scene::Formula =
-                serde_json::from_value(self.node(id)?["gpu"]["formula"].clone())
-                    .map_err(|e| e.to_string())?;
-            scene.camera_reference = Some(reference.framing_radius());
-            scene.camera.yaw_degrees += self.camera_orbit_angle(id, frame)?;
-            let m = self.world_matrix(id, frame, &mut HashSet::new())?;
-            if m != glam::Mat4::IDENTITY {
-                let orientation = scene.camera.orientation();
-                let back = m.transform_vector3(orientation * glam::Vec3::Z);
-                let scale = back.length();
-                let back = back.normalize_or_zero();
-                let up = m.transform_vector3(orientation * glam::Vec3::Y);
-                let right = up.cross(back).normalize_or_zero();
-                let up = back.cross(right).normalize_or_zero();
-                if scale <= 0.0 || right.length_squared() == 0.0 {
-                    return Err("Camera transform is singular".into());
-                }
-                let q = glam::Quat::from_mat3(&glam::Mat3::from_cols(right, up, back));
-                let (yaw, pitch, roll) = q.to_euler(glam::EulerRot::YXZ);
-                scene.camera.yaw_degrees = yaw.to_degrees();
-                scene.camera.pitch_degrees = -pitch.to_degrees();
-                scene.camera.roll_degrees = roll.to_degrees();
-                scene.camera.distance *= scale;
-                scene.camera.target = m
-                    .transform_point3(glam::Vec3::from(scene.camera.target))
-                    .to_array();
-            }
-            // A camera take the camera plays is the visible pose itself: it replaces the
-            // evaluated camera.
-            if let Some((take, shown)) = self.take_frame(id, frame)? {
-                scene.camera = take
-                    .camera_at(shown, self.first, self.last, self.fps)
-                    .ok_or_else(|| format!("Take \"{}\" is not a camera take", take.name))?;
-            }
+            (scene.camera, scene.camera_reference) = self
+                .camera_pose(id, frame)
+                .map(|(camera, reference)| (camera, Some(reference)))?;
         }
-        if let Some(id) = self.active_environment.filter(|id| {
-            self.visible_at(*id, frame, &mut HashSet::new())
-                .unwrap_or(false)
-        }) {
+        let environment = match self.active_environment {
+            Some(id) if self.shows(id, WorldKind::Environment, frame, shown)? => Some(id),
+            _ => None,
+        };
+        if let Some(id) = environment {
             let v = self.evaluated_node(id, frame)?;
             scene.environment =
                 serde_json::from_value(v["environment"].clone()).map_err(|e| e.to_string())?;
@@ -4858,46 +4968,24 @@ impl WorldDocument {
         } else {
             scene.environment.enabled = false;
         }
-        let environment_light = if let Some(id) = self.active_environment {
-            if self.visible_at(id, frame, &mut HashSet::new())? {
-                Some(
-                    serde_json::from_value::<crate::scene::Lighting>(
-                        self.evaluated_node(id, frame)?["lighting"].clone(),
-                    )
-                    .map_err(|e| e.to_string())?,
+        let environment_light = match environment {
+            Some(id) => Some(
+                serde_json::from_value::<crate::scene::Lighting>(
+                    self.evaluated_node(id, frame)?["lighting"].clone(),
                 )
-            } else {
-                None
-            }
-        } else {
-            None
+                .map_err(|e| e.to_string())?,
+            ),
+            None => None,
         };
         let solo = nodes.iter().any(|n| n.solo);
         for node in &nodes {
-            if !self.visible_at(node.id, frame, &mut HashSet::new())? {
-                continue;
-            }
-            if solo
-                && !node.solo
-                && matches!(node.kind, WorldKind::Fractal | WorldKind::DirectionalLight)
+            if node.kind != WorldKind::DirectionalLight
+                || (solo && !node.solo)
+                || !self.shows(node.id, node.kind, frame, shown)?
             {
                 continue;
             }
-            if node.kind == WorldKind::DirectionalLight {
-                let v = self.evaluated_node(node.id, frame)?;
-                let mut light: crate::scene::Lighting =
-                    serde_json::from_value(v["lighting"].clone()).map_err(|e| e.to_string())?;
-                let az = light.sun_azimuth.to_radians();
-                let el = light.sun_elevation.to_radians();
-                let direction = glam::Vec3::new(az.sin() * el.cos(), el.sin(), az.cos() * el.cos());
-                let d = self
-                    .world_matrix(node.id, frame, &mut HashSet::new())?
-                    .transform_vector3(direction)
-                    .normalize_or_zero();
-                light.sun_elevation = d.y.clamp(-1.0, 1.0).asin().to_degrees();
-                light.sun_azimuth = d.x.atan2(d.z).to_degrees();
-                scene.lights.push(light);
-            }
+            scene.lights.push(self.sun_light(node.id, frame)?);
         }
         if let Some(light) = scene.lights.first() {
             scene.lighting = *light;
@@ -4919,18 +5007,14 @@ impl WorldDocument {
             if !self.visible_at(node.id, frame, &mut HashSet::new())? {
                 continue;
             }
-            let mask: crate::scene::Mask =
-                serde_json::from_value(self.evaluated_node(node.id, frame)?["mask"].clone())
-                    .map_err(|e| e.to_string())?;
-            let world = self
-                .world_matrix(node.id, frame, &mut HashSet::new())?
-                .to_cols_array_2d();
+            let mask = self.mask(node.id, frame)?;
+            let world = self.node_world(node.id, frame)?.to_cols_array_2d();
             masks.push((node.parent, crate::scene::MaskInstance { mask, world }));
         }
         for node in nodes {
             if node.kind != WorldKind::Fractal
-                || !self.visible_at(node.id, frame, &mut HashSet::new())?
                 || (solo && !node.solo)
+                || !self.shows(node.id, node.kind, frame, shown)?
             {
                 continue;
             }
