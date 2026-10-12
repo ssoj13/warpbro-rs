@@ -682,7 +682,7 @@ impl App {
     /// Bind take `id` to its targets ([`Self::take_targets`]).
     fn bind_targets(&mut self, id: u64) -> Result<(), String> {
         let targets = self.take_targets(id)?;
-        self.world.bind_take(&targets, Some(id))
+        self.world.bind_take(&targets, Some(id), None)
     }
 
     /// Unbind take `id` everywhere when it drives anything, else bind it to its targets.
@@ -691,7 +691,7 @@ impl App {
         if bound.is_empty() {
             return self.bind_targets(id);
         }
-        self.world.bind_take(&bound, None)
+        self.world.bind_take(&bound, None, None)
     }
 
     /// New takes from the selected objects (transform takes) or, with none selected, from the

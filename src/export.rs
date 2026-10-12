@@ -274,7 +274,7 @@ impl Default for ExportSettings {
             job: ExportJob::default(),
             output: OutputSettings::default(),
             dir: PathBuf::new(),
-            samples: 256,
+            samples: 32,
             transform: None,
         }
     }

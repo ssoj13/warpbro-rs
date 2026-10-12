@@ -461,6 +461,16 @@ impl Take {
         }
     }
 
+    /// The document frame the take begins playing on: its start frame (`KeepSpeed`) or the work
+    /// area's first frame (`FitWorkArea`). A node's time warp pivots here
+    /// (`WorldDocument::take_frame`).
+    pub fn play_start(&self, first: u32) -> f64 {
+        match self.timing {
+            Timing::KeepSpeed => self.start,
+            Timing::FitWorkArea => f64::from(first),
+        }
+    }
+
     /// The camera a document at (`first`..`last`, `fps`) shows on `frame`; None for a transform take.
     pub fn camera_at(&self, frame: f64, first: u32, last: u32, fps: f64) -> Option<Camera> {
         match &self.poses {

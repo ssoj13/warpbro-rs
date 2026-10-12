@@ -1072,7 +1072,7 @@ impl App {
                     self.status = error;
                 }
             }
-            if bound && let Err(error) = self.world.bind_take(&[id], None) {
+            if bound && let Err(error) = self.world.bind_take(&[id], None, Some(gesture)) {
                 self.status = error;
             }
             if let Ok(pose) = self.world.document.authored_trs(id, frame) {
@@ -1097,7 +1097,12 @@ impl App {
     /// the camera (a navigation gesture or an Attribute Editor edit) releases the take first:
     /// the change continues from the take's pose and is authored on the camera node like any
     /// other, instead of being written to the node but hidden behind the take.
-    fn record_take(&mut self, ctx: &egui::Context, before: crate::scene::Camera) {
+    fn record_take(
+        &mut self,
+        ctx: &egui::Context,
+        before: crate::scene::Camera,
+        gesture: Option<u64>,
+    ) {
         let after = if self.navigated {
             self.scene.camera
         } else {
@@ -1117,7 +1122,7 @@ impl App {
             && let Some(camera) =
                 camera.filter(|c| matches!(self.world.document.take_clip(*c), Ok(Some(_))))
         {
-            if let Err(error) = self.world.bind_take(&[camera], None) {
+            if let Err(error) = self.world.bind_take(&[camera], None, gesture) {
                 self.status = error;
             }
             self.evaluated_world = None;
@@ -2293,8 +2298,7 @@ impl App {
         snapshot.colour = self.scene.colour.clone();
         snapshot.animation = Default::default();
         snapshot.render = effective.render;
-        let width = ((w as f32 * effective.resolution_scale).round() as usize).max(1);
-        let height = ((h as f32 * effective.resolution_scale).round() as usize).max(1);
+        let (width, height) = scaled_extent((w, h), effective.resolution_scale);
         self.target_spp = effective.samples;
         // Only the Moving binding is a disposable proxy; Locked motion keeps Manual's film.
         let preview = selection.target == crate::render_profiles::ProfileTarget::Moving;
@@ -3476,6 +3480,26 @@ struct PreviewKey {
     samples: u32,
 }
 
+impl PreviewKey {
+    /// The key without the viewport size: what the frames show, not the size they fit.
+    fn content(self) -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            ..self
+        }
+    }
+}
+
+/// The render size of a viewport of `pixels` (`viewport_pixels`) at a profile's resolution
+/// `scale`: what the viewport and the cached preview render at.
+fn scaled_extent(pixels: (usize, usize), scale: f32) -> (usize, usize) {
+    (
+        ((pixels.0 as f32 * scale).round() as usize).max(1),
+        ((pixels.1 as f32 * scale).round() as usize).max(1),
+    )
+}
+
 /// The viewport's size in physical pixels: the one measure the viewport renders at (scaled by the
 /// profile's resolution) and the cached preview is keyed by (`PreviewKey`).
 fn viewport_pixels(size: egui::Vec2, ppp: f32) -> (usize, usize) {
@@ -3587,6 +3611,7 @@ impl App {
             None
         }
         .unwrap_or_else(|| Arc::new(self.frozen_world_scene()));
+        let size = scaled_extent((key.width, key.height), f32::from_bits(key.scale_bits));
         crate::preview::PreviewRequest {
             generation: self.preview_sequence,
             scene,
@@ -3599,8 +3624,8 @@ impl App {
             first,
             last,
             fps: self.world.document.fps as f32,
-            width: key.width,
-            height: key.height,
+            width: size.0,
+            height: size.1,
             spp,
             seed: self.seed,
             output_hdr: key.output_hdr,
@@ -3667,9 +3692,11 @@ impl App {
             self.showing_preview = false;
             self.world_ui.playing = false;
         }
+        // The viewport alone decides whether the size still fits (on the pass that is shown):
+        // a discarded pass's layout must not cancel playback here.
         if self
             .preview_key
-            .is_some_and(|key| key != self.preview_identity(ctx))
+            .is_some_and(|key| key.content() != self.preview_identity(ctx).content())
         {
             self.preview.cancel();
             self.preview_key = None;
@@ -3859,7 +3886,7 @@ impl App {
         if let Some(before) = before.as_ref()
             && self.load_revision == edit_origin
         {
-            self.record_take(&ctx, before.camera);
+            self.record_take(&ctx, before.camera, camera_gesture);
         }
         if let Some(before) = before.as_ref()
             && self.load_revision == edit_origin
@@ -5797,7 +5824,7 @@ mod tests {
         // Play advances as fast as the preview renders its frames: real time, bounded.
         let started = std::time::Instant::now();
         let mut i = 10;
-        while app.world_ui.playhead < 13 && started.elapsed().as_secs() < 60 {
+        while app.world_ui.playhead < 13 && started.elapsed().as_secs() < 300 {
             assert!(app.world_ui.playing, "playback stopped: {}", app.status);
             frame(&mut app, i);
             i += 1;

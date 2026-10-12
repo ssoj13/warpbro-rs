@@ -104,7 +104,7 @@ pub(crate) fn quality_values(render: &Value) -> Value {
     for key in QUALITY_RENDER_FIELDS {
         quality.insert((*key).into(), render[*key].clone());
     }
-    quality.insert("samples".into(), json!(512));
+    quality.insert("samples".into(), json!(32));
     quality.insert("resolution_scale".into(), json!(1.0));
     Value::Object(quality)
 }

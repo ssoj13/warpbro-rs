@@ -2143,7 +2143,7 @@ fn render_profiles_route_auto_locked_and_output_without_mutating_document() {
             moving.resolution_scale,
             moving.render.max_bounces
         ),
-        (64, 0.5, 2)
+        (32, 0.5, 2)
     );
     assert_eq!(still.profile, policy.still_id);
     assert_eq!(still.method, RenderMethod::Full);
@@ -2860,7 +2860,7 @@ fn a_played_camera_take_drives_the_snapshot_and_survives_undo_redo_and_save() {
     let id = e.add_take(take_from(0.0, &[base, turned]));
     let fps = e.document.fps;
     let revision = e.revision();
-    e.bind_take(&[camera], Some(id)).unwrap();
+    e.bind_take(&[camera], Some(id), None).unwrap();
     assert_ne!(
         e.revision(),
         revision,
@@ -2872,7 +2872,7 @@ fn a_played_camera_take_drives_the_snapshot_and_survives_undo_redo_and_save() {
     assert!((shown.yaw_degrees - turned.yaw_degrees).abs() < 1e-3);
     // A camera take cannot drive a fractal.
     let frac = find(&e, WorldKind::Fractal);
-    assert!(e.bind_take(&[frac], Some(id)).is_err());
+    assert!(e.bind_take(&[frac], Some(id), None).is_err());
     // Recordings are not edits (undo/redo keep the takes); attaching one is.
     e.execute(WorldCommand::SetMark {
         slot: 1,
@@ -2899,7 +2899,7 @@ fn a_played_camera_take_drives_the_snapshot_and_survives_undo_redo_and_save() {
     );
     // A played take cannot be deleted; detached, it can, and the camera node shows again.
     assert!(e.delete_take(id).unwrap_err().contains("detach"));
-    e.bind_take(&[camera], None).unwrap();
+    e.bind_take(&[camera], None, None).unwrap();
     assert_eq!(e.document.snapshot(fps).unwrap().camera, base);
 }
 
@@ -2924,7 +2924,7 @@ fn a_played_transform_take_moves_its_node_and_bakes_into_its_keys() {
     .unwrap();
     let id = e.add_take(take);
     let before = e.document.clone();
-    e.bind_take(&[frac], Some(id)).unwrap();
+    e.bind_take(&[frac], Some(id), None).unwrap();
     let world = |e: &WorldEditor, f: f64| e.document.manip_frame(frac, f).unwrap().0;
     let moved = world(&e, fps).transform_point3(glam::Vec3::ZERO);
     assert!((moved.x - 1.0).abs() < 1e-5, "{moved:?}");
@@ -2960,7 +2960,7 @@ fn baking_a_camera_take_keys_the_camera_in_one_undo_and_releases_the_binding() {
     let mut zoomed = base;
     zoomed.fov_y_degrees = base.fov_y_degrees * 0.5;
     let id = e.add_take(take_from(0.0, &[base, zoomed]));
-    e.bind_take(&[camera], Some(id)).unwrap();
+    e.bind_take(&[camera], Some(id), None).unwrap();
     let before = e.document.clone();
     let options = Options {
         transform: false,
@@ -3159,7 +3159,7 @@ fn x_take(e: &mut WorldEditor) -> (NodeId, u64) {
         })
         .collect();
     let id = e.add_take(Take::from_frames(0.0, 1.0, Some(frac), poses).unwrap());
-    e.bind_take(&[frac], Some(id)).unwrap();
+    e.bind_take(&[frac], Some(id), None).unwrap();
     (frac, id)
 }
 
@@ -3266,4 +3266,96 @@ fn the_take_row_lists_takes_of_the_nodes_kind_and_copies_keep_their_take_in_one_
         other.document.take_clip(other.selection.unwrap()).unwrap(),
         None
     );
+}
+
+#[test]
+fn deleting_a_take_releases_it_in_history_and_retention_keeps_takes_history_plays() {
+    let mut e = editor();
+    let (frac, id) = x_take(&mut e);
+    e.bind_take(&[frac], None, None).unwrap();
+    // Undo history still plays the take: retention keeps it past the unpinned limit.
+    for _ in 0..(crate::takes::MAX_UNPINNED + 3) {
+        let (other, _) = (
+            frac,
+            e.add_take(e.document.takes.get(id).unwrap().as_ref().clone()),
+        );
+        let _ = other;
+    }
+    assert!(e.document.takes.get(id).is_some(), "an undo state plays it");
+    // Deleting it (nothing plays it now) releases it in every undo state too.
+    assert!(e.delete_take(id).unwrap());
+    assert!(e.undo());
+    assert_eq!(e.document.take_clip(frac).unwrap(), None);
+    e.document.snapshot(0.0).unwrap();
+}
+
+#[test]
+fn baking_a_warped_take_keys_the_motion_the_node_shows() {
+    let mut e = editor();
+    let (frac, id) = x_take(&mut e);
+    let fps = e.document.fps;
+    set(&mut e, frac, TAKE_SPEED, json!(2.0), 0.0);
+    let shown = e
+        .document
+        .take_trs(frac, 2.0 * fps)
+        .unwrap()
+        .unwrap()
+        .position[0];
+    assert!((shown - 4.0).abs() < 1e-4);
+    e.bake_take(frac, id, crate::camera_recorder::Options::default())
+        .unwrap();
+    assert_eq!(e.document.take_clip(frac).unwrap(), None);
+    let keyed = e.document.authored_trs(frac, 2.0 * fps).unwrap().position[0];
+    assert!(
+        (keyed - shown).abs() < 1e-2,
+        "keys show the warped motion: {keyed} vs {shown}"
+    );
+}
+
+#[test]
+fn a_copy_whose_take_is_gone_pastes_playing_none_and_a_release_joins_its_gesture() {
+    let mut e = editor();
+    let (frac, id) = x_take(&mut e);
+    let text = e.document.copy_fragment(&[frac]).unwrap();
+    e.bind_take(&[frac], None, None).unwrap();
+    e.delete_take(id).unwrap();
+    let nodes = parse_clipboard(&text).unwrap().1;
+    assert!(
+        e.document
+            .unresolved_references(&nodes)
+            .iter()
+            .any(|(_, field)| *field == "take")
+    );
+    e.execute(WorldCommand::Paste(text)).unwrap();
+    assert_eq!(e.document.take_clip(e.selection.unwrap()).unwrap(), None);
+    // A drag that releases a played take is one undo step with its writes.
+    let id = e.add_take(
+        crate::takes::Take::still(
+            crate::takes::Trs {
+                position: [1.0, 0.0, 0.0],
+                rotation_degrees: [0.0; 3],
+                scale: [1.0; 3],
+            },
+            0.0,
+            e.document.fps,
+            Some(frac),
+        )
+        .unwrap(),
+    );
+    e.bind_take(&[frac], Some(id), None).unwrap();
+    let bound = e.document.clone();
+    e.execute_edit(
+        WorldCommand::SetAttribute {
+            id: frac,
+            path: "/transform/position".into(),
+            value: json!([2.0, 0.0, 0.0]),
+            frame: 0.0,
+        },
+        Some(7),
+    )
+    .unwrap();
+    e.bind_take(&[frac], None, Some(7)).unwrap();
+    e.finish_edit();
+    assert!(e.undo());
+    assert_eq!(e.document, bound, "one undo restores the take and the pose");
 }
