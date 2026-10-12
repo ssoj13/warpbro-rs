@@ -926,9 +926,10 @@ impl App {
         self.apply_colour_change(changed);
     }
 
-    /// Feed this frame's navigation to the take recorder. A gesture that starts while a take
-    /// drives the camera releases the take first: navigation continues from the take's pose and
-    /// is authored on the camera node (`navigate_camera`) like any other.
+    /// Feed this frame's navigation to the take recorder. Any camera change while a take drives
+    /// the camera (a navigation gesture or an Attribute Editor edit) releases the take first:
+    /// the change continues from the take's pose and is authored on the camera node like any
+    /// other, instead of being written to the node but hidden behind the take.
     fn record_take(&mut self, ctx: &egui::Context, before: crate::scene::Camera) {
         let after = if self.navigated {
             self.scene.camera
@@ -944,7 +945,7 @@ impl App {
                 || self.orbit.rig.has_inertia()
                 || ctx.input(|i| i.pointer.any_down()),
         });
-        if update.started && self.world.document.takes.current_id().is_some() {
+        if self.scene.camera != before && self.world.document.takes.current_id().is_some() {
             if let Err(error) = self.world.set_current_take(None) {
                 self.status = error;
             }
