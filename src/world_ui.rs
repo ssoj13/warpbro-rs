@@ -6,8 +6,8 @@ use egui_attr_grid::{AnimIntent, AnimState, ChannelExpansion};
 use egui_attr_grid::{AttrField, AttrGridHooks, AttrValue as GridValue, render_grid_with_config};
 use egui_outliner::{ContextItem, OutlinerAction, OutlinerConfig, OutlinerModel, TreeNode};
 use egui_track_timeline::{
-    Clip, KeyPos, Keyframe, PropLane, TimelineAction, TimelineConfig, TimelineModel, TimelineView,
-    Track, TrackTimeline, WorkArea,
+    Band, Clip, KeyPos, Keyframe, PropLane, TimelineAction, TimelineConfig, TimelineModel,
+    TimelineView, Track, TrackTimeline, WorkArea,
 };
 use egui_widgets_config::AttrMetrics;
 use egui_widgets_config::attr_layout::{ValueEditorLayout, cell_ui, square_icon};
@@ -1299,6 +1299,8 @@ impl WorldUi {
             || timeline.revision != cache.revision
             || timeline.projection != projection
         {
+            // The accent of a take's band on its node's bar.
+            let take_color = ui.visuals().hyperlink_color;
             timeline.rows = nodes.to_vec();
             timeline.lanes = nodes
                 .iter()
@@ -1340,8 +1342,10 @@ impl WorldUi {
                         .collect::<Vec<_>>();
                     // Expanded only when there is something to show: the caret reads this too.
                     let expanded = self.expanded.contains(&n.id) && !props.is_empty();
-                    let mut clips = vec![clip];
-                    // The take's bar on the Take lane (lane 0, `lanes`): where it plays.
+                    let mut clips = Vec::with_capacity(2);
+                    // Where the take plays: a band on the node's own bar (seen collapsed too) and
+                    // the bar on its Take lane (lane 0, `lanes`); both pick the take.
+                    let mut clip = clip;
                     if ls.first().and_then(|l| l.path.as_deref()) == Some(crate::world::TAKE_CLIP) {
                         match e.document.take_span(n.id) {
                             Ok(Some((start, end))) => {
@@ -1353,6 +1357,13 @@ impl WorldUi {
                                     .and_then(|id| e.document.takes.get(id))
                                     .map(|take| take.name.clone())
                                     .unwrap_or_default();
+                                clip = clip.with_band(Band {
+                                    start,
+                                    duration: end - start,
+                                    color: take_color,
+                                    label: format!("{} {name}", egui_phosphor::regular::FILM_STRIP),
+                                    id: Some(take_wid(n.id)),
+                                });
                                 clips.push(
                                     Clip::new(take_wid(n.id), start, end - start, name)
                                         .with_color(kind_color(n.kind))
@@ -1363,6 +1374,7 @@ impl WorldUi {
                             Err(error) => self.error = Some(error),
                         }
                     }
+                    clips.insert(0, clip);
                     Track::new(n.name.clone(), clips)
                         .with_lanes(props)
                         .expanded(expanded)

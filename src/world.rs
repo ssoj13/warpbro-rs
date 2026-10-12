@@ -3490,12 +3490,41 @@ impl WorldDocument {
     /// The work-area frames node `id`'s take plays on, `[start, end)`: those whose warped take
     /// time lies within the take (held first / last poses are not playing). None when the node
     /// plays no take, or none of it inside the work area. What the timeline draws as its bar.
+    ///
+    /// One pass over the work area: with a keyed speed and a static offset, each frame's take
+    /// frame is the previous one's plus the speed integrated over that one frame (Simpson), not
+    /// a fresh integral from the start; an animated offset moves the start, so each frame is
+    /// warped on its own (`take_frame`).
     pub fn take_span(&self, id: NodeId) -> Result<Option<(i64, i64)>, String> {
+        let Some((take, mut shown)) = self.take_frame(id, f64::from(self.first))? else {
+            return Ok(None);
+        };
+        let attrs = self.attrs(id)?;
+        let incremental = attrs.is_animated(TAKE_SPEED)
+            && attrs.conn(TAKE_SPEED).is_none()
+            && !attrs.is_animated(TAKE_OFFSET)
+            && attrs.conn(TAKE_OFFSET).is_none();
+        let speed = |at: f64| -> Result<f64, String> {
+            attrs
+                .eval_at(TAKE_SPEED, at)
+                .map(attr_json)
+                .and_then(|v| v.as_f64())
+                .filter(|v| v.is_finite())
+                .ok_or_else(|| format!("{TAKE_SPEED} must be a finite number"))
+        };
         let mut span: Option<(u32, u32)> = None;
         for frame in self.first..=self.last {
-            let Some((take, shown)) = self.take_frame(id, f64::from(frame))? else {
-                return Ok(None);
-            };
+            if frame > self.first {
+                let f = f64::from(frame);
+                shown = if incremental {
+                    shown + (speed(f - 1.0)? + 4.0 * speed(f - 0.5)? + speed(f)?) / 6.0
+                } else {
+                    match self.take_frame(id, f)? {
+                        Some((_, shown)) => shown,
+                        None => return Ok(None),
+                    }
+                };
+            }
             let seconds = take.seconds_at(shown, self.first, self.last, self.fps);
             if (0.0..=take.duration()).contains(&seconds) {
                 span = Some(span.map_or((frame, frame), |(start, _)| (start, frame)));

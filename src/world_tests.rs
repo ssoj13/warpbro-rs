@@ -3492,6 +3492,28 @@ fn a_takes_span_is_where_it_plays_under_its_warp() {
     let (start, end) = e.document.take_span(frac).unwrap().unwrap();
     assert_eq!(start, 24);
     assert_eq!(end, 24 + ten / 2 + 1, "twice as fast: half the frames");
+    // A keyed speed: the one-pass span agrees with warping each frame on its own.
+    set(&mut e, frac, TAKE_OFFSET, json!(0.0), 0.0);
+    set(&mut e, frac, TAKE_SPEED, json!(0.5), 0.0);
+    e.execute(WorldCommand::Key {
+        id: frac,
+        path: TAKE_SPEED.into(),
+        frame: 0.0,
+    })
+    .unwrap();
+    set(&mut e, frac, TAKE_SPEED, json!(3.0), 120.0);
+    let per_frame = (e.document.first..=e.document.last)
+        .filter(|f| {
+            let (take, shown) = e.document.take_frame(frac, f64::from(*f)).unwrap().unwrap();
+            let s = take.seconds_at(shown, e.document.first, e.document.last, fps);
+            (0.0..=take.duration()).contains(&s)
+        })
+        .map(i64::from)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        e.document.take_span(frac).unwrap(),
+        Some((per_frame[0], per_frame[per_frame.len() - 1] + 1))
+    );
     e.bind_take(&[frac], None, None).unwrap();
     assert_eq!(e.document.take_span(frac).unwrap(), None);
 }
