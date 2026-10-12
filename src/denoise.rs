@@ -325,7 +325,19 @@ impl State {
 /// the network (upload, readback, size-dependent resources) is render-rs's shared
 /// `pt_denoise_oidn::host::HostDenoiser`; this adds WarpBro's settings and its working space.
 pub struct Processor {
-    inner: Option<HostDenoiser>,
+    /// The denoiser and the bound of its network's working memory (`Params::max_memory_mb`).
+    inner: Option<(HostDenoiser, Option<i32>)>,
+}
+
+/// The network's working-memory bound: half the VRAM headroom (the driver's budget for this
+/// process minus what it already uses, gpu-info-rs) on the shared device when the denoiser is
+/// created, so the renderer keeps the other half. Measured once: the bound is part of OIDN's
+/// filter key, so a per-frame value would rebuild the filter. None where the driver reports no
+/// budget: oidn-rs's own tile plan.
+fn memory_bound(adapter: &wgpu::Adapter, device: &wgpu::Device) -> Option<i32> {
+    let vram = gpu_info::VramQuerier::new(gpu_info::GpuVramContext { adapter, device })?.query()?;
+    let mib = vram.budget.saturating_sub(vram.used) / 2 / (1 << 20);
+    Some(i32::try_from(mib).unwrap_or(i32::MAX).max(1))
 }
 
 impl Processor {
@@ -346,18 +358,22 @@ impl Processor {
                 latency_ms: 0.0,
             });
         }
-        let denoiser = match &mut self.inner {
-            Some(denoiser) => denoiser,
+        let (denoiser, max_memory_mb) = match &mut self.inner {
+            Some(inner) => inner,
             slot => {
                 // shared_device uses OnceLock::get_or_init: this also negotiates the
                 // headless GPU on first use, then adopts that same device everywhere.
                 let shared = gpu_info::shared_device().ok_or("OIDN shared GPU unavailable")?;
-                slot.insert(HostDenoiser::new(GpuContext {
-                    instance: Arc::new(shared.instance.clone()),
-                    adapter: Arc::new(shared.adapter.clone()),
-                    device: Arc::new(shared.device.clone()),
-                    queue: Arc::new(shared.queue.clone()),
-                }))
+                let bound = memory_bound(&shared.adapter, &shared.device);
+                slot.insert((
+                    HostDenoiser::new(GpuContext {
+                        instance: Arc::new(shared.instance.clone()),
+                        adapter: Arc::new(shared.adapter.clone()),
+                        device: Arc::new(shared.device.clone()),
+                        queue: Arc::new(shared.queue.clone()),
+                    }),
+                    bound,
+                ))
             }
         };
         denoiser.process(
@@ -369,6 +385,7 @@ impl Processor {
                 spp,
                 // The viewer denoises whole frames: OIDN's autoexposure measures each one.
                 input_scale: None,
+                max_memory_mb: *max_memory_mb,
             },
         )
     }

@@ -2986,6 +2986,51 @@ mod tests {
         assert_eq!(lit(&masked), 0, "density 1 removes every cell");
     }
 
+    /// Cost of a Cells mask on the world march: the same bulb unmasked, with a Cells mask
+    /// (density 0.5) and with a Sphere mask, median of five 32-spp renders at 512x384.
+    #[test]
+    #[ignore = "GPU timing; run explicitly with --ignored --nocapture"]
+    fn cuda_mask_cost_benchmark() {
+        use crate::scene::{Mask, MaskInstance, MaskShape};
+        let _gpu_test = crate::test_gpu::lock();
+        let mut gpu = Gpu::new().unwrap();
+        let mut target = gpu.target(512, 384);
+        let mut scene = dark_world();
+        scene.render.max_bounces = 2;
+        scene
+            .objects
+            .push(world_object(FAMILY_BULB, [0.0; 3], [1.0; 3], [1.0; 3]));
+        let mask = |shape, size: f32| MaskInstance {
+            mask: Mask {
+                shape,
+                size: [size; 3],
+                density: 0.5,
+                ..Mask::default()
+            },
+            world: glam::Mat4::IDENTITY.to_cols_array_2d(),
+        };
+        for (name, masks) in [
+            ("none", vec![]),
+            ("cells", vec![mask(MaskShape::Cells, 0.15)]),
+            ("sphere", vec![mask(MaskShape::Sphere, 0.9)]),
+        ] {
+            scene.objects[0].masks = masks;
+            let mut times: Vec<f64> = (0..6)
+                .map(|_| {
+                    gpu.prepare_target(&mut target, &scene, None);
+                    target.samples = 0;
+                    let started = std::time::Instant::now();
+                    gpu.step(&mut target, &scene, 32, 0, None, false);
+                    assert!(!gpu.scene_linear(&target).is_empty());
+                    started.elapsed().as_secs_f64() * 1000.0
+                })
+                .skip(1)
+                .collect();
+            times.sort_by(f64::total_cmp);
+            eprintln!("mask {name}: {:.1} ms", times[2]);
+        }
+    }
+
     #[test]
     fn cuda_world_sibling_casts_a_shadow_outside_its_camera_silhouette() {
         let _gpu_test = crate::test_gpu::lock();
