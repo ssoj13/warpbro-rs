@@ -2422,11 +2422,12 @@ mod tests {
                 assert!((n.length() - 1.0).abs() < 1e-4);
                 hits += 1;
                 let (x, y) = ((i % w) as u32, (i / w) as u32);
-                let nx = 2.0 * (x as f32 + fractal_core::sampler::sample(x ^ 19, y, 0, 0))
+                let nx = 2.0 * (x as f32 + standard_surface_bsdf::sampling::sobol(x ^ 19, y, 0, 0))
                     / w as f32
                     - 1.0;
                 let ny = 1.0
-                    - 2.0 * (y as f32 + fractal_core::sampler::sample(x ^ 19, y, 0, 1)) / h as f32;
+                    - 2.0 * (y as f32 + standard_surface_bsdf::sampling::sobol(x ^ 19, y, 0, 1))
+                        / h as f32;
                 let ray = (forward + right * nx * p[P_HALF_W] + up * ny * p[P_HALF_H]).normalize();
                 if n.dot(-ray) > 0.999999 {
                     fallback += 1;
