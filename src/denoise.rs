@@ -67,7 +67,7 @@ mod tests {
         settings.interval = 256;
         assert!(!state.due(&settings, 128, false));
         assert!(state.output.is_some());
-        settings.quality = Quality::High;
+        settings.quality = Quality::Fast;
         assert!(state.due(&settings, 128, false));
         state.complete(128, success(128));
         settings.mode = Mode::Color;
@@ -236,16 +236,14 @@ pub enum Quality {
     Fast,
     #[default]
     Balanced,
-    High,
 }
 impl Quality {
     #[cfg(test)]
-    pub const ALL: [Self; 3] = [Self::Fast, Self::Balanced, Self::High];
+    pub const ALL: [Self; 2] = [Self::Fast, Self::Balanced];
     fn native(self) -> pt_denoise_oidn::Quality {
         match self {
             Self::Fast => pt_denoise_oidn::Quality::Fast,
             Self::Balanced => pt_denoise_oidn::Quality::Balanced,
-            Self::High => pt_denoise_oidn::Quality::High,
         }
     }
 }
@@ -369,6 +367,8 @@ impl Processor {
                 quality: settings.quality.native(),
                 primaries: Primaries::AcesCg,
                 spp,
+                // The viewer denoises whole frames: OIDN's autoexposure measures each one.
+                input_scale: None,
             },
         )
     }

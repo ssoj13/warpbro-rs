@@ -2324,7 +2324,7 @@ mod tests {
         changed.scene.colour.view = "another display".into();
         changed.scene.render.denoise.enabled = false;
         changed.scene.render.denoise.interval = 256;
-        changed.scene.render.denoise.quality = crate::denoise::Quality::High;
+        changed.scene.render.denoise.quality = crate::denoise::Quality::Fast;
         changed.scene.render.denoise.mode = crate::denoise::Mode::Color;
         changed.paused = true;
         changed.raw = true;

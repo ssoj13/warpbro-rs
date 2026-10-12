@@ -1574,7 +1574,7 @@ fn attribute_choices(path: &str) -> Vec<Value> {
         "/coloring" => &["Radius", "TrapOrigin", "TrapPlane", "TrapPoint"],
         "/mask/shape" => &["Sphere", "Box", "Cells"],
         "/render/denoise/mode" => &["Color", "ColorAlbedo", "ColorAlbedoNormal"],
-        "/render/denoise/quality" => &["Fast", "Balanced", "High"],
+        "/render/denoise/quality" => &["Fast", "Balanced"],
         "/material/model" => &["Fast", "StandardSurface"],
         "/material/color_source" => &["Palette", "Material"],
         p if p.ends_with("/kind") && p.starts_with("/formula") => {
@@ -2169,7 +2169,7 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
         "/render/denoise/mode" => {
             "Guide images for OIDN: colour only, + albedo, + albedo and normal (sharpest)."
         }
-        "/render/denoise/quality" => "OIDN quality: faster or sharper.",
+        "/render/denoise/quality" => "OIDN network: Fast (small) or Balanced (standard).",
         "/render/adaptive/enabled" => {
             "Adaptive sampling: stop sampling tiles whose noise is below the threshold."
         }

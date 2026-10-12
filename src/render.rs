@@ -2764,7 +2764,7 @@ mod tests {
         assert!(!target.denoise.due(&scene.render.denoise, 3, true));
         scene.render.denoise.enabled = false;
         scene.render.denoise.mode = crate::denoise::Mode::Color;
-        scene.render.denoise.quality = crate::denoise::Quality::High;
+        scene.render.denoise.quality = crate::denoise::Quality::Fast;
         scene.render.exposure_stops = 2.0;
         gpu.step(&mut target, &scene, 0, 0, None, true);
         assert_eq!(target.samples, 3);
