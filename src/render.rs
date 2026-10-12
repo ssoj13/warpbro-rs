@@ -2625,10 +2625,13 @@ mod tests {
                         .any(|(a, n)| a[..3] == [0.0; 3] && n[..3] == [0.0; 3])
                 );
                 let center = 12 * 33 + 16;
-                // The kernel's primary albedo, base * tint * (1 - metal) + emission, over working-space inputs.
+                // The kernel's primary albedo: render-rs `SurfaceInputs::guide_albedo`, base * colour *
+                // tint (a metal's F0 too: metalness does not enter) plus the emission, clamped to
+                // [0, 1], over working-space inputs.
                 let w = crate::color::to_working;
                 let (c, t, e) = (w([0.2, 0.4, 0.6]), w([1.0, 0.5, 0.25]), w([0.1, 0.2, 0.3]));
-                let want: [f32; 3] = std::array::from_fn(|k| c[k] * 0.8 * t[k] * 0.75 + e[k] * 0.7);
+                let want: [f32; 3] =
+                    std::array::from_fn(|k| (c[k] * 0.8 * t[k] + e[k] * 0.7).clamp(0.0, 1.0));
                 for (actual, expected) in albedo[center][..3].iter().zip(want) {
                     assert!(
                         (actual / 4.0 - expected).abs() < 1e-5,

@@ -3941,7 +3941,7 @@ dependencies = [
 [[package]]
 name = "fractal-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#5f7688adc34ec391e6c5f183669b83e643cf04bb"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#f57e4fab3923403cc79c07be3987e31f76dd48e7"
 dependencies = [
  "standard-surface-bsdf",
 ]
@@ -3949,7 +3949,7 @@ dependencies = [
 [[package]]
 name = "fractal-env"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#5f7688adc34ec391e6c5f183669b83e643cf04bb"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#f57e4fab3923403cc79c07be3987e31f76dd48e7"
 dependencies = [
  "fractal-core",
  "pt-integrator",
@@ -3959,7 +3959,7 @@ dependencies = [
 [[package]]
 name = "fractal-kernels"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#5f7688adc34ec391e6c5f183669b83e643cf04bb"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#f57e4fab3923403cc79c07be3987e31f76dd48e7"
 dependencies = [
  "cuda-core",
  "cuda-device",
@@ -3971,7 +3971,7 @@ dependencies = [
 [[package]]
 name = "fractal-materials"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#5f7688adc34ec391e6c5f183669b83e643cf04bb"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#f57e4fab3923403cc79c07be3987e31f76dd48e7"
 
 [[package]]
 name = "futures-channel"
@@ -6894,7 +6894,7 @@ dependencies = [
 [[package]]
 name = "pt-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#6e5a9c2f70fd4c84d0dd42c92eeb5cd8d6959f33"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#0d1af8c796a8cb188fde5ec7458054c1a6f84517"
 dependencies = [
  "bytemuck",
  "glam",
@@ -6921,7 +6921,7 @@ dependencies = [
 [[package]]
 name = "pt-integrator"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#6e5a9c2f70fd4c84d0dd42c92eeb5cd8d6959f33"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#0d1af8c796a8cb188fde5ec7458054c1a6f84517"
 dependencies = [
  "half",
  "pt-core",
@@ -7429,7 +7429,7 @@ dependencies = [
 [[package]]
 name = "render-env"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#6e5a9c2f70fd4c84d0dd42c92eeb5cd8d6959f33"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#0d1af8c796a8cb188fde5ec7458054c1a6f84517"
 dependencies = [
  "bytemuck",
  "image",
@@ -8098,7 +8098,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 [[package]]
 name = "standard-surface-bsdf"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#6e5a9c2f70fd4c84d0dd42c92eeb5cd8d6959f33"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#0d1af8c796a8cb188fde5ec7458054c1a6f84517"
 dependencies = [
  "cuda-device",
  "libm",
