@@ -14,6 +14,16 @@ pub enum RenderMethod {
     Fast,
     Full,
 }
+/// What a render profile shows of the fractals: their path-traced light, the direct light of
+/// their first hit only (no bounces), or their bounds alone (drawn by the viewport, nothing
+/// traced). Viewport profiles pick it; the Output profile renders the scene as authored.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Display {
+    #[default]
+    PathTraced,
+    Direct,
+    Bounds,
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ViewportMode {
     Auto,
@@ -44,6 +54,10 @@ pub struct EffectiveRender {
     pub render: Render,
     pub samples: u32,
     pub resolution_scale: f32,
+    pub display: Display,
+    /// The share of each fractal left out, 0 (all of it) .. 1 (none): a Cells mask of that
+    /// density over the object (`EffectiveRender::show`).
+    pub thinning: f32,
 }
 impl EffectiveRender {
     /// Apply only to an evaluated scene. Authored material/geometry nodes remain untouched.
@@ -54,9 +68,59 @@ impl EffectiveRender {
         if self.method == RenderMethod::Fast && scene.material.transmission <= 0.0 {
             scene.material.model = crate::scene::MaterialModel::Fast;
         }
+        if self.display == Display::Direct {
+            scene.render.max_bounces = 0;
+        }
         for object in &mut scene.objects {
             self.apply_to(object);
         }
+    }
+
+    /// Apply the profile's display to an evaluated world scene: thinning adds a Cells mask of
+    /// `thinning` density to every fractal (cells a quarter of its framing radius, in its own
+    /// space, so they move with it); Bounds keeps each fractal's bounds for the viewport to draw
+    /// (`Scene::bounds`) and traces none of them.
+    pub fn show(&self, scene: &mut crate::scene::Scene) -> Result<(), String> {
+        use crate::scene::{Bounds, Mask, MaskInstance, MaskShape};
+        let world = |object: &crate::scene::Scene| {
+            object
+                .object_world
+                .unwrap_or(glam::Mat4::IDENTITY.to_cols_array_2d())
+        };
+        if self.thinning > 0.0 {
+            for object in &mut scene.objects {
+                if object.masks.len() >= fractal_core::params::MAX_MASKS {
+                    return Err(format!(
+                        "{} has {} masks: thinning needs one more",
+                        object.name,
+                        object.masks.len()
+                    ));
+                }
+                let edge = object.formula.framing_radius() * 0.25;
+                object.masks.push(MaskInstance {
+                    mask: Mask {
+                        shape: MaskShape::Cells,
+                        size: [edge; 3],
+                        density: self.thinning,
+                        seed: 0,
+                        invert: false,
+                    },
+                    world: world(object),
+                });
+            }
+        }
+        if self.display == Display::Bounds {
+            scene.bounds = scene
+                .objects
+                .iter()
+                .map(|object| Bounds {
+                    world: world(object),
+                    half: object.formula.framing_radius(),
+                })
+                .collect();
+            scene.objects.clear();
+        }
+        Ok(())
     }
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -114,6 +178,8 @@ pub(crate) fn render_values(render: &Value, quality: NodeId) -> Value {
         values.insert((*key).into(), render[*key].clone());
     }
     values.insert("method".into(), json!(RenderMethod::Full));
+    values.insert("display".into(), json!(Display::PathTraced));
+    values.insert("thinning".into(), json!(0.0));
     values.insert("quality_id".into(), json!(quality));
     Value::Object(values)
 }

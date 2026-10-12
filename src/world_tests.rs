@@ -3370,3 +3370,41 @@ fn the_suns_disc_setting_reaches_the_camera_sun_parameter() {
     set(&mut e, sun, "/lighting/sun_disc", json!(false), 0.0);
     assert_eq!(packed(&e), 0.0);
 }
+
+#[test]
+fn display_modes_thin_trace_direct_or_show_bounds_on_their_profile_only() {
+    let mut e = editor();
+    let still = e.document.viewport_policy(0.0).unwrap().still_id;
+    let output = e.document.output_render_profile().unwrap();
+    let shown = |e: &WorldEditor, profile| {
+        e.document
+            .snapshot_with_render_profile(profile, 0.0)
+            .unwrap()
+    };
+    let full = shown(&e, still);
+    assert!(!full.objects.is_empty() && full.bounds.is_empty());
+    assert!(full.objects.iter().all(|o| o.masks.is_empty()));
+    set(&mut e, still, "/render/thinning", json!(0.5), 0.0);
+    let thinned = shown(&e, still);
+    for object in &thinned.objects {
+        let cells = object.masks.last().unwrap();
+        assert_eq!(cells.mask.shape, crate::scene::MaskShape::Cells);
+        assert_eq!(cells.mask.density, 0.5);
+    }
+    set(&mut e, still, "/render/display", json!("Direct"), 0.0);
+    assert_eq!(shown(&e, still).render.max_bounces, 0);
+    set(&mut e, still, "/render/display", json!("Bounds"), 0.0);
+    let boxes = shown(&e, still);
+    assert!(boxes.objects.is_empty());
+    assert_eq!(boxes.bounds.len(), full.objects.len());
+    // The Output profile renders the scene as authored.
+    let out = shown(&e, output);
+    assert_eq!(out.objects.len(), full.objects.len());
+    assert!(out.bounds.is_empty() && out.objects.iter().all(|o| o.masks.is_empty()));
+    // The thinning is a share: the document holds it to 0..1.
+    set(&mut e, still, "/render/thinning", json!(1.5), 0.0);
+    assert_eq!(
+        e.document.attribute_value(still, "/render/thinning", 0.0).unwrap(),
+        json!(1.0)
+    );
+}

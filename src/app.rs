@@ -941,6 +941,55 @@ impl App {
     /// the local pose under the parent, one undo step per drag, keyed like any edit at the
     /// playhead. The edits change the scene, so the viewport switches to its Moving profile
     /// while dragging, as during navigation.
+    /// The fractals a Bounds display shows (`render_profiles::Display::Bounds`): each one's cube,
+    /// drawn over the image through the viewport camera, edges cut at the camera plane.
+    fn draw_bounds(&self, ui: &egui::Ui, rect: egui::Rect) {
+        let Some(bounds) = self
+            .viewport_scene
+            .as_ref()
+            .map(|cached| &cached.3.bounds)
+            .filter(|bounds| !bounds.is_empty())
+        else {
+            return;
+        };
+        let (view, projection) = self.scene.camera_matrices(rect.width() / rect.height());
+        let painter = ui.painter_at(rect);
+        let stroke = egui::Stroke::new(1.0, ui.visuals().selection.stroke.color);
+        let screen = |p: glam::Vec4| {
+            let ndc = p.truncate() / p.w;
+            egui::pos2(
+                rect.left() + (ndc.x * 0.5 + 0.5) * rect.width(),
+                rect.top() + (0.5 - ndc.y * 0.5) * rect.height(),
+            )
+        };
+        const NEAR: f32 = 1.0e-6;
+        for b in bounds {
+            let clip = projection * view * glam::Mat4::from_cols_array_2d(&b.world);
+            let corner = |i: usize| {
+                let side = |bit: usize| if i & bit != 0 { b.half } else { -b.half };
+                clip * glam::Vec4::new(side(1), side(2), side(4), 1.0)
+            };
+            for i in 0..8 {
+                for bit in [1, 2, 4] {
+                    if i & bit != 0 {
+                        continue;
+                    }
+                    let (mut a, mut c) = (corner(i), corner(i | bit));
+                    if a.w <= NEAR && c.w <= NEAR {
+                        continue;
+                    }
+                    // The part in front of the camera only.
+                    if a.w <= NEAR {
+                        a = c + (a - c) * ((c.w - NEAR) / (c.w - a.w));
+                    } else if c.w <= NEAR {
+                        c = a + (c - a) * ((a.w - NEAR) / (a.w - c.w));
+                    }
+                    painter.line_segment([screen(a), screen(c)], stroke);
+                }
+            }
+        }
+    }
+
     fn manipulate(&mut self, ui: &egui::Ui, rect: egui::Rect) {
         use egui_gizmo::{GizmoConfig, GizmoOrientation, GizmoSpace, GizmoTool, Transform};
         let tool = match self.tool {
@@ -3492,6 +3541,7 @@ impl App {
                 },
             ));
         }
+        self.draw_bounds(ui, rect);
         self.manipulate(ui, rect);
         if self.export.is_running() {
             let text = format!("Rendering · {}", self.export.status);

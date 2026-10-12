@@ -140,8 +140,9 @@ impl PreparationInputs {
             render: _,
             environment,
             // Authoring and display state: never packed into the upload (`mask` reaches it
-            // resolved, as `masks`).
+            // resolved, as `masks`; `bounds` are drawn by the viewport, never traced).
             mask: _,
+            bounds: _,
             document: _,
             animation: _,
             name: _,
@@ -194,6 +195,7 @@ impl PreparationInputs {
             render: _,
             environment,
             mask: _,
+            bounds: _,
             document: _,
             animation: _,
             name: _,

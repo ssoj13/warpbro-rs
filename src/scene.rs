@@ -364,6 +364,14 @@ impl Default for Mask {
     }
 }
 
+/// A fractal shown as its bounds (`render_profiles::Display::Bounds`): the cube of half edge
+/// `half` around its origin, in its own space (`world`: object to world).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Bounds {
+    pub world: [[f32; 4]; 4],
+    pub half: f32,
+}
+
 /// A mask as an object meets it: its settings and its world matrix at the frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaskInstance {
@@ -552,6 +560,9 @@ pub struct Scene {
     /// The scene masks this object is intersected with (resolved by `WorldDocument::snapshot`).
     #[serde(skip)]
     pub masks: Vec<MaskInstance>,
+    /// The fractals a Bounds display draws instead of tracing (`EffectiveRender::show`).
+    #[serde(skip)]
+    pub bounds: Vec<Bounds>,
     /// A Mask node's settings: its authoring branch (`WorldKind::Mask`).
     #[serde(default)]
     pub mask: Mask,
@@ -793,6 +804,7 @@ impl Scene {
             lights: Vec::new(),
             object_world: None,
             masks: Vec::new(),
+            bounds: Vec::new(),
             mask: Mask::default(),
             document: None,
             animation: Default::default(),

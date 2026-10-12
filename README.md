@@ -287,6 +287,11 @@ or Manual in Locked; Moving does not change the cached job's profile or quality.
 
 **Fast** uses the existing World path tracer with approximate opaque-material shading,
 preserving transmitting material models. **Full** keeps authored material models.
+Each profile's **Display** picks what it shows of the fractals: **PathTraced**, **Direct** (the
+first hit's direct light only, no bounces) or **Bounds** (each fractal's cube drawn over the
+image, nothing traced), and **Thinning** (0..1) leaves that share of every fractal out through
+a random 3D grid of removed cells. Set them on the Moving / Still profiles; Output renders the
+scene as authored.
 The selected quality node owns samples, resolution scale, tracing limits and adaptive sampling.
 Fresh Moving settings start at Fast, 64 samples, half resolution and two bounces; these are
 editable profile values. No real-time WorldDirect or guaranteed navigation FPS is claimed.

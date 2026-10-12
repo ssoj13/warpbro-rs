@@ -1652,6 +1652,7 @@ fn attribute_choices(path: &str) -> Vec<Value> {
     }
     let values: &[&str] = match path {
         "/render/method" => &["Fast", "Full"],
+        "/render/display" => &["PathTraced", "Direct", "Bounds"],
         "/viewport/mode" => &["Auto", "Locked"],
         "/palette" => &[
             "Classic", "Fire", "Ice", "Mono", "Sunset", "Aurora", "Ocean", "Ember", "Amethyst",
@@ -1686,7 +1687,7 @@ pub(crate) fn attribute_range(path: &str) -> Option<(f64, f64)> {
         // Bounds the time warp's integration span (`WorldDocument::take_frame`).
         TAKE_OFFSET => Some((-100_000.0, 100_000.0)),
         TAKE_SPEED => Some((-1000.0, 1000.0)),
-        "/mask/density" => Some((0.0, 1.0)),
+        "/mask/density" | "/render/thinning" => Some((0.0, 1.0)),
         "/mask/seed" => Some((0.0, 16_777_215.0)),
         "/viewport/target_fps" => Some((1.0, 240.0)),
         "/viewport/settle_delay_ms" => Some((0.0, 10000.0)),
@@ -2053,6 +2054,12 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
         return formula_hint(family, field);
     }
     Some(match path {
+        "/render/display" => {
+            "What this profile shows of the fractals: path traced, the direct light of the first hit only (fast), or their bounds alone (nothing traced). Use it on the viewport's Moving / Still profiles; the Output profile renders the scene as authored."
+        }
+        "/render/thinning" => {
+            "Leaves part of every fractal out, 0 (all of it) to 1 (none): a 3D grid of cells is removed at random, so the march has less to trace."
+        }
         "/render/method" => {
             "Fast evaluates opaque materials with the existing simplified material model; transmission keeps Standard Surface. Full preserves each authored material model. Quality remains controlled by the linked QualitySettings."
         }
@@ -2982,6 +2989,22 @@ impl WorldDocument {
         {
             return Err("QualitySettings contain invalid tracing or adaptive limits".into());
         }
+        // A profile saved before display modes has neither attribute: it path-traces it all.
+        let attrs = self.attrs(profile)?;
+        let display: crate::render_profiles::Display = if attrs.contains("/render/display") {
+            serde_json::from_value(self.attribute_value(profile, "/render/display", frame)?)
+                .map_err(|e| format!("Invalid display: {e}"))?
+        } else {
+            Default::default()
+        };
+        let thinning = if attrs.contains("/render/thinning") {
+            self.attribute_value(profile, "/render/thinning", frame)?
+                .as_f64()
+                .filter(|v| (0.0..=1.0).contains(v))
+                .ok_or("Thinning must be between 0 and 1")? as f32
+        } else {
+            0.0
+        };
         Ok(EffectiveRender {
             profile,
             quality,
@@ -2989,6 +3012,8 @@ impl WorldDocument {
             render,
             samples,
             resolution_scale,
+            display,
+            thinning,
         })
     }
     pub fn viewport_policy(
@@ -4957,7 +4982,9 @@ impl WorldDocument {
             scene.trap_axis = first.trap_axis;
             scene.trap_scale = first.trap_scale;
         }
-        self.effective_render(profile, frame)?.apply_to(&mut scene);
+        let effective = self.effective_render(profile, frame)?;
+        effective.apply_to(&mut scene);
+        effective.show(&mut scene)?;
         scene.camera.validate_lens()?;
         Ok(scene)
     }
