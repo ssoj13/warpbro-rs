@@ -424,107 +424,8 @@ impl App {
             ..Default::default()
         }
         .show(ui, rect, &mut state, |ui| {
-            use egui_widgets_config::icons as ph;
-            for tool in super::ViewTool::ALL {
-                let (icon, tip) = tool.label();
-                if ui
-                    .selectable_label(self.tool == tool, icon)
-                    .on_hover_text(tip)
-                    .clicked()
-                {
-                    self.tool = tool;
-                }
-            }
-            ui.menu_button(ph::VISIBLE, |ui| self.visibility_menu(ui))
-                .response
-                .on_hover_text("Visibility and selectability of node kinds in the viewport");
-            ui.separator();
-            let frame = f64::from(self.world_ui.playhead);
-            // The binding the viewport actually renders; step_viewport is its only producer.
-            let active = self.viewport_render.clone();
-            if let Some(effective) = active.as_ref().map(|selection| &selection.effective) {
-                let mut exposure = effective.render.exposure_stops;
-                egui_viewport_toolbar::exposure_control(
-                    ui,
-                    &mut exposure,
-                    &mut self.exposure_hold,
-                    -10.0..=10.0,
-                );
-                if exposure != effective.render.exposure_stops {
-                    let gesture = ui
-                        .input(|input| input.pointer.primary_down())
-                        .then(|| {
-                            egui::Id::new((
-                                "viewport_camera_edit",
-                                self.world.document.active_camera,
-                            ))
-                            .value()
-                        })
-                        .or_else(|| self.world.active_edit());
-                    if let Err(error) = self.world.execute_edit(
-                        crate::world::WorldCommand::SetAttribute {
-                            id: effective.profile,
-                            path: "/render/exposure_stops".into(),
-                            value: serde_json::json!(exposure),
-                            frame,
-                        },
-                        gesture,
-                    ) {
-                        self.status = error;
-                    }
-                }
-            }
-            ui.separator();
-            self.colour.set_hdr(true);
-            let changed = self.colour.quick_view_ui(ui);
-            self.apply_colour_change(changed);
-            if ui
-                .button(ph::GEAR)
-                .on_hover_text("Colour management settings")
-                .clicked()
-            {
-                self.open_settings(super::SettingsPage::Color);
-            }
-            ui.separator();
-            let actions = crate::render_profiles_ui::toolbar(
-                ui,
-                &mut self.world,
-                f64::from(self.world_ui.playhead),
-                active.as_ref(),
-            );
-            self.profile_ui_actions(actions);
-            ui.separator();
-            // A/B of the viewport only: the scene's denoise settings (World Settings) and exports
-            // stay as authored, and denoising keeps running so switching back is instant.
-            let denoising = active
-                .as_ref()
-                .is_some_and(|selection| selection.effective.render.denoise.enabled);
-            let mut shown = denoising && !self.raw_view;
-            if ui
-                .add_enabled(denoising, egui::Button::selectable(shown, ph::PATH_TRACE))
-                .on_hover_text("Viewport: denoised / raw samples")
-                .on_disabled_hover_text("Denoising is off in the selected viewport profile")
-                .clicked()
-            {
-                shown = !shown;
-                self.raw_view = !shown;
-            }
-            if ui
-                .selectable_label(self.scene.camera.free_flight, ph::FLIGHT)
-                .on_hover_text("Free flight / horizon lock · RMB + WASD, R / Space up, C down, Q/E")
-                .clicked()
-            {
-                self.toggle_flight_mode();
-            }
-            // One button keeps the toolbar narrow: click saves as displayed, the context menu
-            // (right click) offers the other snapshot files, as File does.
-            let snapshot = ui
-                .button(ph::CAMERA)
-                .on_hover_text("Save the viewport as displayed (PNG) · right click: more formats");
-            if snapshot.clicked() {
-                self.save_frame(super::Monitor::read(ui.ctx()), None);
-            }
-            snapshot.context_menu(|ui| self.snapshot_menu(ui));
+            // CamClip claims the right end first; the other controls lay out left to right in
+            // what remains, so a narrow viewport never pushes CamClip off the toolbar.
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.add_space(ui.spacing().item_spacing.x);
                 match self.camera_slots.ui(
@@ -547,6 +448,113 @@ impl App {
                     None => {}
                 }
                 ui.separator();
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    use egui_widgets_config::icons as ph;
+                    for tool in super::ViewTool::ALL {
+                        let (icon, tip) = tool.label();
+                        if ui
+                            .selectable_label(self.tool == tool, icon)
+                            .on_hover_text(tip)
+                            .clicked()
+                        {
+                            self.tool = tool;
+                        }
+                    }
+                    ui.menu_button(ph::VISIBLE, |ui| self.visibility_menu(ui))
+                        .response
+                        .on_hover_text(
+                            "Visibility and selectability of node kinds in the viewport",
+                        );
+                    ui.separator();
+                    let frame = f64::from(self.world_ui.playhead);
+                    // The binding the viewport actually renders; step_viewport is its only producer.
+                    let active = self.viewport_render.clone();
+                    if let Some(effective) = active.as_ref().map(|selection| &selection.effective) {
+                        let mut exposure = effective.render.exposure_stops;
+                        egui_viewport_toolbar::exposure_control(
+                            ui,
+                            &mut exposure,
+                            &mut self.exposure_hold,
+                            -10.0..=10.0,
+                        );
+                        if exposure != effective.render.exposure_stops {
+                            let gesture = ui
+                                .input(|input| input.pointer.primary_down())
+                                .then(|| {
+                                    egui::Id::new((
+                                        "viewport_camera_edit",
+                                        self.world.document.active_camera,
+                                    ))
+                                    .value()
+                                })
+                                .or_else(|| self.world.active_edit());
+                            if let Err(error) = self.world.execute_edit(
+                                crate::world::WorldCommand::SetAttribute {
+                                    id: effective.profile,
+                                    path: "/render/exposure_stops".into(),
+                                    value: serde_json::json!(exposure),
+                                    frame,
+                                },
+                                gesture,
+                            ) {
+                                self.status = error;
+                            }
+                        }
+                    }
+                    ui.separator();
+                    self.colour.set_hdr(true);
+                    let changed = self.colour.quick_view_ui(ui);
+                    self.apply_colour_change(changed);
+                    if ui
+                        .button(ph::GEAR)
+                        .on_hover_text("Colour management settings")
+                        .clicked()
+                    {
+                        self.open_settings(super::SettingsPage::Color);
+                    }
+                    ui.separator();
+                    let actions = crate::render_profiles_ui::toolbar(
+                        ui,
+                        &mut self.world,
+                        f64::from(self.world_ui.playhead),
+                        active.as_ref(),
+                    );
+                    self.profile_ui_actions(actions);
+                    ui.separator();
+                    // A/B of the viewport only: the scene's denoise settings (World Settings) and exports
+                    // stay as authored, and denoising keeps running so switching back is instant.
+                    let denoising = active
+                        .as_ref()
+                        .is_some_and(|selection| selection.effective.render.denoise.enabled);
+                    let mut shown = denoising && !self.raw_view;
+                    if ui
+                        .add_enabled(denoising, egui::Button::selectable(shown, ph::PATH_TRACE))
+                        .on_hover_text("Viewport: denoised / raw samples")
+                        .on_disabled_hover_text("Denoising is off in the selected viewport profile")
+                        .clicked()
+                    {
+                        shown = !shown;
+                        self.raw_view = !shown;
+                    }
+                    if ui
+                        .selectable_label(self.scene.camera.free_flight, ph::FLIGHT)
+                        .on_hover_text(
+                            "Free flight / horizon lock · RMB + WASD, R / Space up, C down, Q/E",
+                        )
+                        .clicked()
+                    {
+                        self.toggle_flight_mode();
+                    }
+                    // One button keeps the toolbar narrow: click saves as displayed, the context menu
+                    // (right click) offers the other snapshot files, as File does.
+                    let snapshot = ui.button(ph::CAMERA).on_hover_text(
+                        "Save the viewport as displayed (PNG) · right click: more formats",
+                    );
+                    if snapshot.clicked() {
+                        self.save_frame(super::Monitor::read(ui.ctx()), None);
+                    }
+                    snapshot.context_menu(|ui| self.snapshot_menu(ui));
+                });
             });
         });
         self.toolbar = state;

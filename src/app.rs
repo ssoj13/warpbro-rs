@@ -5940,7 +5940,7 @@ mod tests {
     }
 
     #[test]
-    fn play_attaches_the_take_and_the_camera_follows_it_while_playing() {
+    fn cuda_play_attaches_the_take_and_the_camera_follows_it_while_playing() {
         let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
         // A Still profile that renders fast, at a resolution scale below 1: the scale once made
@@ -6053,7 +6053,7 @@ mod tests {
     }
 
     #[test]
-    fn scrubbing_after_a_completed_frame_renders_the_new_frame_live() {
+    fn cuda_scrubbing_after_a_completed_frame_renders_the_new_frame_live() {
         let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
         let policy = app.world.document.viewport_policy(0.0).unwrap();
