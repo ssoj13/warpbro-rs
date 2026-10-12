@@ -527,7 +527,7 @@ impl WorldEditor {
     pub fn undo(&mut self) -> bool {
         self.finish_edit();
         if let Some((d, s, selected)) = self.undo.pop() {
-            let d = self.keep_takes(d);
+            let d = self.keep_live(d);
             self.redo.push((
                 std::mem::replace(&mut self.document, d),
                 self.selection,
@@ -544,7 +544,7 @@ impl WorldEditor {
     pub fn redo(&mut self) -> bool {
         self.finish_edit();
         if let Some((d, s, selected)) = self.redo.pop() {
-            let d = self.keep_takes(d);
+            let d = self.keep_live(d);
             self.undo.push((
                 std::mem::replace(&mut self.document, d),
                 self.selection,
@@ -558,10 +558,19 @@ impl WorldEditor {
             false
         }
     }
-    /// A history snapshot carrying the live takes: undo/redo restore edits, never recordings.
-    fn keep_takes(&self, mut document: WorldDocument) -> WorldDocument {
+    /// A history snapshot carrying the live takes and identity: undo/redo restore edits, never
+    /// recordings, and never turn the document back into the one it was copied from.
+    fn keep_live(&self, mut document: WorldDocument) -> WorldDocument {
         document.takes = self.document.takes.clone();
+        document.graph.id = self.document.graph.id;
         document
+    }
+
+    /// Make the document a new one (Save As to another file): a fresh UUID, so it and the file
+    /// it was copied from are told apart (clipboard take references, caches keyed by it).
+    pub fn renew_identity(&mut self) {
+        self.document.renew_identity();
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// The document states of the undo history: undo, redo and a pending gesture's original.
@@ -3495,6 +3504,12 @@ impl WorldDocument {
         }
         self.last = last;
         Ok(())
+    }
+
+    /// A fresh UUID: this document is a new one, not the template, preset, bookmark or file it
+    /// was made from.
+    pub fn renew_identity(&mut self) {
+        self.graph.id = NodeId::new().uuid();
     }
 
     pub fn from_scene(scene: &Scene) -> Self {

@@ -1258,7 +1258,7 @@ impl App {
             && let Some(e) = self.gallery.get(i)
         {
             let scene = e.scene.clone();
-            self.load(scene);
+            self.load(scene, Load::New);
         }
         if let Ok(name) = std::env::var("FRAC_SNAP_MATERIAL")
             && let Some(p) = crate::materials::PRESETS.iter().find(|p| p.name() == name)
@@ -1363,6 +1363,13 @@ impl App {
         if save && path.extension().is_none() {
             path.set_extension(crate::fs_name::SCENE_SUFFIX);
         }
+        // Saved under another name the scene becomes a copy: the file it was opened from keeps
+        // the old identity, this document (and its new file) gets its own.
+        if action == crate::templates::FileAction::Save
+            && self.scene_file_path.as_ref() != Some(&path)
+        {
+            self.world.renew_identity();
+        }
         let id = self.scene_file_sequence.wrapping_add(1);
         let command = if save {
             crate::io_service::Command::SaveScene {
@@ -1416,7 +1423,15 @@ impl App {
         self.scene_file_pending = None;
         match event.result {
             Ok(Some(scene)) => {
-                self.load(*scene);
+                // A template opens as a new scene; a scene file is that document again.
+                self.load(
+                    *scene,
+                    if action.template() {
+                        Load::New
+                    } else {
+                        Load::Same
+                    },
+                );
                 if !action.template() {
                     self.scene_file_path = Some(event.path.clone());
                 }
@@ -1435,7 +1450,10 @@ impl App {
         }
     }
 
-    fn load(&mut self, mut scene: Scene) {
+    /// Load `scene` as the editor's document: the same document again (`Load::Same`: a file
+    /// opened, a reset) or a new one made from it (`Load::New`: a template, preset or bookmark,
+    /// which gets its own identity: `WorldDocument::renew_identity`).
+    fn load(&mut self, mut scene: Scene, mode: Load) {
         self.takes_recorder.cancel();
         self.preview.cancel();
         self.preview_key = None;
@@ -1445,7 +1463,12 @@ impl App {
         self.viewport_scene = None;
         self.viewport_render = None;
         self.load_revision = self.load_revision.wrapping_add(1);
-        let document = crate::world::WorldDocument::from_scene(&scene);
+        let mut document = crate::world::WorldDocument::from_scene(&scene);
+        if mode == Load::New {
+            document.renew_identity();
+            // "Reset" goes back to this document, not to the template it was made from.
+            scene.document = Some(Box::new(document.clone()));
+        }
         self.world_ui.reset();
         self.world_ui.seek(document.first);
         self.world = crate::world::WorldEditor::new(document.clone());
@@ -2969,7 +2992,7 @@ impl App {
                             match crate::presets::scene(index) {
                                 Ok(scene) => {
                                     self.status = format!("Opened template {}", scene.name);
-                                    self.load(scene);
+                                    self.load(scene, Load::New);
                                 }
                                 Err(error) => self.status = error,
                             }
@@ -3003,7 +3026,7 @@ impl App {
                 }
                 ui.separator();
                 if ui.button("Reset scene").clicked() {
-                    self.load(self.origin.clone());
+                    self.load(self.origin.clone(), Load::Same);
                     self.colour.sel = self.scene.colour.clone();
                     self.colour.rebuild();
                     ui.close();
@@ -3161,7 +3184,7 @@ impl App {
                     });
             });
         if let Some(s) = load {
-            self.load(s);
+            self.load(s, Load::New);
         }
         if let Some(i) = delete {
             let e = self.bookmarks.remove(i);
@@ -3459,6 +3482,15 @@ impl App {
             );
         }
     }
+}
+
+/// Whether a loaded scene is the same document again or a new one made from it (`App::load`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Load {
+    /// A scene file opened (again), or a reset: its identity stays.
+    Same,
+    /// A template, preset or bookmark instantiated: a document of its own.
+    New,
 }
 
 /// What a cached preview was rendered for: any difference makes the cache stale. Compared
@@ -4337,7 +4369,7 @@ mod tests {
             .unwrap();
         let mut initial = app.scene.clone();
         initial.document = Some(Box::new(app.world.document.clone()));
-        app.load(initial);
+        app.load(initial, Load::Same);
         app.last_change = Instant::now() - std::time::Duration::from_secs(2);
         app.step_viewport(1, 1, false, 100.0);
         let previous = app.request.as_ref().unwrap().scene.objects.clone();
@@ -4368,7 +4400,7 @@ mod tests {
         assert_ne!(expected, previous);
         let mut reopened = app.scene.clone();
         reopened.document = Some(Box::new(edited.document));
-        app.load(reopened);
+        app.load(reopened, Load::Same);
         assert_eq!(app.world.document.graph.id, original_id);
         assert_eq!(app.world.revision(), 0);
         app.last_change = Instant::now() - std::time::Duration::from_secs(2);
@@ -4751,7 +4783,7 @@ mod tests {
         assert_eq!(app.world.revision(), revision);
         assert_eq!(app.snapshot_clones, clones);
         app.scene_file_pending = Some((8, app.load_revision, crate::templates::FileAction::Open));
-        app.load(Scene::preset(crate::params::FAMILY_BULB));
+        app.load(Scene::preset(crate::params::FAMILY_BULB), Load::New);
         app.scene_file_event(crate::io_service::SceneEvent {
             id: 8,
             path: PathBuf::from("stale.frac.json"),
@@ -4896,7 +4928,7 @@ mod tests {
         let revision = app.load_revision;
         let mut reload = app.scene.clone();
         reload.document = Some(Box::new(app.world.document.clone()));
-        app.load(reload);
+        app.load(reload, Load::Same);
         assert!(app.evaluated_world.is_none());
         assert_ne!(app.load_revision, revision);
         app.refresh_scene().unwrap();
@@ -5848,5 +5880,38 @@ mod tests {
         let expected = app.world.document.snapshot(head).unwrap().camera;
         assert_ne!(expected, base, "the take moved the camera");
         assert_eq!(app.scene.camera, expected, "the viewport shows the take");
+    }
+
+    #[test]
+    fn scenes_made_from_one_template_and_save_as_copies_are_distinct_documents() {
+        let _gpu_test = crate::test_gpu::lock();
+        let mut app = App::new();
+        let preset = Scene::preset(crate::params::FAMILY_BULB);
+        let mut template = preset.clone();
+        template.document = Some(Box::new(crate::world::WorldDocument::from_scene(&preset)));
+        app.load(template.clone(), Load::New);
+        let first = app.world.document.graph.id;
+        app.load(template.clone(), Load::New);
+        let second = app.world.document.graph.id;
+        assert_ne!(first, second, "two scenes from one template");
+        assert_ne!(Some(first), template.document.as_ref().map(|d| d.graph.id));
+        // A reset returns to this scene, not to the template.
+        app.load(app.origin.clone(), Load::Same);
+        assert_eq!(app.world.document.graph.id, second);
+        // An edit then Save As: the copy is a new document, and undo keeps it so.
+        app.world
+            .execute(crate::world::WorldCommand::SetMark {
+                slot: 1,
+                frame: Some(3),
+            })
+            .unwrap();
+        app.submit_scene_action(
+            std::env::temp_dir().join("warpbro-identity-copy.json"),
+            crate::templates::FileAction::Save,
+        );
+        let copy = app.world.document.graph.id;
+        assert_ne!(copy, second);
+        assert!(app.world.undo());
+        assert_eq!(app.world.document.graph.id, copy);
     }
 }
