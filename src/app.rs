@@ -127,8 +127,8 @@ pub(crate) struct App {
     takes_recorder: crate::takes::Recorder,
     /// The flight or orbit rig moved the camera this frame: only navigation makes takes.
     navigated: bool,
-    /// The take whose name field is being edited (Takes panel).
-    take_rename: Option<(u64, String)>,
+    /// Takes panel state (not saved): see `takes_ui`.
+    takes_view: takes_ui::View,
     /// Splitter state of the three Settings > Controls grids.
     prefs_grids: [AttrGridState; 3],
     dock: egui_dock::DockState<dock::Panel>,
@@ -141,8 +141,6 @@ pub(crate) struct App {
     viewport_rect: Option<egui::Rect>,
     config_picker: egui_file_dialog::FileDialog,
     scene_picker: Option<(crate::templates::FileAction, egui_file_dialog::FileDialog)>,
-    /// Export (Some take id) or import (None) dialog of the Takes panel.
-    take_picker: Option<(Option<u64>, egui_file_dialog::FileDialog)>,
     scene_file_path: Option<PathBuf>,
     scene_file_sequence: u64,
     scene_file_pending: Option<(u64, u64, crate::templates::FileAction)>,
@@ -606,7 +604,7 @@ impl App {
             recorder_options: Default::default(),
             takes_recorder: Default::default(),
             navigated: false,
-            take_rename: None,
+            takes_view: Default::default(),
             prefs_grids: Default::default(),
             dock: dock::default_layout(),
             panels_to_open: Vec::new(),
@@ -618,7 +616,6 @@ impl App {
             viewport_rect: None,
             config_picker: egui_file_dialog::FileDialog::new(),
             scene_picker: None,
-            take_picker: None,
             scene_file_path: None,
             scene_file_sequence: 0,
             scene_file_pending: None,
@@ -2305,6 +2302,13 @@ impl App {
     /// clipboard, Ctrl+V pastes WarpBro nodes from it. Each edit is one world command / undo step.
     fn node_clipboard(&mut self, ctx: &egui::Context) {
         use crate::hotkeys::{self, Command as Hotkey, Scope};
+        // Takes paste wherever the pointer is (the text says what it is); the panel under the
+        // pointer owns Copy / Duplicate / Delete.
+        self.paste_takes(ctx);
+        if hotkeys::active(ctx) == Some(Scope::Takes) {
+            self.takes_hotkeys(ctx);
+            return;
+        }
         let selected = if self.world.selected.is_empty() {
             self.world.selection.into_iter().collect()
         } else {

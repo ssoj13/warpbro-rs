@@ -2889,6 +2889,16 @@ impl WorldDocument {
 }
 
 impl WorldDocument {
+    /// The active camera's visible pose on every frame of the work area from its own animation,
+    /// a bound take ignored: the timeline motion as take poses ("Take from animation").
+    pub fn camera_frames(&self) -> Result<Vec<crate::scene::Camera>, String> {
+        let mut unbound = self.clone();
+        unbound.takes.set_current(None)?;
+        (self.first..=self.last)
+            .map(|frame| unbound.snapshot(f64::from(frame)).map(|scene| scene.camera))
+            .collect()
+    }
+
     /// Move the work area's last frame. Growing it also grows every node span that reached the
     /// old end or beyond it but stops short of the new one (a non-animated `/end` in
     /// `[old_end, new_end)`), so nothing that was visible at the old end vanishes in the added

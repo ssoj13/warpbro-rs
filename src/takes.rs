@@ -23,6 +23,8 @@ const SETTLE_SECS: f64 = 0.3;
 const MIN_SECS: f64 = 0.1;
 /// A runaway gesture is cut here (about ten minutes at 60 Hz) and the next move starts a new take.
 const MAX_SAMPLES: usize = 36_000;
+/// Marker of WarpBro takes on the system clipboard, so other text is never pasted as takes.
+const CLIPBOARD_KEY: &str = "warpbro_takes";
 
 /// One recorded navigation gesture.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -110,37 +112,173 @@ impl Take {
 
     /// Versioned single-take clip file for exchange between scenes.
     pub fn to_clip(&self, fps: f64) -> Result<String, String> {
-        serde_json::to_string_pretty(&Clip {
-            version: CLIP_VERSION,
-            fps,
-            name: self.name.clone(),
-            start: self.start,
-            timing: self.timing,
-            samples: self.samples.clone(),
-        })
-        .map_err(|e| e.to_string())
+        serde_json::to_string_pretty(&Clip::of(self, fps)).map_err(|e| e.to_string())
     }
 
     /// Parse a clip file; the take is unpinned and has no id until a store adds it.
     pub fn from_clip(text: &str) -> Result<Self, String> {
         let clip: Clip =
             serde_json::from_str(text).map_err(|e| format!("Invalid take clip: {e}"))?;
-        if clip.version != CLIP_VERSION {
-            return Err(format!(
-                "Unsupported take clip version {} (expected {CLIP_VERSION})",
-                clip.version
-            ));
+        clip.take()
+    }
+}
+
+impl Take {
+    /// A still take of `camera` from frame `start`: a camera bookmark (two equal poses one
+    /// frame apart, the least a take holds).
+    pub fn still(camera: Camera, start: f64, fps: f64) -> Result<Self, String> {
+        Self::from_frames(start, fps, vec![camera, camera])
+    }
+
+    /// A take through `poses`, one per frame from `start` at `fps`: the timeline animation of a
+    /// camera as a take.
+    pub fn from_frames(start: f64, fps: f64, poses: Vec<Camera>) -> Result<Self, String> {
+        if !(fps.is_finite() && fps > 0.0) {
+            return Err("Invalid frame rate".into());
         }
         Take {
             id: 0,
-            name: clip.name,
-            start: clip.start,
-            timing: clip.timing,
+            name: String::new(),
+            start,
+            timing: Timing::KeepSpeed,
             pinned: false,
-            samples: clip.samples,
+            samples: poses
+                .into_iter()
+                .enumerate()
+                .map(|(i, camera)| Sample {
+                    seconds: i as f64 / fps,
+                    camera,
+                })
+                .collect(),
         }
         .checked()
     }
+
+    /// The part between `from` and `to` seconds, rebased to 0. The cut poses are interpolated,
+    /// and the start frame moves with the cut (`from` seconds at `fps`), so the kept motion
+    /// still plays on the frames it played on.
+    pub fn trimmed(&self, from: f64, to: f64, fps: f64) -> Result<Self, String> {
+        let from = from.max(0.0);
+        let to = to.min(self.duration());
+        if !(to > from) {
+            return Err("Trim keeps nothing".into());
+        }
+        let first = self.pose_at(from).ok_or("Empty take")?;
+        let last = self.pose_at(to).ok_or("Empty take")?;
+        let mut samples = vec![Sample {
+            seconds: 0.0,
+            camera: first,
+        }];
+        samples.extend(
+            self.samples
+                .iter()
+                .filter(|s| s.seconds > from && s.seconds < to)
+                .map(|s| Sample {
+                    seconds: s.seconds - from,
+                    camera: s.camera,
+                }),
+        );
+        samples.push(Sample {
+            seconds: to - from,
+            camera: last,
+        });
+        Take {
+            start: self.start + from * fps,
+            samples,
+            ..self.clone()
+        }
+        .checked()
+    }
+
+    /// Played `speed` times as fast (2 = half the duration).
+    pub fn retimed(&self, speed: f64) -> Result<Self, String> {
+        if !(speed.is_finite() && speed > 0.0) {
+            return Err("Speed must be positive".into());
+        }
+        let mut take = self.clone();
+        for sample in &mut take.samples {
+            sample.seconds /= speed;
+        }
+        take.checked()
+    }
+
+    /// Hand shake removed: every pose becomes the mean of the poses within `window` seconds
+    /// around it (rotation by the normalized mean of hemisphere-aligned quaternions, accurate
+    /// for the small angles one window spans). The first and last poses stay.
+    pub fn smoothed(&self, window: f64) -> Self {
+        let mut take = self.clone();
+        let half = window.max(0.0) * 0.5;
+        let n = self.samples.len();
+        if half <= 0.0 || n < 3 {
+            return take;
+        }
+        for (i, out) in take.samples.iter_mut().enumerate().take(n - 1).skip(1) {
+            let t = self.samples[i].seconds;
+            let lo = self.samples.partition_point(|s| s.seconds < t - half);
+            let hi = self.samples.partition_point(|s| s.seconds <= t + half);
+            out.camera = mean(&self.samples[lo..hi], &self.samples[i].camera);
+        }
+        take
+    }
+
+    /// Cut at `seconds` into two takes; the second starts on the frame the cut played on.
+    pub fn split(&self, seconds: f64, fps: f64) -> Result<(Self, Self), String> {
+        let head = self.trimmed(0.0, seconds, fps)?;
+        let tail = self.trimmed(seconds, self.duration(), fps)?;
+        Ok((head, tail))
+    }
+}
+
+/// The mean pose of `samples` (non-empty); discrete fields come from `like`.
+fn mean(samples: &[Sample], like: &Camera) -> Camera {
+    let n = samples.len().max(1) as f32;
+    let avg = |f: &dyn Fn(&Camera) -> f32| samples.iter().map(|s| f(&s.camera)).sum::<f32>() / n;
+    let reference = like.orientation();
+    let q = samples
+        .iter()
+        .map(|s| {
+            let q = s.camera.orientation();
+            if q.dot(reference) < 0.0 { -q } else { q }
+        })
+        .fold(glam::Quat::from_xyzw(0.0, 0.0, 0.0, 0.0), |a, q| a + q)
+        .normalize();
+    let (yaw, pitch, roll) = q.to_euler(glam::EulerRot::YXZ);
+    Camera {
+        target: std::array::from_fn(|k| avg(&|c| c.target[k])),
+        distance: avg(&|c| c.distance),
+        fov_y_degrees: avg(&|c| c.fov_y_degrees),
+        f_number: avg(&|c| c.f_number),
+        sensor_height: avg(&|c| c.sensor_height),
+        focus_distance: avg(&|c| c.focus_distance),
+        yaw_degrees: yaw.to_degrees(),
+        pitch_degrees: -pitch.to_degrees(),
+        roll_degrees: roll.to_degrees(),
+        ..*like
+    }
+}
+
+/// Takes on the system clipboard: the clip format, many at once.
+pub fn to_clipboard(takes: &[&Take], fps: f64) -> Result<String, String> {
+    let clips: Vec<Clip> = takes.iter().map(|t| Clip::of(t, fps)).collect();
+    serde_json::to_string(&serde_json::json!({ CLIPBOARD_KEY: CLIP_VERSION, "clips": clips }))
+        .map_err(|e| e.to_string())
+}
+
+/// The takes of a [`to_clipboard`] text; None for any other text, an error for a WarpBro
+/// takes text that does not parse.
+pub fn from_clipboard(text: &str) -> Option<Result<Vec<Take>, String>> {
+    let value: serde_json::Value = serde_json::from_str(text.trim()).ok()?;
+    let version = value.get(CLIPBOARD_KEY)?.as_u64();
+    if version != Some(u64::from(CLIP_VERSION)) {
+        return Some(Err(format!(
+            "Unsupported takes clipboard version {version:?}"
+        )));
+    }
+    Some(
+        serde_json::from_value::<Vec<Clip>>(value["clips"].clone())
+            .map_err(|e| format!("Invalid takes clipboard: {e}"))
+            .and_then(|clips| clips.into_iter().map(Clip::take).collect()),
+    )
 }
 
 /// The on-disk single-take exchange format.
@@ -154,6 +292,38 @@ struct Clip {
     start: f64,
     timing: Timing,
     samples: Vec<Sample>,
+}
+
+impl Clip {
+    fn of(take: &Take, fps: f64) -> Self {
+        Clip {
+            version: CLIP_VERSION,
+            fps,
+            name: take.name.clone(),
+            start: take.start,
+            timing: take.timing,
+            samples: take.samples.clone(),
+        }
+    }
+
+    /// The take of a clip: unpinned, without an id until a store adds it.
+    fn take(self) -> Result<Take, String> {
+        if self.version != CLIP_VERSION {
+            return Err(format!(
+                "Unsupported take clip version {} (expected {CLIP_VERSION})",
+                self.version
+            ));
+        }
+        Take {
+            id: 0,
+            name: self.name,
+            start: self.start,
+            timing: self.timing,
+            pinned: false,
+            samples: self.samples,
+        }
+        .checked()
+    }
 }
 
 fn camera_finite(c: &Camera) -> bool {
@@ -563,6 +733,84 @@ mod tests {
         let future = text.replace("\"version\": 1", "\"version\": 2");
         assert!(Take::from_clip(&future).unwrap_err().contains("version"));
         assert!(Take::from_clip("{}").is_err());
+    }
+
+    #[test]
+    fn trim_split_and_retime_keep_the_motion_where_it_played() {
+        // Yaw 0, 10, 20, 30, 40 at 0..4 s from frame 10.
+        let t = take(&[0.0, 10.0, 20.0, 30.0, 40.0]);
+        let cut = t.trimmed(1.5, 3.0, 24.0).unwrap();
+        assert_eq!(cut.duration(), 1.5);
+        assert!(
+            (cut.samples[0].camera.yaw_degrees - 15.0).abs() < 1e-3,
+            "interpolated cut pose"
+        );
+        assert_eq!(
+            cut.start,
+            10.0 + 1.5 * 24.0,
+            "the kept motion stays on its frames"
+        );
+        assert!((cut.samples.last().unwrap().camera.yaw_degrees - 30.0).abs() < 1e-3);
+        assert!(t.trimmed(3.0, 3.0, 24.0).is_err());
+        let (head, tail) = t.split(1.0, 24.0).unwrap();
+        assert_eq!((head.duration(), tail.duration()), (1.0, 3.0));
+        assert_eq!(tail.start, 10.0 + 24.0);
+        assert_eq!(tail.samples[0].camera, head.samples.last().unwrap().camera);
+        let fast = t.retimed(2.0).unwrap();
+        assert_eq!(fast.duration(), 2.0);
+        assert!(t.retimed(0.0).is_err());
+    }
+
+    #[test]
+    fn smoothing_removes_jitter_and_keeps_the_ends() {
+        let yaws: Vec<f32> = (0..41)
+            .map(|i| i as f32 + if i % 2 == 0 { 0.5 } else { -0.5 })
+            .collect();
+        let t = take(&yaws);
+        let s = t.smoothed(8.0);
+        assert_eq!(s.samples[0].camera, t.samples[0].camera);
+        assert_eq!(s.samples[40].camera, t.samples[40].camera);
+        let jitter = |k: &Take| {
+            k.samples[5..36]
+                .windows(3)
+                .map(|w| {
+                    (w[0].camera.yaw_degrees + w[2].camera.yaw_degrees
+                        - 2.0 * w[1].camera.yaw_degrees)
+                        .abs()
+                })
+                .fold(0.0f32, f32::max)
+        };
+        assert!(
+            jitter(&s) < 0.25 * jitter(&t),
+            "{} vs {}",
+            jitter(&s),
+            jitter(&t)
+        );
+    }
+
+    #[test]
+    fn stills_and_frames_make_takes_and_the_clipboard_roundtrips() {
+        let still = Take::still(cam(30.0), 5.0, 24.0).unwrap();
+        assert_eq!(still.samples.len(), 2);
+        assert_eq!(still.pose_at(0.5).unwrap(), cam(30.0));
+        let anim = Take::from_frames(0.0, 24.0, vec![cam(0.0), cam(1.0), cam(2.0)]).unwrap();
+        assert!((anim.duration() - 2.0 / 24.0).abs() < 1e-12);
+        let mut named = take(&[0.0, 9.0]);
+        named.name = "Orbit".into();
+        let text = to_clipboard(&[&named, &still], 24.0).unwrap();
+        let back = from_clipboard(&text).unwrap().unwrap();
+        assert_eq!(back.len(), 2);
+        assert_eq!((back[0].name.as_str(), back[0].id), ("Orbit", 0));
+        assert!(
+            from_clipboard("{\"warpbro_nodes\":1}").is_none(),
+            "other text is not takes"
+        );
+        assert!(from_clipboard("plain text").is_none());
+        assert!(
+            from_clipboard(&text.replace("\"warpbro_takes\":1", "\"warpbro_takes\":9"))
+                .unwrap()
+                .is_err()
+        );
     }
 
     fn tick(recorder: &mut Recorder, before: Camera, after: Camera, held: bool) -> Update {

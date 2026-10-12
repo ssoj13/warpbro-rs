@@ -70,6 +70,11 @@ Documentation: [render and quality profiles](docs/render-profiles.md), [workspac
     frame the gesture began on; "Fit work area" stretches it over the work area instead.
   - "Bake to keys" keys the bound take onto the camera (chosen channels, reduction error) as one
     undo step; keys outside its span remain. Takes export and import as clip files.
+  - Managing: filter by name or pinned, Ctrl / Shift multi-select, pin, copy / paste (Ctrl+C / V,
+    through the system clipboard, so takes move between scenes), duplicate (Ctrl+D), delete
+    (Delete). New takes come from the camera's timeline animation or the current pose.
+  - Trim, speed, smooth (hand shake) and split at the playhead each make a new take next to
+    the original: takes have no undo, so an edit never loses one.
 - **The browser:**
   - an 18-preset gallery with GPU-rendered thumbnails;
   - bookmarks (scenes saved as JSON);

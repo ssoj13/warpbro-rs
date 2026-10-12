@@ -85,6 +85,8 @@ pub enum Command {
     /// Time mark slot 0-9: set at the time cursor, or jump to it.
     SetMark(u8),
     Mark(u8),
+    /// Delete the panel's selection (Takes).
+    Delete,
 }
 
 #[derive(Clone, Copy)]
@@ -147,6 +149,7 @@ pub const VIEWPORT: &[Binding] = &[
     property(Command::Flight, Key::Backtick),
     binding(Command::Play, Key::Space, Modifiers::NONE),
 ];
+pub const TAKES: &[Binding] = &[binding(Command::Delete, Key::Delete, Modifiers::NONE)];
 pub const TIMELINE: &[Binding] = &[
     binding(Command::Fit, Key::F, Modifiers::NONE),
     property(Command::Translate, Key::P),
@@ -194,6 +197,7 @@ pub fn bindings(scope: Scope) -> &'static [Binding] {
         Scope::Global => GLOBAL,
         Scope::Viewport => VIEWPORT,
         Scope::Timeline => TIMELINE,
+        Scope::Takes => TAKES,
         _ => &[],
     }
 }
