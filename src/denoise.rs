@@ -112,7 +112,7 @@ mod tests {
         }
     }
     #[test]
-    fn invalid_inputs_fail_before_initializing_gpu() {
+    fn invalid_inputs_are_rejected() {
         let _gpu_test = crate::test_gpu::lock();
         let mut processor = Processor::new().unwrap();
         assert!(
@@ -129,7 +129,17 @@ mod tests {
                 .process(image(0, 2, &[], None, None), &Settings::default(), 1)
                 .is_err()
         );
-        assert!(processor.inner.is_none());
+        // The default mode needs both guides; a render that lacks one is an error, never a
+        // silently poorer denoise.
+        assert!(
+            processor
+                .process(
+                    image(1, 1, &[[0.0; 4]], None, None),
+                    &Settings::default(),
+                    1
+                )
+                .is_err()
+        );
     }
     #[test]
     #[ignore = "requires a real shared wgpu adapter and embedded OIDN HDR weights"]
@@ -199,9 +209,11 @@ mod tests {
     }
 }
 
-use pt_denoise_oidn::{GpuContext, OidnDenoiser, OidnMode};
+use pt_denoise_oidn::host::{HostDenoiser, Params};
+pub use pt_denoise_oidn::host::{Image, Output};
+use pt_denoise_oidn::{GpuContext, OidnMode, Primaries};
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, mpsc};
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mode {
@@ -255,12 +267,6 @@ impl Default for Settings {
         }
     }
 }
-#[derive(Debug)]
-pub struct Output {
-    pub pixels: Vec<[f32; 4]>,
-    pub latency_ms: f32,
-}
-
 /// Independent cadence and output ownership for each viewport or export target.
 #[derive(Default)]
 pub struct State {
@@ -317,272 +323,53 @@ impl State {
     }
 }
 
-/// A single persistent processor belongs to the GPU worker, never the GUI.
+/// A single persistent processor belongs to the GPU worker, never the GUI. The staging around
+/// the network (upload, readback, size-dependent resources) is render-rs's shared
+/// `pt_denoise_oidn::host::HostDenoiser`; this adds WarpBro's settings and its working space.
 pub struct Processor {
-    inner: Option<Inner>,
-}
-struct Inner {
-    ctx: GpuContext,
-    denoiser: OidnDenoiser,
-    width: u32,
-    height: u32,
-    color: wgpu::Texture,
-    albedo: wgpu::Buffer,
-    normal: wgpu::Buffer,
-    readback: wgpu::Buffer,
-    padded_row: u32,
-}
-/// The frame OIDN denoises: averaged colour plus the optional albedo / normal guides, each
-/// `width * height` pixels in raster order.
-pub struct Image<'a> {
-    pub width: usize,
-    pub height: usize,
-    pub color: &'a [[f32; 4]],
-    pub albedo: Option<&'a [[f32; 4]]>,
-    pub normal: Option<&'a [[f32; 4]]>,
+    inner: Option<HostDenoiser>,
 }
 
 impl Processor {
     pub fn new() -> Result<Self, String> {
         Ok(Self { inner: None })
     }
+    /// Denoise `image` under `settings` (disabled: the colour unchanged). The colour is ACEScg,
+    /// so OIDN's autoexposure measures luminance in ACEScg primaries.
     pub fn process(
         &mut self,
         image: Image<'_>,
         settings: &Settings,
         spp: u32,
     ) -> Result<Output, String> {
-        let Image {
-            width,
-            height,
-            color,
-            albedo,
-            normal,
-        } = image;
-        let count = width
-            .checked_mul(height)
-            .ok_or("OIDN dimensions overflow")?;
-        if count == 0 || width > u32::MAX as usize || height > u32::MAX as usize {
-            return Err("OIDN dimensions must be nonzero and fit u32".into());
-        }
-        if color.len() != count
-            || albedo.is_some_and(|v| v.len() != count)
-            || normal.is_some_and(|v| v.len() != count)
-        {
-            return Err("OIDN input dimensions do not match pixel buffers".into());
-        }
         if !settings.enabled {
             return Ok(Output {
-                pixels: color.to_vec(),
+                pixels: image.color.to_vec(),
                 latency_ms: 0.0,
             });
         }
-        if self.inner.is_none() {
-            // shared_device uses OnceLock::get_or_init: this also negotiates the
-            // headless GPU on first use, then adopts that same device everywhere.
-            let shared = gpu_info::shared_device().ok_or("OIDN shared GPU unavailable")?;
-            let ctx = GpuContext {
-                instance: Arc::new(shared.instance.clone()),
-                adapter: Arc::new(shared.adapter.clone()),
-                device: Arc::new(shared.device.clone()),
-                queue: Arc::new(shared.queue.clone()),
-            };
-            self.inner = Some(Inner::new(ctx, width as u32, height as u32)?);
-        }
-        let inner = self.inner.as_mut().unwrap();
-        inner.resize(width as u32, height as u32)?;
-        inner.denoiser.set_mode(settings.mode.native());
-        inner.denoiser.set_quality(settings.quality.native());
-        // No firefly clamp: preserve the scene's HDR range and color.
-        inner.denoiser.set_input_clamp(0.0);
-        inner.denoiser.set_external_input_scale(None);
-        inner.denoiser.set_nan_protect(true);
-        inner.ctx.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &inner.color,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            bytemuck::cast_slice(color),
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(inner.width * 16),
-                rows_per_image: Some(inner.height),
-            },
-            wgpu::Extent3d {
-                width: inner.width,
-                height: inner.height,
-                depth_or_array_layers: 1,
-            },
-        );
-        if let Some(aov) = albedo {
-            inner
-                .ctx
-                .queue
-                .write_buffer(&inner.albedo, 0, bytemuck::cast_slice(aov));
-        }
-        if let Some(aov) = normal {
-            inner
-                .ctx
-                .queue
-                .write_buffer(&inner.normal, 0, bytemuck::cast_slice(aov));
-        }
-        let encoder = inner.ctx.device.create_command_encoder(&Default::default());
-        inner
-            .denoiser
-            .denoise(
-                &inner.ctx,
-                encoder,
-                &inner.color,
-                albedo.map(|_| &inner.albedo),
-                normal.map(|_| &inner.normal),
-                spp,
-            )
-            .map_err(|e| format!("OIDN inference: {e}"))?;
-        let pixels = inner.read_pixels()?;
-        Ok(Output {
-            pixels,
-            latency_ms: inner.denoiser.last_latency_ms().unwrap_or(0.0),
-        })
-    }
-}
-impl Inner {
-    fn new(ctx: GpuContext, width: u32, height: u32) -> Result<Self, String> {
-        let (color, albedo, normal, readback, padded_row) = Self::resources(&ctx, width, height)?;
-        let denoiser = OidnDenoiser::new(&ctx, width, height, None);
-        Ok(Self {
-            ctx,
-            denoiser,
-            width,
-            height,
-            color,
-            albedo,
-            normal,
-            readback,
-            padded_row,
-        })
-    }
-    fn resources(
-        ctx: &GpuContext,
-        width: u32,
-        height: u32,
-    ) -> Result<(wgpu::Texture, wgpu::Buffer, wgpu::Buffer, wgpu::Buffer, u32), String> {
-        let limits = ctx.device.limits();
-        if width > limits.max_texture_dimension_2d || height > limits.max_texture_dimension_2d {
-            return Err("OIDN resolution exceeds shared device limits".into());
-        }
-        let row = width.checked_mul(16).ok_or("OIDN row size overflow")?;
-        let padded_row = row.checked_add(255).ok_or("OIDN row padding overflow")? & !255;
-        let aov_bytes = u64::from(row) * u64::from(height);
-        let readback_bytes = u64::from(padded_row) * u64::from(height);
-        if aov_bytes > limits.max_buffer_size || readback_bytes > limits.max_buffer_size {
-            return Err("OIDN image exceeds shared device buffer limits".into());
-        }
-        let color = ctx.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("frac OIDN linear input"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba32Float,
-            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let aov = |label| {
-            ctx.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(label),
-                size: aov_bytes,
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            })
-        };
-        let readback = ctx.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("frac OIDN linear readback"),
-            size: readback_bytes,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        Ok((
-            color,
-            aov("frac OIDN albedo sums"),
-            aov("frac OIDN normal sums"),
-            readback,
-            padded_row,
-        ))
-    }
-    fn resize(&mut self, width: u32, height: u32) -> Result<(), String> {
-        if (width, height) == (self.width, self.height) {
-            return Ok(());
-        }
-        let (color, albedo, normal, readback, padded_row) =
-            Self::resources(&self.ctx, width, height)?;
-        self.denoiser.resize(&self.ctx, width, height);
-        self.width = width;
-        self.height = height;
-        self.color = color;
-        self.albedo = albedo;
-        self.normal = normal;
-        self.readback = readback;
-        self.padded_row = padded_row;
-        Ok(())
-    }
-    fn read_pixels(&self) -> Result<Vec<[f32; 4]>, String> {
-        let mut encoder = self.ctx.device.create_command_encoder(&Default::default());
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: self.denoiser.result_texture(),
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &self.readback,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(self.padded_row),
-                    rows_per_image: Some(self.height),
-                },
-            },
-            wgpu::Extent3d {
-                width: self.width,
-                height: self.height,
-                depth_or_array_layers: 1,
-            },
-        );
-        self.ctx.queue.submit([encoder.finish()]);
-        let slice = self.readback.slice(..);
-        let (tx, rx) = mpsc::sync_channel(1);
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = tx.send(result);
-        });
-        let result = (|| {
-            self.ctx
-                .device
-                .poll(wgpu::PollType::wait_indefinitely())
-                .map_err(|e| format!("OIDN readback poll: {e}"))?;
-            rx.recv()
-                .map_err(|e| format!("OIDN readback callback: {e}"))?
-                .map_err(|e| format!("OIDN readback map: {e}"))?;
-            let mapped = slice
-                .get_mapped_range()
-                .map_err(|e| format!("OIDN mapped readback view: {e}"))?;
-            let mut pixels = Vec::with_capacity(self.width as usize * self.height as usize);
-            for row in mapped.chunks_exact(self.padded_row as usize) {
-                for pixel in row[..self.width as usize * 16].as_chunks::<16>().0 {
-                    pixels.push(std::array::from_fn(|channel| {
-                        f32::from_le_bytes(pixel[channel * 4..channel * 4 + 4].try_into().unwrap())
-                    }));
-                }
+        let denoiser = match &mut self.inner {
+            Some(denoiser) => denoiser,
+            slot => {
+                // shared_device uses OnceLock::get_or_init: this also negotiates the
+                // headless GPU on first use, then adopts that same device everywhere.
+                let shared = gpu_info::shared_device().ok_or("OIDN shared GPU unavailable")?;
+                slot.insert(HostDenoiser::new(GpuContext {
+                    instance: Arc::new(shared.instance.clone()),
+                    adapter: Arc::new(shared.adapter.clone()),
+                    device: Arc::new(shared.device.clone()),
+                    queue: Arc::new(shared.queue.clone()),
+                }))
             }
-            Ok(pixels)
-        })();
-        // Drop the BufferView before unmapping, on success or any readback error.
-        self.readback.unmap();
-        result
+        };
+        denoiser.process(
+            image,
+            &Params {
+                mode: settings.mode.native(),
+                quality: settings.quality.native(),
+                primaries: Primaries::AcesCg,
+                spp,
+            },
+        )
     }
 }
