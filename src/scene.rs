@@ -893,6 +893,40 @@ impl Scene {
         v
     }
 
+    /// The camera's eye, orientation (looking down -Z, Y up) and target distance in world
+    /// units: the one camera the kernels render ([`Self::pack`]) and viewport overlays
+    /// ([`Self::camera_matrices`]) draw over.
+    pub fn camera_eye(&self) -> (glam::Vec3, glam::Quat, f32) {
+        let c = &self.camera;
+        let dist = c.distance
+            * self
+                .camera_reference
+                .unwrap_or(self.formula.framing_radius());
+        let orientation = c.orientation();
+        let fwd = orientation * -glam::Vec3::Z;
+        (
+            glam::Vec3::from_array(c.target) - fwd * dist,
+            orientation,
+            dist,
+        )
+    }
+
+    /// View and projection matrices (right-handed, depth 0..1) of the kernel camera for a frame
+    /// of `aspect` = width / height: what a viewport overlay (the transform gizmo) projects with
+    /// to sit exactly on the rendered image.
+    pub fn camera_matrices(&self, aspect: f32) -> (glam::Mat4, glam::Mat4) {
+        let (eye, orientation, dist) = self.camera_eye();
+        let view = glam::Mat4::from_rotation_translation(orientation, eye).inverse();
+        let near = (dist * 1.0e-4).max(1.0e-6);
+        let projection = glam::camera::rh::proj::directx::perspective(
+            self.camera.fov_y_degrees.to_radians(),
+            aspect.max(1.0e-6),
+            near,
+            near * 1.0e9,
+        );
+        (view, projection)
+    }
+
     /// Pack this scene into the kernel parameter block for a `w` x `h` frame.
     pub fn pack(&self, w: u32, h: u32) -> Vec<f32> {
         let mut p = vec![0.0f32; P_COUNT];
@@ -901,13 +935,11 @@ impl Scene {
         let camera_radius = self.camera_reference.unwrap_or(radius);
 
         // --- camera (ofx-gen OrbitCamera: eye on +Z at yaw = pitch = 0, around the target)
-        let dist = c.distance * camera_radius;
-        let orientation = c.orientation();
+        let (eye, orientation, dist) = self.camera_eye();
+        let eye = eye.to_array();
         let fwd = (orientation * -glam::Vec3::Z).to_array();
         let right = (orientation * glam::Vec3::X).to_array();
         let up = (orientation * glam::Vec3::Y).to_array();
-        let eye =
-            (glam::Vec3::from_array(c.target) - glam::Vec3::from_array(fwd) * dist).to_array();
         let half_h = (c.fov_y_degrees.to_radians() * 0.5).tan();
         let half_w = half_h * w as f32 / h as f32;
         p[P_WIDTH] = w as f32;

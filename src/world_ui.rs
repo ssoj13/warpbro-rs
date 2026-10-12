@@ -153,6 +153,9 @@ struct TimelineCache {
     projection: u64,
     frame: u64,
     lanes: Vec<Vec<Lane>>,
+    /// The nodes the tracks show, in track order (the shy filter applied): track `i` is
+    /// `rows[i]`, never `cache.nodes[i]`.
+    rows: Vec<WorldNodeInfo>,
     model: TimelineModel,
 }
 #[derive(Default)]
@@ -1167,6 +1170,7 @@ impl WorldUi {
             || timeline.revision != cache.revision
             || timeline.projection != projection
         {
+            timeline.rows = nodes.to_vec();
             timeline.lanes = nodes
                 .iter()
                 .map(|n| {
@@ -3755,8 +3759,8 @@ mod tests {
             assert_eq!(state.timeline_cache.projection, projection);
         }
         let track = state
-            .cache
-            .nodes
+            .timeline_cache
+            .rows
             .iter()
             .position(|node| node.id == object)
             .unwrap();
@@ -3765,7 +3769,7 @@ mod tests {
             .position(|lane| lane.path.as_deref() == Some("/transform/position/0"))
             .unwrap();
         let identity = WorldUi::key_identity(
-            &state.cache.nodes,
+            &state.timeline_cache.rows,
             &state.timeline_cache.lanes,
             KeyPos {
                 track,

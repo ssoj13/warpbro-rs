@@ -37,6 +37,8 @@ egui = "0.36"
 egui_dock = { version = "0.21", features = ["serde"] }
 egui-dock-layout = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
 egui-viewport-toolbar = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
+# Viewport transform manipulator (Q / W / E / R tools, as in Playa).
+egui-gizmo = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
 egui-wgpu = "0.36"
 egui-winit = "0.36"
 wgpu = "30"

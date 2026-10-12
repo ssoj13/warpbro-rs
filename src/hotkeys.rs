@@ -87,6 +87,8 @@ pub enum Command {
     Mark(u8),
     /// Delete the panel's selection (Takes).
     Delete,
+    /// Viewport tools: Q select (no manipulator), W move, E rotate, R scale.
+    Tool(crate::app::ViewTool),
 }
 
 #[derive(Clone, Copy)]
@@ -148,6 +150,26 @@ pub const VIEWPORT: &[Binding] = &[
     binding(Command::Home, Key::H, Modifiers::NONE),
     property(Command::Flight, Key::Backtick),
     binding(Command::Play, Key::Space, Modifiers::NONE),
+    binding(
+        Command::Tool(crate::app::ViewTool::Select),
+        Key::Q,
+        Modifiers::NONE,
+    ),
+    binding(
+        Command::Tool(crate::app::ViewTool::Move),
+        Key::W,
+        Modifiers::NONE,
+    ),
+    binding(
+        Command::Tool(crate::app::ViewTool::Rotate),
+        Key::E,
+        Modifiers::NONE,
+    ),
+    binding(
+        Command::Tool(crate::app::ViewTool::Scale),
+        Key::R,
+        Modifiers::NONE,
+    ),
 ];
 pub const TAKES: &[Binding] = &[binding(Command::Delete, Key::Delete, Modifiers::NONE)];
 pub const TIMELINE: &[Binding] = &[

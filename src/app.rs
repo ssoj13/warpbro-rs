@@ -129,6 +129,11 @@ pub(crate) struct App {
     navigated: bool,
     /// Takes panel state (not saved): see `takes_ui`.
     takes_view: takes_ui::View,
+    /// The viewport tool (Q / W / E / R) and its manipulator, drawn on the selected objects.
+    tool: ViewTool,
+    gizmo: egui_gizmo::Gizmo,
+    /// The manipulator drag in progress: its edits share one undo step.
+    gizmo_gesture: Option<u64>,
     /// Splitter state of the three Settings > Controls grids.
     prefs_grids: [AttrGridState; 3],
     dock: egui_dock::DockState<dock::Panel>,
@@ -605,6 +610,9 @@ impl App {
             takes_recorder: Default::default(),
             navigated: false,
             takes_view: Default::default(),
+            tool: ViewTool::Select,
+            gizmo: egui_gizmo::Gizmo::new(egui_gizmo::GizmoConfig::default()),
+            gizmo_gesture: None,
             prefs_grids: Default::default(),
             dock: dock::default_layout(),
             panels_to_open: Vec::new(),
@@ -921,6 +929,117 @@ impl App {
             self.config_picker.pick_file();
         }
         self.apply_colour_change(changed);
+    }
+
+    /// The transform manipulator of the current tool on the selected unlocked nodes that take it
+    /// (`world::manip_tools`: fractals and groups, the sun for Rotate), drawn over the viewport
+    /// image. It shows each object's world pose at
+    /// its pivot; a drag writes back only the edited channel (position, rotation or scale) as
+    /// the local pose under the parent, one undo step per drag, keyed like any edit at the
+    /// playhead. The edits change the scene, so the viewport switches to its Moving profile
+    /// while dragging, as during navigation.
+    fn manipulate(&mut self, ui: &egui::Ui, rect: egui::Rect) {
+        use egui_gizmo::{GizmoConfig, GizmoOrientation, GizmoSpace, GizmoTool, Transform};
+        let tool = match self.tool {
+            ViewTool::Select => None,
+            ViewTool::Move => Some(GizmoTool::Move),
+            ViewTool::Rotate => Some(GizmoTool::Rotate),
+            ViewTool::Scale => Some(GizmoTool::Scale),
+        };
+        let frame = f64::from(self.world_ui.playhead);
+        let document = &self.world.document;
+        let selected: Vec<_> = if self.world.selected.is_empty() {
+            self.world.selection.into_iter().collect()
+        } else {
+            self.world.selected.clone()
+        };
+        // (node, parent world matrix, world scale), in the order of `targets`.
+        let mut edited = Vec::new();
+        let mut targets = Vec::new();
+        for id in selected {
+            let Ok(info) = document.info(id) else {
+                continue;
+            };
+            let [moves, turns, scales] = crate::world::manip_tools(info.kind);
+            let takes_tool = match self.tool {
+                ViewTool::Select => false,
+                ViewTool::Move => moves,
+                ViewTool::Rotate => turns,
+                ViewTool::Scale => scales,
+            };
+            if info.locked || !takes_tool {
+                continue;
+            }
+            let Ok((pose, parent)) = document.manip_frame(id, frame) else {
+                continue;
+            };
+            let (scale, rotation, translation) = pose.to_scale_rotation_translation();
+            // Move and Rotate draw unit handles: a scaled object would stretch them.
+            let shown = if self.tool == ViewTool::Scale {
+                scale
+            } else {
+                glam::Vec3::ONE
+            };
+            targets.push(Transform::from_scale_rotation_translation(
+                shown,
+                rotation,
+                translation,
+            ));
+            edited.push((id, parent, scale));
+        }
+        let Some(tool) = tool.filter(|_| !targets.is_empty() && rect.height() > 0.0) else {
+            self.gizmo.clear_hover();
+            self.gizmo_gesture = None;
+            return;
+        };
+        let (view, projection) = self.scene.camera_matrices(rect.width() / rect.height());
+        self.gizmo.update_config(GizmoConfig {
+            view,
+            projection,
+            viewport: rect,
+            space: GizmoSpace::ThreeD,
+            tool,
+            orientation: GizmoOrientation::Local,
+            // Shift: 5 degree / 0.1 increments for Rotate and Scale.
+            snapping: tool != GizmoTool::Move && ui.input(|i| i.modifiers.shift),
+            snap_angle: 5.0_f32.to_radians(),
+            snap_scale: 0.1,
+            ..Default::default()
+        });
+        let Some((_, moved)) = self.gizmo.interact(ui, &targets) else {
+            self.gizmo_gesture = None;
+            return;
+        };
+        let gesture = egui::Id::new("viewport_gizmo").value();
+        self.gizmo_gesture = Some(gesture);
+        for ((id, parent, scale), t) in edited.into_iter().zip(moved) {
+            let scale = if self.tool == ViewTool::Scale {
+                t.scale
+            } else {
+                scale
+            };
+            let pose =
+                glam::Mat4::from_scale_rotation_translation(scale, t.rotation, t.translation);
+            let (position, rotation, scale) = crate::world::local_pose(parent, pose);
+            let (path, value) = match self.tool {
+                ViewTool::Move => ("/transform/position", position),
+                ViewTool::Rotate => ("/transform/rotation_degrees", rotation),
+                ViewTool::Scale => ("/transform/scale", scale),
+                ViewTool::Select => continue,
+            };
+            if let Err(error) = self.world.execute_edit(
+                crate::world::WorldCommand::SetAttribute {
+                    id,
+                    path: path.into(),
+                    value: serde_json::json!(value),
+                    frame,
+                },
+                Some(gesture),
+            ) {
+                self.status = error;
+            }
+        }
+        ui.ctx().request_repaint();
     }
 
     /// Feed this frame's navigation to the take recorder. Any camera change while a take drives
@@ -3198,8 +3317,19 @@ impl App {
         if !toolbar.contains_pointer || self.fly.is_some() {
             self.fly_camera(ui, &resp);
         }
-        if self.fly.is_none() {
+        // A hovered or dragged handle owns the left button (last frame's hover: the gizmo
+        // is drawn over the image, after the camera rigs run).
+        let gizmo_owns = self.gizmo.is_hovered() || self.gizmo_gesture.is_some();
+        if self.fly.is_none() && !gizmo_owns {
             self.orbit_camera(ui, &resp, toolbar.contains_pointer);
+        }
+        if self.fly.is_none() {
+            use crate::hotkeys::{self, Command as Hotkey, Scope};
+            for tool in ViewTool::ALL {
+                if hotkeys::consume(ui.ctx(), Scope::Viewport, Hotkey::Tool(tool)) {
+                    self.tool = tool;
+                }
+            }
         }
         if resp.double_clicked() {
             self.scene.camera.target = [0.0; 3];
@@ -3256,6 +3386,7 @@ impl App {
                 },
             ));
         }
+        self.manipulate(ui, rect);
         if self.export.is_running() {
             let text = format!("Rendering · {}", self.export.status);
             ui.painter().text(
@@ -3705,8 +3836,11 @@ impl App {
         self.snapshot_before = before;
         self.remember_material_targets();
         self.process_preview_intent(&ctx);
-        self.world
-            .finish_edit_unless(egui_attr_grid::edit_gesture(&ctx).or(camera_gesture));
+        self.world.finish_edit_unless(
+            egui_attr_grid::edit_gesture(&ctx)
+                .or(camera_gesture)
+                .or(self.gizmo_gesture),
+        );
         if let Err(error) = self.refresh_scene() {
             self.status = error;
         }
@@ -3724,6 +3858,28 @@ impl App {
 #[allow(dead_code)]
 fn exists(p: &Path) -> bool {
     p.exists()
+}
+
+/// The viewport tool (Maya / Playa Q W E R): Select shows no manipulator and leaves the mouse
+/// to navigation; Move, Rotate and Scale show the transform gizmo on the selected objects.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ViewTool {
+    Select,
+    Move,
+    Rotate,
+    Scale,
+}
+impl ViewTool {
+    pub const ALL: [Self; 4] = [Self::Select, Self::Move, Self::Rotate, Self::Scale];
+    pub fn label(self) -> (&'static str, &'static str) {
+        use egui_widgets_config::icons as ph;
+        match self {
+            Self::Select => (ph::SELECT, "Select · Q (no manipulator)"),
+            Self::Move => (ph::MOVE, "Move · W"),
+            Self::Rotate => (ph::ROTATE, "Rotate · E"),
+            Self::Scale => (ph::SCALE, "Scale · R"),
+        }
+    }
 }
 
 /// The navigation clock step: what the flight and orbit rigs integrate with, and what takes

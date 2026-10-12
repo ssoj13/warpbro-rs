@@ -425,6 +425,17 @@ impl App {
         }
         .show(ui, rect, &mut state, |ui| {
             use egui_widgets_config::icons as ph;
+            for tool in super::ViewTool::ALL {
+                let (icon, tip) = tool.label();
+                if ui
+                    .selectable_label(self.tool == tool, icon)
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    self.tool = tool;
+                }
+            }
+            ui.separator();
             let frame = f64::from(self.world_ui.playhead);
             // The binding the viewport actually renders; step_viewport is its only producer.
             let active = self.viewport_render.clone();

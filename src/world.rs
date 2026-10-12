@@ -15,6 +15,28 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::LazyLock;
 
+/// The local `/transform` position, rotation (degrees, the attribute convention) and scale that
+/// put a node's pivot at world `pose` under its parent's world matrix `parent`: the inverse of
+/// [`WorldDocument::manip_frame`]. A parent with nonuniform scale and a relative rotation
+/// shears the child, which `T R S` cannot hold; that shear is dropped.
+pub fn local_pose(parent: glam::Mat4, pose: glam::Mat4) -> ([f32; 3], [f32; 3], [f32; 3]) {
+    let local = parent.inverse() * pose;
+    playa_engine::entities::transform::decompose_pose(glam::Mat4::from_cols_array_2d(
+        &local.to_cols_array_2d(),
+    ))
+}
+
+/// The viewport manipulator tools (move, rotate, scale) a node of `kind` takes. Placed objects
+/// take all three. The sun only turns: its world rotation is its direction (`snapshot`), and it
+/// has no place or size. A camera moves by navigation; settings and environments have no place.
+pub fn manip_tools(kind: WorldKind) -> [bool; 3] {
+    match kind {
+        WorldKind::Fractal | WorldKind::Group => [true, true, true],
+        WorldKind::DirectionalLight => [false, true, false],
+        _ => [false, false, false],
+    }
+}
+
 /// Marker of WarpBro nodes on the system clipboard, so foreign text is never pasted as nodes.
 const CLIPBOARD_KEY: &str = "warpbro_nodes";
 const CLIPBOARD_VERSION: u32 = 1;
@@ -3893,6 +3915,24 @@ impl WorldDocument {
             attrs.set(&offset_path, to_attr(&offset));
         }
         Ok(base_changed || offset_changed || keys_changed)
+    }
+
+    /// The node's frame for a viewport manipulator: its world matrix at the pivot (parent and
+    /// `T R S`, where the handles sit and rotation turns around) and the parent's world matrix
+    /// (identity at the root) that an edit is expressed under ([`local_pose`]).
+    pub fn manip_frame(&self, id: NodeId, frame: f64) -> Result<(glam::Mat4, glam::Mat4), String> {
+        let pivot = self
+            .attribute_value(id, "/transform/pivot", frame)?
+            .as_array()
+            .filter(|v| v.len() == 3)
+            .map(|v| glam::Vec3::from(std::array::from_fn(|i| v[i].as_f64().unwrap_or(0.0) as f32)))
+            .unwrap_or(glam::Vec3::ZERO);
+        let world = self.world_matrix(id, frame, &mut HashSet::new())?;
+        let parent = match self.info(id)?.parent {
+            Some(parent) => self.world_matrix(parent, frame, &mut HashSet::new())?,
+            None => glam::Mat4::IDENTITY,
+        };
+        Ok((world * glam::Mat4::from_translation(pivot), parent))
     }
 
     fn world_matrix(
