@@ -2618,11 +2618,18 @@ mod tests {
                 let normal = gpu.guide_sums(&target, &target.normal);
                 assert!(albedo.iter().all(|p| p[3] == 4.0));
                 assert!(normal.iter().all(|p| p[3] == 4.0));
+                // Misses: no normal, and the albedo of what the camera ray shows, clamped to
+                // [0, 1] per sample (the denoiser keeps the sky as detail).
+                let misses: Vec<_> = albedo
+                    .iter()
+                    .zip(&normal)
+                    .filter(|(_, n)| n[..3] == [0.0; 3])
+                    .collect();
+                assert!(!misses.is_empty());
                 assert!(
-                    albedo
+                    misses
                         .iter()
-                        .zip(&normal)
-                        .any(|(a, n)| a[..3] == [0.0; 3] && n[..3] == [0.0; 3])
+                        .all(|(a, _)| a[..3].iter().all(|v| (0.0..=4.0).contains(v)))
                 );
                 let center = 12 * 33 + 16;
                 // The kernel's primary albedo: render-rs `SurfaceInputs::guide_albedo`, base * colour *
@@ -2664,11 +2671,10 @@ mod tests {
                 if world {
                     scene.objects.clear();
                     gpu.step(&mut target, &scene, 1, 19, None, false);
-                    assert!(
-                        gpu.guide_sums(&target, &target.albedo)
-                            .iter()
-                            .all(|p| *p == [0.0, 0.0, 0.0, 1.0])
-                    );
+                    // Every ray misses: the albedo is the sky it shows, clamped; no normal.
+                    assert!(gpu.guide_sums(&target, &target.albedo).iter().all(|p| {
+                        p[3] == 1.0 && p[..3].iter().all(|v| (0.0..=1.0).contains(v))
+                    }));
                     assert!(
                         gpu.guide_sums(&target, &target.normal)
                             .iter()
