@@ -186,6 +186,8 @@ pub struct WorldUi {
     /// Settings > Animation > New key type; the app hands it to the editor every frame.
     pub new_key: Tan,
     pub looping: bool,
+    /// Hide shy nodes from the timeline (After Effects "Hide shy layers"); the Outliner keeps them.
+    pub hide_shy: bool,
     pub attribute_label_width: f32,
     /// Authored outline/canvas split; narrow panels only clamp its drawn width.
     pub timeline_outline_width: f32,
@@ -233,6 +235,7 @@ impl Default for WorldUi {
             auto_key: false,
             new_key: Tan::Smooth,
             looping: true,
+            hide_shy: true,
             attribute_label_width: 180.0,
             timeline_outline_width: 340.0,
             attribute_metrics: AttrMetrics::default(),
@@ -928,6 +931,7 @@ impl WorldUi {
                                 "/visible" => node.visible = value,
                                 "/locked" => node.locked = value,
                                 "/solo" => node.solo = value,
+                                "/shy" => node.shy = value,
                                 _ => {}
                             }
                         }
@@ -1124,7 +1128,13 @@ impl WorldUi {
         self.transport(ui, e);
         self.status(ui);
         let cache = self.take_cache(e);
-        let nodes = &cache.nodes;
+        let shown: Vec<WorldNodeInfo>;
+        let nodes = if self.hide_shy {
+            shown = cache.nodes.iter().filter(|n| !n.shy).cloned().collect();
+            &shown
+        } else {
+            &cache.nodes
+        };
         self.timeline_shortcuts(ui, e, nodes);
         let mut timeline = std::mem::take(&mut self.timeline_cache);
         let mut hash = std::collections::hash_map::DefaultHasher::new();
@@ -1470,7 +1480,7 @@ impl WorldUi {
                 .attribute_metrics
                 .icon_side
                 .min(body.height())
-                .min((body.width() / 6.0).max(0.0));
+                .min((body.width() / 7.0).max(0.0));
             let mut x = body.left();
             let gap = self.attribute_metrics.component_gap;
             let mut next = || {
@@ -1507,6 +1517,13 @@ impl WorldUi {
                 ("/visible", n.visible, ph::VISIBLE, ph::HIDDEN, "Visibility"),
                 ("/locked", n.locked, ph::LOCK, ph::UNLOCK, "Lock"),
                 ("/solo", n.solo, "S", "s", "Solo"),
+                (
+                    "/shy",
+                    n.shy,
+                    egui_phosphor::regular::GHOST,
+                    egui_phosphor::regular::GHOST,
+                    "Shy: hidden while Hide shy is on",
+                ),
             ] {
                 if egui_widgets_config::icon_toggle(
                     ui,
@@ -2042,6 +2059,8 @@ impl WorldUi {
             ui.checkbox(&mut self.auto_key, "Auto Key")
                 .on_hover_text("Key camera navigation only when Auto Key is enabled; otherwise preserve existing animation keys.");
             ui.checkbox(&mut self.snap, "Snap");
+            ui.toggle_value(&mut self.hide_shy, format!("{} Hide shy", egui_phosphor::regular::GHOST))
+                .on_hover_text("Hide shy nodes (render settings and profiles start shy); the Outliner shows every node");
             if ui.small_button("Fit").on_hover_text("Fit working range · F").clicked() {
                 let width = ui.max_rect().width();
                 self.fit_timeline(width, e);

@@ -80,6 +80,8 @@ pub struct WorldNodeInfo {
     pub visible: bool,
     pub locked: bool,
     pub solo: bool,
+    /// Hidden from the timeline while its "Hide shy" switch is on (After Effects shy).
+    pub shy: bool,
     pub start: f64,
     pub end: f64,
 }
@@ -1978,6 +1980,7 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
         "/visible" => "Show this node in renders.",
         "/locked" => "Lock against edits in the viewport and the editors.",
         "/solo" => "Render only soloed nodes.",
+        "/shy" => "Shy: hidden from the timeline while Hide shy is on. Settings nodes start shy.",
         "/start" => "First frame this node exists on.",
         "/end" => "Last frame this node exists on.",
         _ => return None,
@@ -3003,6 +3006,7 @@ impl WorldDocument {
             ("/visible", json!(true)),
             ("/locked", json!(false)),
             ("/solo", json!(false)),
+            ("/shy", json!(crate::render_profiles::setting_kind(kind))),
             ("/start", json!(self.first as f64)),
             ("/end", json!(self.last as f64 + 1.0)),
             ("/transform/position", json!(([0.0; 3]))),
@@ -3085,14 +3089,17 @@ impl WorldDocument {
     pub fn info(&self, id: NodeId) -> Result<WorldNodeInfo, String> {
         let data = self.node(id)?;
         let a = self.attrs(id)?;
+        let kind: WorldKind =
+            serde_json::from_value(data["type"].clone()).map_err(|e| e.to_string())?;
         Ok(WorldNodeInfo {
             id,
-            kind: serde_json::from_value(data["type"].clone()).map_err(|e| e.to_string())?,
+            kind,
             name: data["name"].as_str().unwrap_or("").into(),
             parent: data["parent"].as_str().and_then(NodeId::parse),
             visible: a.get_bool_or("/visible", true),
             locked: a.get_bool_or("/locked", false),
             solo: a.get_bool_or("/solo", false),
+            shy: a.get_bool_or("/shy", crate::render_profiles::setting_kind(kind)),
             start: f64::from(a.get_float_or("/start", 0.0)),
             end: f64::from(a.get_float_or("/end", self.last as f32 + 1.0)),
         })
@@ -3227,8 +3234,10 @@ impl WorldDocument {
             {
                 continue;
             }
-            let keyable = !matches!(path.as_str(), "/locked" | "/solo" | "/start" | "/end")
-                && !crate::render_profiles::static_path(path);
+            let keyable = !matches!(
+                path.as_str(),
+                "/locked" | "/solo" | "/shy" | "/start" | "/end"
+            ) && !crate::render_profiles::static_path(path);
             out.push(WorldAttribute {
                 path: path.clone(),
                 label: attribute_label(path),
@@ -3595,7 +3604,7 @@ impl WorldDocument {
         for path in paths {
             if matches!(
                 path.as_str(),
-                "/visible" | "/locked" | "/solo" | "/start" | "/end"
+                "/visible" | "/locked" | "/solo" | "/shy" | "/start" | "/end"
             ) || path.starts_with("/transform/")
                 || path.starts_with("/custom/")
             {
