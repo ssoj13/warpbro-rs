@@ -22,7 +22,9 @@
 //!   (reference white at those nits), `cICP` 9/16/0/1, `mDCV` and a measured `cLLI`.
 //!
 //! [`ShotKind::Displayed`] is the window's own surface signal instead (`FRAC_SNAP`, the README
-//! images): an 8-bit sRGB PNG on an SDR window.
+//! images): an 8-bit sRGB PNG on an SDR window, egui-display's PNG of the encoded signal on a
+//! PQ / HLG / 10-bit one, and on an scRGB window the float signal as an EXR
+//! ([`write_displayed`]).
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -177,6 +179,12 @@ pub fn linear_light(capture: &Capture) -> Result<Vec<[f32; 4]>, ShotError> {
             egui_display::SCRGB_NITS
         )));
     }
+    float_pixels(capture)
+}
+
+/// The half-float RGBA of `capture` as f32; any other pixel type, or a sample count that does
+/// not match the size, is an error.
+fn float_pixels(capture: &Capture) -> Result<Vec<[f32; 4]>, ShotError> {
     let Pixels::RgbaF16(px) = &capture.pixels else {
         return Err(ShotError::Pixels(format!(
             "{:?} capture is not linear float",
@@ -282,16 +290,53 @@ pub fn save(shot: &WindowShot, capture: &Capture) -> Result<Vec<PathBuf>, ShotEr
                 *sdr_white_nits,
             )
         }
-        ShotKind::Displayed { path } => {
-            capture
-                .save(path)
-                .map(|path| vec![path])
-                .map_err(|e| ShotError::Write {
-                    path: path.clone(),
-                    message: e.to_string(),
-                })
-        }
+        ShotKind::Displayed { path } => write_displayed(capture, path).map(|path| vec![path]),
     }
+}
+
+/// Write the window's own surface signal at `path` with its extension replaced, replacing an
+/// existing file (`FRAC_SNAP` reruns): on an scRGB window the float signal as an EXR (RGB,
+/// BT.709 / D65 `chromaticities`, `whiteLuminance` = scRGB's 80 nits, so value x 80 = nits),
+/// else egui-display's PNG of the encoded signal. Both are published by a sibling temp + rename,
+/// so a failed write leaves no partial file. Returns the path written.
+pub fn write_displayed(capture: &Capture, path: &Path) -> Result<PathBuf, ShotError> {
+    let write_err = |path: &Path, message: String| ShotError::Write {
+        path: path.to_owned(),
+        message,
+    };
+    if capture.output == Output::Scrgb {
+        let path = path.with_extension("exr");
+        let light = float_pixels(capture)?;
+        crate::exr_io::write_rgb(
+            &path,
+            capture.width as usize,
+            capture.height as usize,
+            &light,
+            &crate::color::DISPLAY_PRIMS,
+            Some(egui_display::SCRGB_NITS),
+            true,
+        )
+        .map_err(|message| write_err(&path, message))?;
+        return Ok(path);
+    }
+    let path = path.with_extension("png");
+    let mut png = Vec::new();
+    capture
+        .write_png(&mut png)
+        .map_err(|e| write_err(&path, e.to_string()))?;
+    let tmp = path.with_extension("png.tmp");
+    std::fs::write(&tmp, &png)
+        .and_then(|()| std::fs::rename(&tmp, &path))
+        .map_err(|e| {
+            // The temp file is ours; a failed rename must not leave it behind.
+            if let Err(cleanup) = std::fs::remove_file(&tmp)
+                && cleanup.kind() != std::io::ErrorKind::NotFound
+            {
+                log::warn!("{}: {cleanup}", tmp.display());
+            }
+            write_err(&path, e.to_string())
+        })?;
+    Ok(path)
 }
 
 #[cfg(test)]
@@ -463,6 +508,63 @@ mod tests {
             linear_light(&other_output),
             Err(ShotError::Pixels(_))
         ));
+    }
+
+    /// The displayed signal: scRGB as a tagged EXR, SDR as an sRGB PNG, each replacing an
+    /// earlier shot at the same path and leaving no temp file.
+    #[test]
+    fn displayed_shots_write_the_surface_signal() {
+        let dir = scratch("displayed");
+        let h = |v: f32| half::f16::from_f32(v);
+        let scrgb = Capture {
+            output: Output::Scrgb,
+            width: 2,
+            height: 1,
+            white_nits: 240.0,
+            peak_nits: 1000.0,
+            pixels: Pixels::RgbaF16([0.5, 2.0, -0.25, 1.0, 0.0, 12.0, 1.0, 1.0].map(h).to_vec()),
+        };
+        let exr = write_displayed(&scrgb, &dir.join("snap.png")).unwrap();
+        assert_eq!(exr, dir.join("snap.exr"));
+        let back = crate::exr_io::read_rgb(&exr).unwrap();
+        assert_eq!(back.pixels, vec![[0.5, 2.0, -0.25], [0.0, 12.0, 1.0]]);
+        assert_eq!(
+            crate::exr_io::read_attr::<f32>(&exr, "whiteLuminance"),
+            Some(egui_display::SCRGB_NITS)
+        );
+
+        let sdr = Capture {
+            output: Output::Sdr8,
+            width: 2,
+            height: 1,
+            white_nits: 203.0,
+            peak_nits: 203.0,
+            pixels: Pixels::Rgba8(vec![255, 128, 0, 255, 1, 2, 3, 255]),
+        };
+        let png = dir.join("snap.png");
+        std::fs::write(&png, b"earlier shot").unwrap();
+        assert_eq!(write_displayed(&sdr, &png).unwrap(), png);
+        let bytes = std::fs::read(&png).unwrap();
+        assert!(chunks(&bytes).iter().any(|(k, _)| k == b"sRGB"));
+        let mut reader = png::Decoder::new(std::io::Cursor::new(bytes))
+            .read_info()
+            .unwrap();
+        let mut px = vec![0; reader.output_buffer_size().unwrap()];
+        reader.next_frame(&mut px).unwrap();
+        assert_eq!(px, [255, 128, 0, 255, 1, 2, 3, 255]);
+        assert!(!dir.join("snap.png.tmp").exists());
+
+        // Pixels that do not match the output are refused, nothing is written.
+        let wrong = Capture {
+            pixels: Pixels::Rgba8(vec![0; 8]),
+            ..scrgb
+        };
+        assert!(matches!(
+            write_displayed(&wrong, &dir.join("wrong.png")),
+            Err(ShotError::Pixels(_))
+        ));
+        assert!(!dir.join("wrong.exr").exists());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// A PNG that fails after the EXR was written reports the EXR with the error.
