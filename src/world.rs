@@ -3010,22 +3010,14 @@ impl WorldDocument {
         {
             return Err("QualitySettings contain invalid tracing or adaptive limits".into());
         }
-        // A profile saved before display modes has neither attribute: it path-traces it all.
-        let attrs = self.attrs(profile)?;
-        let display: crate::render_profiles::Display = if attrs.contains("/render/display") {
+        let display: crate::render_profiles::Display =
             serde_json::from_value(self.attribute_value(profile, "/render/display", frame)?)
-                .map_err(|e| format!("Invalid display: {e}"))?
-        } else {
-            Default::default()
-        };
-        let thinning = if attrs.contains("/render/thinning") {
-            self.attribute_value(profile, "/render/thinning", frame)?
-                .as_f64()
-                .filter(|v| (0.0..=1.0).contains(v))
-                .ok_or("Thinning must be between 0 and 1")? as f32
-        } else {
-            0.0
-        };
+                .map_err(|e| format!("Invalid display: {e}"))?;
+        let thinning = self
+            .attribute_value(profile, "/render/thinning", frame)?
+            .as_f64()
+            .filter(|v| (0.0..=1.0).contains(v))
+            .ok_or("Thinning must be between 0 and 1")? as f32;
         Ok(EffectiveRender {
             profile,
             quality,
@@ -3066,19 +3058,10 @@ impl WorldDocument {
         };
         let mode: ViewportMode =
             serde_json::from_value(value("/viewport/mode")?).map_err(|e| e.to_string())?;
-        // A viewport saved before the kind filter has none of these: it shows everything.
-        let attrs = self.attrs(id)?;
-        let flag = |path: &str| -> Result<bool, String> {
-            if attrs.contains(path) {
-                boolean(path)
-            } else {
-                Ok(true)
-            }
-        };
         let (mut shown, mut selectable) = (Kinds::ALL, Kinds::ALL);
         for (kind, name, _) in crate::render_profiles::VIEW_KINDS {
-            shown = shown.with(kind, flag(&format!("/viewport/show/{name}"))?);
-            selectable = selectable.with(kind, flag(&format!("/viewport/select/{name}"))?);
+            shown = shown.with(kind, boolean(&format!("/viewport/show/{name}"))?);
+            selectable = selectable.with(kind, boolean(&format!("/viewport/select/{name}"))?);
         }
         Ok(ViewportPolicy {
             mode,
@@ -3092,7 +3075,7 @@ impl WorldDocument {
             frozen: boolean("/viewport/frozen")?,
             shown,
             selectable,
-            extras: flag("/viewport/extras")?,
+            extras: boolean("/viewport/extras")?,
         })
     }
     pub fn viewport_render(

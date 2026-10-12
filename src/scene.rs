@@ -399,13 +399,8 @@ pub struct Lighting {
     /// Show the sky behind the fractal (otherwise only its light).
     pub background: bool,
     /// Show the sun disc in the background where camera rays miss (`P_CAMERA_SUN`); bounced
-    /// rays see the sun either way. A field added later: a scene without it shows the disc.
-    #[serde(default = "sun_disc_default")]
+    /// rays see the sun either way.
     pub sun_disc: bool,
-}
-
-fn sun_disc_default() -> bool {
-    true
 }
 
 impl Camera {

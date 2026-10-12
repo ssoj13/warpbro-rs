@@ -23,6 +23,24 @@ egui-widgets-rs. Topic docs (how things work) live in docs/; this file only trac
   checked-in or operator files once with a throwaway script (and a backup).
 - References: D:\Projects\vfx.ref.
 
+## State (2026-10-12)
+
+- **Takes** play through node attributes: `/take/clip` (node data, set like `/material_id`),
+  `/take/offset` and keyable `/take/speed` (time warp: `WorldDocument::take_frame` integrates the
+  speed). Undo history counts as playing a take (retention, deletion). Timeline: a Take lane with
+  the take's bar (egui-track-timeline lane clip) and a band on the node's bar (clip bands); both
+  pick the take. Takes take the timeline's curve effects (`Take::effected`, `world_ui::effect_rows`).
+- **Viewport kind filter** (Blender's object_type_exclude_viewport / _select) on ViewportSettings
+  (`/viewport/show|select/<kind>`, `/viewport/extras`); one predicate `WorldDocument::shows`;
+  `snapshot_with_render_profile(.., View)` says Output or Viewport. Extras in `overlay.rs`.
+- **Display modes** per render profile (`/render/display` PathTraced / Direct / Bounds,
+  `/render/thinning` = a Cells mask): `EffectiveRender::show`.
+- **Masks** (Sphere / Box / Cells) are nodes; fractal-rs ABI 4.
+- Scene identity: templates, presets and bookmarks load as new documents (`Load::New`), Save As
+  renews the UUID. File > New / Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S.
+- Own git deps are bumped by editing the lock's rev (a plain `cargo update -p` collapses
+  windows-sys 0.61 to 0.52); build with `--locked`.
+
 ## State (2026-10-09)
 
 - **Render settings are graph nodes**: RenderSettings, QualitySettings, ViewportSettings and
@@ -53,6 +71,12 @@ egui-widgets-rs. Topic docs (how things work) live in docs/; this file only trac
   kernels. Branch builds stay PTX-only. Evidence: C:\projects\projects.rust.cg\nv\prs\cubin-probe.
 
 ## Open work (priority order)
+
+0. **Pending from 2026-10-12**: measure the Cells mask cost (`cuda_mask_cost_benchmark`, ignored;
+   the GPU was busy with other processes: before the lazy-neighbour change cells cost x4.8);
+   look at the overlays, the take band and the Bounds display on screen; the 1-ULP mismatch of
+   `cuda_specialized_world_materials` (pixel 643, predates the masks); guide_albedo SSOT in
+   render-rs (ofx-rs-be queued it; it touches fractal-kernels: coordinate).
 
 1. **Register spills under `#[launch_bounds(128)]`.** Now visible as build warnings (ptxas
    reports per architecture; the driver JIT did the same silently): 13 kernels spill, e.g.
