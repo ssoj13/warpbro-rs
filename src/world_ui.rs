@@ -146,9 +146,84 @@ struct OutlinerCache {
     model: OutlinerModel,
     config: OutlinerConfig,
 }
-/// The Effects menu's parameters (session state).
+/// The curve effects' rows (Simplify, Smooth, Euler filter: label, parameters, Apply) inside a
+/// three-column grid, on one set of parameters: the timeline's Effects menu applies the chosen
+/// effect to selected keys, the Takes panel to the selected take. `enabled`: something to apply
+/// to. The Euler filter's middle is the target's own (camera or transform), set by who applies it.
+pub(crate) fn effect_rows(
+    ui: &mut egui::Ui,
+    p: &mut EffectParams,
+    enabled: bool,
+) -> Option<curves::Effect<f64>> {
+    let mut chosen = None;
+    ui.label("Simplify");
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::DragValue::new(&mut p.tolerance)
+                .range(0.0..=1.0e3)
+                .speed(0.001)
+                .prefix("error "),
+        )
+        .on_hover_text("Largest allowed change of the curve, in the channel's units");
+        ui.add(
+            egui::DragValue::new(&mut p.max_keys)
+                .range(0..=100_000)
+                .prefix("max keys "),
+        )
+        .on_hover_text("0: no limit. Otherwise the smallest error that fits in this many keys");
+    });
+    if ui
+        .add_enabled(enabled, egui::Button::new("Apply"))
+        .clicked()
+    {
+        chosen = Some(curves::Effect::Simplify {
+            tolerance: p.tolerance,
+            max_keys: (p.max_keys > 0).then_some(p.max_keys),
+        });
+    }
+    ui.end_row();
+    ui.label("Smooth");
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::DragValue::new(&mut p.iterations)
+                .range(1..=1000)
+                .prefix("iterations "),
+        );
+        ui.add(
+            egui::DragValue::new(&mut p.strength)
+                .range(0.0..=1.0)
+                .speed(0.01)
+                .prefix("strength "),
+        );
+    });
+    if ui
+        .add_enabled(enabled, egui::Button::new("Apply"))
+        .clicked()
+    {
+        chosen = Some(curves::Effect::Smooth {
+            iterations: p.iterations,
+            strength: p.strength,
+        });
+    }
+    ui.end_row();
+    ui.label("Euler filter");
+    ui.weak("rotation flips and turns");
+    if ui
+        .add_enabled(enabled, egui::Button::new("Apply"))
+        .on_hover_text(
+            "Rewrites the rotation to the equivalent angles nearest each previous moment",
+        )
+        .clicked()
+    {
+        chosen = Some(curves::Effect::EulerFilter { middle: Some(1) });
+    }
+    ui.end_row();
+    chosen
+}
+
+/// The curve effects' parameters (session state), shared by the timeline and the Takes panel.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct EffectParams {
+pub(crate) struct EffectParams {
     tolerance: f64,
     max_keys: usize,
     iterations: u32,
@@ -210,7 +285,7 @@ pub struct WorldUi {
     /// Hide shy nodes from the timeline (After Effects "Hide shy layers"); the Outliner keeps them.
     pub hide_shy: bool,
     /// Parameters of the timeline's curve effects (Effects menu).
-    effects: EffectParams,
+    pub(crate) effects: EffectParams,
     pub attribute_label_width: f32,
     /// Authored outline/canvas split; narrow panels only clamp its drawn width.
     pub timeline_outline_width: f32,
@@ -2241,46 +2316,10 @@ impl WorldUi {
         if !any {
             ui.weak("Select keys: an effect edits their curves.");
         }
-        let p = &mut self.effects;
         let mut chosen = None;
-        egui::Grid::new("curve_effects").num_columns(3).show(ui, |ui| {
-            ui.label("Simplify");
-            ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(&mut p.tolerance).range(0.0..=1.0e3).speed(0.001).prefix("error "))
-                    .on_hover_text("Largest allowed change of the curve, in the channel's units");
-                ui.add(egui::DragValue::new(&mut p.max_keys).range(0..=100_000).prefix("max keys "))
-                    .on_hover_text("0: no limit. Otherwise the smallest error that fits in this many keys");
-            });
-            if ui.add_enabled(any, egui::Button::new("Apply")).clicked() {
-                chosen = Some(curves::Effect::Simplify {
-                    tolerance: p.tolerance,
-                    max_keys: (p.max_keys > 0).then_some(p.max_keys),
-                });
-            }
-            ui.end_row();
-            ui.label("Smooth");
-            ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(&mut p.iterations).range(1..=1000).prefix("iterations "));
-                ui.add(egui::DragValue::new(&mut p.strength).range(0.0..=1.0).speed(0.01).prefix("strength "));
-            });
-            if ui.add_enabled(any, egui::Button::new("Apply")).clicked() {
-                chosen = Some(curves::Effect::Smooth {
-                    iterations: p.iterations,
-                    strength: p.strength,
-                });
-            }
-            ui.end_row();
-            ui.label("Euler filter");
-            ui.weak("rotation flips and turns");
-            if ui
-                .add_enabled(any, egui::Button::new("Apply"))
-                .on_hover_text("Rewrites the selected rotations to the equivalent angles nearest each previous moment")
-                .clicked()
-            {
-                chosen = Some(curves::Effect::EulerFilter { middle: Some(1) });
-            }
-            ui.end_row();
-        });
+        egui::Grid::new("curve_effects")
+            .num_columns(3)
+            .show(ui, |ui| chosen = effect_rows(ui, &mut self.effects, any));
         if let Some(effect) = chosen {
             self.command(e, WorldCommand::CurveEffect { targets, effect });
             ui.close();

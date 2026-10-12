@@ -2,8 +2,8 @@
 //! Filter, multi-select (Ctrl / Shift click), pin, bind as the scene camera, play, rename,
 //! copy / paste / duplicate (the system clipboard, so takes move between scenes), delete, export /
 //! import clip files, takes made from the timeline animation or the current pose, and
-//! non-destructive edits (trim, speed, smooth, split: each makes a new take, since takes have no
-//! undo). Bake to keys keys the bound take onto the camera as one undo step.
+//! non-destructive edits (trim, speed, the timeline's curve effects, split: each makes a new take,
+//! since takes have no undo). Bake to keys keys the bound take onto the camera as one undo step.
 use super::App;
 use crate::camera_recorder::Timing;
 use crate::takes::{Take, TakeKind};
@@ -21,10 +21,10 @@ pub(super) struct View {
     anchor: Option<u64>,
     /// The take whose name is being edited.
     rename: Option<(u64, String)>,
-    /// Edit parameters of the selected take: trim in / out (seconds), speed, smooth window.
+    /// Edit parameters of the selected take: trim in / out (seconds), speed. The curve effects'
+    /// parameters are the timeline's (`WorldUi::effects`).
     trim: (f64, f64),
     speed: f64,
-    smooth: f64,
     /// The take `trim` was initialised for: a new selection resets it to the whole take.
     trim_of: Option<u64>,
     /// Export (Some take) or import (None) file dialog.
@@ -42,7 +42,6 @@ impl Default for View {
             rename: None,
             trim: (0.0, 0.0),
             speed: 1.0,
-            smooth: 0.25,
             trim_of: None,
             picker: None,
             clipboard: None,
@@ -78,7 +77,8 @@ pub(super) enum Action {
 pub(super) enum Derive {
     Trim(f64, f64),
     Speed(f64),
-    Smooth(f64),
+    /// A curve effect (`Take::effected`).
+    Effect(curves::Effect<f64>),
     Split,
 }
 
@@ -366,20 +366,12 @@ impl App {
                 }
                 ui.end_row();
 
-                ui.label("Smooth (s)");
-                ui.add(
-                    egui::DragValue::new(&mut view.smooth)
-                        .range(0.0..=5.0)
-                        .speed(0.01),
-                );
-                if ui
-                    .button("Smooth")
-                    .on_hover_text("New take with the hand shake averaged out over this window")
-                    .clicked()
+                // The timeline's curve effects, on the same parameters: each makes a new take.
+                if let Some(effect) =
+                    crate::world_ui::effect_rows(ui, &mut self.world_ui.effects, true)
                 {
-                    actions.push(Action::Derive(id, Derive::Smooth(view.smooth)));
+                    actions.push(Action::Derive(id, Derive::Effect(effect)));
                 }
-                ui.end_row();
 
                 ui.label("");
                 ui.label("");
@@ -517,7 +509,9 @@ impl App {
                     Derive::Speed(speed) => take
                         .retimed(speed)
                         .map(|t| vec![named(t, &format!("x{speed}"))]),
-                    Derive::Smooth(window) => Ok(vec![named(take.smoothed(window), "smooth")]),
+                    Derive::Effect(effect) => take
+                        .effected(&effect)
+                        .map(|t| vec![named(t, &effect.label().to_lowercase())]),
                     Derive::Split => take
                         .split(playhead, fps)
                         .map(|(a, b)| vec![named(a, "A"), named(b, "B")]),

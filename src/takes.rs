@@ -2,7 +2,7 @@
 //!
 //! A take is a list of timed poses of one kind ([`Poses`]): a camera's visible pose (viewport
 //! navigation, recorded by [`Recorder`]) or a node's local transform ([`Trs`]: manipulator drags,
-//! recorded by [`DragRecorder`]). Every operation on a take (interpolation, trim, speed, smoothing,
+//! recorded by [`DragRecorder`]). Every operation on a take (interpolation, trim, speed, curve effects,
 //! split) is written once over the [`Pose`] trait. Finished takes live in the document's [`Takes`]
 //! store, saved with the scene but outside undo/redo and outside document equality: a take is a
 //! recording, not an edit. A node plays a take through its own attributes (`/take/clip`, the
@@ -39,9 +39,13 @@ pub trait Pose: Copy + PartialEq + std::fmt::Debug + Serialize + DeserializeOwne
     /// The pose `t` of the way from `self` to `other`: rotation by quaternion slerp, written as
     /// the Euler angles nearest `self`'s (no flip at +-180), the rest linearly.
     fn blend(&self, other: &Self, t: f32) -> Self;
-    /// The mean of `samples` (non-empty); rotation by the normalized mean of hemisphere-aligned
-    /// quaternions, written nearest `like`'s angles.
-    fn mean(samples: &[Sample<Self>], like: &Self) -> Self;
+    /// The pose's continuous values: the channels a curve effect edits (`Take::effected`).
+    fn channels(&self) -> Vec<f32>;
+    /// This pose with `values` (as [`Pose::channels`] orders them) written back.
+    fn with_channels(&self, values: &[f32]) -> Self;
+    /// The first of its three rotation channels and their Euler order's middle
+    /// (`curves::Effect::EulerFilter`): the timeline's choice for the same attributes.
+    const ROTATION: (usize, Option<usize>);
 }
 
 /// One pose at `seconds` of the take's clock.
@@ -100,23 +104,21 @@ impl Pose for Trs {
         }
         out.with_quat(self.quat().slerp(other.quat(), t), self.rotation_degrees)
     }
-    fn mean(samples: &[Sample<Self>], like: &Self) -> Self {
-        let n = samples.len().max(1) as f32;
-        let avg = |f: &dyn Fn(&Trs) -> [f32; 3]| {
-            let sum = samples.iter().fold([0.0; 3], |acc, s| {
-                let v = f(&s.pose);
-                std::array::from_fn(|i| acc[i] + v[i])
-            });
-            sum.map(|v| v / n)
-        };
-        let q = mean_quat(samples.iter().map(|s| s.pose.quat()), like.quat());
-        Trs {
-            position: avg(&|p| p.position),
-            scale: avg(&|p| p.scale),
-            ..*like
-        }
-        .with_quat(q, like.rotation_degrees)
+    fn channels(&self) -> Vec<f32> {
+        [self.position, self.rotation_degrees, self.scale]
+            .into_iter()
+            .flatten()
+            .collect()
     }
+    fn with_channels(&self, values: &[f32]) -> Self {
+        let three = |at: usize| std::array::from_fn(|i| values[at + i]);
+        Trs {
+            position: three(0),
+            rotation_degrees: three(3),
+            scale: three(6),
+        }
+    }
+    const ROTATION: (usize, Option<usize>) = (3, Some(1));
 }
 
 impl Pose for Camera {
@@ -155,32 +157,36 @@ impl Pose for Camera {
         }
         c
     }
-    fn mean(samples: &[Sample<Self>], like: &Self) -> Self {
-        let n = samples.len().max(1) as f32;
-        let avg = |f: &dyn Fn(&Camera) -> f32| samples.iter().map(|s| f(&s.pose)).sum::<f32>() / n;
-        let q = mean_quat(
-            samples.iter().map(|s| s.pose.orientation()),
-            like.orientation(),
-        );
-        let mut out = Camera {
-            target: std::array::from_fn(|k| avg(&|c| c.target[k])),
-            distance: avg(&|c| c.distance),
-            fov_y_degrees: avg(&|c| c.fov_y_degrees),
-            f_number: avg(&|c| c.f_number),
-            sensor_height: avg(&|c| c.sensor_height),
-            focus_distance: avg(&|c| c.focus_distance),
-            ..*like
-        };
-        set_orientation(&mut out, q, like);
-        out
+    fn channels(&self) -> Vec<f32> {
+        let mut values = self.target.to_vec();
+        values.extend([
+            self.yaw_degrees,
+            self.pitch_degrees,
+            self.roll_degrees,
+            self.distance,
+            self.fov_y_degrees,
+            self.f_number,
+            self.sensor_height,
+            self.focus_distance,
+        ]);
+        values
     }
-}
-
-/// The normalized mean of quaternions, each first turned into `reference`'s hemisphere.
-fn mean_quat(qs: impl Iterator<Item = glam::Quat>, reference: glam::Quat) -> glam::Quat {
-    qs.map(|q| if q.dot(reference) < 0.0 { -q } else { q })
-        .fold(glam::Quat::from_xyzw(0.0, 0.0, 0.0, 0.0), |a, q| a + q)
-        .normalize()
+    fn with_channels(&self, v: &[f32]) -> Self {
+        Camera {
+            target: [v[0], v[1], v[2]],
+            yaw_degrees: v[3],
+            pitch_degrees: v[4],
+            roll_degrees: v[5],
+            distance: v[6],
+            fov_y_degrees: v[7],
+            f_number: v[8],
+            sensor_height: v[9],
+            focus_distance: v[10],
+            ..*self
+        }
+    }
+    // Pitch is limited: whole turns only, as the timeline filters a camera's keys.
+    const ROTATION: (usize, Option<usize>) = (3, None);
 }
 
 /// Write the rotation `q` into `camera`'s yaw / pitch / roll (Euler YXZ) as the angles nearest
@@ -322,21 +328,48 @@ fn retime<P: Pose>(s: &[Sample<P>], speed: f64) -> Vec<Sample<P>> {
         .collect()
 }
 
-/// Every interior pose the mean of the poses within `window` seconds around it.
-fn smooth<P: Pose>(s: &[Sample<P>], window: f64) -> Vec<Sample<P>> {
-    let mut out = s.to_vec();
-    let half = window.max(0.0) * 0.5;
-    let n = s.len();
-    if half <= 0.0 || n < 3 {
-        return out;
+/// `effect` on the samples: each channel ([`Pose::channels`]) a curve of linear keys at the
+/// sample times, edited by the same `curves::Effect` the timeline applies to keys (the Euler
+/// filter to the rotation's three channels, [`Pose::ROTATION`]), and read back at those times.
+fn effected<P: Pose>(
+    s: &[Sample<P>],
+    effect: &curves::Effect<f64>,
+) -> Result<Vec<Sample<P>>, String> {
+    let rows: Vec<Vec<f32>> = s.iter().map(|x| x.pose.channels()).collect();
+    let count = rows.first().map_or(0, Vec::len);
+    let mut tracks = (0..count)
+        .map(|c| {
+            curves::Track::from_keys(
+                s.iter()
+                    .zip(&rows)
+                    .map(|(x, row)| {
+                        curves::Key::new(x.seconds, f64::from(row[c])).with_tan(curves::Tan::Linear)
+                    })
+                    .collect(),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    match *effect {
+        curves::Effect::EulerFilter { .. } => {
+            let (first, middle) = P::ROTATION;
+            let mut rotation = tracks[first..first + 3].to_vec();
+            curves::Effect::EulerFilter { middle }
+                .apply(&mut rotation)
+                .map_err(|e| e.to_string())?;
+            tracks.splice(first..first + 3, rotation);
+        }
+        _ => effect.apply(&mut tracks).map_err(|e| e.to_string())?,
     }
-    for (i, o) in out.iter_mut().enumerate().take(n - 1).skip(1) {
-        let t = s[i].seconds;
-        let lo = s.partition_point(|x| x.seconds < t - half);
-        let hi = s.partition_point(|x| x.seconds <= t + half);
-        o.pose = P::mean(&s[lo..hi], &s[i].pose);
-    }
-    out
+    Ok(s.iter()
+        .map(|x| {
+            let values: Vec<f32> = tracks.iter().map(|t| t.eval(x.seconds) as f32).collect();
+            Sample {
+                seconds: x.seconds,
+                pose: x.pose.with_channels(&values),
+            }
+        })
+        .collect())
 }
 
 /// One recorded motion.
@@ -511,13 +544,14 @@ impl Take {
         .checked()
     }
 
-    /// Shake removed: every pose the mean of the poses within `window` seconds around it. The
-    /// first and last poses stay.
-    pub fn smoothed(&self, window: f64) -> Self {
+    /// A curve effect (Simplify, Smooth, Euler filter) on the take's motion, as the timeline
+    /// applies it to keys ([`effected`]).
+    pub fn effected(&self, effect: &curves::Effect<f64>) -> Result<Self, String> {
         Take {
-            poses: map_poses!(&self.poses, s => smooth(s, window)),
+            poses: map_poses!(&self.poses, s => effected(s, effect)?),
             ..self.clone()
         }
+        .checked()
     }
 
     /// Cut at `seconds` into two takes; the second starts on the frame the cut played on.

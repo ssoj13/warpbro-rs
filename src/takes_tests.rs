@@ -160,7 +160,12 @@ fn trim_split_retime_and_smooth_work_on_either_kind() {
         })
         .collect();
     let shaky = Take::new(0.0, None, jitter).unwrap();
-    let smooth = shaky.smoothed(8.0);
+    let smooth = shaky
+        .effected(&curves::Effect::Smooth {
+            iterations: 8,
+            strength: 0.5,
+        })
+        .unwrap();
     let roughness = |t: &Take| match &t.poses {
         Poses::Transform(s) => s[5..36]
             .windows(3)
@@ -245,4 +250,41 @@ fn a_drag_records_one_transform_take_per_moved_node() {
         t.duration()
     );
     assert!(d.finish().is_empty(), "finish clears the drag");
+}
+
+#[test]
+fn the_euler_filter_and_simplify_edit_a_takes_motion_like_keys() {
+    // A turn written with a decomposer's wrap at +-180: 170, 180, -170, -160.
+    let turn: Vec<Sample<Trs>> = [170.0, 180.0, -170.0, -160.0]
+        .into_iter()
+        .enumerate()
+        .map(|(i, z)| Sample {
+            seconds: i as f64,
+            pose: Trs {
+                position: [i as f32, 0.0, 0.0],
+                rotation_degrees: [0.0, 0.0, z],
+                scale: [1.0; 3],
+            },
+        })
+        .collect();
+    let take = Take::new(0.0, None, turn).unwrap();
+    let filtered = take
+        .effected(&curves::Effect::EulerFilter { middle: None })
+        .unwrap();
+    let Poses::Transform(s) = &filtered.poses else {
+        unreachable!()
+    };
+    let z: Vec<f32> = s.iter().map(|x| x.pose.rotation_degrees[2]).collect();
+    assert!(
+        z.windows(2).all(|w| (w[1] - w[0] - 10.0).abs() < 1e-3),
+        "{z:?}"
+    );
+    // Simplify keeps the samples, now on a curve within the error of the old one.
+    let simple = take
+        .effected(&curves::Effect::Simplify {
+            tolerance: 0.01,
+            max_keys: None,
+        })
+        .unwrap();
+    assert_eq!(simple.len(), take.len());
 }
