@@ -643,24 +643,28 @@ impl ExportController {
     }
     /// `timeline` is (first, last, fps, playhead) of the world document. The host fills
     /// `settings.output` from the document's OutputSettings node before this call and authors
-    /// any change made here back to that node (`App::export_ui`).
-    pub fn ui(
+    /// any change made here back to that node (`App::export_ui`). `rows` draws the host's own
+    /// rows (its bindings) at the top of the form's grid, `freeze` the scene a start renders;
+    /// both get the host's `host` (its document editor).
+    #[allow(clippy::too_many_arguments)]
+    pub fn ui<H>(
         &mut self,
         ui: &mut egui::Ui,
+        host: &mut H,
         timeline: (u32, u32, f64, u32),
         service: &RenderService,
         ocio: Option<&crate::ocio::Ocio>,
         current: &crate::ocio::Sel,
-        freeze: impl FnOnce() -> Scene,
+        rows: impl FnOnce(&mut egui::Ui, &mut H),
+        freeze: impl FnOnce(&mut H) -> Scene,
     ) {
         let running = self.is_running();
         let kind_before = self.settings.output.output_kind();
         ui.add_enabled_ui(!running, |ui| {
-            ui.weak(format!("Written to {}", self.out_root.join("<date_time>").display()));
-            ui.weak("Animation is sampled at each frame. The scene and keys are frozen when export starts.");
-            // One grid, so every value column lines up: the settings every format shares, drawn
-            // once, then the format row (the tabs) and only that format's options under it.
+            // One grid, so every value column lines up: the host's rows, the settings every
+            // format shares, then the format row (the tabs) and only that format's options.
             egui::Grid::new("render_encode").num_columns(2).show(ui, |ui| {
+                rows(ui, host);
                 ui.label("Name"); ui.horizontal(|ui| {
                     ui.text_edit_singleline(&mut self.settings.job.name);
                     ui.label(format!(".{}", self.settings.suffix()));
@@ -735,6 +739,8 @@ impl ExportController {
             // An override names a display of one kind (SDR / PQ / HLG): a new kind starts automatic.
             self.settings.output.normalize_override(kind_before);
             ui.small(self.settings.output.format.hint());
+            ui.weak(format!("Written to {}", self.out_root.join("<date_time>").display()));
+            ui.weak("Animation is sampled at each frame. The scene and keys are frozen when export starts.");
             // The same quality, scaling and checks a start applies (`start`).
             let validation = self.quality.ok_or_else(|| "The Output render profile cannot be evaluated".to_string()).and_then(|(samples, scale)| {
                 let mut preview = self.settings.clone();
@@ -744,7 +750,7 @@ impl ExportController {
             });
             if let Err(error) = &validation { ui.colored_label(egui::Color32::LIGHT_RED,error); }
             if ui.add_enabled(validation.is_ok(),egui::Button::new("Start render")).clicked() {
-                let scene = freeze();
+                let scene = freeze(host);
                 if let Err(error) = self.start(&scene,service) { self.status = error; }
             }
         });

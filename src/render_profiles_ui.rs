@@ -252,6 +252,8 @@ struct CatalogOps<'a> {
 }
 /// One binding row: `label`, the bound profile's combo (picking executes `bind`), the
 /// Attribute Editor gear and the create / copy / template menu of `kind`'s catalog.
+/// One row of a two-column grid (the caller's): the label, then the profile menu with its
+/// edit and new / copy / template buttons, so every binding's menu lines up.
 fn catalog_selector(
     ui: &mut egui::Ui,
     world: &mut WorldEditor,
@@ -265,63 +267,62 @@ fn catalog_selector(
     let nodes = world
         .document
         .settings_nodes(kind, Some(CatalogRole::Profile));
-    ui.push_id(("profile_binding", label), |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.label(label);
-            let mut candidate = selected;
-            egui::ComboBox::from_id_salt("profile")
-                .width(160.0)
-                .selected_text(profile_name(&nodes, selected))
-                .show_ui(ui, |ui| {
-                    for node in &nodes {
-                        ui.selectable_value(&mut candidate, node.id, &node.name);
-                    }
-                });
-            if candidate != selected {
-                actions.execute(world, bind(candidate));
-            }
-            if ui
-                .button(ph::GEAR)
-                .on_hover_text("Edit profile in Attribute Editor")
-                .clicked()
-            {
-                actions.edit = Some(candidate);
-            }
-            ui.menu_button(ph::ADD, |ui| {
-                if ui.button("New profile…").clicked() {
-                    request_name(
-                        ui,
-                        world,
-                        (ops.create)(None, CatalogRole::Profile),
-                        format!("{label} profile"),
-                    );
-                    ui.close();
-                }
-                if ui.button("Independent copy…").clicked() {
-                    request_name(
-                        ui,
-                        world,
-                        (ops.create)(Some(candidate), CatalogRole::Profile),
-                        format!("{} copy", profile_name(&nodes, candidate)),
-                    );
-                    ui.close();
-                }
-                let templates = world
-                    .document
-                    .settings_nodes(kind, Some(CatalogRole::Template));
-                if !templates.is_empty() {
-                    ui.separator();
-                    ui.label("Apply template as independent copy");
-                    for template in templates {
-                        if ui.button(&template.name).clicked() {
-                            request_name(ui, world, (ops.instantiate)(template.id), template.name);
-                            ui.close();
-                        }
-                    }
+    ui.label(label);
+    ui.horizontal(|ui| {
+        let mut candidate = selected;
+        egui::ComboBox::from_id_salt(("profile_binding", label))
+            .width(160.0)
+            .selected_text(profile_name(&nodes, selected))
+            .show_ui(ui, |ui| {
+                for node in &nodes {
+                    ui.selectable_value(&mut candidate, node.id, &node.name);
                 }
             });
+        if candidate != selected {
+            actions.execute(world, bind(candidate));
+        }
+        if ui
+            .button(ph::GEAR)
+            .on_hover_text("Edit profile in Attribute Editor")
+            .clicked()
+        {
+            actions.edit = Some(candidate);
+        }
+        ui.menu_button(ph::ADD, |ui| {
+            if ui.button("New profile…").clicked() {
+                request_name(
+                    ui,
+                    world,
+                    (ops.create)(None, CatalogRole::Profile),
+                    format!("{label} profile"),
+                );
+                ui.close();
+            }
+            if ui.button("Independent copy…").clicked() {
+                request_name(
+                    ui,
+                    world,
+                    (ops.create)(Some(candidate), CatalogRole::Profile),
+                    format!("{} copy", profile_name(&nodes, candidate)),
+                );
+                ui.close();
+            }
+            let templates = world
+                .document
+                .settings_nodes(kind, Some(CatalogRole::Template));
+            if !templates.is_empty() {
+                ui.separator();
+                ui.label("Apply template as independent copy");
+                for template in templates {
+                    if ui.button(&template.name).clicked() {
+                        request_name(ui, world, (ops.instantiate)(template.id), template.name);
+                        ui.close();
+                    }
+                }
+            }
         });
     });
+    ui.end_row();
     actions
 }
 /// A render-profile binding (Moving / Still / Manual / Output); copies made here are bound.
@@ -350,15 +351,20 @@ fn profile_selector(
         },
     )
 }
-/// The export bindings for the Render / Encode panel: `output_rows` plus the name dialog,
-/// which every top-level entry draws once, after all its rows could request it.
-pub(crate) fn output_bindings(ui: &mut egui::Ui, world: &mut WorldEditor, frame: f64) -> Actions {
+/// The export bindings for the Render / Encode panel as rows of its form grid: `output_rows`
+/// plus the name dialog, which every top-level entry draws once, after all its rows could
+/// request it.
+pub(crate) fn output_binding_rows(
+    ui: &mut egui::Ui,
+    world: &mut WorldEditor,
+    frame: f64,
+) -> Actions {
     let mut actions = output_rows(ui, world, frame);
     actions.merge(dialogs(ui, world));
     actions
 }
-/// The Output render profile and the OutputSettings recipe rows, shared by the Render /
-/// Encode panel and Settings → Render & Viewport.
+/// The Output render profile and the OutputSettings recipe rows (grid rows), shared by the
+/// Render / Encode panel and Settings → Render & Viewport.
 fn output_rows(ui: &mut egui::Ui, world: &mut WorldEditor, frame: f64) -> Actions {
     let mut actions = Actions::default();
     match (
@@ -417,18 +423,23 @@ fn binding_controls(
             return actions;
         }
     };
-    for (target, selected) in [
-        (ProfileTarget::Moving, policy.moving_id),
-        (ProfileTarget::Still, policy.still_id),
-        (ProfileTarget::Manual, policy.manual_id),
-    ] {
-        actions.merge(profile_selector(
-            ui, world, viewport, target, selected, frame,
-        ));
-    }
-    if include_output {
-        actions.merge(output_rows(ui, world, frame));
-    }
+    // One grid: every binding's menu starts in the same column.
+    egui::Grid::new("profile_bindings")
+        .num_columns(2)
+        .show(ui, |ui| {
+            for (target, selected) in [
+                (ProfileTarget::Moving, policy.moving_id),
+                (ProfileTarget::Still, policy.still_id),
+                (ProfileTarget::Manual, policy.manual_id),
+            ] {
+                actions.merge(profile_selector(
+                    ui, world, viewport, target, selected, frame,
+                ));
+            }
+            if include_output {
+                actions.merge(output_rows(ui, world, frame));
+            }
+        });
     actions
 }
 
@@ -987,9 +998,9 @@ mod tests {
     fn frame(
         ctx: &egui::Context,
         events: Vec<egui::Event>,
-        draw: impl FnOnce(&mut egui::Ui),
+        mut draw: impl FnMut(&mut egui::Ui),
     ) -> egui::FullOutput {
-        let mut draw = Some(draw);
+        // Every pass draws: a grid's first frame asks for a second (sizing) pass.
         ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -1000,7 +1011,7 @@ mod tests {
                 ..Default::default()
             },
             |root| {
-                egui::CentralPanel::default().show(root, |ui| draw.take().unwrap()(ui));
+                egui::CentralPanel::default().show(root, |ui| draw(ui));
             },
         )
     }

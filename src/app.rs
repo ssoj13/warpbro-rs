@@ -2753,8 +2753,6 @@ impl App {
     fn export_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("Render / Encode");
         let frame = f64::from(self.world_ui.playhead);
-        let actions = crate::render_profiles_ui::output_bindings(ui, &mut self.world, frame);
-        self.profile_ui_actions(actions);
         let quality = self.world.document.output_render_profile().and_then(|id| {
             self.world
                 .document
@@ -2764,20 +2762,13 @@ impl App {
             .as_ref()
             .ok()
             .map(|effective| (effective.samples, effective.resolution_scale));
-        match &quality {
-            Ok(effective) => {
-                if ui
-                    .button("Edit Output quality in Attribute Editor")
-                    .clicked()
-                {
-                    self.profile_ui_actions(crate::render_profiles_ui::Actions {
-                        edit: Some(effective.quality),
-                        error: None,
-                    });
-                }
+        let quality_id = match &quality {
+            Ok(effective) => Some(effective.quality),
+            Err(error) => {
+                self.status = error.clone();
+                None
             }
-            Err(error) => self.status = error.clone(),
-        }
+        };
         // An unreadable recipe still shows the form (its check fails, a running export keeps
         // its progress and Cancel); only the authoring step needs the recipe.
         let recipe = self
@@ -2799,19 +2790,38 @@ impl App {
             self.world_ui.playhead,
         );
         let scene = &self.scene;
-        let world = &mut self.world;
         let ocio = self.colour.config().ok();
+        let mut actions = crate::render_profiles_ui::Actions::default();
         self.export.ui(
             ui,
+            &mut self.world,
             timeline,
             &self.renderer,
             ocio,
             &self.scene.colour,
-            || {
+            |ui, world| {
+                actions = crate::render_profiles_ui::output_binding_rows(ui, world, frame);
+                if let Some(id) = quality_id {
+                    ui.label("Quality");
+                    if ui
+                        .button(format!(
+                            "{} Edit Output quality",
+                            egui_phosphor::regular::GEAR
+                        ))
+                        .on_hover_text("Edit the Output quality profile in the Attribute Editor")
+                        .clicked()
+                    {
+                        actions.edit = Some(id);
+                    }
+                    ui.end_row();
+                }
+            },
+            |world| {
                 world.finish_edit();
                 freeze_world_scene(scene, &world.document)
             },
         );
+        self.profile_ui_actions(actions);
         let Ok((id, before)) = recipe else {
             return;
         };
@@ -5027,11 +5037,13 @@ mod tests {
                 egui::CentralPanel::default().show(root, |ui| {
                     app.export.ui(
                         ui,
+                        &mut (),
                         (frame, frame + 250, 24.0, frame),
                         &app.renderer,
                         None,
                         &crate::color::default_selection(),
-                        || panic!("An idle export panel must not clone the authoring document"),
+                        |_, _| {},
+                        |_| panic!("An idle export panel must not clone the authoring document"),
                     );
                 });
             });
