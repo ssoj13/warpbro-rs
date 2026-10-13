@@ -11,7 +11,11 @@ mod tests {
     #[test]
     fn cadence_counts_samples_and_runs_final_only_once() {
         let _gpu_test = crate::test_gpu::lock();
-        let settings = Settings::default();
+        // The cadence on an explicit interval, whatever the default is.
+        let settings = Settings {
+            interval: 128,
+            ..Settings::default()
+        };
         let mut state = State::default();
         assert!(!state.due(&settings, 0, true));
         assert!(!state.due(&settings, 127, false));
@@ -29,7 +33,11 @@ mod tests {
     #[test]
     fn failures_clear_stale_output_and_do_not_retry_every_frame() {
         let _gpu_test = crate::test_gpu::lock();
-        let settings = Settings::default();
+        // The cadence on an explicit interval, whatever the default is.
+        let settings = Settings {
+            interval: 128,
+            ..Settings::default()
+        };
         let mut state = State::default();
         assert!(state.due(&settings, 128, false));
         state.complete(128, success(128));
@@ -259,7 +267,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             enabled: true,
-            interval: 128,
+            interval: 32,
             mode: Mode::default(),
             quality: Quality::default(),
         }
