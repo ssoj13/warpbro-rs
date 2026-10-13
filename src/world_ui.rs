@@ -151,48 +151,72 @@ struct OutlinerCache {
     model: OutlinerModel,
     config: OutlinerConfig,
 }
-/// The kinds a user creates, in the order every Add menu lists them (the outliner's + Add and
-/// its context menu, the timeline layer's Add child, the Tab menu).
-const ADD_KINDS: [WorldKind; 11] = [
-    WorldKind::Fractal,
-    WorldKind::Camera,
-    WorldKind::DirectionalLight,
-    WorldKind::Environment,
-    WorldKind::Group,
-    WorldKind::Mask,
-    WorldKind::Material,
-    WorldKind::RenderSettings,
-    WorldKind::QualitySettings,
-    WorldKind::ViewportSettings,
-    WorldKind::OutputSettings,
-];
-/// The outliner context action that adds a kind: this prefix and its label.
+/// What a user creates: every Add menu shows this one list (the Tab menu, the outliner's
+/// + Add and right-click Add, a timeline layer's Add child), grouped as in a DCC's Tab menu.
+fn add_items() -> Vec<egui_tab_menu::MenuItem<WorldKind>> {
+    use egui_tab_menu::MenuItem;
+    let item = |kind: WorldKind, group: &str, keywords: &str| {
+        MenuItem::new(kind, kind_label(kind))
+            .icon(kind_icon(kind))
+            .group(group)
+            .keywords(keywords)
+    };
+    vec![
+        item(
+            WorldKind::Fractal,
+            "Objects",
+            "mandelbulb kifs julia hybrid",
+        ),
+        item(WorldKind::Group, "Objects", "null locator transform"),
+        item(
+            WorldKind::Mask,
+            "Objects",
+            "bounding box sphere clip cells cut",
+        ),
+        item(WorldKind::Camera, "Cameras", "view lens"),
+        item(WorldKind::DirectionalLight, "Lighting", "sun directional"),
+        item(WorldKind::Environment, "Lighting", "hdri sky dome"),
+        item(WorldKind::Material, "Shading", "surface shader"),
+        item(WorldKind::RenderSettings, "Settings", "render profile"),
+        item(
+            WorldKind::QualitySettings,
+            "Settings",
+            "samples quality profile",
+        ),
+        item(WorldKind::ViewportSettings, "Settings", "viewport display"),
+        item(WorldKind::OutputSettings, "Settings", "output file export"),
+    ]
+}
+/// The outliner context action that adds an item of [`add_items`]: this prefix, its index.
 const ADD_ACTION: &str = "add:";
 /// The kind an outliner context action adds ([`ADD_ACTION`]).
 fn add_action(action: &str) -> Option<WorldKind> {
-    let label = action.strip_prefix(ADD_ACTION)?;
-    ADD_KINDS
-        .into_iter()
-        .find(|kind| kind_label(*kind) == label)
+    let index: usize = action.strip_prefix(ADD_ACTION)?.parse().ok()?;
+    add_items().get(index).map(|item| item.key)
 }
-/// One button per [`ADD_KINDS`] entry inside a menu: the kind clicked (the menu closes).
-fn add_kind_buttons(ui: &mut egui::Ui) -> Option<WorldKind> {
-    for kind in ADD_KINDS {
-        if ui
-            .button(format!("{} {}", kind_icon(kind), kind_label(kind)))
-            .clicked()
-        {
-            ui.close();
-            return Some(kind);
-        }
+/// The outliner's Add submenu: the tree of [`add_items`] as nested context items.
+fn add_context_item(menu: &egui_tab_menu::TabMenu<WorldKind>) -> ContextItem {
+    fn level(
+        tree: &egui_tab_menu::MenuTree,
+        items: &[egui_tab_menu::MenuItem<WorldKind>],
+    ) -> Vec<ContextItem> {
+        let mut out: Vec<ContextItem> = tree
+            .groups
+            .iter()
+            .map(|(name, group)| {
+                ContextItem::new(name.as_str(), name.as_str()).with_children(level(group, items))
+            })
+            .collect();
+        out.extend(tree.leaves.iter().map(|&i| {
+            ContextItem::new(
+                format!("{ADD_ACTION}{i}"),
+                format!("{}  {}", items[i].icon, items[i].label),
+            )
+        }));
+        out
     }
-    None
-}
-/// The open Tab Add menu: where, its search, and whether the search still needs focus.
-struct AddMenu {
-    at: Pos2,
-    query: String,
-    focus: bool,
+    let items = add_items();
+    ContextItem::new("add", "Add").with_children(level(&menu.tree(&items), &items))
 }
 
 /// The curve effects' rows (Simplify, Smooth, Euler filter: label, parameters, Apply) inside a
@@ -355,8 +379,8 @@ pub struct WorldUi {
     pub hide_shy: bool,
     /// Parameters of the timeline's curve effects (Effects menu).
     pub(crate) effects: EffectParams,
-    /// The Tab Add menu while open (`add_menu_ui`).
-    add_menu: Option<AddMenu>,
+    /// The Add menus' state: the Tab menu, History, favorites and usage (`add_items`).
+    add_menu: egui_tab_menu::TabMenu<WorldKind>,
     pub attribute_label_width: f32,
     /// Authored outline/canvas split; narrow panels only clamp its drawn width.
     pub timeline_outline_width: f32,
@@ -412,7 +436,7 @@ impl Default for WorldUi {
             looping: true,
             hide_shy: true,
             effects: EffectParams::default(),
-            add_menu: None,
+            add_menu: egui_tab_menu::TabMenu::new("world_add_menu"),
             attribute_label_width: 180.0,
             timeline_outline_width: 340.0,
             timeline_width: 0.0,
@@ -852,64 +876,27 @@ impl WorldUi {
             },
         );
     }
-    /// Open the Tab Add menu at `at` (screen points), its search empty and focused.
+    /// Open the Tab menu at `at` (screen points, the cursor).
     pub(crate) fn open_add_menu(&mut self, at: Pos2) {
-        self.add_menu = Some(AddMenu {
-            at,
-            query: String::new(),
-            focus: true,
-        });
+        self.add_menu.open(at);
     }
-    /// The Tab Add menu while open: a search over [`ADD_KINDS`]; a click or Enter (the first
-    /// match) creates at the root, Escape or a click elsewhere closes it.
+    /// The Tab menu while open: an entry taken creates its node at the root.
     pub(crate) fn add_menu_ui(&mut self, ctx: &egui::Context, e: &mut WorldEditor) {
-        let Some(mut menu) = self.add_menu.take() else {
-            return;
-        };
-        let mut chosen = None;
-        let area = egui::Area::new(egui::Id::new("add_node_menu"))
-            .order(egui::Order::Foreground)
-            .fixed_pos(menu.at)
-            .show(ctx, |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_min_width(180.0);
-                    let edit =
-                        ui.add(egui::TextEdit::singleline(&mut menu.query).hint_text("Add node…"));
-                    if std::mem::take(&mut menu.focus) {
-                        edit.request_focus();
-                    }
-                    let query = menu.query.to_lowercase();
-                    let matches: Vec<WorldKind> = ADD_KINDS
-                        .into_iter()
-                        .filter(|kind| kind_label(*kind).to_lowercase().contains(&query))
-                        .collect();
-                    if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                        chosen = matches.first().copied();
-                    }
-                    for kind in matches {
-                        if ui
-                            .button(format!("{} {}", kind_icon(kind), kind_label(kind)))
-                            .clicked()
-                        {
-                            chosen = Some(kind);
-                        }
-                    }
-                });
-            });
-        if let Some(kind) = chosen {
+        if let Some(kind) = self.add_menu.show(ctx, &add_items()) {
             self.create(e, kind, None);
-        } else if !area.response.clicked_elsewhere()
-            && !ctx.input(|i| i.key_pressed(egui::Key::Escape))
-        {
-            self.add_menu = Some(menu);
+        }
+    }
+    /// The Add menu's nested entries inside an open menu: what was taken, created under
+    /// `parent` (None: the root).
+    fn add_menu_entries(&mut self, ui: &mut egui::Ui, e: &mut WorldEditor, parent: Option<NodeId>) {
+        if let Some(kind) = self.add_menu.menu_ui(ui, &add_items()) {
+            self.create(e, kind, parent);
         }
     }
     pub fn outliner(&mut self, ui: &mut egui::Ui, e: &mut WorldEditor) {
         ui.horizontal(|ui| {
             ui.menu_button(format!("{} Add", ph::ADD), |ui| {
-                if let Some(kind) = add_kind_buttons(ui) {
-                    self.create(e, kind, None);
-                }
+                self.add_menu_entries(ui, e, None);
             });
             if ui
                 .add_enabled(e.selection.is_some(), egui::Button::new(ph::COPY))
@@ -1095,12 +1082,7 @@ impl WorldUi {
                     .with_row_height(24.0);
                 cache.config.context_items = vec![
                     // On a row: a child of it; on the empty area: at the root.
-                    ContextItem::new("add", "Add").with_children(ADD_KINDS.map(|kind| {
-                        ContextItem::new(
-                            format!("{ADD_ACTION}{}", kind_label(kind)),
-                            format!("{} {}", kind_icon(kind), kind_label(kind)),
-                        )
-                    })),
+                    add_context_item(&self.add_menu),
                     ContextItem::new("duplicate", "Duplicate").with_separator(),
                     ContextItem::new("unparent", "Move to root"),
                     ContextItem::new("active", "Make active camera / environment"),
@@ -1897,9 +1879,7 @@ impl WorldUi {
             }
             source.context_menu(|ui| {
                 ui.menu_button("Add child", |ui| {
-                    if let Some(kind) = add_kind_buttons(ui) {
-                        self.create(e, kind, Some(n.id));
-                    }
+                    self.add_menu_entries(ui, e, Some(n.id));
                 });
                 ui.separator();
                 if ui
@@ -3465,15 +3445,27 @@ mod tests {
         }
     }
     #[test]
-    fn every_add_menu_entry_names_its_kind_once() {
-        for kind in ADD_KINDS {
+    fn every_add_menu_entry_is_one_creatable_kind() {
+        let items = add_items();
+        for (i, item) in items.iter().enumerate() {
+            assert_eq!(add_action(&format!("{ADD_ACTION}{i}")), Some(item.key));
             assert_eq!(
-                add_action(&format!("{ADD_ACTION}{}", kind_label(kind))),
-                Some(kind)
+                items.iter().filter(|other| other.key == item.key).count(),
+                1
             );
         }
         assert_eq!(add_action("duplicate"), None);
-        assert_eq!(add_action("add:Nothing"), None);
+        assert_eq!(add_action("add:99"), None);
+        // The outliner's Add submenu holds every item, nested in its groups.
+        fn count(item: &ContextItem) -> usize {
+            if item.children.is_empty() {
+                1
+            } else {
+                item.children.iter().map(count).sum()
+            }
+        }
+        let menu = egui_tab_menu::TabMenu::<WorldKind>::new("t");
+        assert_eq!(count(&add_context_item(&menu)), items.len());
     }
 
     #[test]

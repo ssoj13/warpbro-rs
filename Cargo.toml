@@ -28,6 +28,7 @@ playa-time = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "main" }
 playa-coord = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "main" }
 playa-events = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "main" }
 egui-outliner = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
+egui-tab-menu = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
 # Our Windows fork includes the Rust 1.99 backend fixes.
 cuda-device = { git = "ssh://git@github.com/ssoj13/cuda-rust-windows.git", branch = "main" }
 cuda-host = { git = "ssh://git@github.com/ssoj13/cuda-rust-windows.git", branch = "main" }
