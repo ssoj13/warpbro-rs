@@ -1,5 +1,17 @@
 # HANDOFF (2026-10-13, ~00:00)
 
+MIS follow-up (2026-10-13): fractal main/origin is now
+`c4222f4a31d61f92cead18a8fbb69d89c29f2690`. `power_heuristic` uses explicit
+`a.mul_add(a, b * b)` so homogeneous Fast and mixed-world kernels keep the same FMA arm.
+The material oracle is enabled in the normal CUDA suite; no tolerance changed. Full source
+verification: 315 passed, 0 failed, 13 ignored (`target/mis-fix/source-full.log`). WarpBro's
+four Git pins are updated, with Cargo.toml and windows-sys unchanged. The published dependency
+passes the strict oracle with `--locked` and no patch (`published-oracle.log`), release build
+(35.35s), clippy with tests and `-D warnings` (13.83s), and fmt. All receipts are in
+`target/mis-fix/`. The generated cuda-device scalar intrinsic sm_80 restriction is a separate
+compiler issue: an isolated branch from `ansidium/cuda-rust-windows` main is preparing its
+generator/evidence/tests correction and upstream PR; it does not block the MIS correction.
+
 Current resume state (2026-10-13): geometry and normal corrections are integrated and pushed:
 fractal main/origin `55d8134f093e6b3a291a0d811e7a07ab1424dd5c`; WarpBro source integration
 revision `d67d3fed05641bea133a2ce4876e68cbd6dea7de` is on main. A docs-only checkpoint may

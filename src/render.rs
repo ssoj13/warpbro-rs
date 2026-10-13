@@ -2463,7 +2463,6 @@ mod tests {
     /// Inlining the single-bulb estimator can reorder f32 transcendental arithmetic;
     /// that route has a tight numerical contract, while the other routes remain exact.
     #[test]
-    #[ignore = "requires CUDA; compares specialized kernels against the mixed-world oracle"]
     fn cuda_specialized_world_materials_preserve_radiance_and_affine_guides() {
         let _gpu_test = crate::test_gpu::lock();
         fn compare_pixels(
