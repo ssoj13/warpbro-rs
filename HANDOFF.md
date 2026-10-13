@@ -101,3 +101,23 @@ the tag (docs, marks, Venice env) are not in the release.
 - WarpBro HDR10 PNGs are 1.0 = 100 nits (OCIO); exr-rs after COLOR_PLAN reads them through
   OCIO, so no change needed in WarpBro unless the operator wants BT.2408 203-nit files.
 - Check the flight look feel on screen; Cells mask benchmark; 1-ULP cuda_specialized mismatch.
+
+## State ~01:25 (2026-10-13) - merged and pushed
+
+- Mandelbulb parameters MERGED: fractal-rs main 1f0d122, warpbro-rs main 26c69f9 (merge +
+  Cargo.lock bump). Operator templates converted (amethyst / box / mandelwhit, .bak beside).
+  Not reviewed, WarpBro not built after the merge: build and run first.
+- exr-rs main 197417f = color-plan + review fixes + the two-stage decision in COLOR_PLAN.md;
+  tag v0.1.0 moved there, old release deleted (CI release not checked). Agent `colorplan` is
+  implementing the two-stage model on branch `color-plan` (not merged): merge it, re-tag.
+
+## Next: fractional-iteration normal jump (fix first, small)
+
+At integer n, pixels inside the set at iteration n have DE(n) = 0 and no gradient, so the kernel
+uses its fallback normal; the blended DE (1-w) DE(n) + w DE(n+1) has gradient w grad DE(n+1),
+and normalisation drops the scale: any w > 0 gives DE(n+1)'s full normal -> a jump (~2% of hit
+pixels on the bulb preset). Fix in the fractal-rs normal: blend NORMALS by w, not gradients:
+N = normalize((1-w) N_n + w N_(n+1)) with N_n the fallback normal where DE(n) has no gradient.
+Cheap form (preferred): add the fallback normal once, weighted (1-w) |grad DE(n+1)|; continuous
+at w = 0 (exactly the old image) and in w. Extend cuda_animated_formula_controls_are_continuous
+to the inside-set pixels (n -> n + eps normals continuous).
