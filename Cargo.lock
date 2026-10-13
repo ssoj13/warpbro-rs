@@ -2580,7 +2580,7 @@ dependencies = [
 [[package]]
 name = "cuda-artifact-finalizer"
 version = "0.2.1"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#5e15109343fadd82d73ec95dc8a737ebdbfebb60"
 dependencies = [
  "libnvvm-sys",
  "nvjitlink-sys",
@@ -2592,7 +2592,7 @@ dependencies = [
 [[package]]
 name = "cuda-bindings"
 version = "0.4.0"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#5e15109343fadd82d73ec95dc8a737ebdbfebb60"
 dependencies = [
  "bindgen",
  "libloading 0.8.9",
@@ -2605,7 +2605,7 @@ dependencies = [
 [[package]]
 name = "cuda-core"
 version = "0.4.0"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#5e15109343fadd82d73ec95dc8a737ebdbfebb60"
 dependencies = [
  "anyhow",
  "cuda-bindings",
@@ -2617,7 +2617,7 @@ dependencies = [
 [[package]]
 name = "cuda-core-derive"
 version = "0.4.0"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#5e15109343fadd82d73ec95dc8a737ebdbfebb60"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2627,7 +2627,7 @@ dependencies = [
 [[package]]
 name = "cuda-device"
 version = "0.2.1"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#5e15109343fadd82d73ec95dc8a737ebdbfebb60"
 dependencies = [
  "cuda-macros",
 ]
@@ -2635,7 +2635,7 @@ dependencies = [
 [[package]]
 name = "cuda-host"
 version = "0.2.1"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#5e15109343fadd82d73ec95dc8a737ebdbfebb60"
 dependencies = [
  "cuda-artifact-finalizer",
  "cuda-core",
@@ -2651,7 +2651,7 @@ dependencies = [
 [[package]]
 name = "cuda-macros"
 version = "0.2.1"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#5e15109343fadd82d73ec95dc8a737ebdbfebb60"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2662,12 +2662,12 @@ dependencies = [
 [[package]]
 name = "cuda-target-spec"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#5e15109343fadd82d73ec95dc8a737ebdbfebb60"
 
 [[package]]
 name = "cuda-toolkit-discovery"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#5e15109343fadd82d73ec95dc8a737ebdbfebb60"
 
 [[package]]
 name = "cudarc"
@@ -5393,7 +5393,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "libnvvm-sys"
 version = "0.2.1"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#5e15109343fadd82d73ec95dc8a737ebdbfebb60"
 dependencies = [
  "cuda-target-spec",
  "cuda-toolkit-discovery",
@@ -5952,7 +5952,7 @@ dependencies = [
 [[package]]
 name = "nvjitlink-sys"
 version = "0.2.1"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#5e15109343fadd82d73ec95dc8a737ebdbfebb60"
 dependencies = [
  "cuda-toolkit-discovery",
  "libloading 0.8.9",
@@ -6940,7 +6940,7 @@ dependencies = [
 [[package]]
 name = "ptx-parse"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#5e15109343fadd82d73ec95dc8a737ebdbfebb60"
 
 [[package]]
 name = "pulp"
@@ -7494,7 +7494,7 @@ dependencies = [
 [[package]]
 name = "reserved-oxide-symbols"
 version = "0.2.1"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#a11d4cce888769a38ca4b085d0073b5d62de3839"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#5e15109343fadd82d73ec95dc8a737ebdbfebb60"
 
 [[package]]
 name = "rgb"

@@ -1,17 +1,21 @@
 # HANDOFF (2026-10-13, ~00:00)
 
 Active release/upstream follow-up (2026-10-13): see
-[RELEASE_PROGRESS.md](RELEASE_PROGRESS.md) before resuming. The operator requests
-reissuing WarpBro v0.1.0 after completing verification, merging only into our own
-ssoj13 repositories, and submitting the four NVIDIA PRs after their checks pass.
-NVIDIA PRs #1509/#1510/#1511/#1512 are now OPEN/non-draft after pinned-nightly Linux,
-backend, lint, format/SPDX and focused GPU verification. ansidium PR #14 remains open
-with 56 successful CI checks and no failures or pending checks. Our compiler main
-5e1510934 is pushed, including the pinned-LLVM scalar backport and standalone backend
-pin; its real Rust sm_75 probe runs with 256 bit-exact results on RTX 3080 Ti.
-WarpBro/fractal render fixes are already pushed. WarpBro's release-candidate update
-to that compiler is under full local verification; the existing release/tag have
-not been replaced. Current logs and active job are recorded in RELEASE_PROGRESS.md.
+[RELEASE_PROGRESS.md](RELEASE_PROGRESS.md) before resuming. NVIDIA PRs
+[#1509](https://github.com/NVIDIA/cuda-rust/pull/1509),
+[#1510](https://github.com/NVIDIA/cuda-rust/pull/1510),
+[#1511](https://github.com/NVIDIA/cuda-rust/pull/1511), and
+[#1512](https://github.com/NVIDIA/cuda-rust/pull/1512) are OPEN/non-draft and MERGEABLE.
+All four were checked locally on the pinned current NVIDIA toolchain before submission;
+upstream hosted checks have not started. No direct upstream merge/push was attempted.
+Our compiler main is 758c069c0 (functional backport/pin 5e1510934 plus a documentation
+provenance guard correction); status-guard now passes. ansidium PR #14 remains open.
+WarpBro's release candidate pins compiler 5e1510934: full locked CUDA suite 315 passed,
+0 failed, 13 ignored; four-architecture cubin release build, clippy with tests and
+-D warnings, fmt and RTX 3080 Ti warmup pass. Package version remains 0.1.0.
+The original release archives pass backup digest/size/CRC checks; its exact annotated
+tag is preserved on GitHub as archive/v0.1.0-before-20261013. Candidate publication and
+v0.1.0 tag CI are the remaining steps; do not claim the new archives published yet.
 
 MIS follow-up (2026-10-13): fractal main/origin is now
 `c4222f4a31d61f92cead18a8fbb69d89c29f2690`. `power_heuristic` uses explicit

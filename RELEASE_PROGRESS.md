@@ -21,41 +21,38 @@ The final scalar checks are in nvidia-scalar-{linux-verified,final-guards}.log.
 Every branch's SPDX/fmt receipt is nvidia-<task>-guards.log. Read current PR CI/reviews
 before any further upstream action; reviewers may need to authorize hosted runs.
 
-Our compiler main/origin is now 5e15109343fadd82d73ec95dc8a737ebdbfebb60, containing
-backport 6dc3dc7a00ad196fc0caaf4e6cdab00e40fcab85 and a standalone backend pin to that
-verified backport. Original untracked crates/ and inst.cmd were preserved.
-Own tests: 318 generator tests, 1221 codegen units, 261 cargo-oxide units plus setup
-integration, clippy and fmt pass; ABI ledger remains 1029. Private native backend
-release build passes. A real Rust scalar project compiles --arch sm_75 and runs on
-RTX 3080 Ti with 256 bit-exact mul/fma results (fork-rust-probe-{build-verified,run}.log).
-Fixture lives on D:/codex-checks-20261013/scalar-rust-probe; backend is
-D:/codex-checks-20261013/own-native-target/release/rustc_codegen_cuda.dll.
-An initial direct debug backend build hit MSVC's object limit; the normal Windows
-release profile works. The fixture needed RUSTC_BOOTSTRAP=1, as WarpBro already sets.
+Our compiler main/origin is 758c069c0f02fa099d8feb42ea56a70865c3c452.
+It contains backport 6dc3dc7a00ad196fc0caaf4e6cdab00e40fcab85 and standalone backend-pin commit
+5e15109343fadd82d73ec95dc8a737ebdbfebb60 (the CLI pins backport 6dc3dc7). The final commit only corrects the CI guard:
+retained measurement provenance and its generated reference may name the actual dated
+LLVM nightly; installation instructions still reject a dated nightly. Both the positive
+and injected-negative checks passed, then hosted status-guard 38462813650 passed all
+14 jobs. No production compiler source changed after 5e1510934. Original untracked
+crates/ and inst.cmd were preserved. Own tests: 318 generator tests, 1221 codegen units,
+261 cargo-oxide units plus setup integration, clippy and fmt pass; ABI ledger remains
+1029. Private native backend release build passes. The real Rust scalar project compiles
+--arch sm_75 and runs on RTX 3080 Ti with 256 bit-exact mul/fma results.
+Receipts: fork-rust-probe-{build-verified,run}.log, compiler-ci-failure.log,
+compiler-guard-push.log; local positive/negative guard helper fork_parity_check.sh.
+Fixture/backend remain on D:/codex-checks-20261013; global installed tools are untouched.
 
-Compiler main upload initially failed three times with connection resets. The successful
-command used HTTPS, a process-local gh credential helper, HTTP/1.1 and http.postBuffer:
-git -c credential.helper= -c 'credential.helper=!gh auth git-credential'
--c http.version=HTTP/1.1 -c http.postBuffer=524288000 push https://github.com/ssoj13/cuda-rust-windows.git main.
-Remote main SHA was then verified through GitHub API. No global Git settings were changed.
+WarpBro's release candidate changes exactly 13 CUDA Git lock pins and bootstrap.py
+from a11d4cc to the tested 5e1510934; Cargo.toml/windows-sys and package version 0.1.0
+are unchanged. CHANGELOG.md describes the reissue. Local locked full CUDA suite:
+315 passed, 0 failed, 13 ignored (56.72s runtime). Release build with embedded cubins
+sm_75/sm_86/sm_89/sm_120 passed in 10m39s. Clippy --release --locked --tests -D warnings
+passed in 2m57s; fmt passed. Actual release executable --warmup-cuda reports RTX 3080 Ti
+ready in 200.5955ms. Receipts: reissue-full-tests-retry.log, reissue-cubin-build.log,
+reissue-clippy.log, reissue-fmt.log and reissue-warmup.log. Isolated target is
+D:/codex-checks-20261013/warp-target, using the private verified backend and pinned LLVM.
 
-WarpBro currently has uncommitted release-candidate changes: exactly 13 CUDA Git lock
-pins and bootstrap.py pin changed from a11d4cc to 5e1510934; Cargo.toml/windows-sys
-unchanged, package version still 0.1.0. CHANGELOG.md now describes the reissue rather
-than obsolete intermediate failures. Root graph reindexed bootstrap/changelog;
-detect_changes(all) reports expected 3 files/LOW. Source candidate test is running in
-session 99189, through buildlock, with CARGO_TARGET_DIR=D:/codex-checks-20261013/warp-target,
-CARGO_BUILD_JOBS=4, CARGO_INCREMENTAL=0, explicit private backend and pinned old LLVM llc.
-Receipt: reissue-full-tests-retry.log. An initial attempt before compiler upload failed
-because its new SHA was not yet available remotely; retry began after successful upload.
-Do not claim the new WarpBro candidate verified until this test completes successfully.
-
-The old v0.1.0 GitHub release/tag remain intact. Both downloaded backup archives pass
-API SHA-256, size and ZIP CRC; receipt warp-release-backup-verified.json, data under
-D:/codex-checks-20261013/warp-release-before. After candidate tests, finish cubin release
-build, clippy/fmt and smoke, commit/push expected root changes, preserve backup tag,
-move annotated v0.1.0 only as authorized, wait tag CI and verify new assets before
-considering the reissue complete. Do not bump version or merge unrelated old branches.
+Original release archives are retained under D:/codex-checks-20261013/warp-release-before;
+API SHA-256/size and ZIP CRC passed (warp-release-backup-verified.json). Original
+annotated tag object ad335f72a2ec973b9ef774b160b0de08fa331681, peeled source
+86def178c188f34f26978d7be12e66013c532ffb, is preserved on GitHub as
+archive/v0.1.0-before-20261013. The published v0.1.0 remains intact until tag CI succeeds.
+Next: commit/push the verified candidate, move v0.1.0 only as authorized, wait both tag
+builds and publishing, then verify the replacement archive digests, CRC and contents.
 
 Environmental precautions: Windows Git checkout in NVIDIA trees had CRLF in imported.json
 and Bash scripts. Linux hash/script checks failed honestly. Restore canonical Git-index
