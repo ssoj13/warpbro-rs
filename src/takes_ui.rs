@@ -135,6 +135,24 @@ impl App {
             ui.toggle_value(&mut self.takes_view.pinned_only, ph::PUSH_PIN)
                 .on_hover_text("Pinned takes only");
             ui.separator();
+            // Record / pause: whether navigation and manipulator drags make takes.
+            let recording = self.record_takes;
+            if ui
+                .selectable_label(recording, if recording { ph::RECORD } else { ph::PAUSE })
+                .on_hover_text(if recording {
+                    "Recording: every navigation gesture and manipulator drag becomes a take (click: pause)"
+                } else {
+                    "Paused: no takes are recorded (click: record)"
+                })
+                .clicked()
+            {
+                self.record_takes = !recording;
+                if recording {
+                    self.takes_recorder.cancel();
+                    self.drag_recorder.finish();
+                }
+            }
+            ui.separator();
             if ui
                 .button(ph::FILM_SLATE)
                 .on_hover_text("New takes from the timeline animation (work area) of the selected objects, or of the active camera")

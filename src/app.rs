@@ -123,6 +123,11 @@ pub(crate) struct App {
     prefs: egui_prefs2::PrefsPanelState,
     /// Channels, tolerance and timing of "Bake to keys" (Takes panel; saved with the settings).
     recorder_options: crate::camera_recorder::Options,
+    /// Navigation gestures become takes (`Settings::record_takes`).
+    record_takes: bool,
+    /// The viewport toolbar's CamClip: application state (a new scene keeps it), saved with a
+    /// scene (`WorldDocument::camera_slots`) and replaced by a scene that carries one.
+    camera_slots: crate::camera_slots::CameraSlots,
     /// Cuts every viewport navigation gesture into a take (`crate::takes`).
     takes_recorder: crate::takes::Recorder,
     /// The flight or orbit rig moved the camera this frame: only navigation makes takes.
@@ -137,11 +142,10 @@ pub(crate) struct App {
     /// Records each manipulator drag as transform takes of the dragged nodes.
     drag_recorder: crate::takes::DragRecorder,
     /// Splitter state of the three Settings > Controls grids.
-    prefs_grids: [AttrGridState; 4],
+    prefs_grids: [AttrGridState; 5],
     dock: egui_dock::DockState<dock::Panel>,
     panels_to_open: Vec<dock::Panel>,
     toolbar: egui_viewport_toolbar::ToolbarState,
-    camera_slots: crate::camera_slots::CameraSlots,
     fonts: dock::Fonts,
     applied_fonts: Option<dock::Fonts>,
     viewport_visible: bool,
@@ -401,6 +405,10 @@ struct Controls {
     /// The viewport manipulator's size in points and its line width.
     gizmo_size: f32,
     gizmo_stroke: f32,
+    /// Flight: holding Alt eases the view to the nearest world axis view (true) or plane
+    /// (false), with this time constant in seconds (`cam_controls::SpaceFlight::set_align`).
+    align_axis: bool,
+    align_seconds: f32,
 }
 impl Default for Controls {
     fn default() -> Self {
@@ -416,6 +424,8 @@ impl Default for Controls {
             swap_slot_buttons: false,
             gizmo_size: 120.0,
             gizmo_stroke: 3.0,
+            align_axis: false,
+            align_seconds: 0.5,
         }
     }
 }
@@ -470,10 +480,13 @@ struct Settings {
     panel: egui_prefs2::PrefsPanelState,
     controls: Controls,
     recorder: crate::camera_recorder::Options,
+    /// Navigation gestures are recorded as takes (the Takes panel's record switch).
+    record_takes: bool,
+    /// The CamClip's last state, kept between scenes and runs (`App::camera_slots`).
+    camera_slots: crate::camera_slots::CameraSlots,
     fonts: dock::Fonts,
     layout: Option<String>,
     toolbar: egui_viewport_toolbar::ToolbarState,
-    camera_slots: crate::camera_slots::CameraSlots,
     layouts: egui_layout_manager::LayoutStore,
     export: crate::export::ExportJob,
     gui_fps: u32,
@@ -494,10 +507,11 @@ impl Default for Settings {
             panel: Default::default(),
             controls: Default::default(),
             recorder: Default::default(),
+            record_takes: true,
+            camera_slots: Default::default(),
             fonts: Default::default(),
             layout: None,
             toolbar: Default::default(),
-            camera_slots: Default::default(),
             layouts: Default::default(),
             export: Default::default(),
             gui_fps: 60,
@@ -628,6 +642,8 @@ impl App {
             colour: crate::ocio::State::new(scene.colour.clone()),
             prefs: Default::default(),
             recorder_options: Default::default(),
+            record_takes: true,
+            camera_slots: Default::default(),
             takes_recorder: Default::default(),
             navigated: false,
             takes_view: Default::default(),
@@ -639,7 +655,6 @@ impl App {
             dock: dock::default_layout(),
             panels_to_open: Vec::new(),
             toolbar: Default::default(),
-            camera_slots: Default::default(),
             fonts: Default::default(),
             applied_fonts: None,
             viewport_visible: false,
@@ -717,6 +732,7 @@ impl App {
             self.controls = settings.controls;
             self.recorder_options = settings.recorder;
             self.toolbar = settings.toolbar;
+            self.record_takes = settings.record_takes;
             self.camera_slots = settings.camera_slots;
             self.layouts.store = settings.layouts;
             self.export.restore(settings.export);
@@ -877,6 +893,16 @@ impl App {
                             ("Horizon flip, °", AttrValue::Float(v)) => c.flip_degrees = v,
                             ("Shift fast ×", AttrValue::Float(v)) => c.fast_multiplier = v,
                             ("Alt slow ×", AttrValue::Float(v)) => c.slow_multiplier = v,
+                            _ => {}
+                        });
+                        egui_prefs2::section_header(ui, "Flight alignment (hold Alt)");
+                        let d = Controls::default();
+                        prefs_grid(ui, am, &mut self.prefs_grids[4], vec![
+                            b_row("To an axis (else a plane)", c.align_axis, d.align_axis),
+                            f_row("Ease time, s", c.align_seconds, 0.05..=5.0, d.align_seconds),
+                        ], |label, v| match (label, v) {
+                            ("To an axis (else a plane)", AttrValue::Bool(v)) => c.align_axis = v,
+                            ("Ease time, s", AttrValue::Float(v)) => c.align_seconds = v,
                             _ => {}
                         });
                         egui_prefs2::section_header(ui, "Manipulator");
@@ -1194,8 +1220,10 @@ impl App {
                 dragged.push((id, pose));
             }
         }
-        self.drag_recorder
-            .sample(f64::from(nav_dt(ui.ctx())), frame, &dragged);
+        if self.record_takes {
+            self.drag_recorder
+                .sample(f64::from(nav_dt(ui.ctx())), frame, &dragged);
+        }
         ui.ctx().request_repaint();
     }
 
@@ -1223,15 +1251,20 @@ impl App {
         } else {
             before
         };
-        let update = self.takes_recorder.tick(&crate::takes::Tick {
-            dt: f64::from(nav_dt(ctx)),
-            before,
-            after,
-            frame: f64::from(self.world_ui.playhead),
-            held: self.fly.is_some()
-                || self.orbit.rig.has_inertia()
-                || ctx.input(|i| i.pointer.any_down()),
-        });
+        // Recording off (the Takes panel's switch): gestures make no takes.
+        let update = if !self.record_takes {
+            crate::takes::Update::default()
+        } else {
+            self.takes_recorder.tick(&crate::takes::Tick {
+                dt: f64::from(nav_dt(ctx)),
+                before,
+                after,
+                frame: f64::from(self.world_ui.playhead),
+                held: self.fly.is_some()
+                    || self.orbit.rig.has_inertia()
+                    || ctx.input(|i| i.pointer.any_down()),
+            })
+        };
         let camera = self.world.document.active_camera;
         if self.scene.camera != before
             && let Some(camera) =
@@ -1305,6 +1338,7 @@ impl App {
             && saved.controls == self.controls
             && saved.recorder == self.recorder_options
             && saved.toolbar == self.toolbar
+            && saved.record_takes == self.record_takes
             && saved.camera_slots == self.camera_slots
             && saved.fonts == self.fonts
             && saved.layouts == self.layouts.store
@@ -1343,6 +1377,7 @@ impl App {
             recorder: self.recorder_options,
             layout,
             toolbar: self.toolbar,
+            record_takes: self.record_takes,
             camera_slots: self.camera_slots,
             fonts: self.fonts.clone(),
             layouts: self.layouts.store.clone(),
@@ -1485,6 +1520,10 @@ impl App {
         {
             self.world.renew_identity();
         }
+        if save {
+            // The scene file carries the CamClip as it is now.
+            self.world.document.camera_slots = self.camera_slots;
+        }
         let id = self.scene_file_sequence.wrapping_add(1);
         let command = if save {
             crate::io_service::Command::SaveScene {
@@ -1595,6 +1634,10 @@ impl App {
         self.viewport_render = None;
         self.load_revision = self.load_revision.wrapping_add(1);
         let mut document = crate::world::WorldDocument::from_scene(&scene);
+        // A scene that carries a CamClip replaces the application's; one without keeps it.
+        if !document.camera_slots.is_empty() {
+            self.camera_slots = document.camera_slots;
+        }
         if mode == Load::New {
             document.renew_identity();
             // "Reset" goes back to this document, not to the template it was made from.
@@ -2857,7 +2900,18 @@ impl App {
             for intent in intents {
                 fly.apply_intent(intent, viewport);
             }
+            // Held Alt (also the slow modifier: slow and precise) eases the view to the
+            // nearest world plane or axis view.
+            fly.set_align(ui.input(|i| i.modifiers.alt).then(|| {
+                let mode = if self.controls.align_axis {
+                    cam_controls::OrbitSnapMode::Axis
+                } else {
+                    cam_controls::OrbitSnapMode::Plane
+                };
+                (mode, self.controls.align_seconds)
+            }));
         } else {
+            fly.set_align(None);
             // Released: drop held axes and modifiers; the momentum coasts and damps out.
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
@@ -6126,5 +6180,34 @@ mod tests {
             "the viewport renders live"
         );
         assert_eq!(app.viewport_stamp.map(|s| s.3), Some(30));
+    }
+
+    #[test]
+    fn camclip_is_app_state_saved_with_a_scene_and_replaced_by_one_that_carries_it() {
+        let _gpu_test = crate::test_gpu::lock();
+        let mut app = App::new();
+        let mut stored = app.scene.camera;
+        stored.yaw_degrees += 33.0;
+        app.camera_slots.slots[0] = Some(stored);
+        // A new scene keeps the CamClip.
+        app.new_scene();
+        assert_eq!(app.camera_slots.slots[0], Some(stored));
+        // Saving writes it into the scene.
+        app.submit_scene_action(
+            std::env::temp_dir().join("warpbro-camclip.json"),
+            crate::templates::FileAction::Save,
+        );
+        assert_eq!(app.world.document.camera_slots.slots[0], Some(stored));
+        // A scene that carries a CamClip replaces the application's.
+        let mut other = app.scene.clone();
+        let mut document = app.world.document.clone();
+        let mut theirs = stored;
+        theirs.yaw_degrees += 10.0;
+        document.camera_slots = crate::camera_slots::CameraSlots::default();
+        document.camera_slots.slots[2] = Some(theirs);
+        other.document = Some(Box::new(document));
+        app.load(other, Load::Same);
+        assert_eq!(app.camera_slots.slots[0], None);
+        assert_eq!(app.camera_slots.slots[2], Some(theirs));
     }
 }

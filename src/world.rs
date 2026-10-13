@@ -116,12 +116,22 @@ pub struct WorldDocument {
     /// equality: a take is a recording, not an edit (`crate::takes`).
     #[serde(default, skip_serializing_if = "crate::takes::Takes::is_empty")]
     pub takes: crate::takes::Takes,
+    /// The viewport toolbar's CamClip as saved with this scene (the live one is application
+    /// state, `App::camera_slots`, written here on save and read back on load). Like the takes,
+    /// not an edit: outside undo / redo and equality.
+    #[serde(
+        default,
+        skip_serializing_if = "crate::camera_slots::CameraSlots::is_empty"
+    )]
+    pub camera_slots: crate::camera_slots::CameraSlots,
 }
 impl PartialEq for WorldDocument {
     fn eq(&self, other: &Self) -> bool {
         let edits = |d: &Self| {
             let mut value = serde_json::to_value(d).ok()?;
-            value.as_object_mut()?.remove("takes");
+            let object = value.as_object_mut()?;
+            object.remove("takes");
+            object.remove("camera_slots");
             Some(value)
         };
         edits(self) == edits(other)
@@ -566,10 +576,12 @@ impl WorldEditor {
             false
         }
     }
-    /// A history snapshot carrying the live takes and identity: undo/redo restore edits, never
-    /// recordings, and never turn the document back into the one it was copied from.
+    /// A history snapshot carrying the live takes, CamClip and identity: undo/redo restore
+    /// edits, never recordings or the clipboard, and never turn the document back into the one
+    /// it was copied from.
     fn keep_live(&self, mut document: WorldDocument) -> WorldDocument {
         document.takes = self.document.takes.clone();
+        document.camera_slots = self.document.camera_slots;
         document.graph.id = self.document.graph.id;
         document
     }
@@ -607,9 +619,11 @@ impl WorldEditor {
         used
     }
 
-    /// Store a finished take (no undo step). Returns its id.
+    /// Store a finished take (no undo step). Returns its id. Every change of the takes moves
+    /// the revision: views of them (the Take pickers, the timeline's take bars) refresh by it.
     pub fn add_take(&mut self, take: crate::takes::Take) -> u64 {
         let used = self.takes_in_use();
+        self.revision = self.revision.wrapping_add(1);
         self.document.takes.add(take, &used)
     }
 
@@ -649,14 +663,15 @@ impl WorldEditor {
         for document in self.history_mut() {
             document.release_take(id);
         }
+        self.revision = self.revision.wrapping_add(1);
         Ok(self.document.takes.remove(id))
     }
 
-    /// Rename, pin or retime a take; a change to a played take moves its nodes.
+    /// Rename, pin or retime a take (a change to a played take moves its nodes).
     pub fn edit_take(&mut self, id: u64, apply: impl FnOnce(&mut crate::takes::Take)) -> bool {
         let used = self.takes_in_use();
         let edited = self.document.takes.edit(id, &used, apply);
-        if edited && self.document.takes_in_use().contains(&id) {
+        if edited {
             self.revision = self.revision.wrapping_add(1);
         }
         edited
@@ -2322,7 +2337,9 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
         "/visible" => "Show this node in renders.",
         "/locked" => "Lock against edits in the viewport and the editors.",
         "/solo" => "Render only soloed nodes.",
-        "/shy" => "Shy: hidden from the timeline while its Shy switch is on. Settings nodes start shy.",
+        "/shy" => {
+            "Shy: hidden from the timeline while its Shy switch is on. Settings nodes start shy."
+        }
         "/start" => "First frame this node exists on.",
         "/end" => "Last frame this node exists on.",
         _ => return None,
@@ -3685,6 +3702,7 @@ impl WorldDocument {
             fps: scene.animation.fps,
             marks: BTreeMap::new(),
             takes: Default::default(),
+            camera_slots: Default::default(),
         };
         document
             .seed_settings(scene)

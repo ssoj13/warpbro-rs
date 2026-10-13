@@ -13,6 +13,13 @@ pub struct CameraSlots {
     pub slots: [Option<Camera>; COUNT],
 }
 
+impl CameraSlots {
+    /// No slot holds a camera (a scene without CamClip slots saves none).
+    pub fn is_empty(&self) -> bool {
+        self.slots.iter().all(Option::is_none)
+    }
+}
+
 /// What a click on the slot strip did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlotAction {
