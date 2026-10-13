@@ -153,7 +153,8 @@ struct OutlinerCache {
 }
 /// The curve effects' rows (Simplify, Smooth, Euler filter: label, parameters, Apply) inside a
 /// three-column grid, on one set of parameters: the timeline's Effects menu applies the chosen
-/// effect to selected keys, the Takes panel to the selected take. `enabled`: something to apply
+/// effect to selected keys, the Takes panel to the selected take. Times are in seconds (the
+/// editor retimes the effect for keys in frames, `WorldEditor::curve_effect`). `enabled`: something to apply
 /// to. The Euler filter's middle is the target's own (camera or transform), set by who applies it.
 pub(crate) fn effect_rows(
     ui: &mut egui::Ui,
@@ -190,24 +191,40 @@ pub(crate) fn effect_rows(
     ui.label("Smooth");
     ui.horizontal(|ui| {
         ui.add(
-            egui::DragValue::new(&mut p.iterations)
-                .range(1..=1000)
-                .prefix("iterations "),
-        );
+            egui::DragValue::new(&mut p.cutoff)
+                .range(0.01..=100.0)
+                .speed(0.05)
+                .prefix("cutoff ")
+                .suffix(" Hz"),
+        )
+        .on_hover_text("Motion faster than this many cycles per second is removed, slower kept");
         ui.add(
-            egui::DragValue::new(&mut p.strength)
-                .range(0.0..=1.0)
+            egui::DragValue::new(&mut p.order)
+                .range(2..=16)
+                .speed(0.1)
+                .prefix("order "),
+        )
+        .on_hover_text("Filter poles: higher cuts sharper at the cutoff");
+        ui.add(
+            egui::DragValue::new(&mut p.blend)
+                .range(0.0..=60.0)
                 .speed(0.01)
-                .prefix("strength "),
-        );
+                .prefix("blend ")
+                .suffix(" s"),
+        )
+        .on_hover_text("Eases from the original at each end into the filtered motion");
     });
+    // Even pole counts only: two poles per filter section.
+    p.order += p.order % 2;
     if ui
         .add_enabled(enabled, egui::Button::new("Apply"))
+        .on_hover_text("Zero-phase Butterworth low-pass: keeps the timing and the slow motion")
         .clicked()
     {
         chosen = Some(curves::Effect::Smooth {
-            iterations: p.iterations,
-            strength: p.strength,
+            cutoff: p.cutoff,
+            order: p.order,
+            blend: p.blend,
         });
     }
     ui.end_row();
@@ -231,16 +248,19 @@ pub(crate) fn effect_rows(
 pub(crate) struct EffectParams {
     tolerance: f64,
     max_keys: usize,
-    iterations: u32,
-    strength: f64,
+    /// Smooth: cutoff in Hz, poles (even), blend in seconds.
+    cutoff: f64,
+    order: u32,
+    blend: f64,
 }
 impl Default for EffectParams {
     fn default() -> Self {
         Self {
             tolerance: 0.01,
             max_keys: 0,
-            iterations: 4,
-            strength: 0.5,
+            cutoff: 3.0,
+            order: 4,
+            blend: 0.0,
         }
     }
 }

@@ -232,7 +232,8 @@ pub enum WorldCommand {
         kind: Tan,
     },
     /// A whole-curve effect (`curves::Effect`: Simplify, Smooth, Euler filter) on the animation
-    /// of `targets` (node, attribute or component path), one undo step. Simplify and Smooth edit
+    /// of `targets` (node, attribute or component path), one undo step, its times in seconds
+    /// (`curves::Effect::scale_time` to the keys' frames). Simplify and Smooth edit
     /// each continuous channel; discrete ones (choices, switches) are left alone. The Euler filter
     /// edits the rotation each target belongs to: `/transform/rotation_degrees` (ZYX, y the
     /// middle angle) or a camera's yaw / pitch / roll (whole turns only: the pitch is limited).
@@ -1386,6 +1387,8 @@ impl WorldEditor {
         ];
         const ROTATION: &str = "/transform/rotation_degrees";
         let error = |e: curves::KeysError| e.to_string();
+        // The effect is given in seconds; the keys are in frames.
+        let effect = effect.scale_time(self.document.fps);
         if let curves::Effect::EulerFilter { .. } = effect {
             let mut rotations: Vec<(NodeId, bool)> = Vec::new();
             for (id, path) in &targets {

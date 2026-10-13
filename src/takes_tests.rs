@@ -162,8 +162,9 @@ fn trim_split_retime_and_smooth_work_on_either_kind() {
     let shaky = Take::new(0.0, None, jitter).unwrap();
     let smooth = shaky
         .effected(&curves::Effect::Smooth {
-            iterations: 8,
-            strength: 0.5,
+            cutoff: 0.1,
+            order: 4,
+            blend: 0.0,
         })
         .unwrap();
     let roughness = |t: &Take| match &t.poses {
@@ -282,8 +283,9 @@ fn the_euler_filter_and_simplify_edit_a_takes_motion_like_keys() {
     // Smoothing a wrapped turn keeps it a 30 degree turn, never a spin through 360.
     let smooth = take
         .effected(&curves::Effect::Smooth {
-            iterations: 8,
-            strength: 0.5,
+            cutoff: 0.2,
+            order: 4,
+            blend: 0.0,
         })
         .unwrap();
     let Poses::Transform(s) = &smooth.poses else {
