@@ -116,6 +116,7 @@ impl EffectiveRender {
                 .map(|object| Bounds {
                     world: world(object),
                     half: object.formula.framing_radius(),
+                    node: object.node,
                 })
                 .collect();
             scene.objects.clear();

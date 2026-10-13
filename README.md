@@ -163,6 +163,7 @@ python bootstrap.py r                                  # build, warm the CUDA ca
 
 | input             | action                                                                                                     |
 | ----------------- | ---------------------------------------------------------------------------------------------------------- |
+| left click        | select what is under the cursor: a fractal, or a camera / light / mask / group wire; Shift adds or removes, a click on nothing clears; Ctrl+click focuses the camera there |
 | left drag         | orbit (coasts on release); Shift: snap to the views along the world axes                                  |
 | middle drag       | pan (coasts on release)                                                                                    |
 | wheel             | zoom                                                                                                       |

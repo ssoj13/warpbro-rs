@@ -370,6 +370,8 @@ impl Default for Mask {
 pub struct Bounds {
     pub world: [[f32; 4]; 4],
     pub half: f32,
+    /// The fractal's node (`Scene::node`).
+    pub node: Option<crate::world::NodeId>,
 }
 
 /// A mask as an object meets it: its settings and its world matrix at the frame.
@@ -584,6 +586,10 @@ pub struct Scene {
     /// The fractals a Bounds display draws instead of tracing (`EffectiveRender::show`).
     #[serde(skip)]
     pub bounds: Vec<Bounds>,
+    /// The world node a world object was evaluated from (`WorldDocument::snapshot`): what a
+    /// viewport pick of it selects.
+    #[serde(skip)]
+    pub node: Option<crate::world::NodeId>,
     /// A Mask node's settings: its authoring branch (`WorldKind::Mask`).
     #[serde(default)]
     pub mask: Mask,
@@ -826,6 +832,7 @@ impl Scene {
             object_world: None,
             masks: Vec::new(),
             bounds: Vec::new(),
+            node: None,
             mask: Mask::default(),
             document: None,
             animation: Default::default(),
@@ -1013,12 +1020,19 @@ impl Scene {
         (view, projection)
     }
 
+    /// The length the camera's relative distances (`Camera::distance`, `focus_distance`) are
+    /// measured in: the world's reference, else the formula's framing radius.
+    pub fn camera_radius(&self) -> f32 {
+        self.camera_reference
+            .unwrap_or(self.formula.framing_radius())
+    }
+
     /// Pack this scene into the kernel parameter block for a `w` x `h` frame.
     pub fn pack(&self, w: u32, h: u32) -> Vec<f32> {
         let mut p = vec![0.0f32; P_COUNT];
         let radius = self.formula.framing_radius();
         let c = &self.camera;
-        let camera_radius = self.camera_reference.unwrap_or(radius);
+        let camera_radius = self.camera_radius();
 
         // --- camera (ofx-gen OrbitCamera: eye on +Z at yaw = pitch = 0, around the target)
         let (eye, orientation, dist) = self.camera_eye();

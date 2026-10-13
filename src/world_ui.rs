@@ -784,20 +784,14 @@ impl WorldUi {
             {
                 e.selected = nodes[a.min(b)..=a.max(b)].iter().map(|n| n.id).collect();
             }
-        } else if add {
-            if let Some(i) = e.selected.iter().position(|n| *n == id) {
-                e.selected.remove(i);
+            e.selection = if e.selected.contains(&id) {
+                Some(id)
             } else {
-                e.selected.push(id);
-            }
+                e.selected.last().copied()
+            };
         } else {
-            e.selected = vec![id];
+            e.click_select(Some(id), add);
         }
-        e.selection = if e.selected.contains(&id) {
-            Some(id)
-        } else {
-            e.selected.last().copied()
-        };
     }
     pub fn outliner(&mut self, ui: &mut egui::Ui, e: &mut WorldEditor) {
         ui.horizontal(|ui| {

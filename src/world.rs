@@ -392,6 +392,27 @@ impl WorldEditor {
             new_key: Tan::Smooth,
         }
     }
+    /// Select `id` as a click does: alone, or with `add` toggled in or out of the selection
+    /// (it becomes the current node when added). None (a click on nothing) clears the
+    /// selection unless `add`. The one click rule of the outliner, timeline and viewport.
+    pub fn click_select(&mut self, id: Option<NodeId>, add: bool) {
+        match (id, add) {
+            (Some(id), true) => {
+                if let Some(i) = self.selected.iter().position(|n| *n == id) {
+                    self.selected.remove(i);
+                } else {
+                    self.selected.push(id);
+                }
+            }
+            (Some(id), false) => self.selected = vec![id],
+            (None, true) => return,
+            (None, false) => self.selected.clear(),
+        }
+        self.selection = match id {
+            Some(id) if self.selected.contains(&id) => Some(id),
+            _ => self.selected.last().copied(),
+        };
+    }
     /// Cache invalidation token, combined with the document UUID by consumers.
     pub fn revision(&self) -> u64 {
         self.revision
@@ -5158,6 +5179,7 @@ impl WorldDocument {
                     .to_cols_array_2d(),
             );
             object.name = node.name;
+            object.node = Some(node.id);
             object.masks = in_scope;
             scene.objects.push(object);
         }

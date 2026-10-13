@@ -18,11 +18,12 @@ pub enum Style {
     Cut,
 }
 
-/// A polyline in world space.
+/// A polyline in world space, of a node (what a viewport click on it picks).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Wire {
     pub points: Vec<Vec3>,
     pub style: Style,
+    pub node: Option<NodeId>,
 }
 
 /// Segments of a drawn circle.
@@ -32,6 +33,7 @@ fn segment(m: Mat4, a: Vec3, b: Vec3, style: Style) -> Wire {
     Wire {
         points: vec![m.transform_point3(a), m.transform_point3(b)],
         style,
+        node: None,
     }
 }
 
@@ -44,6 +46,7 @@ fn circle(m: Mat4, u: Vec3, v: Vec3, radius: f32, style: Style) -> Wire {
             })
             .collect(),
         style,
+        node: None,
     }
 }
 
@@ -123,6 +126,7 @@ fn camera(camera: &crate::scene::Camera, reference: f32, aspect: f32, style: Sty
             .map(|p| m.transform_point3(*p))
             .collect(),
         style,
+        node: None,
     });
     wires.push(Wire {
         points: [
@@ -134,6 +138,7 @@ fn camera(camera: &crate::scene::Camera, reference: f32, aspect: f32, style: Sty
         .map(|p| m.transform_point3(*p))
         .collect(),
         style,
+        node: None,
     });
     wires
 }
@@ -148,10 +153,12 @@ fn sun(origin: Vec3, toward_sun: Vec3, style: Style) -> Vec<Wire> {
         Wire {
             points: vec![tail, origin],
             style,
+            node: None,
         },
         Wire {
             points: vec![back + side, origin, back - side],
             style,
+            node: None,
         },
     ]
 }
@@ -178,6 +185,7 @@ pub fn extras(
         } else {
             Style::Plain
         };
+        let first = wires.len();
         match node.kind {
             WorldKind::Mask => {
                 let settings = document.mask(node.id, frame)?;
@@ -204,19 +212,57 @@ pub fn extras(
             }
             _ => {}
         }
+        for wire in &mut wires[first..] {
+            wire.node = Some(node.id);
+        }
     }
     Ok(wires)
 }
 
-/// The cubes of a Bounds display (`EffectiveRender::show`).
-pub fn bounds(bounds: &[Bounds]) -> impl Iterator<Item = Wire> + '_ {
-    bounds.iter().flat_map(|b| {
+/// The cubes of a Bounds display (`EffectiveRender::show`), a selected fractal's highlighted.
+pub fn bounds<'a>(bounds: &'a [Bounds], selected: &'a [NodeId]) -> impl Iterator<Item = Wire> + 'a {
+    bounds.iter().flat_map(move |b| {
+        let style = if b.node.is_some_and(|n| selected.contains(&n)) {
+            Style::Selected
+        } else {
+            Style::Plain
+        };
         cube(
             Mat4::from_cols_array_2d(&b.world),
             Vec3::splat(b.half),
-            Style::Plain,
+            style,
         )
+        .map(move |mut w| {
+            w.node = b.node;
+            w
+        })
     })
+}
+
+/// The node of the wire nearest `pos` within `reach` points, on screen through `clip` into
+/// `rect` (`project`): what a viewport click on the extras picks.
+pub fn wire_at<'a>(
+    wires: impl Iterator<Item = &'a Wire>,
+    clip: Mat4,
+    rect: egui::Rect,
+    pos: egui::Pos2,
+    reach: f32,
+) -> Option<NodeId> {
+    let mut best: Option<(f32, NodeId)> = None;
+    for wire in wires {
+        let Some(node) = wire.node else {
+            continue;
+        };
+        for [a, b] in project(wire, clip, rect) {
+            let ab = b - a;
+            let t = ((pos - a).dot(ab) / ab.length_sq().max(1e-12)).clamp(0.0, 1.0);
+            let distance = (a + ab * t).distance(pos);
+            if distance <= reach && best.is_none_or(|(d, _)| distance < d) {
+                best = Some((distance, node));
+            }
+        }
+    }
+    best.map(|(_, node)| node)
 }
 
 /// `wire`'s screen segments through `clip` (projection * view) into `rect`, each cut at the
@@ -245,4 +291,35 @@ pub fn project(wire: &Wire, clip: Mat4, rect: egui::Rect) -> Vec<[egui::Pos2; 2]
             Some([screen(a), screen(c)])
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_click_picks_the_nearest_wire_within_reach() {
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 100.0));
+        // Identity clip: x, y in -1..1 map across the rect, y up.
+        let (one, two) = (NodeId::new(), NodeId::new());
+        let wire = |x: f32, node: NodeId| Wire {
+            points: vec![Vec3::new(x, -1.0, 0.5), Vec3::new(x, 1.0, 0.5)],
+            style: Style::Plain,
+            node: Some(node),
+        };
+        let wires = [
+            wire(0.0, one),
+            wire(0.1, two),
+            Wire {
+                node: None,
+                ..wire(0.5, one)
+            },
+        ];
+        let at = |x: f32| wire_at(wires.iter(), Mat4::IDENTITY, rect, egui::pos2(x, 50.0), 6.0);
+        // The wires stand at x = 100 and 110 points.
+        assert_eq!(at(103.0), Some(one));
+        assert_eq!(at(108.0), Some(two));
+        assert_eq!(at(130.0), None, "out of reach");
+        assert_eq!(at(150.0), None, "a wire of no node is not picked");
+    }
 }

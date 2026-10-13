@@ -140,9 +140,11 @@ impl PreparationInputs {
             render: _,
             environment,
             // Authoring and display state: never packed into the upload (`mask` reaches it
-            // resolved, as `masks`; `bounds` are drawn by the viewport, never traced).
+            // resolved, as `masks`; `bounds` are drawn by the viewport, never traced; `node`
+            // only maps a pick back to its node).
             mask: _,
             bounds: _,
+            node: _,
             document: _,
             animation: _,
             name: _,
@@ -196,6 +198,7 @@ impl PreparationInputs {
             environment,
             mask: _,
             bounds: _,
+            node: _,
             document: _,
             animation: _,
             name: _,
@@ -825,6 +828,54 @@ impl Gpu {
         let prepared = self.preparation.get(scene, width as u32, height as u32)?;
         self.environment_for(prepared.environment.as_ref())?;
         Ok(())
+    }
+
+    /// The fractal under the normalized device point `ndc` (-1..1, y up) of the world `scene`
+    /// seen in a `width` x `height` frame: its index in `scene.objects` and the hit's depth
+    /// along the view axis, or None on a miss. One camera ray through the `pick` kernel,
+    /// marched like the frame's own (the same estimators, transforms and masks), on this
+    /// worker between launches: it uploads the scene's parameters as a launch does.
+    pub fn pick(
+        &mut self,
+        scene: &Scene,
+        width: usize,
+        height: usize,
+        ndc: [f32; 2],
+    ) -> Result<Option<(usize, f32)>, String> {
+        if !scene.world_render || scene.objects.is_empty() {
+            return Ok(None);
+        }
+        let prepared = self.preparation.get(scene, width as u32, height as u32)?;
+        let env = self.environment_for(prepared.environment.as_ref())?;
+        self.upload_prepared(&prepared, env.as_deref(), true)?;
+        let p = prepared.params(scene, None);
+        self.module
+            .set_params(&self.stream, &p)
+            .map_err(|e| format!("CUDA parameter upload: {e:?}"))?;
+        let mut query = DeviceBuffer::zeroed(&self.stream, 1).map_err(|e| format!("{e:?}"))?;
+        query
+            .copy_from_host(&self.stream, &[[ndc[0], ndc[1], 0.0, 0.0]])
+            .map_err(|e| format!("pick upload: {e:?}"))?;
+        let mut out = DeviceBuffer::zeroed(&self.stream, 1).map_err(|e| format!("{e:?}"))?;
+        let launch = self
+            .module
+            .prepare_pick(LaunchConfig1D::new(1, 32, 0))
+            .map_err(|e| format!("pick: {e:?}"))?;
+        self.module
+            .pick(
+                &self.stream,
+                &launch,
+                &self.objects,
+                &self.lights,
+                &query,
+                &mut out,
+            )
+            .map_err(|e| format!("pick: {e:?}"))?;
+        let mut hit = [[0.0f32; 4]];
+        out.copy_to_host(&self.stream, &mut hit)
+            .map_err(|e| format!("pick readback: {e:?}"))?;
+        let [object, _, depth, _] = hit[0];
+        Ok((object >= 1.0).then(|| (object as usize - 1, depth)))
     }
 
     fn upload_prepared(
@@ -2190,6 +2241,28 @@ mod tests {
             cache.builds,
             cache.hits
         );
+    }
+
+    #[test]
+    fn cuda_pick_finds_the_fractal_under_the_cursor_and_misses_the_sky() {
+        let _gpu_test = crate::test_gpu::lock();
+        let mut gpu = Gpu::new().unwrap();
+        let scene = crate::world::WorldDocument::from_scene(&Scene::preset(FAMILY_BULB))
+            .snapshot(0.0)
+            .unwrap();
+        assert!(scene.world_render && scene.objects[0].node.is_some());
+        let (w, h) = (64usize, 48usize);
+        let centre = gpu.pick(&scene, w, h, [0.0, 0.0]).unwrap();
+        let (index, depth) = centre.expect("the framed fractal fills the centre");
+        assert_eq!(index, 0);
+        let (eye, _, _) = scene.camera_eye();
+        assert!(depth > 0.0 && depth < eye.length(), "depth {depth}");
+        assert_eq!(gpu.pick(&scene, w, h, [0.999, 0.999]).unwrap(), None);
+        // Between viewport launches: a launch after a pick sets its own parameters back, and a
+        // pick after a launch answers the same.
+        let mut target = gpu.target(w, h);
+        gpu.step(&mut target, &scene, 1, 19, None, false);
+        assert_eq!(gpu.pick(&scene, w, h, [0.0, 0.0]).unwrap(), centre);
     }
 
     #[test]

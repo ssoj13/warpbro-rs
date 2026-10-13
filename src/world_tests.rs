@@ -3537,3 +3537,32 @@ fn a_takes_span_is_where_it_plays_under_its_warp() {
     e.bind_take(&[frac], None, None).unwrap();
     assert_eq!(e.document.take_span(frac).unwrap(), None);
 }
+
+#[test]
+fn a_click_selects_alone_shift_toggles_and_nothing_clears() {
+    let mut e = WorldEditor::new(WorldDocument::from_scene(&Scene::preset(0)));
+    let ids: Vec<NodeId> = e.document.nodes().iter().take(3).map(|n| n.id).collect();
+    e.click_select(Some(ids[0]), false);
+    assert_eq!(
+        (e.selected.clone(), e.selection),
+        (vec![ids[0]], Some(ids[0]))
+    );
+    e.click_select(Some(ids[1]), true);
+    assert_eq!(
+        (e.selected.clone(), e.selection),
+        (vec![ids[0], ids[1]], Some(ids[1]))
+    );
+    e.click_select(Some(ids[1]), true);
+    assert_eq!(
+        (e.selected.clone(), e.selection),
+        (vec![ids[0]], Some(ids[0]))
+    );
+    e.click_select(None, true);
+    assert_eq!(
+        e.selected,
+        vec![ids[0]],
+        "Shift on nothing keeps the selection"
+    );
+    e.click_select(None, false);
+    assert_eq!((e.selected.clone(), e.selection), (vec![], None));
+}

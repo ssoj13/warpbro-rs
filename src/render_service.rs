@@ -256,6 +256,15 @@ pub enum Command {
     },
     CancelExport,
     ReloadColour,
+    /// A viewport click: the fractal of `scene` (the viewport's) under `ndc` (`Gpu::pick`),
+    /// answered with [`RenderEvent::Picked`].
+    Pick {
+        id: u64,
+        scene: Box<Scene>,
+        width: usize,
+        height: usize,
+        ndc: [f32; 2],
+    },
     BeginPreview {
         request: crate::preview::PreviewRequest,
         cache_all: bool,
@@ -286,6 +295,12 @@ pub enum RenderEvent {
     Thumbnail {
         id: u64,
         frame: Arc<Frame>,
+    },
+    /// [`Command::Pick`]'s answer: the hit object's index in the picked scene's objects and the
+    /// hit's depth along the view axis, None on a miss.
+    Picked {
+        id: u64,
+        hit: Result<Option<(usize, f32)>, String>,
     },
     ExportProgress {
         id: u64,
@@ -1324,6 +1339,18 @@ fn run_worker(shared: &Shared) {
                 | Command::CancelPreview { .. }
                 | Command::RecyclePreviewFrame { .. } => {}
                 Command::CancelExport => export = None,
+                Command::Pick {
+                    id,
+                    scene,
+                    width,
+                    height,
+                    ndc,
+                } => {
+                    let hit = validate_size(width, height, 1)
+                        .and_then(|()| gpu.pick(&scene, width, height, ndc));
+                    // Its parameters replaced the viewport's: the next viewport launch sets its own.
+                    push_event(shared, RenderEvent::Picked { id, hit });
+                }
                 Command::ReloadColour => {
                     gpu.invalidate_colour();
                     if let Some(v) = &mut viewport {

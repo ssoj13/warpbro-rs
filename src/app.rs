@@ -101,6 +101,9 @@ pub(crate) struct App {
     layouts: dock::Layouts,
     export: crate::export::ExportController,
     thumb_pending: Option<(u64, Scene)>,
+    /// The viewport click waiting for its GPU pick (`App::viewport_click`), and the last id.
+    pick_pending: Option<PendingPick>,
+    pick_sequence: u64,
     gui_fps: u32,
     scene: Scene,
     world: crate::world::WorldEditor,
@@ -623,6 +626,8 @@ impl App {
             layouts: Default::default(),
             export: Default::default(),
             thumb_pending: None,
+            pick_pending: None,
+            pick_sequence: 0,
             gui_fps: 60,
             origin: scene.clone(),
             last_scene: scene.clone(),
@@ -1053,7 +1058,12 @@ impl App {
             .overlays
             .iter()
             .flat_map(|(_, wires)| wires.iter().cloned());
-        for wire in wires.chain(crate::overlay::bounds(bounds)) {
+        let picked = self
+            .overlays
+            .as_ref()
+            .map(|(key, _)| key.3.clone())
+            .unwrap_or_default();
+        for wire in wires.chain(crate::overlay::bounds(bounds, &picked)) {
             for [a, b] in crate::overlay::project(&wire, clip, rect) {
                 match wire.style {
                     crate::overlay::Style::Plain => {
@@ -2601,6 +2611,7 @@ impl App {
                     }
                     self.status = error;
                 }
+                RenderEvent::Picked { id, hit } => self.picked(id, hit),
                 RenderEvent::Thumbnail { id, frame } => {
                     let pending = if self
                         .thumb_pending
@@ -3603,6 +3614,118 @@ impl App {
         });
     }
 
+    /// A viewport click (Blender / Maya): the extras' wire under the cursor first (cameras,
+    /// lights, masks, groups, Bounds cubes), else the fractal under it through one GPU ray of
+    /// the shown frame (`Command::Pick`, answered in [`Self::picked`]). Shift adds or removes;
+    /// Ctrl focuses the camera at the fractal under the cursor instead (depth of field); a
+    /// click on nothing clears the selection. Only what the viewport may select is picked.
+    fn viewport_click(&mut self, ui: &egui::Ui, resp: &egui::Response, rect: egui::Rect) {
+        let Some(pos) = resp.interact_pointer_pos() else {
+            return;
+        };
+        let (add, focus) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
+        if !focus {
+            let aspect = rect.width() / rect.height().max(1.0);
+            let (view, projection) = self.scene.camera_matrices(aspect);
+            let bounds: Vec<_> = self
+                .request
+                .as_ref()
+                .map(|r| crate::overlay::bounds(&r.scene.bounds, &[]).collect())
+                .unwrap_or_default();
+            let extras = self.overlays.iter().flat_map(|(_, wires)| wires.iter());
+            let wire = crate::overlay::wire_at(
+                extras.chain(bounds.iter()),
+                projection * view,
+                rect,
+                pos,
+                PICK_REACH,
+            );
+            if let Some(node) = wire.filter(|node| self.viewport_selects(*node)) {
+                self.world.click_select(Some(node), add);
+                return;
+            }
+        }
+        let Some(request) = self
+            .request
+            .as_ref()
+            .filter(|r| !r.scene.objects.is_empty())
+        else {
+            if !focus {
+                self.world.click_select(None, add);
+            }
+            return;
+        };
+        let ndc = [
+            2.0 * (pos.x - rect.left()) / rect.width().max(1.0) - 1.0,
+            1.0 - 2.0 * (pos.y - rect.top()) / rect.height().max(1.0),
+        ];
+        self.pick_sequence = self.pick_sequence.wrapping_add(1);
+        let pending = PendingPick {
+            id: self.pick_sequence,
+            nodes: request.scene.objects.iter().map(|o| o.node).collect(),
+            add,
+            focus,
+            camera_radius: request.scene.camera_radius(),
+        };
+        match self.renderer.try_command(Command::Pick {
+            id: pending.id,
+            scene: Box::new(request.scene.clone()),
+            width: request.width,
+            height: request.height,
+            ndc,
+        }) {
+            Ok(()) => self.pick_pending = Some(pending),
+            Err(error) => self.status = error,
+        }
+    }
+
+    /// Whether a viewport click may select `node`: shown and of a kind the viewport's filter
+    /// lets pick (`/viewport/select/<kind>`), as the manipulator requires.
+    fn viewport_selects(&self, node: playa_graph::NodeId) -> bool {
+        let frame = f64::from(self.world_ui.playhead);
+        let document = &self.world.document;
+        let (Ok(policy), Ok(info)) = (document.viewport_policy(frame), document.info(node)) else {
+            return false;
+        };
+        policy.selectable.contains(info.kind)
+            && document
+                .shows(node, info.kind, frame, policy.shown)
+                .unwrap_or(false)
+    }
+
+    /// A GPU pick's answer ([`Self::viewport_click`]); a stale one (a newer click) is dropped.
+    fn picked(&mut self, id: u64, hit: Result<Option<(usize, f32)>, String>) {
+        let Some(pending) = self.pick_pending.take_if(|p| p.id == id) else {
+            return;
+        };
+        let hit = match hit {
+            Ok(hit) => hit,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
+        if pending.focus {
+            match hit {
+                Some((_, depth)) if pending.camera_radius > 0.0 => {
+                    // Authored with the camera pose at the end of the frame (navigation).
+                    self.scene.camera.focus_distance = depth / pending.camera_radius;
+                    self.status = format!("Focus at {depth:.3}");
+                }
+                _ => self.status = "Focus: no fractal under the cursor".into(),
+            }
+            return;
+        }
+        let node = hit
+            .and_then(|(index, _)| pending.nodes.get(index).copied().flatten())
+            .filter(|node| self.viewport_selects(*node));
+        if hit.is_some() && node.is_none() {
+            // A fractal the viewport does not let pick: the click changes nothing.
+            return;
+        }
+        self.world.click_select(node, pending.add);
+    }
+
     fn viewport(&mut self, ui: &mut egui::Ui) {
         self.viewport_visible = true;
         let avail = ui.available_size();
@@ -3681,6 +3804,9 @@ impl App {
         }
         self.draw_overlays(ui, rect);
         self.manipulate(ui, rect);
+        if resp.clicked() && !gizmo_owns && self.fly.is_none() && !toolbar.contains_pointer {
+            self.viewport_click(ui, &resp, rect);
+        }
         if self.export.is_running() {
             let text = format!("Rendering · {}", self.export.status);
             ui.painter().text(
@@ -3693,6 +3819,20 @@ impl App {
         }
     }
 }
+
+/// A viewport click waiting for its GPU pick: what each object index of the picked scene
+/// selects, and what the click asked for (`App::viewport_click`).
+struct PendingPick {
+    id: u64,
+    nodes: Vec<Option<playa_graph::NodeId>>,
+    add: bool,
+    focus: bool,
+    /// The picked scene's `Scene::camera_radius`: a focus distance is in its units.
+    camera_radius: f32,
+}
+
+/// How far (points) from a wire of the viewport extras a click still picks its node.
+const PICK_REACH: f32 = 6.0;
 
 /// Whether a loaded scene is the same document again or a new one made from it (`App::load`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
