@@ -136,7 +136,7 @@ pub struct WorldNodeInfo {
     pub visible: bool,
     pub locked: bool,
     pub solo: bool,
-    /// Hidden from the timeline while its "Hide shy" switch is on (After Effects shy).
+    /// Hidden from the timeline while its Shy switch is on (After Effects shy).
     pub shy: bool,
     pub start: f64,
     pub end: f64,
@@ -2322,7 +2322,7 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
         "/visible" => "Show this node in renders.",
         "/locked" => "Lock against edits in the viewport and the editors.",
         "/solo" => "Render only soloed nodes.",
-        "/shy" => "Shy: hidden from the timeline while Hide shy is on. Settings nodes start shy.",
+        "/shy" => "Shy: hidden from the timeline while its Shy switch is on. Settings nodes start shy.",
         "/start" => "First frame this node exists on.",
         "/end" => "Last frame this node exists on.",
         _ => return None,

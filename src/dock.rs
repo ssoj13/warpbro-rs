@@ -460,8 +460,14 @@ impl App {
                             self.tool = tool;
                         }
                     }
-                    ui.menu_button(ph::VISIBLE, |ui| self.visibility_menu(ui))
-                        .response
+                    // Twenty toggles: the menu stays open until a click elsewhere or on its button.
+                    egui::containers::menu::MenuButton::new(ph::VISIBLE)
+                        .config(
+                            egui::containers::menu::MenuConfig::new()
+                                .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside),
+                        )
+                        .ui(ui, |ui| self.visibility_menu(ui))
+                        .0
                         .on_hover_text(
                             "Visibility and selectability of node kinds in the viewport",
                         );

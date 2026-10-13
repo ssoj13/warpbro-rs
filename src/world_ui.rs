@@ -1690,7 +1690,7 @@ impl WorldUi {
                     n.shy,
                     egui_phosphor::regular::GHOST,
                     egui_phosphor::regular::GHOST,
-                    "Shy: hidden while Hide shy is on",
+                    "Shy: hidden while the timeline's Shy switch is on",
                 ),
             ] {
                 if egui_widgets_config::icon_toggle(
@@ -2257,7 +2257,7 @@ impl WorldUi {
             ui.checkbox(&mut self.auto_key, "Auto Key")
                 .on_hover_text("Key camera navigation only when Auto Key is enabled; otherwise preserve existing animation keys.");
             ui.checkbox(&mut self.snap, "Snap");
-            ui.toggle_value(&mut self.hide_shy, format!("{} Hide shy", egui_phosphor::regular::GHOST))
+            ui.toggle_value(&mut self.hide_shy, format!("{} Shy", egui_phosphor::regular::GHOST))
                 .on_hover_text("Hide shy nodes (render settings and profiles start shy); the Outliner shows every node");
             if ui.small_button("Fit").on_hover_text("Fit working range · F").clicked() {
                 let width = ui.max_rect().width();

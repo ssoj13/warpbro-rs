@@ -137,7 +137,7 @@ pub(crate) struct App {
     /// Records each manipulator drag as transform takes of the dragged nodes.
     drag_recorder: crate::takes::DragRecorder,
     /// Splitter state of the three Settings > Controls grids.
-    prefs_grids: [AttrGridState; 3],
+    prefs_grids: [AttrGridState; 4],
     dock: egui_dock::DockState<dock::Panel>,
     panels_to_open: Vec<dock::Panel>,
     toolbar: egui_viewport_toolbar::ToolbarState,
@@ -398,6 +398,9 @@ struct Controls {
     /// Slot strips (CamClip, colour presets): the left button stores and the right recalls,
     /// instead of the default left = recall, right = store (`hotkeys::slot_click`).
     swap_slot_buttons: bool,
+    /// The viewport manipulator's size in points and its line width.
+    gizmo_size: f32,
+    gizmo_stroke: f32,
 }
 impl Default for Controls {
     fn default() -> Self {
@@ -411,6 +414,8 @@ impl Default for Controls {
             fast_multiplier: 4.0,
             slow_multiplier: 0.1,
             swap_slot_buttons: false,
+            gizmo_size: 120.0,
+            gizmo_stroke: 3.0,
         }
     }
 }
@@ -874,6 +879,16 @@ impl App {
                             ("Alt slow ×", AttrValue::Float(v)) => c.slow_multiplier = v,
                             _ => {}
                         });
+                        egui_prefs2::section_header(ui, "Manipulator");
+                        let d = Controls::default();
+                        prefs_grid(ui, am, &mut self.prefs_grids[3], vec![
+                            f_row("Size, pt", c.gizmo_size, 40.0..=400.0, d.gizmo_size),
+                            f_row("Line width, pt", c.gizmo_stroke, 0.5..=10.0, d.gizmo_stroke),
+                        ], |label, v| match (label, v) {
+                            ("Size, pt", AttrValue::Float(v)) => c.gizmo_size = v,
+                            ("Line width, pt", AttrValue::Float(v)) => c.gizmo_stroke = v,
+                            _ => {}
+                        });
                         egui_prefs2::section_header(ui, "Slot buttons");
                         prefs_grid(ui, am, &mut self.prefs_grids[1], vec![
                             b_row("Swap copy/paste mouse buttons", c.swap_slot_buttons, false),
@@ -1114,6 +1129,11 @@ impl App {
             snapping: tool != GizmoTool::Move && ui.input(|i| i.modifiers.shift),
             snap_angle: 5.0_f32.to_radians(),
             snap_scale: 0.1,
+            visuals: egui_gizmo::GizmoVisuals {
+                gizmo_size: self.controls.gizmo_size,
+                stroke_width: self.controls.gizmo_stroke,
+                ..Default::default()
+            },
             ..Default::default()
         });
         let Some((_, moved)) = self.gizmo.interact(ui, &targets) else {
@@ -4047,10 +4067,13 @@ impl App {
             self.fly = None;
             ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
         }
-        let camera_gesture =
-            (self.fly.is_some() || ctx.input(|i| i.pointer.any_down())).then(|| {
-                egui::Id::new(("viewport_camera_edit", self.world.document.active_camera)).value()
-            });
+        // A held button is a camera gesture unless the manipulator owns the drag: its own gesture
+        // must stay the open undo step until release, not be closed by this one every frame.
+        let camera_gesture = (self.fly.is_some()
+            || (self.gizmo_gesture.is_none() && ctx.input(|i| i.pointer.any_down())))
+        .then(|| {
+            egui::Id::new(("viewport_camera_edit", self.world.document.active_camera)).value()
+        });
         if let Some(before) = before.as_ref()
             && self.load_revision == edit_origin
         {
