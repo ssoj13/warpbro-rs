@@ -405,7 +405,7 @@ struct Controls {
     /// The viewport manipulator's size in points and its line width.
     gizmo_size: f32,
     gizmo_stroke: f32,
-    /// Flight: holding Alt eases the view to the nearest world axis view (true) or plane
+    /// Flight: holding Ctrl eases the view to the nearest world axis view (true) or plane
     /// (false), with this time constant in seconds (`cam_controls::SpaceFlight::set_align`).
     align_axis: bool,
     align_seconds: f32,
@@ -895,7 +895,7 @@ impl App {
                             ("Alt slow ×", AttrValue::Float(v)) => c.slow_multiplier = v,
                             _ => {}
                         });
-                        egui_prefs2::section_header(ui, "Flight alignment (hold Alt)");
+                        egui_prefs2::section_header(ui, "Flight alignment (hold Ctrl)");
                         let d = Controls::default();
                         prefs_grid(ui, am, &mut self.prefs_grids[4], vec![
                             b_row("To an axis (else a plane)", c.align_axis, d.align_axis),
@@ -2824,7 +2824,7 @@ impl App {
         }
     }
     /// Unreal-style flight: hold RMB in the viewport, mouse looks, WASD moves, R/Space up, C down,
-    /// Q/E roll, Shift fast, Alt slow, the wheel scales the speed. Integrated by cam-controls `SpaceFlight` (thrust,
+    /// Q/E roll, Shift fast, Alt slow, Ctrl aligns to the nearest plane or axis, the wheel scales the speed. Integrated by cam-controls `SpaceFlight` (thrust,
     /// inertia, damping); on release the orbit pivot is placed in front of the camera at the
     /// current orbit distance, so orbiting continues from where you flew.
     fn fly_camera(&mut self, ui: &egui::Ui, resp: &egui::Response) {
@@ -2900,9 +2900,9 @@ impl App {
             for intent in intents {
                 fly.apply_intent(intent, viewport);
             }
-            // Held Alt (also the slow modifier: slow and precise) eases the view to the
-            // nearest world plane or axis view.
-            fly.set_align(ui.input(|i| i.modifiers.alt).then(|| {
+            // Flight modifiers: Shift fast, Alt slow, Ctrl the constraint: held, it eases the
+            // view to the nearest world plane or axis view.
+            fly.set_align(ui.input(|i| i.modifiers.ctrl).then(|| {
                 let mode = if self.controls.align_axis {
                     cam_controls::OrbitSnapMode::Axis
                 } else {
