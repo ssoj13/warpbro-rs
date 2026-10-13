@@ -17,4 +17,9 @@ __pycache__/
 /gallery/
 /out/
 ag.cmd
+# Local agent and tool state, never part of the project.
+.agents/
+.claude/
+.gitnexus/
+.omh/
 /dist/
