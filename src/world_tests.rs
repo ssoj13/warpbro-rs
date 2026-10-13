@@ -1580,7 +1580,10 @@ fn julia_mix_and_orbit_controls_are_keyable_clamped_numbers() {
     let attrs = e.document.attributes(id, 0.0).unwrap();
     for path in ["/julia", "/julia_mix", "/orbit_offset"] {
         let a = attrs.iter().find(|a| a.path == path).unwrap();
-        assert!(a.keyable && a.choices.is_empty() && a.slider.is_some(), "{path}");
+        assert!(
+            a.keyable && a.choices.is_empty() && a.slider.is_some(),
+            "{path}"
+        );
     }
     e.execute(WorldCommand::SetAnimation {
         id,
@@ -1596,15 +1599,22 @@ fn julia_mix_and_orbit_controls_are_keyable_clamped_numbers() {
     assert_eq!(at(&e, 0.0).julia_mix, 0.0);
     assert_eq!(at(&e, 10.0).julia_mix, 1.0);
     let middle = at(&e, 5.0).julia_mix;
-    assert!(0.0 < middle && middle < 1.0, "a key between the forms morphs: {middle}");
+    assert!(
+        0.0 < middle && middle < 1.0,
+        "a key between the forms morphs: {middle}"
+    );
     assert_eq!(at(&e, 5.0).julia, [0.3, 0.4, 0.5]);
     set(&mut e, id, "/julia_mix", json!(2.0), 10.0);
     assert_eq!(at(&e, 10.0).julia_mix, 1.0, "the mix is clamped to 0..1");
+    set(&mut e, id, "/inversion_strength", json!(0.5), 0.0);
     set(&mut e, id, "/inversion_strength", json!(-1.0), 0.0);
-    assert_eq!(at(&e, 0.0).inversion_strength, 0.0);
+    assert_eq!(
+        at(&e, 0.0).inversion_strength,
+        0.0,
+        "the strength is clamped to 0..1"
+    );
     assert!(e.undo());
-    assert!(e.undo());
-    assert_eq!(at(&e, 10.0).julia_mix, 1.0);
+    assert_eq!(at(&e, 0.0).inversion_strength, 0.5);
 }
 #[test]
 fn render_schema_filters_fractal_controls_but_keeps_world_settings_keys() {
@@ -1897,7 +1907,9 @@ fn inactive_parameters_follow_what_the_kernel_reads() {
             ("/julia_mix".to_owned(), json!(mix)),
             ("/inversion_strength".to_owned(), json!(strength)),
         ];
-        inactive_reason(path, |p| values.iter().find(|(k, _)| k == p).map(|(_, v)| v))
+        inactive_reason(path, |p| {
+            values.iter().find(|(k, _)| k == p).map(|(_, v)| v)
+        })
     };
     assert_eq!(off("/julia/1", 0.0, 0.0).as_deref(), Some("Julia mix is 0"));
     assert!(off("/julia/1", 0.25, 0.0).is_none() && off("/julia_mix", 0.0, 0.0).is_none());

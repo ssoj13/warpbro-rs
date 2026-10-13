@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Animatable formula parameters (fractal-rs ABI 5)
+
+- **Julia mix** replaces the Julia switch: the orbit constant is c = mix(point, J, t) + offset,
+  so a key from 0 (Mandelbrot form) to 1 (Julia form) morphs the shape; `/julia` is a plain
+  vector, `/julia_mix` 0..1. Mandelbulb and Mandelbox.
+- **Orbit offset** `/orbit_offset`: a constant added every iteration.
+- **Fractional iterations:** `/render/iterations` is a float; the estimate blends floor(n) and
+  floor(n) + 1 iterations, so keyed counts grow the detail smoothly (integers render as before).
+- **Spherical inversion** `/inversion_strength` (0 off .. 1), `/inversion_center`,
+  `/inversion_radius`: Mandelbulber's inversion pre-transform for every family, its distance
+  corrected by the map's stretch; an inside-out set is marched to 10^4 object units.
+- `/trap_scale` has a hard floor of 0.
+- Saved scenes and templates with `"julia": null` need a one-off conversion (no legacy loader).
+
 ## 0.1.0 — 2026-10-12
 
 ### Viewport: selecting, creating and transforming
