@@ -1971,6 +1971,229 @@ mod tests {
         }
     }
 
+    #[test]
+    fn fractional_endpoint_margin_preserves_a_grazing_weighted_sphere_band() {
+        let (weight, eps, y, start) = (0.001f64, 0.0001, 1.09999, -0.04);
+        let sphere = |x: f64| x.hypot(y) - 1.0;
+        let raw_next = start + 0.8 * sphere(start);
+        assert!(weight * sphere(start) > eps && weight * sphere(raw_next) > eps);
+        assert!(
+            weight * sphere(0.0) < eps,
+            "raw endpoint maximum skipped the entire hit band"
+        );
+        let boundary = -((1.0 + eps / weight).powi(2) - y * y).sqrt();
+        let mut x = start;
+        let mut accelerated = 0;
+        for _ in 0..4096 {
+            let weighted = weight * sphere(x);
+            if weighted <= eps {
+                break;
+            }
+            let margin = ((weighted - eps) / weight).max(0.0);
+            let next = x + (0.8 * weighted.max(margin)).max(0.5 * eps);
+            if margin > weighted {
+                assert!(
+                    next <= boundary,
+                    "an accelerated step crossed the analytic band entry"
+                );
+                accelerated += 1;
+            }
+            x = next;
+        }
+        assert!(accelerated > 0, "fixture must exercise acceleration");
+        assert!(
+            weight * sphere(x) <= eps,
+            "margin marcher must resolve the grazing band"
+        );
+    }
+
+    #[test]
+    fn cuda_fractional_bulb_march_converges_without_erasing_the_weighted_hit_band() {
+        let _gpu_test = crate::test_gpu::lock();
+        let mut gpu = Gpu::new().unwrap();
+        let mut scene = Scene::preset(FAMILY_BULB);
+        let p = scene.pack(96, 64);
+        let v = |i| glam::Vec3::from_slice(&p[i..i + 3]);
+        let (forward, right, up) = (v(P_CAM_FORWARD), v(P_CAM_RIGHT), v(P_CAM_UP));
+        let nx =
+            2.0 * (45.0 + standard_surface_bsdf::sampling::sobol(45 ^ 19, 16, 0, 0)) / 96.0 - 1.0;
+        let ny =
+            1.0 - 2.0 * (16.0 + standard_surface_bsdf::sampling::sobol(45 ^ 19, 16, 0, 1)) / 64.0;
+        let ray = (forward + right * nx * p[P_HALF_W] + up * ny * p[P_HALF_H]).normalize();
+        let point = v(P_CAM_ORIGIN) + ray * (2.4022722 / forward.dot(ray));
+        scene.camera.distance = 0.1;
+        scene.camera.target =
+            (point + forward * (scene.camera.distance * scene.formula.framing_radius())).to_array();
+        scene.camera.fov_y_degrees = 0.5;
+        scene.camera.f_number = 0.0;
+        scene.render.iterations = 4.001;
+        scene.render.max_bounces = 0;
+        scene.render.adaptive.enabled = false;
+        scene.render.denoise.enabled = false;
+        // Captured on f3e55bd with 16,384 steps, before the march enhancement.
+        let expected = include_bytes!("golden/fractional_bulb_march.bin")
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|v| f32::from_le_bytes(*v))
+            .collect::<Vec<_>>();
+        let reference_depths = [
+            0.012887325,
+            0.012751972,
+            0.0126214465,
+            0.012838403,
+            0.012704739,
+            0.012574547,
+            0.012789463,
+            0.01265746,
+            0.012528922,
+        ];
+        let mut failures = Vec::new();
+        for world in [false, true] {
+            let mut actual = if world {
+                crate::world::WorldDocument::from_scene(&scene)
+                    .snapshot(0.0)
+                    .unwrap()
+            } else {
+                scene.clone()
+            };
+            actual.render.max_steps = 4096;
+            for object in &mut actual.objects {
+                object.render.max_steps = 4096;
+            }
+            let mut reference = actual.clone();
+            reference.render.max_steps = 16384;
+            for object in &mut reference.objects {
+                object.render.max_steps = 16384;
+            }
+            let started = Instant::now();
+            let high = frame_guides(&mut gpu, &reference)[2].clone();
+            let reference_time = started.elapsed();
+            let started = Instant::now();
+            let low = frame_guides(&mut gpu, &actual)[2].clone();
+            println!(
+                "geometry world={world}: reference {reference_time:?}, default {:?}",
+                started.elapsed()
+            );
+            let ref_hits = high.iter().filter(|n| n[..3] != [0.0; 3]).count();
+            let hits = low.iter().filter(|n| n[..3] != [0.0; 3]).count();
+            println!("geometry world={world}: default hits={hits}, 4x reference hits={ref_hits}");
+            assert_eq!(
+                ref_hits,
+                96 * 64,
+                "fixture's reference must converge every primary ray"
+            );
+            if hits != ref_hits {
+                failures.push(format!(
+                    "world={world}: default {hits}, reference {ref_hits}"
+                ));
+            }
+            let mut normal_error = 0.0f32;
+            for (a, b) in low.iter().zip(expected.as_chunks::<4>().0) {
+                if a[..3] != [0.0; 3] {
+                    normal_error = normal_error
+                        .max(glam::Vec3::from_slice(a).distance(glam::Vec3::from_slice(b)));
+                    assert!(
+                        glam::Vec3::from_slice(a).distance(glam::Vec3::from_slice(b)) < 1.0e-3,
+                        "world={world}: weighted-hit normal changed"
+                    );
+                }
+            }
+            println!(
+                "geometry world={world}: maximum original-reference normal error={normal_error}"
+            );
+            let picks = if world {
+                actual.clone()
+            } else {
+                crate::world::WorldDocument::from_scene(&actual)
+                    .snapshot(0.0)
+                    .unwrap()
+            };
+            let packed = picks.pack(96, 64);
+            let origin = glam::Vec3::from_slice(&packed[P_CAM_ORIGIN..P_CAM_ORIGIN + 3]);
+            let mut i = 0;
+            for ny in [-1.0, 0.0, 1.0] {
+                for nx in [-1.0, 0.0, 1.0] {
+                    let direction =
+                        (forward + right * nx * packed[P_HALF_W] + up * ny * packed[P_HALF_H])
+                            .normalize();
+                    let reference_depth = reference_depths[i];
+                    let distance = reference_depth / forward.dot(direction);
+                    let eps = (packed[P_FOOTPRINT] * distance)
+                        .max((origin + direction * distance).length() * 0.0000019073486);
+                    match gpu.pick(&picks, 96, 64, [nx, ny]).unwrap() {
+                        Some((_, depth)) => {
+                            let error = (depth - reference_depth).abs() / forward.dot(direction);
+                            println!(
+                                "world={world}, ray={i}: depth={depth}, original={reference_depth}, error={error}, footprint={eps}"
+                            );
+                            if error > eps {
+                                failures.push(format!(
+                                    "world={world}, ray={i}: error={error}, footprint={eps}"
+                                ));
+                            }
+                        }
+                        None => failures.push(format!(
+                            "world={world}, ray={i}: missed original weighted hit"
+                        )),
+                    }
+                    i += 1;
+                }
+            }
+        }
+        // The weighted-nearest Bulb is not necessarily the object that bounds an
+        // accelerated step: this tiny exact cube lies in front of its hit band.
+        let mut union = crate::world::WorldDocument::from_scene(&scene)
+            .snapshot(0.0)
+            .unwrap();
+        let packed = union.pack(96, 64);
+        let origin = glam::Vec3::from_slice(&packed[P_CAM_ORIGIN..P_CAM_ORIGIN + 3]);
+        let scale = 0.0001;
+        let center_depth = 0.0008;
+        let center = origin + forward * center_depth;
+        let mut blocker = Scene::preset(FAMILY_KIFS);
+        if let crate::scene::Formula::Kifs(k) = &mut blocker.formula {
+            k.kind = crate::scene::KifsKind::Menger;
+        }
+        blocker.render.iterations = 0.0;
+        blocker.material.model = crate::scene::MaterialModel::Fast;
+        blocker.object_world = Some(
+            glam::Mat4::from_cols(
+                (right * scale).extend(0.0),
+                (up * scale).extend(0.0),
+                (forward * scale).extend(0.0),
+                center.extend(1.0),
+            )
+            .to_cols_array_2d(),
+        );
+        union.objects.push(blocker);
+        let upload = WorldUpload::new(&union, 96, 64).unwrap();
+        let estimate_scale = upload.objects[OBJECT_STRIDE + O_DISTANCE_SCALE] / scale;
+        let front = center_depth - scale;
+        let eps = (packed[P_FOOTPRINT] * front)
+            .max((origin + forward * front).length() * 0.0000019073486);
+        let expected_depth = front - eps / estimate_scale;
+        let (object, depth) = gpu
+            .pick(&union, 96, 64, [0.0, 0.0])
+            .unwrap()
+            .expect("near cube must not be skipped");
+        println!(
+            "union blocker: object={object}, depth={depth}, analytic band={expected_depth}, footprint={eps}"
+        );
+        assert_eq!(
+            object, 1,
+            "step must include the unsupported neighboring object's estimate"
+        );
+        assert!(
+            (depth - expected_depth).abs() <= eps,
+            "neighbor weighted band moved beyond its footprint"
+        );
+        assert!(
+            failures.is_empty(),
+            "fractional march understeps: {failures:?}"
+        );
+    }
+
     /// Explicit visual probe; artifacts remain under target and are not scene templates.
     #[test]
     #[ignore = "renders CUDA glass comparison PNGs; run explicitly with --ignored --nocapture"]
