@@ -37,12 +37,17 @@ impl PropertyFilter {
     const ROTATION: u8 = 2;
     const SCALE: u8 = 4;
     const KEYED: u8 = 8;
+    /// Animated or changed from its default (After Effects UU).
+    const MODIFIED: u8 = 16;
     fn matches(self, attr: &WorldAttribute) -> bool {
         self.0 == 0
             || (self.0 & Self::POSITION != 0 && attr.path == "/transform/position")
             || (self.0 & Self::ROTATION != 0 && attr.path == "/transform/rotation_degrees")
             || (self.0 & Self::SCALE != 0 && attr.path == "/transform/scale")
             || (self.0 & Self::KEYED != 0 && !attr.frames.is_empty())
+            || (self.0 & Self::MODIFIED != 0
+                && (!attr.frames.is_empty()
+                    || attr.default.as_ref().is_some_and(|d| *d != attr.value)))
     }
     fn toggle(&mut self, bit: u8, additive: bool) {
         self.0 = if additive {
@@ -289,6 +294,10 @@ pub struct WorldUi {
     pub attribute_label_width: f32,
     /// Authored outline/canvas split; narrow panels only clamp its drawn width.
     pub timeline_outline_width: f32,
+    /// The timeline panel's width this frame: what Fit fits the working range into, from its
+    /// button and from F alike (`fit_timeline`).
+    timeline_width: f32,
+
     pub attribute_metrics: AttrMetrics,
     pub material_library_requested: bool,
     pub preview_action: Option<PreviewAction>,
@@ -339,6 +348,8 @@ impl Default for WorldUi {
             effects: EffectParams::default(),
             attribute_label_width: 180.0,
             timeline_outline_width: 340.0,
+            timeline_width: 0.0,
+
             attribute_metrics: AttrMetrics::default(),
             material_library_requested: false,
             preview_action: None,
@@ -540,13 +551,15 @@ impl WorldUi {
         let modifiers = ui.input(|input| input.modifiers);
         let pressed = |command| hotkeys::consume(ui.ctx(), Scope::Timeline, command);
         if pressed(Hotkey::Fit) {
-            self.fit_timeline(ui.available_width(), e);
+            self.fit_timeline(self.timeline_width, e);
         }
+        // U: the animated properties; U U (a double tap): the modified ones (After Effects).
         for (command, bit) in [
             (Hotkey::Translate, PropertyFilter::POSITION),
             (Hotkey::Rotate, PropertyFilter::ROTATION),
             (Hotkey::Scale, PropertyFilter::SCALE),
             (Hotkey::Keyed, PropertyFilter::KEYED),
+            (Hotkey::Modified, PropertyFilter::MODIFIED),
         ] {
             if pressed(command) {
                 for id in e
@@ -1257,6 +1270,7 @@ impl WorldUi {
         lanes
     }
     pub fn timeline(&mut self, ui: &mut egui::Ui, e: &mut WorldEditor) {
+        self.timeline_width = ui.max_rect().width();
         self.transport(ui, e);
         self.status(ui);
         let cache = self.take_cache(e);
@@ -2260,8 +2274,7 @@ impl WorldUi {
             ui.toggle_value(&mut self.hide_shy, format!("{} Shy", egui_phosphor::regular::GHOST))
                 .on_hover_text("Hide shy nodes (render settings and profiles start shy); the Outliner shows every node");
             if ui.small_button("Fit").on_hover_text("Fit working range · F").clicked() {
-                let width = ui.max_rect().width();
-                self.fit_timeline(width, e);
+                self.fit_timeline(self.timeline_width, e);
             }
             ui.scope(|ui| {
                 ui.spacing_mut().slider_width *= 2.0;
@@ -3277,11 +3290,22 @@ mod tests {
         )))
     }
 
+    /// One frame a second after the last: its presses are never the second of a double tap.
     fn shortcut_frame(
         ctx: &egui::Context,
         state: &mut WorldUi,
         e: &mut WorldEditor,
+        events: Vec<egui::Event>,
+    ) {
+        shortcut_frame_after(ctx, state, e, events, 1.0);
+    }
+    /// One frame `seconds` after the last.
+    fn shortcut_frame_after(
+        ctx: &egui::Context,
+        state: &mut WorldUi,
+        e: &mut WorldEditor,
         mut events: Vec<egui::Event>,
+        seconds: f64,
     ) {
         let nodes = e.document.nodes();
         let modifiers = events
@@ -3297,6 +3321,7 @@ mod tests {
             egui::RawInput {
                 screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(1000.0, 700.0))),
                 events,
+                time: Some(ctx.input(|i| i.time) + seconds),
                 ..Default::default()
             },
             |root| {
@@ -3593,12 +3618,31 @@ mod tests {
             state.lanes(object, &attrs).is_empty(),
             "U on an unkeyed layer shows nothing, so its track is not expanded"
         );
+        // A while later (not a double tap): U again collapses.
         shortcut_frame(&ctx, &mut state, &mut e, u());
         assert!(
             !state.expanded.contains(&object),
             "U again collapses the layer"
         );
         assert!(!state.property_filters.contains_key(&object));
+        // U U: the modified properties, those changed from their default.
+        e.execute(WorldCommand::SetAttribute {
+            id: object,
+            path: "/transform/position".into(),
+            value: json!([1.0, 0.0, 0.0]),
+            frame: 0.0,
+        })
+        .unwrap();
+        shortcut_frame(&ctx, &mut state, &mut e, u());
+        shortcut_frame_after(&ctx, &mut state, &mut e, u(), 0.1);
+        assert_eq!(state.property_filters[&object].0, PropertyFilter::MODIFIED);
+        let attrs = e.document.attributes(object, 0.0).unwrap();
+        let shown: Vec<_> = state
+            .lanes(object, &attrs)
+            .into_iter()
+            .filter_map(|lane| lane.path.filter(|path| !path.starts_with('@')))
+            .collect();
+        assert_eq!(shown, vec!["/transform/position".to_owned()], "{shown:?}");
     }
     #[test]
     fn timeline_keyboard_focus_survives_pointer_exit_and_clears_on_outside_click() {

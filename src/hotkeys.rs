@@ -92,6 +92,8 @@ pub enum Command {
     Mark(u8),
     /// Delete the panel's selection (Takes).
     Delete,
+    /// Timeline: show the modified properties of the selected layers (After Effects U U).
+    Modified,
     /// Viewport tools: Q select (no manipulator), W move, E rotate, R scale.
     Tool(crate::app::ViewTool),
 }
@@ -105,7 +107,13 @@ pub struct Binding {
     /// Match the key position, not the character: Shift+1 types "!" on a US layout and
     /// "!" / "№" elsewhere, but is always the physical 1 key.
     physical: bool,
+    /// Fires on a double tap of the chord ([`DOUBLE_TAP_SECONDS`]) instead of a press.
+    double: bool,
 }
+
+/// Two presses of one chord within this many seconds are a double tap: a binding made with
+/// [`double_tap`] fires on the second press (the first fired the chord's own binding).
+pub const DOUBLE_TAP_SECONDS: f64 = 0.4;
 const fn binding(command: Command, key: Key, modifiers: Modifiers) -> Binding {
     Binding {
         command,
@@ -113,6 +121,7 @@ const fn binding(command: Command, key: Key, modifiers: Modifiers) -> Binding {
         modifiers,
         additive: false,
         physical: false,
+        double: false,
     }
 }
 const fn property(command: Command, key: Key) -> Binding {
@@ -122,6 +131,7 @@ const fn property(command: Command, key: Key) -> Binding {
         modifiers: Modifiers::NONE,
         additive: true,
         physical: false,
+        double: false,
     }
 }
 const fn physical(command: Command, key: Key, modifiers: Modifiers) -> Binding {
@@ -131,6 +141,14 @@ const fn physical(command: Command, key: Key, modifiers: Modifiers) -> Binding {
         modifiers,
         additive: false,
         physical: true,
+        double: false,
+    }
+}
+/// `binding` fired by a double tap of its chord (`property` matching: Shift is additive).
+const fn double_tap(binding: Binding) -> Binding {
+    Binding {
+        double: true,
+        ..binding
     }
 }
 pub const GLOBAL: &[Binding] = &[
@@ -186,6 +204,7 @@ pub const TIMELINE: &[Binding] = &[
     property(Command::Rotate, Key::R),
     property(Command::Scale, Key::S),
     property(Command::Keyed, Key::U),
+    double_tap(property(Command::Modified, Key::U)),
     binding(Command::In, Key::I, Modifiers::NONE),
     binding(Command::Out, Key::O, Modifiers::NONE),
     binding(Command::Play, Key::Space, Modifiers::NONE),
@@ -251,22 +270,81 @@ fn matches(
 }
 /// Global-first lookup is shared by every consumer, independent of panel draw order.
 /// `physical_key` is the key position an event reports (see [`Binding::physical`]).
+/// A `double` press (the second of a double tap, [`double_taps`]) takes a double-tap binding
+/// first and is an ordinary press where there is none.
 fn resolve(
     scope: Scope,
     key: Key,
     physical_key: Option<Key>,
     modifiers: Modifiers,
+    double: bool,
 ) -> Option<(Scope, Command)> {
-    GLOBAL
-        .iter()
-        .find(|b| matches(b, key, physical_key, modifiers))
-        .map(|b| (Scope::Global, b.command))
-        .or_else(|| {
-            bindings(scope)
+    let find = |double: bool| {
+        GLOBAL
+            .iter()
+            .find(|b| b.double == double && matches(b, key, physical_key, modifiers))
+            .map(|b| (Scope::Global, b.command))
+            .or_else(|| {
+                bindings(scope)
+                    .iter()
+                    .find(|b| b.double == double && matches(b, key, physical_key, modifiers))
+                    .map(|b| (scope, b.command))
+            })
+    };
+    double.then(|| find(true)).flatten().or_else(|| find(false))
+}
+
+/// The chord presses of this frame that are double taps, and the last press before them.
+#[derive(Clone, Default)]
+struct Taps {
+    frame: u64,
+    last: Option<(Key, Modifiers, f64)>,
+    doubles: Vec<(Key, Modifiers)>,
+}
+fn taps_id() -> Id {
+    Id::new("dcc-hotkey-taps")
+}
+/// The chords pressed this frame as the second press of a double tap: the chord pressed last,
+/// again within [`DOUBLE_TAP_SECONDS`] (a third press starts over). Settled once per frame,
+/// on the first ask, before any consumer removes the frame's events.
+fn double_taps(ctx: &Context) -> Vec<(Key, Modifiers)> {
+    let frame = ctx.cumulative_frame_nr();
+    let mut taps = ctx
+        .data(|d| d.get_temp::<Taps>(taps_id()))
+        .unwrap_or_default();
+    if taps.frame != frame || frame == 0 && taps.last.is_none() && taps.doubles.is_empty() {
+        taps.frame = frame;
+        taps.doubles.clear();
+        let (now, presses) = ctx.input(|input| {
+            let presses: Vec<(Key, Modifiers)> = input
+                .events
                 .iter()
-                .find(|b| matches(b, key, physical_key, modifiers))
-                .map(|b| (scope, b.command))
-        })
+                .filter_map(|event| match event {
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        repeat: false,
+                        modifiers,
+                        ..
+                    } => Some((*key, *modifiers)),
+                    _ => None,
+                })
+                .collect();
+            (input.time, presses)
+        });
+        for (key, modifiers) in presses {
+            if taps.last.is_some_and(|(k, m, at)| {
+                k == key && m == modifiers && now - at <= DOUBLE_TAP_SECONDS
+            }) {
+                taps.doubles.push((key, modifiers));
+                taps.last = None;
+            } else {
+                taps.last = Some((key, modifiers, now));
+            }
+        }
+        ctx.data_mut(|d| d.insert_temp(taps_id(), taps.clone()));
+    }
+    taps.doubles
 }
 fn owner_id() -> Id {
     Id::new("dcc-hotkey-owner")
@@ -356,7 +434,14 @@ pub fn shortcut(ctx: &Context, scope: Scope, command: Command) -> Option<String>
     bindings(scope)
         .iter()
         .find(|b| b.command == command)
-        .map(|b| ctx.format_shortcut(&egui::KeyboardShortcut::new(b.modifiers, b.key)))
+        .map(|b| {
+            let chord = ctx.format_shortcut(&egui::KeyboardShortcut::new(b.modifiers, b.key));
+            if b.double {
+                format!("{chord} {chord}")
+            } else {
+                chord
+            }
+        })
 }
 
 /// A menu item for `command`, labelled with its shortcut ([`shortcut`]).
@@ -373,6 +458,7 @@ pub fn consume(ctx: &Context, scope: Scope, command: Command) -> bool {
     if ctx.text_edit_focused() || (scope != Scope::Global && active(ctx) != Some(scope)) {
         return false;
     }
+    let doubles = double_taps(ctx);
     ctx.input_mut(|input| {
         // Remove the exact event: a physical binding's logical key may be any character.
         let index = input.events.iter().position(|event| {
@@ -382,7 +468,13 @@ pub fn consume(ctx: &Context, scope: Scope, command: Command) -> bool {
                 pressed: true,
                 repeat: false,
                 modifiers,
-            } if resolve(scope, *key, *physical_key, *modifiers) == Some((scope, command)))
+            } if resolve(
+                scope,
+                *key,
+                *physical_key,
+                *modifiers,
+                doubles.contains(&(*key, *modifiers)),
+            ) == Some((scope, command)))
         });
         index.map(|i| input.events.remove(i)).is_some()
     })
@@ -627,30 +719,36 @@ mod tests {
         let t = Scope::Timeline;
         // A Shift binding never fires without Shift, a plain one never with it.
         assert_eq!(
-            resolve(t, Key::Insert, None, Modifiers::NONE),
+            resolve(t, Key::Insert, None, Modifiers::NONE, false),
             Some((t, Command::Preview))
         );
         assert_eq!(
-            resolve(t, Key::Insert, None, Modifiers::SHIFT),
+            resolve(t, Key::Insert, None, Modifiers::SHIFT, false),
             Some((t, Command::CachePreview))
         );
         assert_eq!(
-            resolve(t, Key::Num3, Some(Key::Num3), Modifiers::NONE),
+            resolve(t, Key::Num3, Some(Key::Num3), Modifiers::NONE, false),
             Some((t, Command::Mark(3)))
         );
         // Shift + 3 types "!" (US) or "№" (no egui key) but is the physical 3.
-        let shifted = resolve(t, Key::Exclamationmark, Some(Key::Num3), Modifiers::SHIFT);
+        let shifted = resolve(
+            t,
+            Key::Exclamationmark,
+            Some(Key::Num3),
+            Modifiers::SHIFT,
+            false,
+        );
         assert_eq!(shifted, Some((t, Command::SetMark(3))));
         // Property filters keep their additive Shift.
         assert_eq!(
-            resolve(t, Key::U, None, Modifiers::SHIFT),
+            resolve(t, Key::U, None, Modifiers::SHIFT, false),
             Some((t, Command::Keyed))
         );
     }
     #[test]
     fn global_commands_reserve_chords_and_panel_tables_are_distinct() {
         assert_eq!(
-            resolve(Scope::Timeline, Key::Z, None, Modifiers::COMMAND),
+            resolve(Scope::Timeline, Key::Z, None, Modifiers::COMMAND, false),
             Some((Scope::Global, Command::Undo))
         );
         assert_eq!(
@@ -658,19 +756,23 @@ mod tests {
                 Scope::Viewport,
                 Key::Z,
                 None,
-                Modifiers::COMMAND.plus(Modifiers::SHIFT)
+                Modifiers::COMMAND.plus(Modifiers::SHIFT),
+                false
             ),
             Some((Scope::Global, Command::Redo))
         );
         assert_eq!(
-            resolve(Scope::Timeline, Key::F, None, Modifiers::NONE),
+            resolve(Scope::Timeline, Key::F, None, Modifiers::NONE, false),
             Some((Scope::Timeline, Command::Fit))
         );
         assert_eq!(
-            resolve(Scope::Viewport, Key::F, None, Modifiers::NONE),
+            resolve(Scope::Viewport, Key::F, None, Modifiers::NONE, false),
             Some((Scope::Viewport, Command::Fit))
         );
-        assert_eq!(resolve(Scope::Export, Key::F, None, Modifiers::NONE), None);
+        assert_eq!(
+            resolve(Scope::Export, Key::F, None, Modifiers::NONE, false),
+            None
+        );
         // The window screenshot and the scene file chords win in every panel.
         for (key, modifiers, command) in [
             (Key::F12, Modifiers::NONE, Command::WindowShot),
@@ -684,20 +786,20 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                resolve(Scope::Timeline, key, None, modifiers),
+                resolve(Scope::Timeline, key, None, modifiers, false),
                 Some((Scope::Global, command))
             );
         }
         assert_eq!(
-            resolve(Scope::Timeline, Key::S, None, Modifiers::NONE),
+            resolve(Scope::Timeline, Key::S, None, Modifiers::NONE, false),
             Some((Scope::Timeline, Command::Scale))
         );
         assert_eq!(
-            resolve(Scope::Timeline, Key::F, None, Modifiers::COMMAND),
+            resolve(Scope::Timeline, Key::F, None, Modifiers::COMMAND, false),
             None
         );
         assert_eq!(
-            resolve(Scope::Timeline, Key::Insert, None, Modifiers::SHIFT),
+            resolve(Scope::Timeline, Key::Insert, None, Modifiers::SHIFT, false),
             Some((Scope::Timeline, Command::CachePreview))
         );
     }
