@@ -1,7 +1,36 @@
 # HANDOFF (2026-10-13, ~00:00)
 
-What is in flight right now, in case the session is cut. Not committed on purpose: the
-warpbro-rs working tree is on branch `mandelbulb-params` with an agent's uncommitted work.
+Current resume state (2026-10-13): animation parameters were merged in `fractal-rs/main`
+`1f0d122` and `warpbro-rs/main` `059984d`. The accepted normal correction is now pushed on
+fractal-rs main as `f3e55bd`; WarpBro `6289cc8` is now pushed on main. Its four Git-pin lines
+change without a local patch and preserve `windows-sys`. The published-candidate 326-test
+suite passes: 312 passed, 0 failed, 14 ignored in 366.81s (compiled in 3m1s), recorded in
+`published-full.log`.
+The dated snapshots below preserve the interrupted session's history; use the
+[resume completion plan](plans/20261013-resume/plan.md) for the current acceptance ledger.
+
+- Three operator template JSON files (amethyst / box / mandelwhit) are converted, with `.bak`
+  files retained, and now pass Rust scene-schema validation. The existing default-feature host
+  `WarpBro-a14b1f1310ab8852.exe` ran
+  `operator_templates_decode_with_current_scene_schema --ignored --nocapture` with
+  `WARPBRO_TEMPLATE_PROBE_DIR=C:/Users/joss1/.warpbro/templates`: 1 passed in 0.06s, loading all
+  three templates. No schema change was needed for the CUDA correction.
+- EXR main/tag now points to `fa8aa3376f78a72794785af347b1a1733d68ff87` (docs commit
+  `fa8aa33`), annotated tag object `d65355fe9e1492117b540274ee813371e415f744`. Six local
+  bootstrap stages pass. Release CI `38382275628` completed successfully (10 jobs, 0 failed);
+  v0.1.0 is public/non-draft, published 2026-10-13 11:04:59 UTC with 3 ZIPs/5 wheels. All asset
+  sizes/SHA-256, ZIP CRCs, wheel RECORD hashes, and architectures/tags pass. The downloaded
+  Windows CLI passes version/help/info and identifies the real PQ PNG as 1920x1080 RGBA.
+  Linux/macOS binaries were not executed, wheels not installed, no release-artifact GPU shot.
+  Old tag `1671769` is preserved locally as
+  `backup/v0.1.0-before-color-resume`; owned duplicate branch/main runs were cancelled because
+  the tag covers the same production code.
+- WarpBro/fractal dependency reachability: 34 distinct own Git pins verified, 34/34 GitHub API
+  checks passed. The existing EXR `7db` pin is reachable and was retained.
+- Larger fractional-step unsigned-DE geometry diagnostics are isolated in `fractal-geometry`
+  and `warp-geometry`, branch `fix/fractional-bulb-march`. Those experimental changes are not
+  in the accepted main shader. Zero fallback pixels and the observed pick-depth jump
+  `2.3983283` -> `2.4022722` disproved the earlier fallback-trigger explanation.
 
 ## Running agents (background, both commit to branches only, no push, no merge)
 
@@ -111,13 +140,20 @@ the tag (docs, marks, Venice env) are not in the release.
   tag v0.1.0 moved there, old release deleted (CI release not checked). Agent `colorplan` is
   implementing the two-stage model on branch `color-plan` (not merged): merge it, re-tag.
 
-## Next: fractional-iteration normal jump (fix first, small)
+## Separate follow-up: fractional unsigned-DE geometry
 
-At integer n, pixels inside the set at iteration n have DE(n) = 0 and no gradient, so the kernel
-uses its fallback normal; the blended DE (1-w) DE(n) + w DE(n+1) has gradient w grad DE(n+1),
-and normalisation drops the scale: any w > 0 gives DE(n+1)'s full normal -> a jump (~2% of hit
-pixels on the bulb preset). Fix in the fractal-rs normal: blend NORMALS by w, not gradients:
-N = normalize((1-w) N_n + w N_(n+1)) with N_n the fallback normal where DE(n) has no gradient.
-Cheap form (preferred): add the fallback normal once, weighted (1-w) |grad DE(n+1)|; continuous
-at w = 0 (exactly the old image) and in w. Extend cuda_animated_formula_controls_are_continuous
-to the inside-set pixels (n -> n + eps normals continuous).
+The earlier hypothesis attributed the jump (~2% of hit pixels on the bulb preset) to
+DE(n) = 0, a fallback normal, and normalisation of w grad DE(n+1) for any w > 0. It proposed
+`normalize((1-w) N_n + w N_(n+1))`, or a weighted fallback correction, to make normals
+continuous at the integer endpoint. This is a historical proposal, not a verified cause.
+
+The resume measurements found zero fallback pixels and a pick-depth jump from `2.3983283`
+to `2.4022722`. They contradict the claimed fallback trigger. The accepted endpoint-normal correction
+is `f3e55bd`; strict targeted tests pass for eight endpoint pairs and the neutral golden.
+A larger fractional change still exposes a separate unsigned-DE step-budget limitation.
+Default 4096-step inside 4.001 produced 0 primary hits with unresolved 1; 16384 steps produced
+6144 primary hits with unresolved 0.09798177 (possibly secondary rays; attribution is not
+established). Keep that geometry work isolated and do not claim all animation is continuous.
+The final published-candidate suite passes (312 passed, 0 failed, 14 ignored). The separate
+RAW-max-step prototype has a counterexample and is not merged; bounded band-margin
+investigation remains pending. Endpoint-normal correction and published integration are done.

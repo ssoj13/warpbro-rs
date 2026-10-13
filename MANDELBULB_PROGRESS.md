@@ -1,7 +1,9 @@
 # Mandelbulb animation parameters: progress
 
-Branch `mandelbulb-params` in warpbro-rs and fractal-rs. Not pushed, not merged (lead reviews).
-Keep this file current after every finished parameter; delete it when the branch lands.
+The parameters are merged and pushed: `fractal-rs/main` `1f0d122`, `warpbro-rs/main`
+`059984d`. The accepted normal correction `f3e55bd` is pushed on fractal-rs main; WarpBro
+`6289cc8` is pushed on main, with its full published-candidate suite passing. Template
+Rust-schema validation passes. Keep this record for the separate open geometry investigation.
 
 ## Parameters
 
@@ -35,7 +37,7 @@ changed every Mandelbulb). Lead's decision: not a regression, no layout tricks; 
 `signed_distance_and_trap` and in fractal-rs AGENTS.md. A cross-build golden would pin the
 layout and the driver, so the permanent tests check in-build invariants instead.
 
-## Tests (run 2026-10-13, all pass)
+## Historical parameter tests (first pass, 2026-10-13)
 
 - fractal-core: 12 (3 new `inversion`: involution, stretch bound, reach holds the set).
 - `cuda_inactive_orbit_and_inversion_values_change_nothing`: every gallery scene, both routes,
@@ -50,25 +52,68 @@ layout and the driver, so the permanent tests check in-build invariants instead.
 
 ## Findings
 
-- Fractional iterations jump at integer counts on ~2% of hit pixels (66 of 3366 on the bulb
-  preset at n = 4): where the n-iteration estimate is 0 its gradient is 0 (fallback normal),
-  and any fraction above 0 adds the (n+1)-th estimate's gradient. Every other pixel is
-  continuous (4.999 -> 5: normals 5e-5). Documented in the kernel's `Fraction`.
+- First-pass measurements found integer-count jumps on ~2% of hit pixels (66 of 3366 on the
+  bulb preset at n = 4), with other pixels continuous (4.999 -> 5: normals 5e-5). The earlier
+  explanation blamed a zero gradient and fallback normal. Resume measurements found zero
+  fallback pixels and a pick-depth jump `2.3983283` -> `2.4022722`, contradicting that trigger.
+  The accepted normal correction is `f3e55bd`, with strict targeted checks below. A larger
+  fractional change still has a separate unsigned-DE marching limitation; the initial
+  `Fraction` explanation must not be treated as established.
 - Julia mix 0 / 1 and offset 0 take no arithmetic: the former constants bit for bit.
+
+## Accepted normal candidate (2026-10-13)
+
+- Eight strict endpoint pairs pass, with zero normal jumps above 0.25. Shared hits: 3366/3365.
+  Maximum normal differences for the representative single/world bulb checks:
+
+  | Step | Single | World |
+  | --- | --- | --- |
+  | Integer 4 plus tiny increment | 2.947e-6 | 2.921e-6 |
+  | 4 -> 4.001 | 0.00307656 | 0.00305181 |
+  | 4.999 -> 5 | 0.00307657 | 0.00305165 |
+  | 5 -> 5.001 | 0.00015452 | 0.00015014 |
+
+- Inside fixture: 6144 hits, tiny-step maximum 1.1515e-6; captured baseline 0.80643 fails.
+- Neutral golden passes (3.05s): 34 exact routes plus the existing Hybrid world tolerance.
+- Default CUDA suite: 26 passed, 6 existing ignored (18.82s); fractal-core: 12 passed.
+- The separately run existing specialized-world oracle still fails by one ULP at Fast/two
+  objects pixel 643, green radiance: delta 2.9802322e-8, relative 8.56848e-8. Captured pre-fix
+  PTX reproduces exactly the same vectors; this is a verified pre-existing failure, with
+  assertions unchanged.
+- Cold JIT: 303.54s. Warm integer frames: 4.5-5.5ms; fractional frames: 6.2-7.5ms, a measured
+  35-45% overhead in this run.
+- Larger inside 4.001 geometry is not certified: at 4096 steps, 0 primary hits/unresolved 1;
+  at 16384, 6144 primary hits/unresolved 0.09798177. This proves understepping; the remaining
+  unresolved share may be secondary rays. Bounded geometry work lives only in separate
+  `fractal-geometry`/`warp-geometry` worktrees on `fix/fractional-bulb-march`.
+- WarpBro `6289cc8`: pushed main, four Git-pin lines, no local patch, `windows-sys` preserved.
+  Full published-candidate suite: 312 passed, 0 failed, 14 ignored (326 total), 366.81s after
+  a 3m1s compile; receipt `published-full.log`.
+- The separate RAW-max-step geometry prototype has a proven counterexample and is not merged.
+  New bounded band-margin investigation remains pending.
 
 ## Remaining
 
-- [ ] Operator templates (~/.warpbro/templates: `"julia": null`, the `/julia` Json attr,
-      `/render/iterations` Int64) need the one-off conversion; script in the scratch dir
-      (`convert_templates.py`, writes .bak), to run after the lead's review and the merge
-      (main still reads the old format).
-- [ ] Bump WarpBro's lock to the fractal-rs branch commit when landing (this branch does not
-      build against fractal-rs main).
+- [x] Operator templates amethyst / box / mandelwhit converted once (`"julia": null`,
+  `/julia` Json, `/render/iterations` Int64 replaced), `.bak` files retained. All three JSON
+  files were structurally validated; do not rerun conversion.
+- [x] Rust schema: `WarpBro-a14b1f1310ab8852.exe`
+  `operator_templates_decode_with_current_scene_schema --ignored --nocapture`, with
+  `WARPBRO_TEMPLATE_PROBE_DIR=C:/Users/joss1/.warpbro/templates`: 1 passed in 0.06s; loaded
+  amethyst, box, and mandelwhit.
+- [x] Parameters and dependency revision integrated in the main revisions above.
+- [x] Accepted endpoint-normal correction `f3e55bd` and strict targeted CUDA regressions.
+- [x] Final published-candidate suite 312 passed / 0 failed / 14 ignored; `6289cc8` pushed main.
+- [ ] Resolve the separately isolated unsigned-DE geometry/step-budget limitation.
 
 ## Build setup
 
-Temporary `[patch."ssh://git@github.com/ssoj13/fractal-rs.git"]` in Cargo.toml (never
-committed). Backup of the original Cargo.toml / Cargo.lock:
+The original parameter branch used a temporary
+`[patch."ssh://git@github.com/ssoj13/fractal-rs.git"]` in Cargo.toml. A later interrupted WIP
+`8e70078` accidentally committed that local patch; it is preserved on
+`backup/limited-agent-20261013` and is not a publication candidate. Backup of the original
+Cargo.toml / Cargo.lock:
 `C:\Users\joss1\AppData\Local\Temp\claude\C--projects-projects-rust-cg-cglibs-warpbro-rs\7d561394-85ba-41bf-95b3-a7611591945c\scratchpad\backup\`.
-WarpBro's branch builds against main fractal-rs only after the lock is bumped to the fractal-rs
-branch commit.
+The parameter dependency revision is already integrated on main. Current continuity work
+used a local patch for testing; accepted WarpBro candidate `6289cc8` has no patch, updates
+four Git-pin lines, and preserves `windows-sys`.

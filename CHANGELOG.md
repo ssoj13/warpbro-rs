@@ -9,12 +9,32 @@
   vector, `/julia_mix` 0..1. Mandelbulb and Mandelbox.
 - **Orbit offset** `/orbit_offset`: a constant added every iteration.
 - **Fractional iterations:** `/render/iterations` is a float; the estimate blends floor(n) and
-  floor(n) + 1 iterations, so keyed counts grow the detail smoothly (integers render as before).
+  floor(n) + 1 iterations (integers render as before). Endpoint-normal continuity is corrected
+  and tested; larger fractional-step marching limitations remain separate.
 - **Spherical inversion** `/inversion_strength` (0 off .. 1), `/inversion_center`,
   `/inversion_radius`: Mandelbulber's inversion pre-transform for every family, its distance
   corrected by the map's stretch; an inside-out set is marched to 10^4 object units.
 - `/trap_scale` has a hard floor of 0.
 - Saved scenes and templates with `"julia": null` need a one-off conversion (no legacy loader).
+
+### Fractional-iteration endpoint normals (2026-10-13)
+
+- Accepted normal correction `fractal-rs` `f3e55bd` is pushed. Eight strict endpoint pairs
+  pass with no normal jumps above 0.25; the inside tiny-step fixture improves from baseline
+  0.80643 to 1.1515e-6 across 6144 hits. Integer/neutral golden passes on 34 exact routes
+  plus the existing Hybrid world tolerance. CUDA default: 26 passed, 6 ignored; core: 12 passed.
+- The old specialized-world one-ULP radiance failure is reproduced with captured pre-fix PTX
+  (pixel 643 green delta 2.9802322e-8); its assertions are unchanged.
+- Warm fractional rendering costs 6.2-7.5ms versus 4.5-5.5ms for integers in this run
+  (35-45% overhead). A larger inside fractional step still understeps with the default
+  4096-step budget; separate geometry experiments are excluded from accepted main.
+- Operator templates amethyst/box/mandelwhit are converted with backups and pass the current
+  Rust scene schema: 1 test passed in 0.06s.
+- WarpBro `6289cc8` is pushed on main: four Git-pin lines, no local patch, `windows-sys`
+  preserved. Full published-candidate suite: 312 passed, 0 failed, 14 ignored (326 total) in
+  366.81s after a 3m1s compile (`published-full.log`). The endpoint-normal correction and
+  integration are complete; the separate RAW-max-step geometry prototype is unmerged after
+  a counterexample, with bounded band-margin investigation still open.
 
 ## 0.1.0 — 2026-10-12
 
