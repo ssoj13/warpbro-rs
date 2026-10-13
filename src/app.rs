@@ -389,11 +389,13 @@ struct Controls {
     fly_speed: f32,
     /// Seconds for the translation speed to fall to 1/e once thrust stops.
     translate_decay: f32,
-    /// Seconds for the rotation rate (look, roll) to fall to 1/e; also the horizon-lock
-    /// levelling speed.
+    /// Seconds for the rotation rate (roll, a released orbit drag) to fall to 1/e; also the
+    /// horizon-lock levelling speed.
     rotate_decay: f32,
-    /// Mouse look coasts and eases out instead of turning 1:1.
+    /// Flight mouse look eases onto the pointer's turn (time constant `look_smoothing`, s)
+    /// instead of turning at once; either way the turn is the pointer's, never more.
     inertial_look: bool,
+    look_smoothing: f32,
     /// Horizon lock: roll angle (degrees) past which the lock flips to the next plane.
     flip_degrees: f32,
     /// Thrust multipliers while Shift (fast) / Alt (slow) are held.
@@ -418,6 +420,7 @@ impl Default for Controls {
             translate_decay: 0.6,
             rotate_decay: 0.25,
             inertial_look: true,
+            look_smoothing: 0.07,
             flip_degrees: 60.0,
             fast_multiplier: 4.0,
             slow_multiplier: 0.1,
@@ -436,14 +439,16 @@ impl Controls {
         cam_controls::InertiaSettings {
             // Relative mouse look (pointer motion), not cursor-deflection steering.
             mouse_steer: cam_controls::MouseSteer::Relative,
-            // Base rates: look 1/3 mrad per pixel, roll 2 rad/s², thrust 2 radii/s² (cruise
-            // 2 radii x translate decay per second).
-            look_sensitivity: 0.001 / 3.0 * self.look_sensitivity,
+            // Base rates: look 5 mrad per pixel (smoothed or not: the smoothing only eases the
+            // same turn in), roll 2 rad/s², thrust 2 radii/s² (cruise 2 radii x translate
+            // decay per second).
+            look_sensitivity: 0.005 * self.look_sensitivity,
             roll_sensitivity: 2.0,
             thrust_sensitivity: 2.0 * radius * self.fly_speed,
             linear_damping: 1.0 / self.translate_decay.max(0.02),
             angular_damping: 1.0 / self.rotate_decay.max(0.02),
             inertial_look: self.inertial_look,
+            look_smoothing: self.look_smoothing,
             // Keep the hold angle 15 degrees past the flip angle: a held key always flips.
             lock_flip: self.flip_degrees.to_radians(),
             lock_hold: (self.flip_degrees + 15.0).to_radians(),
@@ -880,7 +885,8 @@ impl App {
                             f_row("Flight speed ×", c.fly_speed, 0.02..=50.0, 1.0),
                             f_row("Translate decay, s", c.translate_decay, 0.02..=5.0, 0.6),
                             f_row("Rotate decay, s", c.rotate_decay, 0.02..=5.0, 0.25),
-                            b_row("Inertial look", c.inertial_look, true),
+                            b_row("Smooth look", c.inertial_look, true),
+                            f_row("Look smoothing, s", c.look_smoothing, 0.0..=0.5, 0.07),
                             f_row("Horizon flip, °", c.flip_degrees, 20.0..=85.0, 60.0),
                             f_row("Shift fast ×", c.fast_multiplier, 1.0..=20.0, 4.0),
                             f_row("Alt slow ×", c.slow_multiplier, 0.01..=1.0, 0.1),
@@ -889,7 +895,8 @@ impl App {
                             ("Flight speed ×", AttrValue::Float(v)) => c.fly_speed = v,
                             ("Translate decay, s", AttrValue::Float(v)) => c.translate_decay = v,
                             ("Rotate decay, s", AttrValue::Float(v)) => c.rotate_decay = v,
-                            ("Inertial look", AttrValue::Bool(v)) => c.inertial_look = v,
+                            ("Smooth look", AttrValue::Bool(v)) => c.inertial_look = v,
+                            ("Look smoothing, s", AttrValue::Float(v)) => c.look_smoothing = v,
                             ("Horizon flip, °", AttrValue::Float(v)) => c.flip_degrees = v,
                             ("Shift fast ×", AttrValue::Float(v)) => c.fast_multiplier = v,
                             ("Alt slow ×", AttrValue::Float(v)) => c.slow_multiplier = v,
