@@ -2263,6 +2263,20 @@ mod tests {
         let mut target = gpu.target(w, h);
         gpu.step(&mut target, &scene, 1, 19, None, false);
         assert_eq!(gpu.pick(&scene, w, h, [0.0, 0.0]).unwrap(), centre);
+        // The index is the hit object's: a box off to the side first, the bulb in the middle.
+        let mut world = dark_world();
+        world.objects.push(world_object(
+            FAMILY_BOX,
+            [3.0, 0.0, 0.0],
+            [0.2; 3],
+            [1.0; 3],
+        ));
+        world
+            .objects
+            .push(world_object(FAMILY_BULB, [0.0; 3], [1.0; 3], [1.0; 3]));
+        world.lights.push(world.lighting);
+        let hit = gpu.pick(&world, w, h, [0.0, 0.0]).unwrap();
+        assert_eq!(hit.map(|(index, _)| index), Some(1));
     }
 
     #[test]

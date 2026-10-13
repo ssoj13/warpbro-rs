@@ -3566,3 +3566,32 @@ fn a_click_selects_alone_shift_toggles_and_nothing_clears() {
     e.click_select(None, false);
     assert_eq!((e.selected.clone(), e.selection), (vec![], None));
 }
+
+#[test]
+fn a_ray_enters_a_bounds_cube_in_its_own_space() {
+    use glam::{Mat4, Quat, Vec3};
+    let cube = crate::scene::Bounds {
+        world: Mat4::from_scale_rotation_translation(
+            Vec3::splat(2.0),
+            Quat::from_rotation_y(0.7),
+            Vec3::new(0.0, 0.0, -10.0),
+        )
+        .to_cols_array_2d(),
+        half: 1.0,
+        node: None,
+    };
+    // Toward its centre: enters within one scaled, turned half edge (2 .. 2 sqrt 2) of it.
+    let t = cube.hit(Vec3::ZERO, -Vec3::Z).unwrap();
+    assert!(t > 10.0 - 2.0 * 2f32.sqrt() - 1e-4 && t < 8.0 + 1e-4, "{t}");
+    assert_eq!(cube.hit(Vec3::ZERO, Vec3::Z), None, "behind the ray");
+    assert_eq!(
+        cube.hit(Vec3::new(5.0, 0.0, 0.0), -Vec3::Z),
+        None,
+        "beside it"
+    );
+    assert_eq!(
+        cube.hit(Vec3::new(0.0, 0.0, -10.0), Vec3::X),
+        Some(0.0),
+        "from inside"
+    );
+}

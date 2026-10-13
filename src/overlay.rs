@@ -240,17 +240,19 @@ pub fn bounds<'a>(bounds: &'a [Bounds], selected: &'a [NodeId]) -> impl Iterator
 }
 
 /// The node of the wire nearest `pos` within `reach` points, on screen through `clip` into
-/// `rect` (`project`): what a viewport click on the extras picks.
+/// `rect` (`project`), among the nodes `accept` takes: what a viewport click on the extras
+/// picks. Wires are drawn over the image, so they win over the fractal behind them.
 pub fn wire_at<'a>(
     wires: impl Iterator<Item = &'a Wire>,
     clip: Mat4,
     rect: egui::Rect,
     pos: egui::Pos2,
     reach: f32,
+    accept: impl Fn(NodeId) -> bool,
 ) -> Option<NodeId> {
     let mut best: Option<(f32, NodeId)> = None;
     for wire in wires {
-        let Some(node) = wire.node else {
+        let Some(node) = wire.node.filter(|node| accept(*node)) else {
             continue;
         };
         for [a, b] in project(wire, clip, rect) {
@@ -315,11 +317,30 @@ mod tests {
                 ..wire(0.5, one)
             },
         ];
-        let at = |x: f32| wire_at(wires.iter(), Mat4::IDENTITY, rect, egui::pos2(x, 50.0), 6.0);
+        let at = |x: f32| {
+            wire_at(
+                wires.iter(),
+                Mat4::IDENTITY,
+                rect,
+                egui::pos2(x, 50.0),
+                6.0,
+                |_| true,
+            )
+        };
         // The wires stand at x = 100 and 110 points.
         assert_eq!(at(103.0), Some(one));
         assert_eq!(at(108.0), Some(two));
         assert_eq!(at(130.0), None, "out of reach");
         assert_eq!(at(150.0), None, "a wire of no node is not picked");
+        // A nearer wire the caller does not accept leaves the farther one picked.
+        let only_two = wire_at(
+            wires.iter(),
+            Mat4::IDENTITY,
+            rect,
+            egui::pos2(104.0, 50.0),
+            6.0,
+            |node| node == two,
+        );
+        assert_eq!(only_two, Some(two));
     }
 }

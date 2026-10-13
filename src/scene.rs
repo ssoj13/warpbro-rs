@@ -373,6 +373,33 @@ pub struct Bounds {
     /// The fractal's node (`Scene::node`).
     pub node: Option<crate::world::NodeId>,
 }
+impl Bounds {
+    /// Where the world ray `origin + t dir` (t >= 0) enters this cube: `t`, 0 from inside it,
+    /// None when it passes by (a slab test in the cube's own space, where `t` is unchanged).
+    pub fn hit(&self, origin: glam::Vec3, dir: glam::Vec3) -> Option<f32> {
+        let inverse = glam::Mat4::from_cols_array_2d(&self.world).inverse();
+        let (o, d) = (
+            inverse.transform_point3(origin),
+            inverse.transform_vector3(dir),
+        );
+        let (mut enter, mut exit) = (0.0f32, f32::INFINITY);
+        for axis in 0..3 {
+            if d[axis].abs() < 1.0e-12 {
+                if o[axis].abs() > self.half {
+                    return None;
+                }
+                continue;
+            }
+            let (a, b) = (
+                (-self.half - o[axis]) / d[axis],
+                (self.half - o[axis]) / d[axis],
+            );
+            enter = enter.max(a.min(b));
+            exit = exit.min(a.max(b));
+        }
+        (enter <= exit && enter.is_finite()).then_some(enter)
+    }
+}
 
 /// A mask as an object meets it: its settings and its world matrix at the frame.
 #[derive(Clone, Copy, Debug, PartialEq)]

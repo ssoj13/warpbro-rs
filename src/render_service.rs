@@ -351,6 +351,8 @@ struct Mailbox {
     active_export_reply: Option<SyncSender<RenderEvent>>,
     pending_export: Option<RenderEvent>,
     pending_failure: Option<RenderEvent>,
+    /// The newest pick answer when the event queue is full (a click is never lost).
+    pending_pick: Option<RenderEvent>,
     last_error: Option<String>,
     preview_generation: Option<u64>,
     preview_control: Option<Command>,
@@ -438,6 +440,7 @@ impl RenderService {
         let mut events: Vec<_> = state.events.drain(..).collect();
         events.extend(state.pending_export.take());
         events.extend(state.pending_failure.take());
+        events.extend(state.pending_pick.take());
         events.extend(state.last_error.take().map(RenderEvent::Error));
         events.extend(state.pending_preview_frame.take());
         events.extend(state.pending_preview_status.take());
@@ -685,6 +688,7 @@ fn push_event(shared: &Shared, event: RenderEvent) {
         match event {
             event @ RenderEvent::ExportFrame { .. } => state.pending_export = Some(event),
             event @ RenderEvent::ExportFailed { .. } => state.pending_failure = Some(event),
+            event @ RenderEvent::Picked { .. } => state.pending_pick = Some(event),
             RenderEvent::Error(error) => state.last_error = Some(error),
             _ => {}
         }

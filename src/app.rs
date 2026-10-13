@@ -1058,12 +1058,12 @@ impl App {
             .overlays
             .iter()
             .flat_map(|(_, wires)| wires.iter().cloned());
-        let picked = self
+        let selection = self
             .overlays
             .as_ref()
             .map(|(key, _)| key.3.clone())
             .unwrap_or_default();
-        for wire in wires.chain(crate::overlay::bounds(bounds, &picked)) {
+        for wire in wires.chain(crate::overlay::bounds(bounds, &selection)) {
             for [a, b] in crate::overlay::project(&wire, clip, rect) {
                 match wire.style {
                     crate::overlay::Style::Plain => {
@@ -3615,23 +3615,32 @@ impl App {
     }
 
     /// A viewport click (Blender / Maya): the extras' wire under the cursor first (cameras,
-    /// lights, masks, groups, Bounds cubes), else the fractal under it through one GPU ray of
-    /// the shown frame (`Command::Pick`, answered in [`Self::picked`]). Shift adds or removes;
-    /// Ctrl focuses the camera at the fractal under the cursor instead (depth of field); a
-    /// click on nothing clears the selection. Only what the viewport may select is picked.
+    /// lights, masks, groups, Bounds cubes), then a Bounds display's cube the cursor's ray
+    /// enters, else the fractal under it through one GPU ray of the shown frame
+    /// (`Command::Pick`, answered in [`Self::picked`]). Shift adds or removes; Ctrl focuses the
+    /// camera at the fractal under the cursor instead (depth of field); a click on nothing
+    /// clears the selection. Only what the viewport may select is picked.
     fn viewport_click(&mut self, ui: &egui::Ui, resp: &egui::Response, rect: egui::Rect) {
         let Some(pos) = resp.interact_pointer_pos() else {
             return;
         };
+        // A played preview shows cached frames of other moments than the live request.
+        if self.preview.displaying_preview() {
+            self.status = "Picking needs the live viewport: stop the preview playback".into();
+            return;
+        }
+        let Some(request) = self.request.as_ref() else {
+            return;
+        };
         let (add, focus) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
+        let aspect = rect.width() / rect.height().max(1.0);
+        let (view, projection) = self.scene.camera_matrices(aspect);
+        let ndc = [
+            2.0 * (pos.x - rect.left()) / rect.width().max(1.0) - 1.0,
+            1.0 - 2.0 * (pos.y - rect.top()) / rect.height().max(1.0),
+        ];
         if !focus {
-            let aspect = rect.width() / rect.height().max(1.0);
-            let (view, projection) = self.scene.camera_matrices(aspect);
-            let bounds: Vec<_> = self
-                .request
-                .as_ref()
-                .map(|r| crate::overlay::bounds(&r.scene.bounds, &[]).collect())
-                .unwrap_or_default();
+            let bounds: Vec<_> = crate::overlay::bounds(&request.scene.bounds, &[]).collect();
             let extras = self.overlays.iter().flat_map(|(_, wires)| wires.iter());
             let wire = crate::overlay::wire_at(
                 extras.chain(bounds.iter()),
@@ -3639,26 +3648,35 @@ impl App {
                 rect,
                 pos,
                 PICK_REACH,
+                |node| self.viewport_selects(node),
             );
-            if let Some(node) = wire.filter(|node| self.viewport_selects(*node)) {
+            // The cursor's world ray: through the near plane and a point beyond it.
+            let unproject = (projection * view).inverse();
+            let near = unproject.project_point3(glam::Vec3::new(ndc[0], ndc[1], 0.0));
+            let beyond = unproject.project_point3(glam::Vec3::new(ndc[0], ndc[1], 0.5));
+            let cube = request
+                .scene
+                .bounds
+                .iter()
+                .filter_map(|b| {
+                    let node = b.node.filter(|node| self.viewport_selects(*node))?;
+                    Some((b.hit(near, (beyond - near).normalize_or_zero())?, node))
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|(_, node)| node);
+            if let Some(node) = wire.or(cube) {
                 self.world.click_select(Some(node), add);
                 return;
             }
         }
-        let Some(request) = self
-            .request
-            .as_ref()
-            .filter(|r| !r.scene.objects.is_empty())
-        else {
-            if !focus {
+        if request.scene.objects.is_empty() {
+            if focus {
+                self.status = "Focus: no traced fractal in this display".into();
+            } else {
                 self.world.click_select(None, add);
             }
             return;
-        };
-        let ndc = [
-            2.0 * (pos.x - rect.left()) / rect.width().max(1.0) - 1.0,
-            1.0 - 2.0 * (pos.y - rect.top()) / rect.height().max(1.0),
-        ];
+        }
         self.pick_sequence = self.pick_sequence.wrapping_add(1);
         let pending = PendingPick {
             id: self.pick_sequence,
@@ -3710,7 +3728,11 @@ impl App {
                 Some((_, depth)) if pending.camera_radius > 0.0 => {
                     // Authored with the camera pose at the end of the frame (navigation).
                     self.scene.camera.focus_distance = depth / pending.camera_radius;
-                    self.status = format!("Focus at {depth:.3}");
+                    self.status = if self.scene.camera.lens_radius() > 0.0 {
+                        format!("Focus at {depth:.3}")
+                    } else {
+                        format!("Focus at {depth:.3} (no depth of field: the aperture is closed)")
+                    };
                 }
                 _ => self.status = "Focus: no fractal under the cursor".into(),
             }
@@ -3804,7 +3826,13 @@ impl App {
         }
         self.draw_overlays(ui, rect);
         self.manipulate(ui, rect);
-        if resp.clicked() && !gizmo_owns && self.fly.is_none() && !toolbar.contains_pointer {
+        // The second click of a double click recentres instead.
+        if resp.clicked()
+            && !resp.double_clicked()
+            && !gizmo_owns
+            && self.fly.is_none()
+            && !toolbar.contains_pointer
+        {
             self.viewport_click(ui, &resp, rect);
         }
         if self.export.is_running() {
