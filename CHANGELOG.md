@@ -1,6 +1,91 @@
 # Changelog
 
-## Unreleased — 2026-10-09
+## 0.1.0 — 2026-10-12
+
+### Viewport: selecting, creating and transforming
+
+- **Picking:** a left click selects what is under the cursor: a fractal through one GPU camera
+  ray (fractal-rs `pick` kernel: the frame's own estimators, transforms and masks), or the wire
+  of a camera, light, mask, group or Bounds cube. Shift adds or removes, a click on nothing
+  clears, Ctrl+click sets the camera's focus distance at the hit. Only shown, selectable kinds
+  are picked; the outliner, timeline and viewport share one click rule.
+- **Tab menu** (new egui-widgets-rs crate `egui-tab-menu`): Houdini's layout with Nuke's search
+  ranking. Search under the cursor over cascading nested groups, All, Favorites and History;
+  word starts ("e p" is Edit Poly), initials ("dm" is DeepMerge), substrings, the group path and
+  keywords; favorites and usage break ties. The outliner's + Add and right-click Add (a child of
+  the row) and a timeline layer's Add child show the same list.
+- **Tools Q / W / E / R** with the egui-gizmo manipulator; a drag is one undo step; gizmo size
+  and stroke in Settings > Controls.
+- **Viewport kind filter and extras** (Blender): per-kind visibility and selectability on
+  ViewportSettings (`/viewport/show|select/<kind>`), wire extras for masks, groups, the cameras
+  other than the active one and the sun. The visibility menu stays open while toggling.
+- **Display modes** per render profile (`/render/display`): path traced, direct (first hit
+  only) or bounds (nothing traced); `/render/thinning` thins the fractals with a cell mask.
+- **Mask nodes:** sphere, box and cell masks section the fractals of their scope (their
+  parent's subtree, or the whole scene at the root); invert cuts instead (fractal-rs ABI 4).
+
+### Camera and flight
+
+- **Smooth look:** the mouse queues its turn and the view eases onto exactly that turn
+  (Settings > Controls > *Look smoothing, s*), never past it: no coasting nose swinging to and
+  fro. One look rate for smoothed and direct look.
+- **Ctrl** eases the flight view to the nearest world plane or axis view (Settings: *Flight
+  alignment*); Shift is fast, Alt slow. **L** switches horizon lock / free flight; the **wheel**
+  moves the flying camera along its view.
+- **CamClip** (the toolbar's camera slots) is application state, saved with a scene and
+  replaced by a scene that carries one.
+- The default layout and control values are the tuned session's (sensitivity 0.5, decays
+  0.96 / 1.0 s, look smoothing 0.23 s, flip 48.6 degrees).
+
+### Takes
+
+- Every navigation gesture is recorded as a camera take; manipulator drags record transform
+  takes. Any node plays a take through its attributes: `/take/clip`, `/take/offset` and a
+  keyable `/take/speed` (a time warp).
+- The Takes panel manages them (filter, pin, multi-select, clipboard, duplicate, delete, trim,
+  retime, split, bake to keys, clip export / import) and has a record / pause switch; its list
+  refreshes on every change.
+- The timeline shows a take as a lane with its bar and as a band on its node's bar; both pick
+  and slide the take.
+- Take effects (Simplify, Smooth, Euler filter) make the rotation continuous first, so a
+  recorded wrap at +-180 never becomes a full turn.
+
+### Animation
+
+- **Curve effects** on keys and takes: **Smooth** is a zero-phase Butterworth low-pass (cutoff
+  in Hz, order, blend; Blender's / MotionBuilder's smoothing), which keeps the timing and the
+  amplitude of the motion below the cutoff; **Simplify** refits within the error and keeps the
+  extrema as flat keys and the corners as broken keys; **Euler filter** removes flips.
+- Timeline: **Shy** layers (After Effects), F fits like the Fit button, **U** shows the animated
+  and **U U** (a keyboard double tap, a hotkey-system feature) the modified properties.
+
+### Scenes and files
+
+- File > New (Ctrl+N), Open (Ctrl+O), Save (Ctrl+S), Save as (Ctrl+Shift+S); menu shortcuts come
+  from the binding table. A scene made from a template, preset or bookmark, and every Save As
+  copy, is its own document.
+- The sun disc's visibility is a light setting (`/lighting/sun_disc`).
+
+### Rendering
+
+- Denoise every 32 samples by default; quality profiles default to 32 samples; denoise quality
+  Fast or Balanced; render-rs's shared host denoiser with one albedo guide (a missed camera ray's
+  guide is the sky it shows).
+- Scrubbing after a completed frame renders the new frame live.
+- Kernels from fractal-rs: OFX HDRI, leave restart, pixel-cone start, point sun, the shared
+  Owen-Sobol sampler, world-march sphere culling, cheaper cell masks.
+
+### Interface
+
+- **`** (the key left of 1, ё on a Russian layout) hides the panels; Tab is the Add menu.
+- Render / Encode and Settings > Render & Viewport lay their rows out on one grid.
+
+### Build
+
+- Release archives embed cubins for sm_75 / 86 / 89 / 120 (cold module load 0.26 s instead of a
+  PTX JIT).
+
+## 2026-10-09
 
 ### Environment orientation
 

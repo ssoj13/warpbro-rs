@@ -18,11 +18,25 @@ Documentation: [render and quality profiles](docs/render-profiles.md), [workspac
   (tetrahedron, octahedron, Menger), Kleinian, pseudo-Kleinian, Apollonian, and Hybrid (up to
   four bulb / box / KIFS-fold / inversion steps, repeated).
 - **World objects:** Playa UUID nodes for fractals, cameras, directional lights, HDR environments,
-  groups and materials, with parent transforms, visibility, layer spans, lock and solo.
+  groups, masks and materials, with parent transforms, visibility, layer spans, lock and solo.
+  A **Mask** node (sphere, box or cells, optionally inverted) sections the fractals of its
+  parent's subtree, or of the whole scene at the root: a movable bounding sphere or box.
   Multiple fractals take part in primary rays, shadows and reflections; multiple directional
   lights and one active HDR/EXR environment illuminate the same world.
 - **Object animation:** an Outliner, Attribute Editor and AE-style Timeline share selection and
   transactional undo/redo. Numeric components and discrete properties use Playa animation.
+  Curve effects on selected keys and on takes: **Smooth** (a zero-phase Butterworth low-pass:
+  cutoff in Hz, order, blend), **Simplify** (refit within an error, extrema and corners kept)
+  and **Euler filter** (no rotation flips).
+- **Viewport:** click to select a fractal (one GPU ray) or a camera / light / mask / group wire
+  (Shift adds or removes, Ctrl+click focuses the camera there); Q / W / E / R select, move,
+  rotate and scale with the transform manipulator. Per render profile the viewport shows path
+  tracing, direct light or the bounds alone; ViewportSettings choose which kinds are shown and
+  which can be picked (Blender's filter), and whether their wires (extras) are drawn.
+- **Creating nodes:** Tab opens a Houdini-style Tab menu at the cursor (type to search: "e p"
+  finds Edit Poly-like names, "dm" DeepMerge-like ones; nested groups, All, Favorites, History);
+  the Outliner's + Add and right-click menus and the Timeline's layer menu show the same list
+  (`egui-tab-menu`).
 - **Unidirectional path tracing:** sun-cone, sky and HDR next-event estimation, MIS with the
   power heuristic, and Russian roulette. A thin-lens camera gives depth of field.
 - **GPU OIDN:** periodic scene-linear HDR denoising with primary-hit albedo/normal guides,
@@ -63,7 +77,8 @@ Documentation: [render and quality profiles](docs/render-profiles.md), [workspac
     (or a 10×10×10 box), including object scale/offset/rotation.
   - Settings → Controls adjusts mouse sensitivity and flight speed, saved between runs.
 - **Camera takes:** every navigation gesture (flight, orbit, pan, zoom, including the coast
-  after release) is recorded as a take at the speed it was flown; there is no record button.
+  after release) is recorded as a take at the speed it was flown, while the Takes panel's
+  record switch is on (on by default).
   - The Takes panel (next to the Outliner) keeps the 20 newest takes plus every pinned one; takes
     are saved with the scene, outside undo/redo.
   - Any camera or movable node plays a take through its own attributes (Attribute Editor, an
@@ -80,8 +95,11 @@ Documentation: [render and quality profiles](docs/render-profiles.md), [workspac
   - Managing: filter by name or pinned, Ctrl / Shift multi-select, pin, copy / paste (Ctrl+C / V,
     through the system clipboard, so takes move between scenes), duplicate (Ctrl+D), delete
     (Delete). New takes come from the camera's timeline animation or the current pose.
-  - Trim, speed, smooth (hand shake) and split at the playhead each make a new take next to
-    the original: takes have no undo, so an edit never loses one.
+  - Trim, speed and split at the playhead each make a new take next to the original: takes
+    have no undo, so an edit never loses one. The curve effects (Smooth against hand shake,
+    Simplify, Euler filter) apply to a take the same way.
+  - The Timeline shows a take as a lane under its node with the take's bar, and as a band on
+    the node's bar; both pick and slide it.
 - **The browser:**
   - an 18-preset gallery with GPU-rendered thumbnails;
   - bookmarks (scenes saved as JSON);
@@ -173,8 +191,9 @@ python bootstrap.py r                                  # build, warm the CUDA ca
 | `Tab`             | the Add menu at the cursor: type to filter, Enter or a click creates the node (also in the Outliner's and Timeline's right-click menus) |
 | `F12` | window screenshot: the whole window as EXR + PQ PNG (see *Window screenshots*); under an attached debugger Windows takes `F12` as its break key, use File → *Window screenshot* |
 | `Ctrl+N`, `Ctrl+O`, `Ctrl+S`, `Ctrl+Shift+S` | new scene (the one WarpBro opens with, nothing kept), open, save, save as |
-| `Space`           | pause                                                                                                      |
-| backtick / tilde  | switch horizon lock / free flight                                                                          |
+| `Space`           | play / pause                                                                                               |
+| `L`               | switch horizon lock / free flight                                                                          |
+| `Q` `W` `E` `R`   | select, move, rotate, scale tool (the transform manipulator)                                               |
 
 The interface uses `egui-dock`: drag tabs to rearrange, split or float panels, including Settings.
 The top bar uses **File**, **Edit**, **View**, **Render** and **Window** menus, following Playa.
@@ -540,7 +559,12 @@ src/palette.rs    the 14 palettes
 src/materials.rs  host adapter for the shared fractal-materials catalog
 fractal-rs        (dependency) fractal-materials: renderer-independent material presets
 src/preview.rs    bounded final/draft Playa RAM cache and playback state
-src/hotkeys.rs    global-first, panel-scoped command bindings
+src/hotkeys.rs    global-first, panel-scoped command bindings, keyboard double taps
+src/overlay.rs    viewport extras: wires of masks, groups, cameras, the sun and Bounds cubes; wire picking
+src/takes.rs      camera / transform takes: store, retime, trim, curve effects, clip files
+src/takes_ui.rs   the Takes panel
+src/camera_recorder.rs   navigation gestures recorded as takes
+src/camera_slots.rs      the CamClip camera slots
 standard-surface-bsdf   SSH dependency: Autodesk Standard Surface (MaterialX port, Apache-2.0)
 cam-controls, cam-viewport   SSH dependencies: gitnexus-rs camera rigs (PolyForm-Noncommercial-1.0.0)
 ```

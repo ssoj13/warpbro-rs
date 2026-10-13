@@ -40,6 +40,18 @@ egui-widgets-rs. Topic docs (how things work) live in docs/; this file only trac
   renews the UUID. File > New / Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S.
 - Own git deps are bumped by editing the lock's rev (a plain `cargo update -p` collapses
   windows-sys 0.61 to 0.52); build with `--locked`.
+- **Picking**: `Gpu::pick` (fractal-rs `pick` kernel, one camera ray between launches) through
+  `Command::Pick` / `RenderEvent::Picked`; world objects and Bounds carry `Scene::node`, extras
+  wires their node (`overlay::wire_at`). One click rule: `WorldEditor::click_select`.
+- **Add menus**: one list `world_ui::add_items` through egui-tab-menu (`TabMenu`, Tab at the
+  cursor; `menu_ui` for + Add / Add child; the outliner's context items from `TabMenu::tree`).
+- **Flight look**: cam-controls `SpaceFlight` queues the pointer's turn and eases it in
+  (`look_smoothing`); Ctrl aligns (`set_align`), L locks, the wheel moves along the view.
+- **Curve effects**: curves-rs `Effect::Smooth` is a filtfilt Butterworth, `Simplify` pins
+  extrema and corners (`Fitter::fit_pinned`); effects are given in seconds and retimed to the
+  keys' frames (`Effect::scale_time`).
+- **Release v0.1.0** points at the current main (`gh release`, CI builds both archives; locally
+  `python bootstrap.py ci --cubins` packs dist/).
 
 ## State (2026-10-09)
 
@@ -75,8 +87,10 @@ egui-widgets-rs. Topic docs (how things work) live in docs/; this file only trac
 0. **Pending from 2026-10-12**: measure the Cells mask cost (`cuda_mask_cost_benchmark`, ignored;
    the GPU was busy with other processes: before the lazy-neighbour change cells cost x4.8);
    look at the overlays, the take band and the Bounds display on screen; the 1-ULP mismatch of
-   `cuda_specialized_world_materials` (pixel 643, predates the masks); guide_albedo SSOT in
-   render-rs (ofx-rs-be queued it; it touches fractal-kernels: coordinate).
+   `cuda_specialized_world_materials` (pixel 643, predates the masks).
+   Open requests: refresh the gallery and every README screenshot with environments and better
+   scenes (the operator may provide scenes / HDRIs); save the Tab menu's History, favorites and
+   usage in settings; check the flight look feel on screen (sensitivity, smoothing defaults).
 
 1. **Register spills under `#[launch_bounds(128)]`.** Now visible as build warnings (ptxas
    reports per architecture; the driver JIT did the same silently): 13 kernels spill, e.g.
