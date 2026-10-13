@@ -9,8 +9,20 @@ four Git pins are updated, with Cargo.toml and windows-sys unchanged. The publis
 passes the strict oracle with `--locked` and no patch (`published-oracle.log`), release build
 (35.35s), clippy with tests and `-D warnings` (13.83s), and fmt. All receipts are in
 `target/mis-fix/`. The generated cuda-device scalar intrinsic sm_80 restriction is a separate
-compiler issue: an isolated branch from `ansidium/cuda-rust-windows` main is preparing its
-generator/evidence/tests correction and upstream PR; it does not block the MIS correction.
+compiler issue: [upstream PR #14](https://github.com/ansidium/cuda-rust-windows/pull/14),
+linked to issue #13, is open from `ssoj13:fix/scalar-fp-target-floors` against ansidium/main
+(not NVIDIA). Commits `d39feb6eb` and book-stamp follow-up `4891e74ea` are signed off and pushed.
+It separates native PTX 2.0/sm_20, LLVM PTX 3.2/sm_20 and CUDA 13.3 libNVVM PTX 6.3/sm_75
+contracts for all 64 scalar variants. Proof: 192 LLVM codegen/assembly captures, 64 typed
+declaration canonicalizations, and 64 libNVVM operations compiled/assembled/LTO-linked with
+all 64 cubin entries retained. Runtime execution of those fixtures is not claimed. The other
+965 catalog records and all 1029 ABI identities are preserved. 319 generator and 1221 codegen
+tests, regeneration/ABI checks, clippy, formatting, Ruff and SPDX pass. CI is running on the
+PR; its initial book catalog-stamp failure was corrected after verifying 576 operations across
+42 modules, with local book-stamp check passing. The installed compiler and our CUDA fork's
+main are untouched. Isolated compiler checkout: C:/Users/joss1/AppData/Local/Temp/
+codex-mis-20261013/cuda-upstream. Receipts: target/mis-fix/. WarpBro main `9f7ef5b` and fractal
+main `c4222f4` are pushed; WarpBro CI 38430261140 passes Windows and Linux.
 
 Current resume state (2026-10-13): geometry and normal corrections are integrated and pushed:
 fractal main/origin `55d8134f093e6b3a291a0d811e7a07ab1424dd5c`; WarpBro source integration
