@@ -77,10 +77,12 @@ contains the original requirements and recovery history.
 - Endpoint band-margin correction uses the tracer's existing distance-estimate assumption;
   fixture tests do not prove a global Lipschitz bound for finite-iteration Mandelbulb DE.
   Shadow `march_visibility` is unchanged; pre-existing one-ULP oracle failure and missing
-  native HDR screenshot remain explicit. CI `38395622388`: Linux succeeded (280 passed,
-  0 failed, 7 ignored, 41 filtered in 21.25s; release build/archive passed,
-  `ci-geometry-linux.log`). Windows main stage started 12:25:06 UTC and is in progress;
-  no Windows stage success is claimed. Earlier
+  native HDR screenshot remain explicit. CI `38395622388` completed SUCCESS: both build jobs
+  pass, Linux/Windows each 280 passed, 0 failed, 7 ignored, 41 filtered (21.25s/35.45s),
+  release builds/archive uploads passed. Windows test build 20m10s after backend 3m29s,
+  release build 2m32s; upload success 13:05:03 UTC, job complete 13:13:42 UTC. Receipts:
+  `ci-geometry-linux.log` and `target/fractional-normal-backup/ci-geometry-windows.log`.
+  Publish release archives was skipped as expected for main push (not tag). Earlier
   `38391295641` auto-cancelled on the new main push after Linux passed. Its Windows job
   was still compiling `nvjitlink-sys` at 12:13:17 UTC, before unit tests; no test hang/failure.
 
@@ -128,7 +130,7 @@ contains the original requirements and recovery history.
 | Current production build/gallery smoke | Complete on `d67d3fe` | Build/clippy/fmt pass; 18/18 valid nonconstant 384x216 PNGs, 4 spp, isolated profile |
 | Historical production smoke | Earlier `5a496c6` passed | 18 nonconstant 96x64 PNGs at 1 spp; render smoke, not a benchmark |
 | Guarded unsigned-DE geometry | Integrated | `55d8134` / `d67d3fe`; published 314/0/14 and focused guard fixtures pass |
-| Final integrated-source CI | Linux succeeded; Windows in progress | `38395622388` on source `d67d3fe`; Linux 280/0/7, build/archive pass; Windows started 12:25:06 UTC |
+| Final integrated-source CI | Complete: SUCCESS | `38395622388` on source `d67d3fe`; Linux/Windows 280/0/7, release builds/archives pass; publish skipped for main push |
 | EXR release replacement | Published and verified | CI `38382275628`: 10 successful jobs, 3 ZIPs/5 wheels integrity verified, Windows CLI smoke passes |
 
 No pending item is complete until its evidence is recorded. Existing historical test results

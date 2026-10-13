@@ -4,7 +4,8 @@ The parameters are merged and pushed: `fractal-rs/main` `1f0d122`, `warpbro-rs/m
 `059984d`. The accepted normal correction `f3e55bd` is pushed on fractal-rs main; WarpBro
 normal-only `6289cc8` passed and was pushed. Guarded geometry is now integrated and pushed
 as fractal `55d8134` / WarpBro `d67d3fe`, with real published-dependency tests passing.
-Template Rust-schema validation passes. Final integrated-source CI remains in progress.
+Template Rust-schema validation passes. Final integrated-source CI completed SUCCESS for
+both Linux and Windows build jobs.
 
 ## Parameters
 
@@ -171,9 +172,13 @@ final guarded-margin integration and production receipts follow below.
   Tests establish these fixtures, not a global Lipschitz bound for finite-iteration Mandelbulb
   DE; no formal/global guarantee. Shadow `march_visibility` is unchanged. The pre-existing
   one-ULP specialized-world failure and lack of native HDR screenshot remain recorded.
-- Integrated-source CI `38395622388` on `d67d3fe`: Linux succeeded, 280 passed, 0 failed,
-  7 ignored, 41 filtered (21.25s), release build and archive passed (`ci-geometry-linux.log`).
-  Windows main stage started 12:25:06 UTC and is in progress; no Windows stage pass is claimed. Earlier run
+- Integrated-source CI `38395622388` on `d67d3fe` completed SUCCESS. Linux: 280 passed,
+  0 failed, 7 ignored, 41 filtered (21.25s), release build/archive passed
+  (`ci-geometry-linux.log`). Windows: all checks passed, 280 passed, 0 failed, 7 ignored,
+  41 filtered (35.45s); test build 20m10s after backend 3m29s, release build 2m32s, archive
+  upload success 13:05:03 UTC, job completed 13:13:42 UTC. Receipt:
+  `target/fractional-normal-backup/ci-geometry-windows.log`. Publish release archives was
+  skipped as expected (main push, not tag). Earlier run
   `38391295641` auto-cancelled on the new main push after Linux passed. Its Windows log was
   still compiling `nvjitlink-sys` at 12:13:17 UTC, with no `Running unittests`; no test hang
   or test failure is established.
@@ -193,7 +198,8 @@ final guarded-margin integration and production receipts follow below.
 - [x] Independently audit all six parameters and run production build/gallery smoke.
 - [x] Guarded geometry integrated (`55d8134` / `d67d3fe`), published-dependency 314/0/14,
   production build/clippy/fmt and 384x216 4-spp gallery pass.
-- [ ] Final integrated-source CI `38395622388`: Linux succeeded; Windows in progress.
+- [x] Final integrated-source CI `38395622388`: SUCCESS, Linux and Windows build jobs pass;
+  release publishing skipped as expected on main push.
 
 ## Build setup
 

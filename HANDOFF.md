@@ -11,10 +11,13 @@ The production executable renders 18/18 valid, nonconstant 384x216 PNGs at 4 spp
 3080 Ti; the Mandelbulb image was visually inspected. A temporary profile leaves the operator
 profile untouched. Receipt: `published-geometry-gallery.log` and temporary gallery
 `verification.json`. WarpBro changes are four lock pins and two tests/golden only;
-`windows-sys` is preserved and Cargo.toml is unchanged. CI `38395622388` on source `d67d3fe`:
-Linux succeeded (280 passed, 0 failed, 7 ignored, 41 filtered, 21.25s; release build and archive
-passed, `ci-geometry-linux.log`). Windows main stage started 12:25:06 UTC and is in progress;
-no Windows stage success is claimed.
+`windows-sys` is preserved and Cargo.toml is unchanged. CI `38395622388` on source `d67d3fe`
+completed SUCCESS: both Linux and Windows build jobs passed. Each reports 280 passed, 0 failed,
+7 ignored, 41 filtered (Linux 21.25s, Windows 35.45s), with release build/archive success.
+Windows test build took 20m10s after backend 3m29s; release build 2m32s, archive upload passed
+at 13:05:03 UTC, job completed at 13:13:42 UTC. Receipts: `ci-geometry-linux.log` and
+`target/fractional-normal-backup/ci-geometry-windows.log`. Publish release archives was
+expectedly skipped for the main push (not a tag).
 The dated snapshots below preserve the interrupted session's history; use the
 [resume completion plan](plans/20261013-resume/plan.md) for the current acceptance ledger.
 
@@ -55,7 +58,8 @@ The dated snapshots below preserve the interrupted session's history; use the
   regression 1 passed. Both routes have 6144/6144 primary hits, normal-reference error 0,
   worst depth error 0.0000007264541 below about 0.00000152194 footprint. Nearby cube object 1
   is picked correctly. Final published dependency checks and integration now pass as recorded
-  above. CI `38395622388`: Linux succeeded, Windows in progress; earlier `38391295641` was auto-cancelled by the new
+  above. CI `38395622388`: Linux and Windows succeeded; earlier `38391295641` was
+  auto-cancelled by the new
   main push after its Linux job passed. The cancelled Windows log still shows compilation
   of `nvjitlink-sys` at 12:13:17 UTC and no `Running unittests`; this is not a test hang or failure.
 
@@ -209,4 +213,5 @@ Tests establish the documented fixtures, not a global Lipschitz bound for finite
 Mandelbulb DE; no formal/global guarantee is claimed. Shadow `march_visibility` is unchanged.
 The existing specialized-world one-ULP radiance failure remains verified as pre-existing via
 captured pre-fix PTX; assertions were not relaxed. No native HDR viewport screenshot was
-captured. CI `38395622388`: Linux succeeds, Windows remains in progress.
+captured. CI `38395622388` completed SUCCESS for Linux and Windows; release publishing was
+expectedly skipped on this main push.

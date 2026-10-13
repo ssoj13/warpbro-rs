@@ -53,7 +53,8 @@
   nearby cube guard also passes for that fixture.
 - At that worktree checkpoint, final revision and published integration checks were pending. Warm 96x64 inside-fixture timings are
   recorded in MANDELBULB_PROGRESS.md and are not comparable to the former zero-hit surface.
-  Source CI retry `38391295641`: Linux passed, Windows pending at this checkpoint.
+  Historical CI retry `38391295641`: Linux passed; Windows was still building when the later
+  geometry push auto-cancelled the run. The final integrated CI result is recorded below.
 
 ### Guarded fractional geometry integrated (2026-10-13)
 
@@ -76,9 +77,13 @@
   fixture tests do not establish a global Lipschitz bound for finite-iteration Mandelbulb DE.
   Shadow `march_visibility` is unchanged, the pre-existing one-ULP oracle failure is retained,
   and native HDR screenshot acceptance was not performed.
-- Source CI `38395622388` on `d67d3fe`: Linux succeeded (280 passed, 0 failed, 7 ignored,
-  41 filtered in 21.25s), release build/archive passed (`ci-geometry-linux.log`). Windows main
-  stage started 12:25:06 UTC and is in progress; no Windows stage success is claimed. Earlier `38391295641` auto-cancelled
+- Source CI `38395622388` on `d67d3fe` completed SUCCESS: Linux and Windows build jobs pass,
+  each with 280 passed, 0 failed, 7 ignored, 41 filtered (21.25s / 35.45s), release builds
+  and archives pass. Windows test build took 20m10s after backend 3m29s; release build 2m32s,
+  archive upload succeeded at 13:05:03 UTC, job completed at 13:13:42 UTC. Receipts:
+  `ci-geometry-linux.log`, `target/fractional-normal-backup/ci-geometry-windows.log`. Publish
+  release archives was skipped as expected for main push rather than tag. Earlier
+  `38391295641` auto-cancelled
   on the new main push after its Linux job passed. The cancelled Windows job was still
   compiling `nvjitlink-sys` at 12:13:17 UTC, before unit tests; no test hang/failure is claimed.
 
