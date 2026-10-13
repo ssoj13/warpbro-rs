@@ -111,6 +111,23 @@ impl FileAction {
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "reads operator templates from WARPBRO_TEMPLATE_PROBE_DIR"]
+    fn operator_templates_decode_with_current_scene_schema() {
+        let path = std::env::var_os("WARPBRO_TEMPLATE_PROBE_DIR").expect("set WARPBRO_TEMPLATE_PROBE_DIR");
+        let entries = catalog(Path::new(&path)).unwrap();
+        let mut files = 0;
+        for entry in entries {
+            if let Source::File(path) = entry.source {
+                let scene = crate::io_service::decode_scene(&std::fs::read_to_string(&path).unwrap())
+                    .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+                assert!(scene.render.iterations.is_finite());
+                eprintln!("loaded {}", path.display());
+                files += 1;
+            }
+        }
+        assert!(files > 0, "the probe must exercise real templates");
+    }
+    #[test]
     fn builtins_need_no_directory_and_files_override_by_name() {
         let dir =
             std::env::temp_dir().join(format!("warpbro-templates-test-{}", std::process::id()));

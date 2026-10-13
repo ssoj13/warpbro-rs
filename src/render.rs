@@ -1628,13 +1628,79 @@ mod tests {
         (flips as f32 / a.len() as f32, sum / both.max(1) as f32)
     }
 
+    /// The neutral defaults (Julia mix 0 / 1 as the former switch, integer iterations, no offset,
+    /// no inversion) render as the kernels before these parameters did. `golden/
+    /// neutral_defaults.bin` holds that build's guides (96x64, 2 samples, seed 19) of every
+    /// gallery scene on both routes: an FNV-1a hash of the albedo and normal guides per route,
+    /// then the normal guides of the Hybrid world routes. Every route matches bit for bit except
+    /// Hybrid on the world route: NVPTX fuses multiply-adds per basic block, and the dispatch
+    /// layout around the estimates changed (fractal-kernels `signed_distance_and_trap`), so its
+    /// normals match within NEUTRAL_HYBRID_NORMAL (measured 2.6e-4) and its radiance, whose
+    /// paths diverge from there, is not compared. The golden pins a GPU / driver: re-record it
+    /// with a build of the former kernels if either changes.
+    #[test]
+    fn cuda_neutral_defaults_render_as_before_the_new_parameters() {
+        const NEUTRAL_HYBRID_NORMAL: f32 = 1.0e-3;
+        let golden = include_bytes!("golden/neutral_defaults.bin");
+        let word = |at: usize| u32::from_le_bytes(golden[at..at + 4].try_into().unwrap());
+        let routes = word(0) as usize;
+        let hash_at =
+            |r: usize| u64::from_le_bytes(golden[4 + 8 * r..12 + 8 * r].try_into().unwrap());
+        let mut normals = golden[4 + 8 * routes..]
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|c| f32::from_le_bytes(*c));
+        let fnv = |buffers: &[&Vec<[f32; 4]>]| {
+            let mut h = 0xcbf2_9ce4_8422_2325u64;
+            for v in buffers.iter().flat_map(|b| b.iter().flatten()) {
+                for byte in v.to_le_bytes() {
+                    h = (h ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+                }
+            }
+            h
+        };
+        let _gpu_test = crate::test_gpu::lock();
+        let mut gpu = Gpu::new().unwrap();
+        let gallery = Scene::gallery();
+        assert_eq!(2 * gallery.len(), routes, "the golden covers the gallery");
+        for (index, scene) in gallery.iter().enumerate() {
+            for world in [false, true] {
+                let s = if world {
+                    crate::world::WorldDocument::from_scene(scene)
+                        .snapshot(0.0)
+                        .unwrap()
+                } else {
+                    scene.clone()
+                };
+                let mut target = gpu.target(96, 64);
+                gpu.step(&mut target, &s, 2, 19, None, false);
+                let albedo = gpu.guide_sums(&target, &target.albedo);
+                let normal = gpu.guide_sums(&target, &target.normal);
+                let name = format!("{} (world {world})", scene.name);
+                if world && matches!(scene.formula, crate::scene::Formula::Hybrid(_)) {
+                    for (k, n) in normal.iter().flatten().enumerate() {
+                        let before = normals.next().unwrap();
+                        assert!(
+                            (n - before).abs() <= NEUTRAL_HYBRID_NORMAL,
+                            "{name}: normal component {k} {n} was {before}"
+                        );
+                    }
+                } else {
+                    assert_eq!(
+                        fnv(&[&albedo, &normal]),
+                        hash_at(2 * index + world as usize),
+                        "{name}"
+                    );
+                }
+            }
+        }
+        assert!(normals.next().is_none(), "every golden normal was compared");
+    }
+
     /// Values the kernels must not read change nothing, bit for bit, on every gallery scene and
     /// both routes: the inversion sphere at strength 0, the Julia constant at mix 0, the orbit
-    /// controls of the families without an orbit constant. (The neutral defaults against the
-    /// kernels before these parameters were compared once, A/B over the same scenes: 34 of 36
-    /// routes bit-identical, Hybrid on the world route within ULPs, normals within 2.6e-4,
-    /// because NVPTX's multiply-add fusion follows the code layout; a cross-build golden image
-    /// would pin that layout and the driver, so it is not a test.)
+    /// controls of the families without an orbit constant.
     #[test]
     fn cuda_inactive_orbit_and_inversion_values_change_nothing() {
         let _gpu_test = crate::test_gpu::lock();
@@ -1671,15 +1737,19 @@ mod tests {
 
     /// Fractional iterations, the Julia mix, the orbit offset and the inversion strength morph
     /// continuously: a step of 1e-3 moves the normals far less than the whole unit step does.
-    /// Iterations are probed inside the unit and on arriving at the next integer, not on
-    /// leaving one: at an integer n the pixels whose normal stencil lies inside the n-iteration
-    /// set (estimate 0, zero gradient: the kernels' fallback normal) gain the gradient of the
-    /// (n+1)-th estimate at any fraction above 0. Measured on this preset: the same 66 of 3366
-    /// hit pixels from 4.000001 to 4.5, every other pixel continuous.
+    /// The iteration regression also checks individual pixels when leaving an integer: a
+    /// frame average alone hid the zero-gradient endpoint discontinuity.
     #[test]
     fn cuda_animated_formula_controls_are_continuous() {
         let _gpu_test = crate::test_gpu::lock();
+        let _ = env_logger::try_init();
+        let initialized = std::time::Instant::now();
+        println!("fractional: initializing CUDA module");
         let mut gpu = Gpu::new().unwrap();
+        println!(
+            "fractional: CUDA initialized in {:?}",
+            initialized.elapsed()
+        );
         let mut base = Scene::preset(FAMILY_BULB);
         base.render.iterations = 4.0;
         let normals = |gpu: &mut Gpu, edit: &dyn Fn(&mut Scene)| {
@@ -1735,12 +1805,170 @@ mod tests {
                 );
             }
         }
+        // Probe both sides of the integer on the single and world routes. Bound
+        // each pixel's change so a frame average cannot hide discontinuities.
+        let camera = base.pack(96, 64);
+        let v = |i| glam::Vec3::from_slice(&camera[i..i + 3]);
+        let (forward, right, up) = (v(P_CAM_FORWARD), v(P_CAM_RIGHT), v(P_CAM_UP));
+        for world in [false, true] {
+            let sample = |gpu: &mut Gpu, iterations: f32| {
+                let mut scene = base.clone();
+                scene.render.iterations = iterations;
+                if world {
+                    scene = crate::world::WorldDocument::from_scene(&scene)
+                        .snapshot(0.0)
+                        .unwrap();
+                }
+                let started = std::time::Instant::now();
+                let normal = frame_guides(gpu, &scene)[2].clone();
+                println!(
+                    "fractional: world={world}, n={iterations}, render {:?}",
+                    started.elapsed()
+                );
+                assert!(normal.iter().flatten().all(|n| n.is_finite()));
+                normal
+            };
+            let unit = normal_gap(&sample(&mut gpu, 4.0), &sample(&mut gpu, 5.0));
+            for (a, b) in [(4.0, 4.000001), (4.0, 4.001), (4.999, 5.0), (5.0, 5.001)] {
+                let x = sample(&mut gpu, a);
+                let y = sample(&mut gpu, b);
+                let mut both = 0;
+                let mut jumps = 0;
+                let mut maximum = 0.0f32;
+                let mut fallback = 0;
+                let mut fallback_maximum = 0.0f32;
+                for (pixel, (x, y)) in x.iter().zip(&y).enumerate() {
+                    if x[..3] != [0.0; 3] && y[..3] != [0.0; 3] {
+                        both += 1;
+                        let gap = glam::Vec3::from_slice(x).distance(glam::Vec3::from_slice(y));
+                        maximum = maximum.max(gap);
+                        jumps += (gap > 0.25) as usize;
+                        let (px, py) = ((pixel % 96) as u32, (pixel / 96) as u32);
+                        let nx = 2.0
+                            * (px as f32
+                                + standard_surface_bsdf::sampling::sobol(px ^ 19, py, 0, 0))
+                            / 96.0
+                            - 1.0;
+                        let ny = 1.0
+                            - 2.0
+                                * (py as f32
+                                    + standard_surface_bsdf::sampling::sobol(px ^ 19, py, 0, 1))
+                                / 64.0;
+                        let ray =
+                            (forward + right * nx * camera[P_HALF_W] + up * ny * camera[P_HALF_H])
+                                .normalize();
+                        if a.fract() == 0.0 && glam::Vec3::from_slice(x).dot(-ray) > 0.999999 {
+                            fallback += 1;
+                            fallback_maximum = fallback_maximum.max(gap);
+                        }
+                    }
+                }
+                println!(
+                    "fractional world={world}, {a}->{b}: hits={both}, jumps={jumps}, max={maximum}, fallback={fallback}, fallback_max={fallback_maximum}"
+                );
+                assert!(both > 3000, "fixture must exercise the interior endpoint");
+                let (flips, mean) = normal_gap(&x, &y);
+                assert!(
+                    flips <= unit.0.max(0.005) && 10.0 * mean < unit.1,
+                    "world={world}, {a}->{b}: flips={flips}, mean={mean}, unit={unit:?}"
+                );
+                assert!(
+                    maximum < 0.25,
+                    "world={world}, {a}->{b}: maximum per-pixel normal change {maximum}"
+                );
+            }
+        }
         // Mix 1 is the Julia form: the constant alone, whatever the point.
         let julia = normals(&mut gpu, &|s| {
             s.julia = [0.35, 0.35, -0.4];
             s.julia_mix = 1.0;
         });
         assert!(julia.iter().any(|n| n[..3] != [0.0; 3]));
+    }
+
+    /// A camera inside the finite four-iteration set but outside the fifth probes
+    /// the actual zero-gradient endpoint, independently of cone-start hit positions.
+    #[test]
+    fn cuda_fractional_normals_leave_zero_gradient_endpoints_continuously() {
+        let _gpu_test = crate::test_gpu::lock();
+        let mut gpu = Gpu::new().unwrap();
+        let mut scene = Scene::preset(FAMILY_BULB);
+        let p = scene.pack(96, 64);
+        let v = |i| glam::Vec3::from_slice(&p[i..i + 3]);
+        let (forward, right, up) = (v(P_CAM_FORWARD), v(P_CAM_RIGHT), v(P_CAM_UP));
+        let nx =
+            2.0 * (45.0 + standard_surface_bsdf::sampling::sobol(45 ^ 19, 16, 0, 0)) / 96.0 - 1.0;
+        let ny =
+            1.0 - 2.0 * (16.0 + standard_surface_bsdf::sampling::sobol(45 ^ 19, 16, 0, 1)) / 64.0;
+        let ray = (forward + right * nx * p[P_HALF_W] + up * ny * p[P_HALF_H]).normalize();
+        // CUDA pick measured this point at n=4.000001 on the original kernels.
+        let point = v(P_CAM_ORIGIN) + ray * (2.4022722 / forward.dot(ray));
+        scene.camera.distance = 0.1;
+        scene.camera.target =
+            (point + forward * (scene.camera.distance * scene.formula.framing_radius())).to_array();
+        scene.camera.fov_y_degrees = 0.5;
+        scene.camera.f_number = 0.0;
+        scene.render.iterations = 4.0;
+        scene.render.max_bounces = 0;
+        scene.render.adaptive.enabled = false;
+        scene.render.denoise.enabled = false;
+        for world in [true, false] {
+            let route = |n| {
+                let mut s = scene.clone();
+                s.render.iterations = n;
+                if world {
+                    crate::world::WorldDocument::from_scene(&s)
+                        .snapshot(0.0)
+                        .unwrap()
+                } else {
+                    s
+                }
+            };
+            let a = frame_guides(&mut gpu, &route(4.0))[2].clone();
+            let p = route(4.0).pack(96, 64);
+            let v = |i| glam::Vec3::from_slice(&p[i..i + 3]);
+            let (forward, right, up) = (v(P_CAM_FORWARD), v(P_CAM_RIGHT), v(P_CAM_UP));
+            let mut fallback = 0;
+            for (i, a) in a.iter().enumerate() {
+                let (x, y) = ((i % 96) as u32, (i / 96) as u32);
+                let nx = 2.0 * (x as f32 + standard_surface_bsdf::sampling::sobol(x ^ 19, y, 0, 0))
+                    / 96.0
+                    - 1.0;
+                let ny = 1.0
+                    - 2.0 * (y as f32 + standard_surface_bsdf::sampling::sobol(x ^ 19, y, 0, 1))
+                        / 64.0;
+                let ray = (forward + right * nx * p[P_HALF_W] + up * ny * p[P_HALF_H]).normalize();
+                fallback += (glam::Vec3::from_slice(a).dot(-ray) > 0.999999) as usize;
+            }
+            println!(
+                "zero-gradient world={world}: fallback={fallback}/{}",
+                a.len()
+            );
+            assert!(
+                fallback * 100 > 99 * a.len(),
+                "fixture must exercise actual integer fallback normals"
+            );
+            // This camera lies inside the zero-gradient integer endpoint. The
+            // smallest positive fraction exercises shading while retaining hits;
+            // larger steps also exercise the unsigned DE's march convergence.
+            let n = 4.000001;
+            let b = frame_guides(&mut gpu, &route(n))[2].clone();
+            let mut maximum = 0.0f32;
+            let mut both = 0;
+            for (a, b) in a.iter().zip(&b) {
+                if a[..3] != [0.0; 3] && b[..3] != [0.0; 3] {
+                    maximum =
+                        maximum.max(glam::Vec3::from_slice(a).distance(glam::Vec3::from_slice(b)));
+                    both += 1;
+                }
+            }
+            println!("zero-gradient world={world}, 4->{n}: hits={both}, max={maximum}");
+            assert!(both * 100 > 99 * a.len());
+            assert!(
+                maximum < 0.01,
+                "zero-gradient endpoint jumped: world={world}, 4->{n}, max={maximum}"
+            );
+        }
     }
 
     /// Explicit visual probe; artifacts remain under target and are not scene templates.
