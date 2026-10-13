@@ -56,7 +56,7 @@ Documentation: [render and quality profiles](docs/render-profiles.md), [workspac
     middle drag pans, the wheel zooms; released drags coast and ease out with the rotate decay).
   - When you release the button, the orbit pivot sits in front of the camera, so orbiting
     continues from where you flew.
-  - Backtick / tilde switches between horizon lock and free flight; switching to the lock
+  - L switches between horizon lock and free flight; switching to the lock
     levels a resting camera smoothly too. Roll and mode are saved with the camera and survive
     releasing RMB; the orbit keeps the roll.
   - H restores the loaded preset/bookmark's camera; F frames the fractal's declared bounds
@@ -169,7 +169,8 @@ python bootstrap.py r                                  # build, warm the CUDA ca
 | wheel             | zoom                                                                                                       |
 | hold right button | fly: mouse looks, WASD moves, R/Space up, C down, Q/E rolls (tilts under the lock), Shift x4, Alt x0.1, wheel forward / back, Ctrl aligns |
 | double-click      | recentre                                                                                                   |
-| `Tab`             | hide the panels                                                                                            |
+| `` ` ``           | hide the panels: the viewport alone (the key left of 1 on any layout)                                       |
+| `Tab`             | the Add menu at the cursor: type to filter, Enter or a click creates the node (also in the Outliner's and Timeline's right-click menus) |
 | `F12` | window screenshot: the whole window as EXR + PQ PNG (see *Window screenshots*); under an attached debugger Windows takes `F12` as its break key, use File → *Window screenshot* |
 | `Ctrl+N`, `Ctrl+O`, `Ctrl+S`, `Ctrl+Shift+S` | new scene (the one WarpBro opens with, nothing kept), open, save, save as |
 | `Space`           | pause                                                                                                      |

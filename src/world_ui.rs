@@ -151,6 +151,50 @@ struct OutlinerCache {
     model: OutlinerModel,
     config: OutlinerConfig,
 }
+/// The kinds a user creates, in the order every Add menu lists them (the outliner's + Add and
+/// its context menu, the timeline layer's Add child, the Tab menu).
+const ADD_KINDS: [WorldKind; 11] = [
+    WorldKind::Fractal,
+    WorldKind::Camera,
+    WorldKind::DirectionalLight,
+    WorldKind::Environment,
+    WorldKind::Group,
+    WorldKind::Mask,
+    WorldKind::Material,
+    WorldKind::RenderSettings,
+    WorldKind::QualitySettings,
+    WorldKind::ViewportSettings,
+    WorldKind::OutputSettings,
+];
+/// The outliner context action that adds a kind: this prefix and its label.
+const ADD_ACTION: &str = "add:";
+/// The kind an outliner context action adds ([`ADD_ACTION`]).
+fn add_action(action: &str) -> Option<WorldKind> {
+    let label = action.strip_prefix(ADD_ACTION)?;
+    ADD_KINDS
+        .into_iter()
+        .find(|kind| kind_label(*kind) == label)
+}
+/// One button per [`ADD_KINDS`] entry inside a menu: the kind clicked (the menu closes).
+fn add_kind_buttons(ui: &mut egui::Ui) -> Option<WorldKind> {
+    for kind in ADD_KINDS {
+        if ui
+            .button(format!("{} {}", kind_icon(kind), kind_label(kind)))
+            .clicked()
+        {
+            ui.close();
+            return Some(kind);
+        }
+    }
+    None
+}
+/// The open Tab Add menu: where, its search, and whether the search still needs focus.
+struct AddMenu {
+    at: Pos2,
+    query: String,
+    focus: bool,
+}
+
 /// The curve effects' rows (Simplify, Smooth, Euler filter: label, parameters, Apply) inside a
 /// three-column grid, on one set of parameters: the timeline's Effects menu applies the chosen
 /// effect to selected keys, the Takes panel to the selected take. Times are in seconds (the
@@ -311,6 +355,8 @@ pub struct WorldUi {
     pub hide_shy: bool,
     /// Parameters of the timeline's curve effects (Effects menu).
     pub(crate) effects: EffectParams,
+    /// The Tab Add menu while open (`add_menu_ui`).
+    add_menu: Option<AddMenu>,
     pub attribute_label_width: f32,
     /// Authored outline/canvas split; narrow panels only clamp its drawn width.
     pub timeline_outline_width: f32,
@@ -366,6 +412,7 @@ impl Default for WorldUi {
             looping: true,
             hide_shy: true,
             effects: EffectParams::default(),
+            add_menu: None,
             attribute_label_width: 180.0,
             timeline_outline_width: 340.0,
             timeline_width: 0.0,
@@ -793,36 +840,75 @@ impl WorldUi {
             e.click_select(Some(id), add);
         }
     }
+    /// Create a `kind` node named after its kind under `parent` (None: the root); it becomes
+    /// the selection. Every Add menu ends here.
+    fn create(&mut self, e: &mut WorldEditor, kind: WorldKind, parent: Option<NodeId>) {
+        self.command(
+            e,
+            WorldCommand::Create {
+                kind,
+                name: kind_label(kind).into(),
+                parent,
+            },
+        );
+    }
+    /// Open the Tab Add menu at `at` (screen points), its search empty and focused.
+    pub(crate) fn open_add_menu(&mut self, at: Pos2) {
+        self.add_menu = Some(AddMenu {
+            at,
+            query: String::new(),
+            focus: true,
+        });
+    }
+    /// The Tab Add menu while open: a search over [`ADD_KINDS`]; a click or Enter (the first
+    /// match) creates at the root, Escape or a click elsewhere closes it.
+    pub(crate) fn add_menu_ui(&mut self, ctx: &egui::Context, e: &mut WorldEditor) {
+        let Some(mut menu) = self.add_menu.take() else {
+            return;
+        };
+        let mut chosen = None;
+        let area = egui::Area::new(egui::Id::new("add_node_menu"))
+            .order(egui::Order::Foreground)
+            .fixed_pos(menu.at)
+            .show(ctx, |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(180.0);
+                    let edit =
+                        ui.add(egui::TextEdit::singleline(&mut menu.query).hint_text("Add node…"));
+                    if std::mem::take(&mut menu.focus) {
+                        edit.request_focus();
+                    }
+                    let query = menu.query.to_lowercase();
+                    let matches: Vec<WorldKind> = ADD_KINDS
+                        .into_iter()
+                        .filter(|kind| kind_label(*kind).to_lowercase().contains(&query))
+                        .collect();
+                    if edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        chosen = matches.first().copied();
+                    }
+                    for kind in matches {
+                        if ui
+                            .button(format!("{} {}", kind_icon(kind), kind_label(kind)))
+                            .clicked()
+                        {
+                            chosen = Some(kind);
+                        }
+                    }
+                });
+            });
+        if let Some(kind) = chosen {
+            self.create(e, kind, None);
+        } else if !area.response.clicked_elsewhere()
+            && !ctx.input(|i| i.key_pressed(egui::Key::Escape))
+        {
+            self.add_menu = Some(menu);
+        }
+    }
     pub fn outliner(&mut self, ui: &mut egui::Ui, e: &mut WorldEditor) {
         ui.horizontal(|ui| {
             ui.menu_button(format!("{} Add", ph::ADD), |ui| {
-                for kind in [
-                    WorldKind::Fractal,
-                    WorldKind::Camera,
-                    WorldKind::DirectionalLight,
-                    WorldKind::Environment,
-                    WorldKind::Group,
-                    WorldKind::Mask,
-                    WorldKind::Material,
-                    WorldKind::RenderSettings,
-                    WorldKind::QualitySettings,
-                    WorldKind::ViewportSettings,
-                    WorldKind::OutputSettings,
-                ] {
-                    if ui
-                        .button(format!("{} {}", kind_icon(kind), kind_label(kind)))
-                        .clicked()
-                    {
-                        self.command(
-                            e,
-                            WorldCommand::Create {
-                                kind,
-                                name: kind_label(kind).into(),
-                                parent: None,
-                            },
-                        );
-                        ui.close();
-                    }
+                if let Some(kind) = add_kind_buttons(ui) {
+                    self.create(e, kind, None);
                 }
             });
             if ui
@@ -908,8 +994,16 @@ impl WorldUi {
                         );
                     }
                 }
+                OutlinerAction::ContextEmpty { action } => {
+                    if let Some(kind) = add_action(&action) {
+                        self.create(e, kind, None);
+                    }
+                }
                 OutlinerAction::Context { id, action } => {
                     if let Some(id) = map.get(&id).copied() {
+                        if let Some(kind) = add_action(&action) {
+                            self.create(e, kind, Some(id));
+                        }
                         match action.as_str() {
                             "duplicate" => self.command(e, WorldCommand::Duplicate(vec![id])),
                             "delete" => self.command(e, WorldCommand::Delete(id)),
@@ -1000,7 +1094,14 @@ impl WorldUi {
                     .with_visibility_on_right(true)
                     .with_row_height(24.0);
                 cache.config.context_items = vec![
-                    ContextItem::new("duplicate", "Duplicate"),
+                    // On a row: a child of it; on the empty area: at the root.
+                    ContextItem::new("add", "Add").with_children(ADD_KINDS.map(|kind| {
+                        ContextItem::new(
+                            format!("{ADD_ACTION}{}", kind_label(kind)),
+                            format!("{} {}", kind_icon(kind), kind_label(kind)),
+                        )
+                    })),
+                    ContextItem::new("duplicate", "Duplicate").with_separator(),
                     ContextItem::new("unparent", "Move to root"),
                     ContextItem::new("active", "Make active camera / environment"),
                     ContextItem::new("delete", "Delete").with_separator(),
@@ -1795,6 +1896,12 @@ impl WorldUi {
                 self.select(e, n.id, false, false, nodes);
             }
             source.context_menu(|ui| {
+                ui.menu_button("Add child", |ui| {
+                    if let Some(kind) = add_kind_buttons(ui) {
+                        self.create(e, kind, Some(n.id));
+                    }
+                });
+                ui.separator();
                 if ui
                     .add_enabled(!n.locked, egui::Button::new("Duplicate"))
                     .clicked()
@@ -3357,6 +3464,18 @@ mod tests {
             },
         }
     }
+    #[test]
+    fn every_add_menu_entry_names_its_kind_once() {
+        for kind in ADD_KINDS {
+            assert_eq!(
+                add_action(&format!("{ADD_ACTION}{}", kind_label(kind))),
+                Some(kind)
+            );
+        }
+        assert_eq!(add_action("duplicate"), None);
+        assert_eq!(add_action("add:Nothing"), None);
+    }
+
     #[test]
     fn timeline_splitter_drags_without_editing_document_and_retains_width_when_narrow() {
         let mut e = editor();

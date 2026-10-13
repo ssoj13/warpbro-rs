@@ -533,7 +533,7 @@ impl App {
                     if ui
                         .selectable_label(self.scene.camera.free_flight, ph::FLIGHT)
                         .on_hover_text(
-                            "Free flight / horizon lock · RMB + WASD, R / Space up, C down, Q/E roll, Shift fast, Alt slow, Ctrl align",
+                            "Free flight / horizon lock (L) · RMB + WASD, R / Space up, C down, Q/E roll, Shift fast, Alt slow, Ctrl align",
                         )
                         .clicked()
                     {

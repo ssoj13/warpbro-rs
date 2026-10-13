@@ -960,7 +960,7 @@ impl App {
                         });
                         *metrics = metrics.normalized();
                         ui.label("Attribute Editor, Timeline and Render Settings share these sizes.");
-                        ui.label("RMB: fly · wheel: forward / back · `: horizon/free flight");
+                        ui.label("RMB: fly · wheel: forward / back · L: horizon/free flight");
                         ui.label("H: restore camera · F: frame bounds (without RMB)");
                     }
                 }
@@ -3291,7 +3291,14 @@ impl App {
                     self.fly = None;
                     ui.close();
                 }
-                if ui.button("Hide UI    Tab").clicked() {
+                if crate::hotkeys::menu_item(
+                    ui,
+                    "Hide UI",
+                    crate::hotkeys::Scope::Global,
+                    crate::hotkeys::Command::ToggleUi,
+                )
+                .clicked()
+                {
                     self.show_ui = false;
                     ui.close();
                 }
@@ -4247,6 +4254,12 @@ impl App {
         if hotkeys::consume(&ctx, Scope::Global, Hotkey::ToggleUi) {
             self.show_ui = !self.show_ui;
         }
+        if hotkeys::consume(&ctx, Scope::Global, Hotkey::AddNode) {
+            let at = ctx
+                .pointer_hover_pos()
+                .unwrap_or_else(|| ctx.content_rect().center());
+            self.world_ui.open_add_menu(at);
+        }
         // A window shot armed in an earlier frame is captured after this one.
         if let Some((_, drawn)) = &mut self.window_shot {
             *drawn = true;
@@ -4299,6 +4312,7 @@ impl App {
                     self.viewport(ui);
                 }
             });
+        self.world_ui.add_menu_ui(root.ctx(), &mut self.world);
 
         if !self.viewport_visible {
             if let Some(request) = &mut self.request {
@@ -5824,8 +5838,8 @@ mod tests {
         );
         let first_yaw = app.scene.camera.yaw_degrees;
         assert!(
-            app.fly.as_ref().unwrap().momentum.angular.length() > 0.0,
-            "The shared controller must receive angular momentum from mouse-look"
+            app.fly.as_ref().unwrap().has_motion(),
+            "The shared controller must take the mouse-look turn to ease in"
         );
         frame(&mut app, vec![]);
         assert!(
@@ -5854,8 +5868,8 @@ mod tests {
             "Flight must end once release inertia settles"
         );
         let toggle = |pressed, shift| egui::Event::Key {
-            key: egui::Key::Backtick,
-            physical_key: Some(egui::Key::Backtick),
+            key: egui::Key::L,
+            physical_key: Some(egui::Key::L),
             pressed,
             repeat: false,
             modifiers: egui::Modifiers {
@@ -5866,7 +5880,7 @@ mod tests {
         frame(&mut app, vec![toggle(true, false), button(true)]);
         assert!(
             app.scene.camera.free_flight,
-            "Backtick must enable free flight while RMB is held"
+            "L must enable free flight while RMB is held"
         );
         let roll = |pressed| egui::Event::Key {
             key: egui::Key::E,
@@ -5904,9 +5918,10 @@ mod tests {
         frame(&mut app, vec![toggle(true, true)]);
         assert!(
             !app.scene.camera.free_flight,
-            "Shift+backtick (tilde) must restore horizon mode"
+            "Shift+L must restore horizon mode"
         );
-        for _ in 0..240 {
+        // The levelling spring's time constant is the rotate decay: ten of them settle it.
+        for _ in 0..(10.0 * 60.0 * app.controls.rotate_decay) as usize {
             frame(&mut app, vec![]);
         }
         // Horizon mode levels the resting camera smoothly onto the nearest world plane.
@@ -6018,7 +6033,8 @@ mod tests {
             &mut app,
             vec![flight_key(egui::Key::Q, false), button(false)],
         );
-        for _ in 0..240 {
+        // Ten time constants of the levelling spring (the rotate decay).
+        for _ in 0..(10.0 * 60.0 * app.controls.rotate_decay) as usize {
             frame(&mut app, vec![]);
         }
         assert!(
@@ -6181,7 +6197,7 @@ mod tests {
                     fly.momentum.linear.length() < momentum.linear.length(),
                     "{name} must damp"
                 );
-            } else {
+            } else if matches!(intent, CameraIntent::Roll { .. }) {
                 assert!(
                     fly.orientation.angle_between(before.orientation) > 1e-4,
                     "{name}"
@@ -6190,6 +6206,13 @@ mod tests {
                     fly.momentum.angular.length() < momentum.angular.length(),
                     "{name} must damp"
                 );
+            } else {
+                // Smoothed look: the turn the mouse asked for keeps easing in, without momentum.
+                assert!(
+                    fly.orientation.angle_between(before.orientation) > 1e-6,
+                    "{name}"
+                );
+                assert_eq!(fly.momentum.angular, glam::Vec3::ZERO, "{name}");
             }
             for _ in 0..600 {
                 fly.update_dynamics(1.0 / 60.0);

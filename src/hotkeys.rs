@@ -57,7 +57,10 @@ pub enum Scope {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Command {
+    /// Hide / show every panel: the viewport alone, full window.
     ToggleUi,
+    /// The Add menu at the cursor: type to filter, Enter creates (Houdini / Nuke Tab menu).
+    AddNode,
     /// Save a screenshot of the whole window (EXR + PQ PNG, `window_shot`).
     WindowShot,
     /// File > New scene / Open / Save / Save as.
@@ -152,7 +155,9 @@ const fn double_tap(binding: Binding) -> Binding {
     }
 }
 pub const GLOBAL: &[Binding] = &[
-    binding(Command::ToggleUi, Key::Tab, Modifiers::NONE),
+    // The key left of 1 on every layout (` on US, ё on Russian).
+    physical(Command::ToggleUi, Key::Backtick, Modifiers::NONE),
+    binding(Command::AddNode, Key::Tab, Modifiers::NONE),
     binding(Command::WindowShot, Key::F12, Modifiers::NONE),
     binding(Command::NewScene, Key::N, Modifiers::COMMAND),
     binding(Command::OpenScene, Key::O, Modifiers::COMMAND),
@@ -173,7 +178,7 @@ pub const GLOBAL: &[Binding] = &[
 pub const VIEWPORT: &[Binding] = &[
     binding(Command::Fit, Key::F, Modifiers::NONE),
     binding(Command::Home, Key::H, Modifiers::NONE),
-    property(Command::Flight, Key::Backtick),
+    property(Command::Flight, Key::L),
     binding(Command::Play, Key::Space, Modifiers::NONE),
     binding(
         Command::Tool(crate::app::ViewTool::Select),
