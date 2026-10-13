@@ -1,5 +1,75 @@
 # Release and NVIDIA PR checkpoint — 2026-10-13
 
+## Latest checkpoint (supersedes the historical preparation state below)
+
+All four NVIDIA PRs are submitted as normal OPEN/non-draft PRs, from our fork:
+[1509 constant memory](https://github.com/NVIDIA/cuda-rust/pull/1509),
+[1510 Cargo profiles](https://github.com/NVIDIA/cuda-rust/pull/1510),
+[1511 inline intent](https://github.com/NVIDIA/cuda-rust/pull/1511), and
+[1512 scalar floors](https://github.com/NVIDIA/cuda-rust/pull/1512).
+No direct upstream push or merge was attempted. Source branches are
+nvidia/fix/constant-memory-lto (5e34bad84), nvidia/fix/release-profile-pins (f6aeeceda),
+nvidia/feat/inline-intent (9f8cee663), nvidia/fix/scalar-floors (4d5f4d2ad).
+Original Alex Khal author/DCO is preserved on the first three; current sign-off is added.
+Current pinned-nightly Linux tests, backend tests, clippy, fmt and SPDX pass.
+GPU examples pass: constant_memory with device LTO and two 256-element rewrites;
+const_generic VALUE=4/8; addressof_sharedarray pointer/device-call and raw-receiver checks.
+Scalar generator/codegen tests, ABI/current-output and book stamp checks pass;
+the canonical Linux scalar catalog/book stamp is 12fe4e6c, with only target/backend
+fields of 64 records changed. Other 965 records/all 1029 ABI identities stay identical.
+The final scalar checks are in nvidia-scalar-{linux-verified,final-guards}.log.
+Every branch's SPDX/fmt receipt is nvidia-<task>-guards.log. Read current PR CI/reviews
+before any further upstream action; reviewers may need to authorize hosted runs.
+
+Our compiler main/origin is now 5e15109343fadd82d73ec95dc8a737ebdbfebb60, containing
+backport 6dc3dc7a00ad196fc0caaf4e6cdab00e40fcab85 and a standalone backend pin to that
+verified backport. Original untracked crates/ and inst.cmd were preserved.
+Own tests: 318 generator tests, 1221 codegen units, 261 cargo-oxide units plus setup
+integration, clippy and fmt pass; ABI ledger remains 1029. Private native backend
+release build passes. A real Rust scalar project compiles --arch sm_75 and runs on
+RTX 3080 Ti with 256 bit-exact mul/fma results (fork-rust-probe-{build-verified,run}.log).
+Fixture lives on D:/codex-checks-20261013/scalar-rust-probe; backend is
+D:/codex-checks-20261013/own-native-target/release/rustc_codegen_cuda.dll.
+An initial direct debug backend build hit MSVC's object limit; the normal Windows
+release profile works. The fixture needed RUSTC_BOOTSTRAP=1, as WarpBro already sets.
+
+Compiler main upload initially failed three times with connection resets. The successful
+command used HTTPS, a process-local gh credential helper, HTTP/1.1 and http.postBuffer:
+git -c credential.helper= -c 'credential.helper=!gh auth git-credential'
+-c http.version=HTTP/1.1 -c http.postBuffer=524288000 push https://github.com/ssoj13/cuda-rust-windows.git main.
+Remote main SHA was then verified through GitHub API. No global Git settings were changed.
+
+WarpBro currently has uncommitted release-candidate changes: exactly 13 CUDA Git lock
+pins and bootstrap.py pin changed from a11d4cc to 5e1510934; Cargo.toml/windows-sys
+unchanged, package version still 0.1.0. CHANGELOG.md now describes the reissue rather
+than obsolete intermediate failures. Root graph reindexed bootstrap/changelog;
+detect_changes(all) reports expected 3 files/LOW. Source candidate test is running in
+session 99189, through buildlock, with CARGO_TARGET_DIR=D:/codex-checks-20261013/warp-target,
+CARGO_BUILD_JOBS=4, CARGO_INCREMENTAL=0, explicit private backend and pinned old LLVM llc.
+Receipt: reissue-full-tests-retry.log. An initial attempt before compiler upload failed
+because its new SHA was not yet available remotely; retry began after successful upload.
+Do not claim the new WarpBro candidate verified until this test completes successfully.
+
+The old v0.1.0 GitHub release/tag remain intact. Both downloaded backup archives pass
+API SHA-256, size and ZIP CRC; receipt warp-release-backup-verified.json, data under
+D:/codex-checks-20261013/warp-release-before. After candidate tests, finish cubin release
+build, clippy/fmt and smoke, commit/push expected root changes, preserve backup tag,
+move annotated v0.1.0 only as authorized, wait tag CI and verify new assets before
+considering the reissue complete. Do not bump version or merge unrelated old branches.
+
+Environmental precautions: Windows Git checkout in NVIDIA trees had CRLF in imported.json
+and Bash scripts. Linux hash/script checks failed honestly. Restore canonical Git-index
+bytes for these checks; do not change upstream.lock hashes to hide the mismatch. Linux
+Git cannot read Windows absolute .git worktree files, so scripts export GIT_DIR and
+GIT_WORK_TREE explicitly. The completed NVIDIA worktrees were cleaned afterward; scalar
+intrinsic files may display as dirty solely for LF/CRLF (inspect actual diff before restore).
+NVIDIA-index main stamping differing from old raw-Windows stamp was resolved by regeneration
+and independent semantic/count checks. Source scripts were not weakened.
+
+Heavy build outputs must stay on D:; C: recently had about 2 GB free. Use the global
+Windows buildlock around WSL and native commands. Background shader/compiler jobs from
+other sessions are not ours and must not be killed or cleaned.
+
 The current task continues the verified recovery in HANDOFF.md. The operator asked
 to merge completed work into our own main branches and reissue WarpBro v0.1.0 on
 GitHub. Never merge or push directly into NVIDIA or ansidium. The latest operator

@@ -3,11 +3,15 @@
 Active release/upstream follow-up (2026-10-13): see
 [RELEASE_PROGRESS.md](RELEASE_PROGRESS.md) before resuming. The operator requests
 reissuing WarpBro v0.1.0 after completing verification, merging only into our own
-ssoj13 repositories, and submitting the four prepared NVIDIA PRs only after their
-checks pass. No new NVIDIA PR has been submitted yet. ansidium PR #14 remains open
-and now has 56 successful CI checks, no failures or pending checks. WarpBro/fractal
-render fixes are already pushed; the compiler-main backport and NVIDIA transplants
-are still local. The existing release/tag have not been replaced.
+ssoj13 repositories, and submitting the four NVIDIA PRs after their checks pass.
+NVIDIA PRs #1509/#1510/#1511/#1512 are now OPEN/non-draft after pinned-nightly Linux,
+backend, lint, format/SPDX and focused GPU verification. ansidium PR #14 remains open
+with 56 successful CI checks and no failures or pending checks. Our compiler main
+5e1510934 is pushed, including the pinned-LLVM scalar backport and standalone backend
+pin; its real Rust sm_75 probe runs with 256 bit-exact results on RTX 3080 Ti.
+WarpBro/fractal render fixes are already pushed. WarpBro's release-candidate update
+to that compiler is under full local verification; the existing release/tag have
+not been replaced. Current logs and active job are recorded in RELEASE_PROGRESS.md.
 
 MIS follow-up (2026-10-13): fractal main/origin is now
 `c4222f4a31d61f92cead18a8fbb69d89c29f2690`. `power_heuristic` uses explicit
