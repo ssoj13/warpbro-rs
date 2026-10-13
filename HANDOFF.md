@@ -1,5 +1,14 @@
 # HANDOFF (2026-10-13, ~00:00)
 
+Active release/upstream follow-up (2026-10-13): see
+[RELEASE_PROGRESS.md](RELEASE_PROGRESS.md) before resuming. The operator requests
+reissuing WarpBro v0.1.0 after completing verification, merging only into our own
+ssoj13 repositories, and submitting the four prepared NVIDIA PRs only after their
+checks pass. No new NVIDIA PR has been submitted yet. ansidium PR #14 remains open
+and now has 56 successful CI checks, no failures or pending checks. WarpBro/fractal
+render fixes are already pushed; the compiler-main backport and NVIDIA transplants
+are still local. The existing release/tag have not been replaced.
+
 MIS follow-up (2026-10-13): fractal main/origin is now
 `c4222f4a31d61f92cead18a8fbb69d89c29f2690`. `power_heuristic` uses explicit
 `a.mul_add(a, b * b)` so homogeneous Fast and mixed-world kernels keep the same FMA arm.
