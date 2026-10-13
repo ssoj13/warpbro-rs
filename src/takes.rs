@@ -351,16 +351,16 @@ fn effected<P: Pose>(
         })
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
-    match *effect {
-        curves::Effect::EulerFilter { .. } => {
-            let (first, middle) = P::ROTATION;
-            let mut rotation = tracks[first..first + 3].to_vec();
-            curves::Effect::EulerFilter { middle }
-                .apply(&mut rotation)
-                .map_err(|e| e.to_string())?;
-            tracks.splice(first..first + 3, rotation);
-        }
-        _ => effect.apply(&mut tracks).map_err(|e| e.to_string())?,
+    // The rotation's angles are made continuous first (the Euler filter), whatever the effect:
+    // a recorded wrap at +-180 would otherwise be smoothed or fitted through as a full turn.
+    let (first, middle) = P::ROTATION;
+    let mut rotation = tracks[first..first + 3].to_vec();
+    curves::Effect::EulerFilter { middle }
+        .apply(&mut rotation)
+        .map_err(|e| e.to_string())?;
+    tracks.splice(first..first + 3, rotation);
+    if !matches!(effect, curves::Effect::EulerFilter { .. }) {
+        effect.apply(&mut tracks).map_err(|e| e.to_string())?;
     }
     Ok(s.iter()
         .map(|x| {

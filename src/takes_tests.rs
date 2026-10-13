@@ -279,6 +279,18 @@ fn the_euler_filter_and_simplify_edit_a_takes_motion_like_keys() {
         z.windows(2).all(|w| (w[1] - w[0] - 10.0).abs() < 1e-3),
         "{z:?}"
     );
+    // Smoothing a wrapped turn keeps it a 30 degree turn, never a spin through 360.
+    let smooth = take
+        .effected(&curves::Effect::Smooth {
+            iterations: 8,
+            strength: 0.5,
+        })
+        .unwrap();
+    let Poses::Transform(s) = &smooth.poses else {
+        unreachable!()
+    };
+    let z: Vec<f32> = s.iter().map(|x| x.pose.rotation_degrees[2]).collect();
+    assert!(z.windows(2).all(|w| (w[1] - w[0]).abs() < 20.0), "{z:?}");
     // Simplify keeps the samples, now on a curve within the error of the old one.
     let simple = take
         .effected(&curves::Effect::Simplify {
