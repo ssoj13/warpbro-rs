@@ -1681,9 +1681,6 @@ fn attribute_choices(path: &str) -> Vec<Value> {
             })
             .collect();
     }
-    if path == "/julia" {
-        return vec![Value::Null, json!([0.0, 0.0, 0.0])];
-    }
     // Export enums list their own variants, so the choices follow the types.
     fn variants<T: Serialize>(all: impl IntoIterator<Item = T>) -> Vec<Value> {
         all.into_iter()
@@ -1750,6 +1747,14 @@ pub(crate) fn attribute_range(path: &str) -> Option<(f64, f64)> {
         "/camera/sensor_height" => Some((0.000001, f32::MAX as f64)),
         // Axis index of the trap plane (X, Y, Z); the kernel reads min(2).
         "/trap_axis" => Some((0.0, 2.0)),
+        // The palette coordinate is 1 - exp(-trap * scale): a negative scale pins it at 0.
+        "/trap_scale" => Some((0.0, f32::MAX as f64)),
+        // Blend weights: outside 0..1 the mix and the inversion extrapolate past both forms.
+        "/julia_mix" | "/inversion_strength" => Some((0.0, 1.0)),
+        // A zero radius collapses the full inversion (no stretch to divide the estimate by).
+        "/inversion_radius" => Some((1.0e-6, 1.0e6)),
+        // The kernels split the count into whole + fraction; f32 counts are exact below 2^24.
+        "/render/iterations" => Some((0.0, 16_777_216.0)),
         "/render/denoise/interval" => Some((0.0, u32::MAX as f64)),
         // Zero would trace nothing (no step, no exit probe): one is the least that means a march.
         "/render/max_steps" | "/render/glass_probes" => Some((1.0, u32::MAX as f64)),
@@ -1951,6 +1956,9 @@ fn attribute_slider(path: &str) -> Option<Slider> {
     }
     match path {
         "/julia" => lin(-8.0, 8.0),
+        "/julia_mix" | "/inversion_strength" => lin(0.0, 1.0),
+        "/orbit_offset" | "/inversion_center" => lin(-4.0, 4.0),
+        "/inversion_radius" => log(0.01, 10.0),
         "/trap_point" => lin(-16.0, 16.0),
         "/trap_scale" => log(0.001, 32.0),
         "/trap_axis" => lin(0.0, 2.0),
@@ -2180,7 +2188,20 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
         }
         "/formula" => "The fractal family and its parameters.",
         "/julia" => {
-            "Julia mode (Mandelbulb, Mandelbox): every iteration adds this fixed constant instead of the starting point."
+            "Julia constant J (Mandelbulb, Mandelbox): the orbit constant the Julia mix blends towards."
+        }
+        "/julia_mix" => {
+            "Mandelbrot to Julia (Mandelbulb, Mandelbox): every iteration adds mix(point, Julia constant, this). 0 is the Mandelbrot form, 1 the Julia form; keys morph between them."
+        }
+        "/orbit_offset" => {
+            "Constant added every iteration on top of the orbit constant (Mandelbulb, Mandelbox): z -> z^p + c + offset. Shifts and reshapes the set."
+        }
+        "/inversion_strength" => {
+            "Spherical inversion of space before iterating (every formula): 0 off, 1 the full inversion in the sphere below, which turns the set inside out; between them a continuous blend."
+        }
+        "/inversion_center" => "Centre of the inversion sphere, in the fractal's own space.",
+        "/inversion_radius" => {
+            "Radius of the inversion sphere: points on it stay in place, nearer ones go far and far ones come near."
         }
         "/coloring" => {
             "Where the palette coordinate comes from: Radius (escape radius) or an orbit trap (origin, plane, point)."
@@ -2317,7 +2338,7 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
         "/material/emission" => "Emitted light strength.",
         "/material/emission_color" => "Emitted light colour.",
         "/render/iterations" => {
-            "Fractal iterations per distance estimate: more resolves finer detail and costs proportionally."
+            "Fractal iterations per distance estimate: more resolves finer detail and costs proportionally. Fractional counts blend into the next iteration, so keyed counts grow the detail smoothly."
         }
         "/render/max_steps" => {
             "Sphere-tracing step budget per ray. A ray that runs out of steps is unresolved: a camera ray shows the background (the OFX Direct preview keeps a sub-pixel near miss), bounce and shadow rays bring no light; the status bar reports the share. Steps a ray does not need cost nothing."
@@ -2372,8 +2393,10 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
 
 /// Why a node's parameter does nothing in its current mode (shown greyed in the Attribute
 /// Editor), or None when it is in use. `value` reads the node's other attributes. The rules follow
-/// what `Scene::pack` and the kernels read: Julia only for Mandelbulb / Mandelbox, the trap
-/// parameters per colouring mode, a Hybrid's sub-formulas only when one of its steps runs them.
+/// what `Scene::pack` and the kernels read: the orbit constant (Julia mix and constant, offset)
+/// only for Mandelbulb / Mandelbox and the constant only at a nonzero mix, the inversion sphere
+/// only at a nonzero strength, the trap parameters per colouring mode, a Hybrid's sub-formulas
+/// only when one of its steps runs them.
 pub(crate) fn inactive_reason<'a>(
     path: &str,
     value: impl Fn(&str) -> Option<&'a Value>,
@@ -2383,12 +2406,19 @@ pub(crate) fn inactive_reason<'a>(
         path.strip_prefix(prefix)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
     };
-    if under("/julia") || under("/trap_point") || under("/trap_axis") || under("/trap_scale") {
-        if under("/julia") {
-            let family = value("/formula")?.as_object()?.keys().next()?.clone();
-            return (!matches!(family.as_str(), "Mandelbulb" | "Mandelbox"))
-                .then(|| format!("The {family} formula has no Julia mode"));
+    if under("/julia") || under("/julia_mix") || under("/orbit_offset") {
+        let family = value("/formula")?.as_object()?.keys().next()?.clone();
+        if !matches!(family.as_str(), "Mandelbulb" | "Mandelbox") {
+            return Some(format!("The {family} formula has no orbit constant"));
         }
+        return (under("/julia") && value("/julia_mix")?.as_f64()? == 0.0)
+            .then(|| "Julia mix is 0".into());
+    }
+    if under("/inversion_center") || under("/inversion_radius") {
+        return (value("/inversion_strength")?.as_f64()? == 0.0)
+            .then(|| "Inversion strength is 0".into());
+    }
+    if under("/trap_point") || under("/trap_axis") || under("/trap_scale") {
         let coloring = value("/coloring")?.as_str()?;
         // fractal-kernels trap3 / hit_palette: Radius reads none, TrapOrigin only the scale, TrapPlane
         // all three, TrapPoint the point and the scale.
@@ -2497,6 +2527,11 @@ fn branches(kind: WorldKind) -> &'static [&'static str] {
         WorldKind::Fractal => &[
             "formula",
             "julia",
+            "julia_mix",
+            "orbit_offset",
+            "inversion_strength",
+            "inversion_center",
+            "inversion_radius",
             "palette",
             "coloring",
             "trap_point",
@@ -4171,7 +4206,7 @@ impl WorldDocument {
         }
         let a = self.attrs(id)?;
         if !a.is_animated(path) {
-            for parent in ["/formula", "/julia", "/material/facing"] {
+            for parent in ["/formula", "/material/facing"] {
                 if path.starts_with(&format!("{parent}/")) && a.is_animated(parent) {
                     let v = self.resolve_attribute(id, parent, frame, visiting)?;
                     if let Some(value) = v.pointer(&path[parent.len()..]) {
@@ -4300,10 +4335,6 @@ impl WorldDocument {
                 serde_json::from_value::<crate::scene::Formula>(value.clone())
                     .map_err(|e| format!("Invalid formula: {e}"))?;
             }
-            "/julia" => {
-                serde_json::from_value::<Option<[f32; 3]>>(value.clone())
-                    .map_err(|e| format!("Invalid Julia constant: {e}"))?;
-            }
             _ => {
                 let choices = attribute_choices(path);
                 if !choices.is_empty() && !choices.contains(&value) {
@@ -4311,7 +4342,7 @@ impl WorldDocument {
                 }
             }
         }
-        let discrete = matches!(path, "/formula" | "/julia" | "/material/facing")
+        let discrete = matches!(path, "/formula" | "/material/facing")
             || !numeric(&value)
             || self.node(id)?["discrete"].get(path).is_some();
         let animated = a.is_animated(path);
@@ -4368,7 +4399,7 @@ impl WorldDocument {
             }
             a.set(path, to_attr(&value));
         }
-        if matches!(path, "/formula" | "/julia" | "/material/facing") && !key && !animated {
+        if matches!(path, "/formula" | "/material/facing") && !key && !animated {
             let mut children = Attrs::new();
             discover(&value, path, &mut children);
             for (child, v) in children.iter() {
@@ -5187,6 +5218,11 @@ impl WorldDocument {
         if let Some(first) = scene.objects.first() {
             scene.formula = first.formula;
             scene.julia = first.julia;
+            scene.julia_mix = first.julia_mix;
+            scene.orbit_offset = first.orbit_offset;
+            scene.inversion_strength = first.inversion_strength;
+            scene.inversion_center = first.inversion_center;
+            scene.inversion_radius = first.inversion_radius;
             scene.object = first.object;
             scene.object_world = first.object_world;
             scene.material = first.material.clone();

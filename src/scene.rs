@@ -207,6 +207,11 @@ impl Hybrid {
 
 const BOUND_FRAMING: f32 = 1.2;
 const REACH_MARGIN_FRAMES: f32 = 2.5;
+/// How far, in object units (the bulb is ~1.2), an inside-out inversion's unbounded set is
+/// marched (`Scene::inversion_reach`): beyond it the far field, the image of the inversion
+/// centre's tiny neighbourhood, is left as background. 10^4 keeps the clip sphere's squared
+/// radius far inside f32 range in the kernels' ray-sphere test.
+const INVERSION_FAR_REACH: f32 = 1.0e4;
 /// The march step budget of every preset. A budget, not a quality knob: a ray that runs out of
 /// steps is `Outcome::Unresolved` (the integrator's per-ray policy in fractal-kernels `trace_path`),
 /// and only rays that need the steps pay for them. Measured
@@ -283,7 +288,9 @@ impl Formula {
         }
     }
 
-    pub fn supports_julia(&self) -> bool {
+    /// Whether the formula iterates z <- f(z) + c with the shared orbit constant (fractal-kernels
+    /// `orbit_constant`): only these read the Julia mix, the Julia constant and the orbit offset.
+    pub fn has_orbit_constant(&self) -> bool {
         matches!(self, Self::Mandelbulb(_) | Self::Mandelbox(_))
     }
 
@@ -539,7 +546,10 @@ pub enum Coloring {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Render {
-    pub iterations: u32,
+    /// Fractal iterations per distance estimate. Fractional counts are continuous: the kernels
+    /// blend the estimates after floor(n) and floor(n) + 1 iterations by the fraction
+    /// (fractal-kernels `fraction`), so a keyed count grows the detail smoothly.
+    pub iterations: f32,
     pub max_steps: u32,
     pub hit_epsilon: f32,
     /// Sphere-tracing step as a fraction of the estimate (ofx-fractal: 0.5; 0.85 measured
@@ -631,7 +641,24 @@ pub struct Scene {
     pub environment: crate::environment::Environment,
     pub name: String,
     pub formula: Formula,
-    pub julia: Option<[f32; 3]>,
+    /// The Julia constant J of the Mandelbulb / Mandelbox orbit constant (`julia_mix`).
+    pub julia: [f32; 3],
+    /// Julia mix t, 0..1: the orbit constant is c = mix(p, J, t) + `orbit_offset`, so a key
+    /// from 0 (the Mandelbrot form, c = the point) to 1 (the Julia form, c = J) morphs the
+    /// shape continuously (fractal-kernels `orbit_constant`). Mandelbulb / Mandelbox only.
+    pub julia_mix: f32,
+    /// Offset k added to the orbit constant every iteration, z <- f(z) + c + k: shifts the
+    /// set's shape without changing the distance estimate's derivative. Mandelbulb / Mandelbox.
+    pub orbit_offset: [f32; 3],
+    /// Spherical inversion pre-transform of the object point before iterating (Mandelbulber
+    /// "Spherical invert"), every family: 0 off, 1 the full inversion in the sphere
+    /// (`inversion_center`, `inversion_radius`), between them a blend that turns the set inside
+    /// out continuously (fractal-core `inversion`).
+    pub inversion_strength: f32,
+    /// Centre of the inversion sphere, in object space.
+    pub inversion_center: [f32; 3],
+    /// Radius of the inversion sphere: the sphere the full inversion leaves in place.
+    pub inversion_radius: f32,
     pub object: ObjectTransform,
     pub camera: Camera,
     pub lighting: Lighting,
@@ -818,6 +845,8 @@ impl Scene {
         }
         let half_extent =
             match self.formula {
+                // The inverted set's bound is the packed clip sphere (`Scene::inversion_reach`).
+                _ if self.inversion_strength != 0.0 => Vec3::splat(self.pack(1, 1)[P_CLIP_RADIUS]),
                 Formula::Kifs(k) if k.kind != KifsKind::Menger => {
                     Vec3::splat(k.kind.bounding_radius() * self.object.scale)
                 }
@@ -847,7 +876,7 @@ impl Scene {
         name: &str,
         formula: Formula,
         fov: f32,
-        iterations: u32,
+        iterations: f32,
         hit_epsilon: f32,
         palette: PaletteScheme,
     ) -> Self {
@@ -867,7 +896,12 @@ impl Scene {
             name: name.into(),
             colour: crate::color::default_selection(),
             formula,
-            julia: None,
+            julia: [0.0; 3],
+            julia_mix: 0.0,
+            orbit_offset: [0.0; 3],
+            inversion_strength: 0.0,
+            inversion_center: [0.0; 3],
+            inversion_radius: 1.0,
             object: ObjectTransform {
                 offset: [0.0; 3],
                 rotation_degrees: [0.0; 3],
@@ -903,14 +937,14 @@ impl Scene {
         let f = Formula::preset(code);
         let name = f.name();
         let mut s = match code {
-            FAMILY_BULB => Self::base(name, f, 38.0, 20, 0.001, P::Classic),
-            FAMILY_BOX => Self::base(name, f, 35.0, 12, 0.003, P::Ice),
-            FAMILY_QUAT => Self::base(name, f, 38.0, 16, 0.001, P::Amethyst),
-            FAMILY_KIFS => Self::base(name, f, 38.0, 12, 0.0005, P::Copper),
-            FAMILY_KLEINIAN => Self::base(name, f, 38.0, 16, 0.001, P::Ocean),
-            FAMILY_PSEUDO_KLEINIAN => Self::base(name, f, 38.0, 6, 0.001, P::Ember),
-            FAMILY_APOLLONIAN => Self::base(name, f, 38.0, 8, 0.001, P::Twilight),
-            _ => Self::base(name, f, 38.0, 12, 0.001, P::Aurora),
+            FAMILY_BULB => Self::base(name, f, 38.0, 20.0, 0.001, P::Classic),
+            FAMILY_BOX => Self::base(name, f, 35.0, 12.0, 0.003, P::Ice),
+            FAMILY_QUAT => Self::base(name, f, 38.0, 16.0, 0.001, P::Amethyst),
+            FAMILY_KIFS => Self::base(name, f, 38.0, 12.0, 0.0005, P::Copper),
+            FAMILY_KLEINIAN => Self::base(name, f, 38.0, 16.0, 0.001, P::Ocean),
+            FAMILY_PSEUDO_KLEINIAN => Self::base(name, f, 38.0, 6.0, 0.001, P::Ember),
+            FAMILY_APOLLONIAN => Self::base(name, f, 38.0, 8.0, 0.001, P::Twilight),
+            _ => Self::base(name, f, 38.0, 12.0, 0.001, P::Aurora),
         };
         // A three-quarter view a little further out than ofx-fractal's neutral default reads
         // better in the gallery.
@@ -946,7 +980,8 @@ impl Scene {
 
         let mut s = Self::preset(FAMILY_BULB);
         s.name = "Bulb · Julia".into();
-        s.julia = Some([0.35, 0.35, -0.4]);
+        s.julia = [0.35, 0.35, -0.4];
+        s.julia_mix = 1.0;
         s.camera.distance = 3.4;
         s.palette = P::Aurora;
         s.coloring = Coloring::TrapOrigin;
@@ -1054,6 +1089,29 @@ impl Scene {
             .unwrap_or(self.formula.framing_radius())
     }
 
+    /// The Mandelbulb's escape radius: its bailout, raised to the orbit constant's own reach
+    /// beyond the point, t |J| + |k| (a Julia set lies within max(bailout, |c|)), so neither the
+    /// Julia mix nor the offset cuts the set at the bailout sphere. Mix 0 with no offset is the
+    /// bailout; mix 1 is the former Julia escape max(bailout, |J|).
+    fn bulb_escape(&self, b: &Bulb) -> f32 {
+        b.bailout
+            .max(self.julia_mix * length(self.julia) + length(self.orbit_offset))
+    }
+
+    /// The object-space radius of everything the inversion pre-transform sends into the
+    /// formula's ball of radius `ball` (fractal-core `inversion::reach`). A full inversion whose
+    /// centre lies inside that ball turns it inside out: the set fills all space beyond a
+    /// sphere and is drawn out to [`INVERSION_FAR_REACH`].
+    fn inversion_reach(&self, ball: f32) -> f32 {
+        fractal_core::inversion::reach(
+            self.inversion_center,
+            self.inversion_radius,
+            self.inversion_strength,
+            ball,
+        )
+        .unwrap_or(INVERSION_FAR_REACH)
+    }
+
     /// Pack this scene into the kernel parameter block for a `w` x `h` frame.
     pub fn pack(&self, w: u32, h: u32) -> Vec<f32> {
         let mut p = vec![0.0f32; P_COUNT];
@@ -1088,13 +1146,12 @@ impl Scene {
         let r = &self.render;
         let object_radius =
             (REACH_MARGIN_FRAMES * radius).max(self.formula.bound_radius()) * self.object.scale;
-        let object_radius = match (self.formula, self.julia) {
-            (Formula::Mandelbulb(b), Some(j)) => {
-                object_radius.max(b.bailout.max(length(j)) * self.object.scale)
+        let object_radius = match self.formula {
+            Formula::Mandelbulb(b) if self.julia_mix != 0.0 || self.orbit_offset != [0.0; 3] => {
+                object_radius.max(self.bulb_escape(&b) * self.object.scale)
             }
             _ => object_radius,
         };
-        p[P_MAX_DISTANCE] = dist + length(c.target) + length(self.object.offset) + object_radius;
         // Bounding sphere (see fractal-kernels march): exact where the estimate itself says "outside".
         let clip_object = match self.formula {
             Formula::Mandelbulb(_) | Formula::QuaternionJulia(_) | Formula::Hybrid(_) => None, // set below from P_BAILOUT
@@ -1117,10 +1174,18 @@ impl Scene {
 
         // --- formula: common
         p[P_FAMILY] = self.formula.code() as f32;
-        p[P_ITERATIONS] = r.iterations as f32;
-        let julia_ok = self.formula.supports_julia() && self.julia.is_some();
-        p[P_JULIA] = julia_ok as u32 as f32;
-        put3(&mut p, P_JULIA_C, self.julia.unwrap_or([0.0; 3]));
+        p[P_ITERATIONS] = r.iterations;
+        let orbit = self.formula.has_orbit_constant();
+        p[P_JULIA] = if orbit { self.julia_mix } else { 0.0 };
+        put3(&mut p, P_JULIA_C, self.julia);
+        put3(
+            &mut p,
+            P_ORBIT_OFFSET,
+            if orbit { self.orbit_offset } else { [0.0; 3] },
+        );
+        p[P_INVERT_STRENGTH] = self.inversion_strength;
+        put3(&mut p, P_INVERT_CENTER, self.inversion_center);
+        p[P_INVERT_RADIUS] = self.inversion_radius;
         // ObjectFrame: rows of R^T so mat3(P_OBJ_AXES, x) = R^T x.
         let rot = euler_matrix(self.object.rotation_degrees);
         let rt = transpose(rot);
@@ -1182,12 +1247,7 @@ impl Scene {
             Formula::Mandelbulb(b) => {
                 pack_bulb(&mut p, b);
                 set_rotation(&mut p, b.rotation_degrees);
-                let escape = if julia_ok {
-                    b.bailout.max(length(self.julia.unwrap_or([0.0; 3])))
-                } else {
-                    b.bailout
-                };
-                p[P_BAILOUT] = escape;
+                p[P_BAILOUT] = self.bulb_escape(b);
                 p[P_BULB_FAST8] = (b.power == 8.0
                     && b.angle_scale == [1.0, 1.0]
                     && b.angle_phase_degrees == [0.0, 0.0]
@@ -1260,11 +1320,21 @@ impl Scene {
             }
         }
 
-        p[P_CLIP_RADIUS] = match clip_object {
+        let clip = match clip_object {
             Some(r) => r,
             // the escape radius, plus a hair for the f32 transform
             None => p[P_BAILOUT] * 1.001,
-        } * self.object.scale;
+        };
+        // The inversion moves the set: the sphere is the one around everything it sends into
+        // the formula's ball, and the march reaches that far.
+        let (clip, object_radius) = if self.inversion_strength == 0.0 {
+            (clip, object_radius)
+        } else {
+            let clip = self.inversion_reach(clip);
+            (clip, object_radius.max(clip * self.object.scale))
+        };
+        p[P_CLIP_RADIUS] = clip * self.object.scale;
+        p[P_MAX_DISTANCE] = dist + length(c.target) + length(self.object.offset) + object_radius;
 
         // --- colour
         p[P_COLOR_MODE] = self.coloring as u32 as f32;

@@ -565,8 +565,9 @@ fn category(path: &str) -> &'static str {
         "transform" => "Transform",
         "camera" => "Camera",
         "material" | "material_id" => "Material",
-        "fractal" | "formula" | "julia" | "palette" | "coloring" | "trap_point" | "trap_axis"
-        | "trap_scale" => "Fractal",
+        "fractal" | "formula" | "julia" | "julia_mix" | "orbit_offset" | "inversion_strength"
+        | "inversion_center" | "inversion_radius" | "palette" | "coloring" | "trap_point"
+        | "trap_axis" | "trap_scale" => "Fractal",
         "light" | "lighting" => "Light",
         "environment" => "Environment",
         "render" => "Render",
@@ -2031,27 +2032,7 @@ impl WorldUi {
             // The row icons sit in the grid's slots: own toggles left, the channel caret right.
             let config = grid_config(self.attribute_metrics);
             let (left, _) = config.icon_slots(ui, cells.actions);
-            if path == "/julia" {
-                let enabled = !lane.value.is_null();
-                if egui_widgets_config::icon_toggle(ui, left, ph::POWER, enabled, true)
-                    .on_hover_text("Enable / disable Julia")
-                    .clicked()
-                {
-                    self.command(
-                        e,
-                        WorldCommand::SetAttribute {
-                            id,
-                            path: path.clone(),
-                            value: if enabled {
-                                Value::Null
-                            } else {
-                                json!([0.0, 0.0, 0.0])
-                            },
-                            frame: self.playhead as f64,
-                        },
-                    );
-                }
-            } else if lane
+            if lane
                 .attr
                 .as_ref()
                 .is_some_and(|a| a.color && a.component.is_none())
@@ -2894,32 +2875,6 @@ impl AttrGridHooks for WorldGridHooks<'_> {
             ui.close();
         }
     }
-    fn actions(&mut self, ui: &mut egui::Ui, field: &AttrField) {
-        let Some(index) = self.index(field) else {
-            return;
-        };
-        let attr = &self.attrs[self.indices[index]];
-        let config = grid_config(self.ui_state.attribute_metrics);
-        let (left, _) = config.icon_slots(ui, ui.max_rect());
-        if attr.path == "/julia" {
-            let enabled = !self.values[index].is_null();
-            if egui_widgets_config::icon_toggle(ui, left, ph::POWER, enabled, true)
-                .on_hover_text("Enable / disable Julia")
-                .clicked()
-            {
-                self.commands.push(WorldCommand::SetAttribute {
-                    id: self.id,
-                    path: attr.path.clone(),
-                    value: if enabled {
-                        Value::Null
-                    } else {
-                        json!([0.0, 0.0, 0.0])
-                    },
-                    frame: self.frame,
-                });
-            }
-        }
-    }
     fn editor(
         &mut self,
         ui: &mut egui::Ui,
@@ -3126,14 +3081,6 @@ fn choice_label(path: &str, value: &Value) -> String {
                     .unwrap_or_else(|| "Formula".into())
             });
     }
-    if path == "/julia" {
-        return if value.is_null() {
-            "Disabled"
-        } else {
-            "Enabled"
-        }
-        .into();
-    }
     value
         .as_str()
         .map(str::to_owned)
@@ -3143,9 +3090,6 @@ fn choice_selected(path: &str, value: &Value, choice: &Value) -> bool {
     if path == "/formula" {
         return value.as_object().and_then(|v| v.keys().next())
             == choice.as_object().and_then(|v| v.keys().next());
-    }
-    if path == "/julia" {
-        return value.is_null() == choice.is_null();
     }
     value == choice
 }
@@ -3160,9 +3104,6 @@ fn schema_editor(
     attr: &WorldAttribute,
     layout: ValueEditorLayout,
 ) -> bool {
-    if attr.path == "/julia" {
-        return value_editor(ui, value, &attr.path, layout);
-    }
     if !attr.choices.is_empty() {
         let mut changed = false;
         let label = |choice: &Value| {
@@ -3187,9 +3128,6 @@ fn schema_editor(
                     }
                 }
             });
-        if attr.path == "/julia" && value.is_array() {
-            value_editor(ui, value, &attr.path, layout);
-        }
         return changed;
     }
     if let Some(range) = attr.range.filter(|_| value.is_number()) {
@@ -4385,14 +4323,6 @@ mod tests {
         apply_choice("/formula", &mut formula, &next);
         assert_eq!(choice_label("/formula", &formula), "Mandelbox");
 
-        let mut julia = Value::Null;
-        apply_choice("/julia", &mut julia, &json!([0.0, 0.0, 0.0]));
-        julia[0] = json!(0.25);
-        apply_choice("/julia", &mut julia, &json!([0.0, 0.0, 0.0]));
-        assert_eq!(julia[0], json!(0.25));
-        assert_eq!(choice_label("/julia", &julia), "Enabled");
-        apply_choice("/julia", &mut julia, &Value::Null);
-        assert_eq!(choice_label("/julia", &julia), "Disabled");
         assert_eq!(numeric_value(&json!(12u32), 13.75), json!(14u32));
     }
     #[test]
@@ -4736,7 +4666,13 @@ mod tests {
         for (path, value) in [
             ("/transform/position/0", json!(10.0)),
             ("/visible", json!(false)),
-            ("/julia", json!([0.2, 0.3, 0.4])),
+            (
+                "/formula",
+                serde_json::to_value(
+                    crate::scene::Scene::preset(crate::params::FAMILY_BOX).formula,
+                )
+                .unwrap(),
+            ),
         ] {
             e.execute(WorldCommand::SetAnimation {
                 id,
@@ -4756,7 +4692,8 @@ mod tests {
         let mut state = WorldUi::default();
         let cache = state.take_cache(&e);
         let ptr = cache.attributes[&id].as_ptr();
-        assert!(!cache.attributes[&id].iter().any(|a| a.path == "/julia/0"));
+        let scale = "/formula/Mandelbox/scale";
+        assert!(!cache.attributes[&id].iter().any(|a| a.path == scale));
         state.cache = cache;
         state.playhead = 5;
         let cache = state.take_cache(&e);
@@ -4776,14 +4713,13 @@ mod tests {
         state.playhead = 10;
         let cache = state.take_cache(&e);
         assert!(!cache.nodes.iter().find(|n| n.id == id).unwrap().visible);
-        assert!(cache.attributes[&id].iter().any(|a| a.path == "/julia/0"));
         assert_eq!(
             cache.attributes[&id]
                 .iter()
-                .find(|a| a.path == "/julia/0")
+                .find(|a| a.path == scale)
                 .unwrap()
                 .value,
-            json!(0.2)
+            json!(crate::scene::MandelBox::PRESET.scale)
         );
     }
 

@@ -64,7 +64,7 @@ fn material_preview_scene(material: Material) -> Scene {
     s.camera.yaw_degrees = 20.0;
     s.camera.pitch_degrees = 15.0;
     s.render.max_bounces = 4;
-    s.render.iterations = 8;
+    s.render.iterations = 8.0;
     s.render.exposure_stops = -0.5;
     // Neutral grey "studio" sky so metals show their own tint, not the blue sky's.
     s.lighting.sun_azimuth = 45.0;

@@ -1534,10 +1534,10 @@ fn per_object_gpu_iterations_are_independent_of_world_ray_settings() {
             .iter()
             .map(|o| o.render.iterations)
             .collect::<Vec<_>>(),
-        vec![7, 19]
+        vec![7.0, 19.0]
     );
-    assert_ne!(snapshot.render.iterations, 7);
-    assert_ne!(snapshot.render.iterations, 19);
+    assert_ne!(snapshot.render.iterations, 7.0);
+    assert_ne!(snapshot.render.iterations, 19.0);
 }
 #[test]
 fn fractal_schema_offers_all_formula_defaults_and_keeps_custom_values() {
@@ -1571,43 +1571,40 @@ fn fractal_schema_offers_all_formula_defaults_and_keeps_custom_values() {
         custom
     );
 }
+/// The orbit constant's controls are plain keyable numbers (no Julia switch): the mix keys from
+/// the Mandelbrot to the Julia form through every value between, clamps to 0..1, and undoes.
 #[test]
-fn julia_schema_toggle_accepts_custom_constants_and_is_undoable() {
+fn julia_mix_and_orbit_controls_are_keyable_clamped_numbers() {
     let mut e = editor();
     let id = find(&e, WorldKind::Fractal);
-    let descriptor = e
-        .document
-        .attributes(id, 0.0)
-        .unwrap()
-        .into_iter()
-        .find(|a| a.path == "/julia")
-        .unwrap();
-    assert_eq!(
-        descriptor.choices,
-        vec![Value::Null, json!([0.0, 0.0, 0.0])]
-    );
-    set(&mut e, id, "/julia", descriptor.choices[1].clone(), 0.0);
-    let lanes: Vec<_> = e
-        .document
-        .attributes(id, 0.0)
-        .unwrap()
-        .into_iter()
-        .filter(|a| a.path.starts_with("/julia/"))
-        .collect();
-    assert_eq!(lanes.len(), 3);
-    assert!(lanes.iter().all(|a| a.choices.is_empty()));
+    let attrs = e.document.attributes(id, 0.0).unwrap();
+    for path in ["/julia", "/julia_mix", "/orbit_offset"] {
+        let a = attrs.iter().find(|a| a.path == path).unwrap();
+        assert!(a.keyable && a.choices.is_empty() && a.slider.is_some(), "{path}");
+    }
+    e.execute(WorldCommand::SetAnimation {
+        id,
+        path: "/julia_mix".into(),
+        enabled: true,
+        frame: 0.0,
+    })
+    .unwrap();
     set(&mut e, id, "/julia", json!([0.3, 0.4, 0.5]), 0.0);
-    assert_eq!(
-        e.document.node_scene(id, 0.0).unwrap().julia,
-        Some([0.3, 0.4, 0.5])
-    );
-    set(&mut e, id, "/julia", Value::Null, 0.0);
-    assert_eq!(e.document.node_scene(id, 0.0).unwrap().julia, None);
+    set(&mut e, id, "/julia_mix", json!(0.0), 0.0);
+    set(&mut e, id, "/julia_mix", json!(1.0), 10.0);
+    let at = |e: &WorldEditor, frame: f64| e.document.node_scene(id, frame).unwrap();
+    assert_eq!(at(&e, 0.0).julia_mix, 0.0);
+    assert_eq!(at(&e, 10.0).julia_mix, 1.0);
+    let middle = at(&e, 5.0).julia_mix;
+    assert!(0.0 < middle && middle < 1.0, "a key between the forms morphs: {middle}");
+    assert_eq!(at(&e, 5.0).julia, [0.3, 0.4, 0.5]);
+    set(&mut e, id, "/julia_mix", json!(2.0), 10.0);
+    assert_eq!(at(&e, 10.0).julia_mix, 1.0, "the mix is clamped to 0..1");
+    set(&mut e, id, "/inversion_strength", json!(-1.0), 0.0);
+    assert_eq!(at(&e, 0.0).inversion_strength, 0.0);
     assert!(e.undo());
-    assert_eq!(
-        e.document.node_scene(id, 0.0).unwrap().julia,
-        Some([0.3, 0.4, 0.5])
-    );
+    assert!(e.undo());
+    assert_eq!(at(&e, 10.0).julia_mix, 1.0);
 }
 #[test]
 fn render_schema_filters_fractal_controls_but_keeps_world_settings_keys() {
@@ -1762,7 +1759,9 @@ fn fractal_slider_endpoints_pack_finite_and_hybrid_spans_match_standalone() {
         for attr in document.attributes(id, 0.0).unwrap() {
             if attr.component.is_some()
                 || !(attr.path.starts_with("/formula/")
-                    || attr.path == "/julia"
+                    || attr.path.starts_with("/julia")
+                    || attr.path.starts_with("/inversion_")
+                    || attr.path == "/orbit_offset"
                     || attr.path == "/render/iterations")
             {
                 continue;
@@ -1878,16 +1877,36 @@ fn inactive_parameters_follow_what_the_kernel_reads() {
         }
     };
     let bulb = doc(json!({"Mandelbulb": {}}), "Radius");
-    assert!(bulb("/julia").is_none());
+    assert!(bulb("/julia").is_none() && bulb("/julia_mix").is_none());
+    assert!(bulb("/orbit_offset/2").is_none());
     assert!(
         bulb("/trap_scale").is_some() && bulb("/trap_point/1").is_some(),
         "Radius reads no trap"
     );
     let kifs = doc(json!({"Kifs": {}}), "TrapPoint");
+    for path in ["/julia", "/julia_mix", "/orbit_offset/0"] {
+        assert_eq!(
+            kifs(path).as_deref(),
+            Some("The Kifs formula has no orbit constant")
+        );
+    }
+    // The constant only at a nonzero mix, the inversion sphere only at a nonzero strength.
+    let off = |path: &str, mix: f64, strength: f64| {
+        let values = [
+            ("/formula".to_owned(), json!({"Mandelbox": {}})),
+            ("/julia_mix".to_owned(), json!(mix)),
+            ("/inversion_strength".to_owned(), json!(strength)),
+        ];
+        inactive_reason(path, |p| values.iter().find(|(k, _)| k == p).map(|(_, v)| v))
+    };
+    assert_eq!(off("/julia/1", 0.0, 0.0).as_deref(), Some("Julia mix is 0"));
+    assert!(off("/julia/1", 0.25, 0.0).is_none() && off("/julia_mix", 0.0, 0.0).is_none());
     assert_eq!(
-        kifs("/julia").as_deref(),
-        Some("The Kifs formula has no Julia mode")
+        off("/inversion_center", 0.0, 0.0).as_deref(),
+        Some("Inversion strength is 0")
     );
+    assert!(off("/inversion_radius", 0.0, 0.5).is_none());
+    assert!(off("/inversion_strength", 0.0, 0.0).is_none());
     assert!(kifs("/trap_point").is_none() && kifs("/trap_scale").is_none());
     assert!(kifs("/trap_axis").is_some(), "a point trap has no axis");
     let origin = doc(json!({"Kifs": {}}), "TrapOrigin");
@@ -1947,9 +1966,8 @@ fn hybrid_marks_unpacked_sub_formula_parameters_and_limits_keep_their_floor() {
 #[test]
 fn every_attribute_has_a_hover_hint() {
     let mut missing = std::collections::BTreeSet::new();
-    // Optional attributes appear only when set: a facing blend and a Julia constant.
+    // Optional attributes appear only when set: a facing blend.
     let mut optional = Scene::preset(crate::params::FAMILY_BULB);
-    optional.julia = Some([0.1, 0.2, 0.3]);
     optional.material.facing = Some(crate::scene::Facing {
         color: [1.0, 0.5, 0.2],
         roughness: 0.3,

@@ -45,7 +45,12 @@ struct PreparationInputs {
     camera_reference: Option<f32>,
     object_world: Option<[[f32; 4]; 4]>,
     formula: crate::scene::Formula,
-    julia: Option<[f32; 3]>,
+    julia: [f32; 3],
+    julia_mix: f32,
+    orbit_offset: [f32; 3],
+    inversion_strength: f32,
+    inversion_center: [f32; 3],
+    inversion_radius: f32,
     object: crate::scene::ObjectTransform,
     camera: crate::scene::Camera,
     lighting: crate::scene::Lighting,
@@ -128,6 +133,11 @@ impl PreparationInputs {
             masks,
             formula,
             julia,
+            julia_mix,
+            orbit_offset,
+            inversion_strength,
+            inversion_center,
+            inversion_radius,
             object,
             camera,
             lighting,
@@ -156,6 +166,11 @@ impl PreparationInputs {
             object_world: *object_world,
             formula: *formula,
             julia: *julia,
+            julia_mix: *julia_mix,
+            orbit_offset: *orbit_offset,
+            inversion_strength: *inversion_strength,
+            inversion_center: *inversion_center,
+            inversion_radius: *inversion_radius,
             object: *object,
             camera: *camera,
             lighting: *lighting,
@@ -185,6 +200,11 @@ impl PreparationInputs {
             masks,
             formula,
             julia,
+            julia_mix,
+            orbit_offset,
+            inversion_strength,
+            inversion_center,
+            inversion_radius,
             object,
             camera,
             lighting,
@@ -209,6 +229,11 @@ impl PreparationInputs {
             && self.object_world == *object_world
             && self.formula == *formula
             && self.julia == *julia
+            && self.julia_mix == *julia_mix
+            && self.orbit_offset == *orbit_offset
+            && self.inversion_strength == *inversion_strength
+            && self.inversion_center == *inversion_center
+            && self.inversion_radius == *inversion_radius
             && self.object == *object
             && self.camera == *camera
             && self.lighting == *lighting
@@ -1578,6 +1603,69 @@ impl Target {
 mod tests {
     use super::*;
 
+    // TEMPORARY A/B probe (never committed): dumps or compares every gallery scene's guides.
+    #[test]
+    fn cuda_tmp_ab_probe() {
+        let _gpu_test = crate::test_gpu::lock();
+        let path = std::path::PathBuf::from(std::env::var("WB_AB_OUT").unwrap());
+        let mut gpu = Gpu::new().unwrap();
+        let mut out: Vec<f32> = Vec::new();
+        let mut names = Vec::new();
+        for scene in Scene::gallery() {
+            for world in [false, true] {
+                let s = if world {
+                    crate::world::WorldDocument::from_scene(&scene).snapshot(0.0).unwrap()
+                } else {
+                    scene.clone()
+                };
+                let mut target = gpu.target(96, 64);
+                gpu.step(&mut target, &s, 2, 19, None, false);
+                let start = out.len();
+                for b in [&target.accum, &target.albedo, &target.normal] {
+                    for v in gpu.guide_sums(&target, b) {
+                        out.extend_from_slice(&v);
+                    }
+                }
+                names.push((format!("{} world={world}", scene.name), start, out.len()));
+            }
+        }
+        if path.exists() {
+            let bytes = std::fs::read(&path).unwrap();
+            let old: Vec<f32> = bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            assert_eq!(old.len(), out.len());
+            let mut bad = 0;
+            for (name, a, b) in &names {
+                let third = (*b - *a) / 3;
+                let mut report = String::new();
+                let mut same = true;
+                for (k, label) in ["accum", "albedo", "normal"].iter().enumerate() {
+                    let r = *a + k * third..*a + (k + 1) * third;
+                    let (mut n, mut max) = (0, 0.0f32);
+                    for (x, y) in old[r.clone()].iter().zip(&out[r]) {
+                        if x.to_bits() != y.to_bits() {
+                            n += 1;
+                            max = max.max((x - y).abs());
+                        }
+                    }
+                    same &= n == 0;
+                    report += &format!(" {label}: {n} diff (max {max:e})");
+                }
+                eprintln!("AB {name}: {}{report}", if same { "identical" } else { "DIFFERENT" });
+                bad += (!same) as usize;
+            }
+            assert_eq!(bad, 0);
+        } else {
+            let bytes: Vec<u8> = out.iter().flat_map(|v| v.to_le_bytes()).collect();
+            std::fs::write(&path, bytes).unwrap();
+            for (name, ..) in &names {
+                eprintln!("AB dumped {name}");
+            }
+        }
+    }
+
     /// Explicit visual probe; artifacts remain under target and are not scene templates.
     #[test]
     #[ignore = "renders CUDA glass comparison PNGs; run explicitly with --ignored --nocapture"]
@@ -1615,7 +1703,7 @@ mod tests {
             for preset in ["GlassClear", "GlassBottleGreen", "GlassWaterGreen"] {
                 let mut object = Scene::preset(family);
                 if family == FAMILY_KIFS {
-                    object.render.iterations = 0;
+                    object.render.iterations = 0.0;
                 }
                 crate::materials::PRESETS
                     .iter()
@@ -1693,7 +1781,7 @@ mod tests {
                 object.formula = crate::scene::Formula::Kifs(crate::scene::Kifs::preset(
                     crate::scene::KifsKind::Menger,
                 ));
-                object.render.iterations = 0;
+                object.render.iterations = 0.0;
             }
             object.material = crate::scene::Material {
                 // Prove the dispatch also promotes manually edited Fast materials.
@@ -2037,7 +2125,7 @@ mod tests {
                 3 => scene.lights[0].sun_azimuth += 1.0,
                 4 => scene.camera.yaw_degrees += 2.0,
                 5 => scene.camera_reference = Some(7.0),
-                6 => scene.objects[0].render.iterations += 1,
+                6 => scene.objects[0].render.iterations += 1.0,
                 7 => scene.environment.revision += 1,
                 _ => scene.objects.clear(),
             }
@@ -2491,7 +2579,7 @@ mod tests {
         scene.camera.fov_y_degrees = 38.0;
         scene.camera.f_number = 0.0;
         scene.camera_reference = Some(2.0);
-        scene.render.iterations = 12;
+        scene.render.iterations = 12.0;
         scene.render.step_factor = 0.85;
         scene.render.hit_epsilon = 0.001;
         scene.render.max_bounces = 0;
@@ -2615,7 +2703,7 @@ mod tests {
         authored.camera.distance = 2.017553;
         authored.camera.fov_y_degrees = 38.0;
         authored.camera.f_number = 0.0;
-        authored.render.iterations = 64;
+        authored.render.iterations = 64.0;
         authored.render.hit_epsilon = 0.001;
         authored.render.denoise.enabled = false;
         authored.render.adaptive.enabled = false;
@@ -2674,7 +2762,7 @@ mod tests {
         let mut object = Scene::preset(FAMILY_KIFS);
         object.formula =
             crate::scene::Formula::Kifs(crate::scene::Kifs::preset(crate::scene::KifsKind::Menger));
-        object.render.iterations = 0;
+        object.render.iterations = 0.0;
         object.material.color_source = crate::scene::ColorSource::Material;
         object.material.base_color = [0.2, 0.4, 0.6];
         object.material.base = 0.8;

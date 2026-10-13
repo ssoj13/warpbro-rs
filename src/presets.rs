@@ -222,9 +222,9 @@ pub fn scene(index: usize) -> Result<Scene, String> {
         [json!(14.0), json!(17.0), json!(20.0)],
     );
     let iterations = match index {
-        0 => [6, 13, 20],
-        1 => [6, 10, 14],
-        _ => [3, 8, 14],
+        0 => [6.0, 13.0, 20.0],
+        1 => [6.0, 10.0, 14.0],
+        _ => [3.0, 8.0, 14.0],
     };
     track(
         &mut commands,
