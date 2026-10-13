@@ -973,7 +973,7 @@ impl Gpu {
                 self.environments.clear();
             }
             self.stats.environment_decodes += 1;
-            let loaded = crate::environment::Map::load(std::path::Path::new(&key.0)).map(Arc::new);
+            let loaded = crate::environment::Map::load(&key.0).map(Arc::new);
             self.environments.insert(key.clone(), loaded);
         }
         self.environments[key].clone().map(Some)
@@ -1716,6 +1716,8 @@ mod tests {
             object.lighting.sky_intensity = 1.0;
             object.lighting.sky_horizon = [1.0; 3];
             object.lighting.sky_zenith = [1.0; 3];
+            // A uniform white sky behind the glass: no environment map.
+            object.environment.enabled = false;
             for world in [false, true] {
                 let mut scene = object.clone();
                 if world {
@@ -2455,6 +2457,8 @@ mod tests {
         scene.camera.fov_y_degrees = 55.0;
         scene.lighting.sky_intensity = 0.0;
         scene.lighting.background = false;
+        // Dark: no environment either (a new scene has the built-in map).
+        scene.environment.enabled = false;
         scene.colour.on = false;
         scene.render.denoise.enabled = false;
         scene.render.max_bounces = 0;

@@ -17,9 +17,11 @@ pub struct Environment {
     pub revision: u64,
 }
 impl Default for Environment {
+    /// The built-in map (`fractal_env::default_path`): a scene has light and a background
+    /// without any file.
     fn default() -> Self {
         Self {
-            path: String::new(),
+            path: fractal_env::default_path(),
             enabled: true,
             intensity: 1.0,
             rotation_degrees: 0.0,
@@ -37,7 +39,16 @@ pub struct Map {
     pub map: fractal_env::EnvMap,
 }
 impl Map {
-    pub fn load(path: &Path) -> Result<Self, String> {
+    /// The map `source` names: a built-in one (`builtin:<name>`, `fractal_env::BUILTINS`) or a
+    /// lat-long `.hdr` / `.exr` file.
+    pub fn load(source: &str) -> Result<Self, String> {
+        if let Some(bytes) = fractal_env::builtin(source) {
+            let img = image::load_from_memory_with_format(bytes, image::ImageFormat::Hdr)
+                .map_err(|e| format!("Environment {source}: {e}"))?;
+            return Self::from_radiance(img.into_rgb32f())
+                .map_err(|e| format!("Environment {source}: {e}"));
+        }
+        let path = Path::new(source);
         let extension = path.extension().and_then(|e| e.to_str()).unwrap_or("");
         if !extension.eq_ignore_ascii_case("hdr") && !extension.eq_ignore_ascii_case("exr") {
             return Err("Environment must be a lat-long .hdr or .exr image".into());
@@ -69,13 +80,16 @@ impl Map {
             .decode()
             .map_err(|e| format!("Environment {}: {e}", path.display()))?
             .into_rgb32f();
+        Self::from_radiance(img).map_err(|e| format!("Environment {}: {e}", path.display()))
+    }
+    /// A decoded Radiance `.hdr`: it has no primaries tag in practice, so it is read as Rec.709.
+    fn from_radiance(img: image::Rgb32FImage) -> Result<Self, String> {
         let (w, h) = img.dimensions();
-        // Radiance .hdr has no primaries tag in practice: it is read as Rec.709.
         let pixels = img
             .pixels()
             .map(|p| crate::color::to_working(p.0))
             .collect();
-        Self::from_pixels(w, h, pixels).map_err(|e| format!("Environment {}: {e}", path.display()))
+        Self::from_pixels(w, h, pixels)
     }
     /// `pixels` are working-space (ACEScg) radiance; `load` converts files into it. Rec.709 lies
     /// inside AP1, so a converted texel is negative only by rounding, but a map in wider primaries
@@ -137,7 +151,7 @@ mod tests {
         .unwrap();
         // The same light, tagged either way, loads as the same working-space radiance (above one).
         for path in [&hdr, &exr709, &exr_ap1] {
-            let map = Map::load(path).unwrap();
+            let map = Map::load(path.to_str().unwrap()).unwrap();
             assert_eq!((map.map.width(), map.map.height()), (4, 2));
             let texel = map.map.equirect().texels()[0];
             for k in 0..3 {
@@ -163,5 +177,12 @@ mod tests {
         assert_eq!(m.map.equirect().texels()[3], [0.0, 0.5, 0.25]);
         assert!(Map::from_pixels(1, 1, vec![[f32::NAN; 3]]).is_err());
         assert!(Map::from_pixels(2, 2, vec![[0.0; 3]; 4]).is_ok());
+    }
+    #[test]
+    fn the_default_environment_is_the_built_in_map() {
+        let path = Environment::default().path;
+        assert_eq!(path, fractal_env::default_path());
+        let map = Map::load(&path).unwrap();
+        assert_eq!((map.map.width(), map.map.height()), (2048, 1024));
     }
 }

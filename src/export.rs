@@ -2386,6 +2386,8 @@ mod tests {
         scene.camera.target = [1000.0; 3];
         scene.lighting.sun_intensity = 0.0;
         scene.lighting.sky_intensity = 0.0;
+        // The keyed procedural sky is the only light: no environment map.
+        scene.environment.enabled = false;
         // Sky intensity 0 at frame 3, 2 at frame 4, keyed on the environment node.
         let mut editor =
             crate::world::WorldEditor::new(crate::world::WorldDocument::from_scene(&scene));
