@@ -221,7 +221,7 @@ pub(crate) struct App {
     orbit_drag: cam_controls_egui::OrbitDragState,
     /// The camera as the orbit coast last wrote it; any other edit stops the coast.
     orbit_written: Option<crate::scene::Camera>,
-    /// Persistent mouse sensitivity and flight speed (also adjusted by the wheel).
+    /// Persistent mouse sensitivity and flight speed (Settings > Controls).
     controls: Controls,
 }
 
@@ -415,13 +415,13 @@ struct Controls {
 impl Default for Controls {
     fn default() -> Self {
         Self {
-            look_sensitivity: 1.0,
+            look_sensitivity: 0.5,
             fly_speed: 1.0,
-            translate_decay: 0.6,
-            rotate_decay: 0.25,
+            translate_decay: 0.96,
+            rotate_decay: 1.0,
             inertial_look: true,
-            look_smoothing: 0.07,
-            flip_degrees: 60.0,
+            look_smoothing: 0.23,
+            flip_degrees: 48.6,
             fast_multiplier: 4.0,
             slow_multiplier: 0.1,
             swap_slot_buttons: false,
@@ -880,16 +880,17 @@ impl App {
                         egui_prefs2::section_header(ui, "Camera controls");
                         let am = self.world_ui.attribute_metrics;
                         let c = &mut self.controls;
+                        let d = Controls::default();
                         prefs_grid(ui, am, &mut self.prefs_grids[0], vec![
-                            f_row("Mouse sensitivity", c.look_sensitivity, 0.1..=5.0, 1.0),
-                            f_row("Flight speed ×", c.fly_speed, 0.02..=50.0, 1.0),
-                            f_row("Translate decay, s", c.translate_decay, 0.02..=5.0, 0.6),
-                            f_row("Rotate decay, s", c.rotate_decay, 0.02..=5.0, 0.25),
-                            b_row("Smooth look", c.inertial_look, true),
-                            f_row("Look smoothing, s", c.look_smoothing, 0.0..=0.5, 0.07),
-                            f_row("Horizon flip, °", c.flip_degrees, 20.0..=85.0, 60.0),
-                            f_row("Shift fast ×", c.fast_multiplier, 1.0..=20.0, 4.0),
-                            f_row("Alt slow ×", c.slow_multiplier, 0.01..=1.0, 0.1),
+                            f_row("Mouse sensitivity", c.look_sensitivity, 0.1..=5.0, d.look_sensitivity),
+                            f_row("Flight speed ×", c.fly_speed, 0.02..=50.0, d.fly_speed),
+                            f_row("Translate decay, s", c.translate_decay, 0.02..=5.0, d.translate_decay),
+                            f_row("Rotate decay, s", c.rotate_decay, 0.02..=5.0, d.rotate_decay),
+                            b_row("Smooth look", c.inertial_look, d.inertial_look),
+                            f_row("Look smoothing, s", c.look_smoothing, 0.0..=0.5, d.look_smoothing),
+                            f_row("Horizon flip, °", c.flip_degrees, 20.0..=85.0, d.flip_degrees),
+                            f_row("Shift fast ×", c.fast_multiplier, 1.0..=20.0, d.fast_multiplier),
+                            f_row("Alt slow ×", c.slow_multiplier, 0.01..=1.0, d.slow_multiplier),
                         ], |label, v| match (label, v) {
                             ("Mouse sensitivity", AttrValue::Float(v)) => c.look_sensitivity = v,
                             ("Flight speed ×", AttrValue::Float(v)) => c.fly_speed = v,
@@ -903,7 +904,6 @@ impl App {
                             _ => {}
                         });
                         egui_prefs2::section_header(ui, "Flight alignment (hold Ctrl)");
-                        let d = Controls::default();
                         prefs_grid(ui, am, &mut self.prefs_grids[4], vec![
                             b_row("To an axis (else a plane)", c.align_axis, d.align_axis),
                             f_row("Ease time, s", c.align_seconds, 0.05..=5.0, d.align_seconds),
@@ -955,7 +955,7 @@ impl App {
                         });
                         *metrics = metrics.normalized();
                         ui.label("Attribute Editor, Timeline and Render Settings share these sizes.");
-                        ui.label("RMB: fly · wheel: flight speed · `: horizon/free flight");
+                        ui.label("RMB: fly · wheel: forward / back · `: horizon/free flight");
                         ui.label("H: restore camera · F: frame bounds (without RMB)");
                     }
                 }
@@ -2841,7 +2841,7 @@ impl App {
         }
     }
     /// Unreal-style flight: hold RMB in the viewport, mouse looks, WASD moves, R/Space up, C down,
-    /// Q/E roll, Shift fast, Alt slow, Ctrl aligns to the nearest plane or axis, the wheel scales the speed. Integrated by cam-controls `SpaceFlight` (thrust,
+    /// Q/E roll, Shift fast, Alt slow, Ctrl aligns to the nearest plane or axis, the wheel moves along the view. Integrated by cam-controls `SpaceFlight` (thrust,
     /// inertia, damping); on release the orbit pivot is placed in front of the camera at the
     /// current orbit distance, so orbiting continues from where you flew.
     fn fly_camera(&mut self, ui: &egui::Ui, resp: &egui::Response) {
@@ -2897,12 +2897,6 @@ impl App {
             ui.ctx().set_cursor_icon(egui::CursorIcon::None);
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::Locked));
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-            if scroll != 0.0 {
-                self.controls.fly_speed =
-                    (self.controls.fly_speed * (scroll * 0.003).exp()).clamp(0.02, 50.0);
-                self.status = format!("Flight speed ×{:.2}", self.controls.fly_speed);
-            }
             // WASD / R-Space-C thrust, Q/E roll, Shift / Alt speed, mouse look: the shared bindings.
             let intents = cam_controls_egui::gather_fly_intents(
                 ui,
@@ -2916,6 +2910,14 @@ impl App {
             );
             for intent in intents {
                 fly.apply_intent(intent, viewport);
+            }
+            // The wheel moves the camera along its view axis: a step of 1/500 of the scene
+            // radius per scrolled point at flight speed x1, scaled like the thrust (Shift / Alt).
+            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            if scroll != 0.0 {
+                let forward = fly.orientation * -Vec3::Z;
+                fly.eye += forward
+                    * (scroll * 0.002 * radius * self.controls.fly_speed * self.fly_speed_scale);
             }
             // Flight modifiers: Shift fast, Alt slow, Ctrl the constraint: held, it eases the
             // view to the nearest world plane or axis view.

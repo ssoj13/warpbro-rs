@@ -45,8 +45,9 @@ Documentation: [render and quality profiles](docs/render-profiles.md), [workspac
     Bottle-green glass and green water are available as presets. See [glass controls and geometry limits](docs/glass.md).
 - **Unreal-style flight:** hold the right mouse button in the viewport to fly.
   - The mouse looks around; WASD moves; R or Space moves up, C down; Q/E rolls; Shift flies x4, Alt x0.1;
-    the wheel sets the speed. Translation, look and roll all carry inertia and ease out
-    (Settings > Camera controls: translate / rotate decay, inertial look, flip angle, multipliers).
+    the wheel moves forward / back; Ctrl eases to the nearest world plane. Translation and roll ease
+    out, the look eases onto the mouse's turn without overshooting it (Settings > Controls: speed,
+    translate / rotate decay, look smoothing, flip angle, multipliers).
   - The toolbar airplane switches free 6-DoF flight and horizon lock. Locked, the horizon stays
     level to a world plane: a short Q/E press tilts and springs back, holding past the flip angle
     turns the camera onto the next world plane, where it levels again.
@@ -165,7 +166,7 @@ python bootstrap.py r                                  # build, warm the CUDA ca
 | left drag         | orbit (coasts on release); Shift: snap to the views along the world axes                                  |
 | middle drag       | pan (coasts on release)                                                                                    |
 | wheel             | zoom                                                                                                       |
-| hold right button | fly: mouse looks, WASD moves, R/Space up, C down, Q/E rolls (tilts under the lock), Shift x4, Alt x0.1, wheel speed |
+| hold right button | fly: mouse looks, WASD moves, R/Space up, C down, Q/E rolls (tilts under the lock), Shift x4, Alt x0.1, wheel forward / back, Ctrl aligns |
 | double-click      | recentre                                                                                                   |
 | `Tab`             | hide the panels                                                                                            |
 | `F12` | window screenshot: the whole window as EXR + PQ PNG (see *Window screenshots*); under an attached debugger Windows takes `F12` as its break key, use File → *Window screenshot* |

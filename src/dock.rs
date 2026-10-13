@@ -48,32 +48,20 @@ impl Panel {
     }
 }
 
+/// The start layout: the Attribute Editor over Settings / Render on the right, the Timeline
+/// under the workspace, and Outliner / Gallery / Materials over Takes left of the Viewport.
 pub(super) fn default_layout() -> DockState<Panel> {
     let mut state = DockState::new(vec![Panel::Viewport]);
-    let [workspace, left] = state.main_surface_mut().split_left(
-        NodeIndex::root(),
-        0.25,
-        vec![Panel::Outliner, Panel::Takes],
+    let surface = state.main_surface_mut();
+    let [workspace, right] = surface.split_right(NodeIndex::root(), 0.70, vec![Panel::Inspector]);
+    surface.split_below(right, 0.62, vec![Panel::Settings, Panel::Export]);
+    let [top, _] = surface.split_below(workspace, 0.82, vec![Panel::Timeline]);
+    let [_, panels] = surface.split_left(
+        top,
+        0.23,
+        vec![Panel::Outliner, Panel::Gallery, Panel::Materials],
     );
-    let [_, materials] =
-        state
-            .main_surface_mut()
-            .split_below(left, 0.30960023, vec![Panel::Materials]);
-    state
-        .main_surface_mut()
-        .split_below(materials, 0.5, vec![Panel::Timeline]);
-    let [_, right] = state.main_surface_mut().split_right(
-        workspace,
-        0.7039749,
-        vec![Panel::Inspector, Panel::Gallery],
-    );
-    let [_, settings] =
-        state
-            .main_surface_mut()
-            .split_below(right, 0.50315166, vec![Panel::Settings]);
-    state
-        .main_surface_mut()
-        .split_below(settings, 0.39916557, vec![Panel::Export]);
+    surface.split_below(panels, 0.52, vec![Panel::Takes]);
     state
 }
 
