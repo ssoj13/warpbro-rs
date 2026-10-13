@@ -1,11 +1,20 @@
 # HANDOFF (2026-10-13, ~00:00)
 
-Current resume state (2026-10-13): animation parameters were merged in `fractal-rs/main`
-`1f0d122` and `warpbro-rs/main` `059984d`. The accepted normal correction is now pushed on
-fractal-rs main as `f3e55bd`; WarpBro `6289cc8` is now pushed on main. Its four Git-pin lines
-change without a local patch and preserve `windows-sys`. The published-candidate 326-test
-suite passes: 312 passed, 0 failed, 14 ignored in 366.81s (compiled in 3m1s), recorded in
-`published-full.log`.
+Current resume state (2026-10-13): geometry and normal corrections are integrated and pushed:
+fractal main/origin `55d8134f093e6b3a291a0d811e7a07ab1424dd5c`; WarpBro source integration
+revision `d67d3fed05641bea133a2ce4876e68cbd6dea7de` is on main. A docs-only checkpoint may
+advance WarpBro HEAD without changing that source. Root verified real Git dependencies with
+`--locked`, no patch: 314 passed, 0 failed, 14 ignored (328 total), compile 2m53s, runtime
+322.31s (`target/fractional-normal-backup/published-geometry-full.log`). Production release
+build passes in 35.48s, clippy `--release --locked --tests -D warnings` in 12.44s, fmt passes.
+The production executable renders 18/18 valid, nonconstant 384x216 PNGs at 4 spp on RTX
+3080 Ti; the Mandelbulb image was visually inspected. A temporary profile leaves the operator
+profile untouched. Receipt: `published-geometry-gallery.log` and temporary gallery
+`verification.json`. WarpBro changes are four lock pins and two tests/golden only;
+`windows-sys` is preserved and Cargo.toml is unchanged. CI `38395622388` on source `d67d3fe`:
+Linux succeeded (280 passed, 0 failed, 7 ignored, 41 filtered, 21.25s; release build and archive
+passed, `ci-geometry-linux.log`). Windows main stage started 12:25:06 UTC and is in progress;
+no Windows stage success is claimed.
 The dated snapshots below preserve the interrupted session's history; use the
 [resume completion plan](plans/20261013-resume/plan.md) for the current acceptance ledger.
 
@@ -14,10 +23,13 @@ The dated snapshots below preserve the interrupted session's history; use the
   `WarpBro-a14b1f1310ab8852.exe` ran
   `operator_templates_decode_with_current_scene_schema --ignored --nocapture` with
   `WARPBRO_TEMPLATE_PROBE_DIR=C:/Users/joss1/.warpbro/templates`: 1 passed in 0.06s, loading all
-  three templates. No schema change was needed for the CUDA correction.
-- EXR main/tag now points to `fa8aa3376f78a72794785af347b1a1733d68ff87` (docs commit
-  `fa8aa33`), annotated tag object `d65355fe9e1492117b540274ee813371e415f744`. Six local
-  bootstrap stages pass. Release CI `38382275628` completed successfully (10 jobs, 0 failed);
+  three templates. No schema change was needed for the CUDA correction. The final published
+  test executable `WarpBro-e96469ec1c702b2b` repeats the same filter/environment successfully:
+  1 passed in 0.06s, all three templates loaded (`published-geometry-templates.log`).
+- EXR current main is `68483c7` (documentation); the released source tag stays at
+  `fa8aa3376f78a72794785af347b1a1733d68ff87` (`fa8aa33`), annotated tag object
+  `d65355fe9e1492117b540274ee813371e415f744`. Six local bootstrap stages pass. Release CI
+  `38382275628` completed successfully (10 jobs, 0 failed);
   v0.1.0 is public/non-draft, published 2026-10-13 11:04:59 UTC with 3 ZIPs/5 wheels. All asset
   sizes/SHA-256, ZIP CRCs, wheel RECORD hashes, and architectures/tags pass. The downloaded
   Windows CLI passes version/help/info and identifies the real PQ PNG as 1920x1080 RGBA.
@@ -25,14 +37,29 @@ The dated snapshots below preserve the interrupted session's history; use the
   Old tag `1671769` is preserved locally as
   `backup/v0.1.0-before-color-resume`; owned duplicate branch/main runs were cancelled because
   the tag covers the same production code.
-- WarpBro/fractal dependency reachability: 34 distinct own Git pins verified, 34/34 GitHub API
-  checks passed. The existing EXR `7db` pin is reachable and was retained.
-- Larger fractional-step unsigned-DE geometry diagnostics are isolated in `fractal-geometry`
-  and `warp-geometry`, branch `fix/fractional-bulb-march`. Those experimental changes are not
-  in the accepted main shader. Zero fallback pixels and the observed pick-depth jump
+- Current WarpBro/fractal dependency audit (including `55d8134`):
+  `python target/fractional-normal-backup/remote-pins.py` passes 35/35 distinct own
+  (repo, revision) pairs (`published-geometry-pins.log`). The earlier 34/34 GitHub API result
+  is historical; reachable EXR `7db` was retained.
+- Geometry work was isolated in `fractal-geometry` and `warp-geometry` on
+  `fix/fractional-bulb-march`; the accepted guarded band-margin correction is now integrated
+  in the revisions above. The rejected RAW-max-step prototype was not merged. Zero fallback pixels and the observed pick-depth jump
   `2.3983283` -> `2.4022722` disproved the earlier fallback-trigger explanation.
 
-## Running agents (background, both commit to branches only, no push, no merge)
+- Independent review verifies all six requested parameters and ABI 5 neutral defaults are
+  wired, with no concrete missing connection. Production main `5a496c6` builds in 35.34s
+  after a 408s lock wait; the real release executable renders 18 nonconstant 96x64 gallery
+  PNGs at 1 spp on RTX 3080 Ti, exit 0. A temporary `WARPBRO_HOME` leaves the operator profile
+  untouched. Logs: `published-build.log` and `published-gallery.log`; this is smoke, not a benchmark.
+- Historical geometry worktree checks, before final integration: full default suite 314 passed/0 failed/14 ignored, and final guard
+  regression 1 passed. Both routes have 6144/6144 primary hits, normal-reference error 0,
+  worst depth error 0.0000007264541 below about 0.00000152194 footprint. Nearby cube object 1
+  is picked correctly. Final published dependency checks and integration now pass as recorded
+  above. CI `38395622388`: Linux succeeded, Windows in progress; earlier `38391295641` was auto-cancelled by the new
+  main push after its Linux job passed. The cancelled Windows log still shows compilation
+  of `nvjitlink-sys` at 12:13:17 UTC and no `Running unittests`; this is not a test hang or failure.
+
+## Historical agent tasks (both originally committed to branches only)
 
 1. **Mandelbulb animation parameters** - repos fractal-rs and warpbro-rs, branch
    `mandelbulb-params` in both. The six asked for:
@@ -109,6 +136,24 @@ untracked files back. Bases: exr-rs a784528, fractal-rs 75e8412, warpbro-rs 8535
 agents were told at ~00:12 to commit WIP checkpoints and keep progress files (COLOR_PLAN.md
 marks; warpbro-rs/MANDELBULB_PROGRESS.md).
 
+## Verified recovery branches and attribution (2026-10-13)
+
+The old snapshots name agents `mandelbulb` and `colorplan`. The inspected commits are authored
+by `ssoj13`; Git author metadata cannot reliably identify the individual agent that wrote a
+change. Branch receipts below were verified with `git branch -avv` by the coordinator.
+
+- WarpBro `mandelbulb-params` and its remote tip remain at WIP `8e70078`, including the local
+  patch, preserved on `backup/limited-agent-20261013`. Main already contains the merged
+  parameters and accepted normal correction; that WIP branch is not the production candidate.
+- Fractal recovery baseline is `1f0d122`, prior accepted normal revision `f3e55bd`, and
+  current integrated main/origin `55d8134`. WarpBro source integration `d67d3fe` is on main. Geometry
+  worktree history on `fix/fractional-bulb-march` remains preserved.
+- EXR recovery baseline `234f3bb` and the saved binary diff are retained. Local `color-plan`
+  is `fa8aa33`, its remote branch is `bbea08c`, current main is `68483c7` (documentation), and
+  release tag v0.1.0 remains at source `fa8aa33`.
+- Preserve branches from other work, including `acescg`, `diag`, `feat/keys`, `takes`, and
+  `mergeofx` work. Do not clean up or delete them as part of this recovery.
+
 ## Done today (pushed)
 
 warpbro-rs main: picking (0150925, fe4c152), Tab menu via egui-tab-menu (86def17), ` hides
@@ -140,7 +185,7 @@ the tag (docs, marks, Venice env) are not in the release.
   tag v0.1.0 moved there, old release deleted (CI release not checked). Agent `colorplan` is
   implementing the two-stage model on branch `color-plan` (not merged): merge it, re-tag.
 
-## Separate follow-up: fractional unsigned-DE geometry
+## Geometry correction and retained limits
 
 The earlier hypothesis attributed the jump (~2% of hit pixels on the bulb preset) to
 DE(n) = 0, a fallback normal, and normalisation of w grad DE(n+1) for any w > 0. It proposed
@@ -150,10 +195,18 @@ continuous at the integer endpoint. This is a historical proposal, not a verifie
 The resume measurements found zero fallback pixels and a pick-depth jump from `2.3983283`
 to `2.4022722`. They contradict the claimed fallback trigger. The accepted endpoint-normal correction
 is `f3e55bd`; strict targeted tests pass for eight endpoint pairs and the neutral golden.
-A larger fractional change still exposes a separate unsigned-DE step-budget limitation.
-Default 4096-step inside 4.001 produced 0 primary hits with unresolved 1; 16384 steps produced
-6144 primary hits with unresolved 0.09798177 (possibly secondary rays; attribution is not
-established). Keep that geometry work isolated and do not claim all animation is continuous.
-The final published-candidate suite passes (312 passed, 0 failed, 14 ignored). The separate
-RAW-max-step prototype has a counterexample and is not merged; bounded band-margin
-investigation remains pending. Endpoint-normal correction and published integration are done.
+Before the guarded correction, a larger fractional change exposed an unsigned-DE step-budget
+limitation: default 4096-step inside 4.001 produced 0 primary hits with unresolved 1;
+16384 steps produced 6144 primary hits with unresolved 0.09798177 (possibly secondary rays;
+attribution was not established). Those are historical measurements, preceding integrated
+geometry verification.
+The earlier normal-only suite passed (312 passed, 0 failed, 14 ignored). The RAW-max-step
+prototype failed a counterexample and was not merged. Guarded band-margin geometry is now
+integrated (`55d8134` / `d67d3fe`) and its published-dependency suite passes (314/0/14).
+
+Endpoint band-margin correction uses the tracer's existing distance-estimate assumption.
+Tests establish the documented fixtures, not a global Lipschitz bound for finite-iteration
+Mandelbulb DE; no formal/global guarantee is claimed. Shadow `march_visibility` is unchanged.
+The existing specialized-world one-ULP radiance failure remains verified as pre-existing via
+captured pre-fix PTX; assertions were not relaxed. No native HDR viewport screenshot was
+captured. CI `38395622388`: Linux succeeds, Windows remains in progress.

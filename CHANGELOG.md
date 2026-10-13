@@ -26,15 +26,61 @@
 - The old specialized-world one-ULP radiance failure is reproduced with captured pre-fix PTX
   (pixel 643 green delta 2.9802322e-8); its assertions are unchanged.
 - Warm fractional rendering costs 6.2-7.5ms versus 4.5-5.5ms for integers in this run
-  (35-45% overhead). A larger inside fractional step still understeps with the default
+  (35-45% reported ratio, fixture-specific rather than a controlled benchmark). Before the
+  later geometry correction, a larger inside fractional step understepped with the default
   4096-step budget; separate geometry experiments are excluded from accepted main.
 - Operator templates amethyst/box/mandelwhit are converted with backups and pass the current
   Rust scene schema: 1 test passed in 0.06s.
 - WarpBro `6289cc8` is pushed on main: four Git-pin lines, no local patch, `windows-sys`
   preserved. Full published-candidate suite: 312 passed, 0 failed, 14 ignored (326 total) in
   366.81s after a 3m1s compile (`published-full.log`). The endpoint-normal correction and
-  integration are complete; the separate RAW-max-step geometry prototype is unmerged after
-  a counterexample, with bounded band-margin investigation still open.
+  integration were complete at that checkpoint; RAW-max-step was rejected after a
+  counterexample. The later integrated guarded margin is recorded below.
+
+### Historical production and geometry worktree checks (2026-10-13)
+
+- Independent source audit confirms all six animation parameters and ABI 5 neutral defaults
+  are wired through kernels, world packing, and keyable attributes; no concrete missing
+  connection was found.
+- Production main `5a496c6` builds through `cargo oxide build -- --release` (35.34s after a
+  408s lock queue). The release executable renders all 18 gallery PNGs at 96x64, 1 spp with
+  nonconstant RGB on RTX 3080 Ti, exit 0, using an isolated temporary profile. This is render
+  smoke, not a 1-spp performance benchmark. Logs: `published-build.log`, `published-gallery.log`.
+- Separate guarded margin geometry candidate: 314 passed, 0 failed, 14 ignored (328 total),
+  318.93s including cold CUDA after 2m53s compilation. The final guard regression passes
+  (1 test, 266.06s): both routes 6144/6144 primary hits, original-reference normal error 0,
+  worst pick-depth error 0.0000007264541 below minimum footprint about 0.00000152194; the
+  nearby cube guard also passes for that fixture.
+- At that worktree checkpoint, final revision and published integration checks were pending. Warm 96x64 inside-fixture timings are
+  recorded in MANDELBULB_PROGRESS.md and are not comparable to the former zero-hit surface.
+  Source CI retry `38391295641`: Linux passed, Windows pending at this checkpoint.
+
+### Guarded fractional geometry integrated (2026-10-13)
+
+- Source integration revisions: fractal main/origin `55d8134`; WarpBro `d67d3fe` is pushed
+  on main. Docs-only follow-ups may advance WarpBro HEAD without changing that source. Root verified actual Git
+  dependencies with `--locked`, no patch: 314 passed, 0 failed, 14 ignored (328 total),
+  322.31s after a 2m53s compile (`published-geometry-full.log`).
+- Production release build passes (35.48s), release/locked tests clippy passes (12.44s), fmt
+  passes. Real release executable gallery: 18/18 decoded, nonconstant 384x216 PNGs at 4 spp
+  on RTX 3080 Ti, with a visually inspected Mandelbulb image and isolated temporary profile.
+  Receipts: `published-geometry-gallery.log` and temporary gallery `verification.json`.
+- Final published template-schema probe `WarpBro-e96469ec1c702b2b` passes: 1 test, 0.06s,
+  amethyst/box/mandelwhit, exact filter/environment retained in progress/HANDOFF.
+  Receipt: `published-geometry-templates.log`; earlier normal-only probe remains historical.
+- Current dependency audit passes 35/35 distinct own (repo, revision) pairs on the original
+  WarpBro/fractal lockfiles, including `55d8134` (`remote-pins.py`, `published-geometry-pins.log`).
+  Earlier 34/34 checks remain historical.
+- Four lock pins and two tests/golden changed in WarpBro; `windows-sys` is preserved and
+  Cargo.toml unchanged. The guarded correction uses the existing distance-estimate assumption;
+  fixture tests do not establish a global Lipschitz bound for finite-iteration Mandelbulb DE.
+  Shadow `march_visibility` is unchanged, the pre-existing one-ULP oracle failure is retained,
+  and native HDR screenshot acceptance was not performed.
+- Source CI `38395622388` on `d67d3fe`: Linux succeeded (280 passed, 0 failed, 7 ignored,
+  41 filtered in 21.25s), release build/archive passed (`ci-geometry-linux.log`). Windows main
+  stage started 12:25:06 UTC and is in progress; no Windows stage success is claimed. Earlier `38391295641` auto-cancelled
+  on the new main push after its Linux job passed. The cancelled Windows job was still
+  compiling `nvjitlink-sys` at 12:13:17 UTC, before unit tests; no test hang/failure is claimed.
 
 ## 0.1.0 — 2026-10-12
 

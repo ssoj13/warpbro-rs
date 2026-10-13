@@ -23,23 +23,25 @@ contains the original requirements and recovery history.
 
 ## Current verified checkpoint
 
-- Normal correction `fractal-rs/main` `f3e55bd` is accepted and pushed. Strict eight-pair and
+- Earlier normal correction `f3e55bd` was accepted and pushed. Strict eight-pair and
   inside tiny-step checks pass; neutral golden, CUDA default 26 passed/6 ignored, and core
-  12 passed. Larger unsigned-DE geometry/step-budget work remains isolated on
-  `fix/fractional-bulb-march` in separate worktrees and is not in accepted main.
+  12 passed. Geometry work was isolated on `fix/fractional-bulb-march`; the later accepted
+  guarded margin is now integrated, while rejected RAW-max-step stays unmerged.
 - WarpBro `6289cc8` is pushed on main: four Git-pin lines, no patch, `windows-sys` preserved.
   The full published-candidate suite passes: 312 passed, 0 failed, 14 ignored (326 total),
   366.81s after 3m1s compile (`published-full.log`). The separate RAW-max-step geometry
-  prototype has a counterexample, remains unmerged, and is superseded by an open bounded
-  band-margin investigation.
+  prototype failed a counterexample and remained unmerged; the later bounded band-margin
+  correction is now integrated as recorded below.
 - Operator templates amethyst/box/mandelwhit pass the current Rust schema: existing
   `WarpBro-a14b1f1310ab8852.exe operator_templates_decode_with_current_scene_schema --ignored
   --nocapture`, with `WARPBRO_TEMPLATE_PROBE_DIR=C:/Users/joss1/.warpbro/templates`, 1 passed
   in 0.06s. Converted JSON and `.bak` files retained.
-- All 34 distinct WarpBro/fractal own Git pins are reachable (34/34 GitHub API checks);
-  existing reachable EXR `7db` is retained.
-- EXR's six local bootstrap stages pass. Main/tag points to
-  `fa8aa3376f78a72794785af347b1a1733d68ff87`; annotated tag object
+- Current original WarpBro/fractal lockfile audit including `55d8134`:
+  `python target/fractional-normal-backup/remote-pins.py` passes 35/35 distinct own
+  (repo, revision) pairs (`published-geometry-pins.log`). Earlier 34/34 GitHub API checks
+  remain historical; reachable EXR `7db` is retained.
+- EXR's six local bootstrap stages pass. Current main is `68483c7` (documentation), while
+  release tag v0.1.0 points to `fa8aa3376f78a72794785af347b1a1733d68ff87`; annotated tag object
   `d65355fe9e1492117b540274ee813371e415f744`. Old tag `1671769` is backed up locally as
   `backup/v0.1.0-before-color-resume`. Tag CI `38382275628`: all 10 jobs succeeded, 0 failed.
   The public/non-draft release was published at 2026-10-13 11:04:59 UTC with 3 ZIPs/5 wheels;
@@ -47,6 +49,40 @@ contains the original requirements and recovery history.
   CLI/PQ-info smoke pass. Linux/macOS execution, wheel installation, and release-artifact GPU
   shots were not performed. Owned duplicate branch/main CI runs were cancelled because the
   tag covers the same production code.
+
+- Independent parameter audit verifies all six controls and ABI 5 neutral defaults wired,
+  with no concrete missing connection. Production main `5a496c6` builds successfully
+  (35.34s after 408s queue) and renders 18 nonconstant 96x64 gallery PNGs at 1 spp using
+  a temporary profile. This is render smoke, not a performance benchmark.
+- Historical guarded band-margin geometry worktree checks: 314 passed/0 failed/14 ignored (328 total),
+  318.93s including cold CUDA; final guard-focused test 1 passed in 266.06s. Both routes
+  6144/6144 primary hits, normal-reference error 0, worst depth error 0.0000007264541 below
+  minimum footprint about 0.00000152194; nearby cube guard passes. These preceded the final
+  integrated published-dependency verification below.
+- Recovery branch and author attribution is recorded in HANDOFF: `ssoj13` commit authors do
+  not reliably identify agents. Preserve WIP backups, saved EXR binary diff, and unrelated
+  branches; no branch cleanup is part of this recovery.
+
+- Geometry source integration revisions: fractal main/origin
+  `55d8134f093e6b3a291a0d811e7a07ab1424dd5c`; WarpBro
+  `d67d3fed05641bea133a2ce4876e68cbd6dea7de` is on main. Docs-only checkpoints can advance
+  WarpBro HEAD without changing the source verified by CI. Real Git dependency
+  `--locked` suite, no patch: 314 passed/0 failed/14 ignored (328 total), compile 2m53s,
+  tests 322.31s (`published-geometry-full.log`). Production build 35.48s, clippy 12.44s, fmt
+  pass; 18/18 nonconstant, decoded 384x216 4-spp gallery PNGs pass on RTX 3080 Ti, with the
+  Mandelbulb image visually inspected and isolated temporary profile.
+- Final published template-schema probe `WarpBro-e96469ec1c702b2b` repeats the same filter
+  and `WARPBRO_TEMPLATE_PROBE_DIR` successfully: 1 passed in 0.06s, all three templates
+  (`published-geometry-templates.log`). Prior normal-only receipts remain historical.
+- Endpoint band-margin correction uses the tracer's existing distance-estimate assumption;
+  fixture tests do not prove a global Lipschitz bound for finite-iteration Mandelbulb DE.
+  Shadow `march_visibility` is unchanged; pre-existing one-ULP oracle failure and missing
+  native HDR screenshot remain explicit. CI `38395622388`: Linux succeeded (280 passed,
+  0 failed, 7 ignored, 41 filtered in 21.25s; release build/archive passed,
+  `ci-geometry-linux.log`). Windows main stage started 12:25:06 UTC and is in progress;
+  no Windows stage success is claimed. Earlier
+  `38391295641` auto-cancelled on the new main push after Linux passed. Its Windows job
+  was still compiling `nvjitlink-sys` at 12:13:17 UTC, before unit tests; no test hang/failure.
 
 ## Completion sequence
 
@@ -82,13 +118,17 @@ contains the original requirements and recovery history.
 | Item | Current state | Required evidence |
 | --- | --- | --- |
 | Recovered WIP preserved | Coordinator receipt; WarpBro backup branch confirmed | Exact backup refs and EXR diff retained |
-| Integer-endpoint normals | Complete; `f3e55bd` and WarpBro `6289cc8` pushed | Eight strict pairs, inside tiny-step, neutral golden, final published-candidate suite |
-| EXR two-stage production path | Six local gates pass; main/tag integrated | `fa8aa33`; final viewer 337 passed, 0 failed, 23 ignored; real PQ exact |
+| Integer-endpoint normals | Complete; incorporated in fractal `55d8134` / WarpBro `d67d3fe` | Eight strict pairs, inside tiny-step, neutral golden, final published-candidate suite |
+| EXR two-stage production path | Six local gates pass; source tag released | Current docs main `68483c7`, release source tag `fa8aa33`; viewer 337 passed, 0 failed, 23 ignored |
 | PQ output parity | Targeted EXR checks pass; native viewport comparison pending | Real PQ worst/mean code error 0, CPU/GPU twins, visually inspected SDR proof; no native HDR viewport screenshot |
-| Operator templates | Complete | Three converted JSONs load through current Rust schema; 1 test passed in 0.06s |
-| Dependency reachability | Complete | 34/34 own Git pins reachable; no patch and `windows-sys` preserved in `6289cc8` |
-| Final WarpBro gates and integration | Complete | 312 passed, 0 failed, 14 ignored; `6289cc8` pushed main |
-| Separate unsigned-DE geometry | Open | RAW-max-step prototype rejected by counterexample; bounded band-margin investigation unmerged |
+| Operator templates | Complete on final published executable | Three converted JSONs load; repeated final schema probe 1 passed in 0.06s |
+| Dependency reachability | Current audit complete | 35/35 own repo/revision pairs reachable, including `55d8134`; `d67d3fe` no patch / `windows-sys` preserved |
+| Final WarpBro local gates and integration | Complete | Final published dependency 314/0/14; `d67d3fe` pushed; build/clippy/fmt and 4-spp gallery pass |
+| Independent parameter audit | Complete | All six controls and ABI 5 defaults wired; no concrete missing connection |
+| Current production build/gallery smoke | Complete on `d67d3fe` | Build/clippy/fmt pass; 18/18 valid nonconstant 384x216 PNGs, 4 spp, isolated profile |
+| Historical production smoke | Earlier `5a496c6` passed | 18 nonconstant 96x64 PNGs at 1 spp; render smoke, not a benchmark |
+| Guarded unsigned-DE geometry | Integrated | `55d8134` / `d67d3fe`; published 314/0/14 and focused guard fixtures pass |
+| Final integrated-source CI | Linux succeeded; Windows in progress | `38395622388` on source `d67d3fe`; Linux 280/0/7, build/archive pass; Windows started 12:25:06 UTC |
 | EXR release replacement | Published and verified | CI `38382275628`: 10 successful jobs, 3 ZIPs/5 wheels integrity verified, Windows CLI smoke passes |
 
 No pending item is complete until its evidence is recorded. Existing historical test results
