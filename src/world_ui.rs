@@ -3632,6 +3632,7 @@ mod tests {
         );
 
         // Shift+3 as a keyboard really sends it: the character differs, the key position not.
+        let before = e.document.marks.clone();
         state.seek(42);
         press(
             &mut state,
@@ -3651,10 +3652,7 @@ mod tests {
         press(&mut state, &mut e, shortcut_key(egui::Key::Num5, false));
         assert_eq!(state.playhead, 42, "an empty slot leaves the cursor");
         assert!(e.undo());
-        assert!(
-            e.document.marks.is_empty(),
-            "setting a mark is one undo step"
-        );
+        assert_eq!(e.document.marks, before, "setting a mark is one undo step");
     }
     #[test]
     fn all_digit_slots_can_share_a_frame_and_jump_independently() {
@@ -3694,7 +3692,7 @@ mod tests {
                 *pressed = false;
             }
             shortcut_frame(&ctx, &mut state, &mut e, vec![event, release]);
-            assert_eq!(e.document.marks.len(), slot + 1);
+            assert_eq!(e.document.marks.get(&(slot as u8)), Some(&42));
         }
         for key in keys {
             state.seek(0);

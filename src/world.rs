@@ -3724,7 +3724,8 @@ impl WorldDocument {
             first: scene.animation.first,
             last: scene.animation.last,
             fps: scene.animation.fps,
-            marks: BTreeMap::new(),
+            // A new scene starts with marks 1 and 2 on its range's ends: 1 / 2 jump there.
+            marks: BTreeMap::from([(1, scene.animation.first), (2, scene.animation.last)]),
             takes: Default::default(),
             camera_slots: Default::default(),
         };

@@ -3595,3 +3595,12 @@ fn a_ray_enters_a_bounds_cube_in_its_own_space() {
         "from inside"
     );
 }
+
+#[test]
+fn a_new_scene_starts_with_marks_one_and_two_on_its_range_ends() {
+    let document = WorldDocument::from_scene(&Scene::preset(0));
+    assert_eq!(
+        document.marks,
+        std::collections::BTreeMap::from([(1, document.first), (2, document.last)])
+    );
+}
