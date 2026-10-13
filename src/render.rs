@@ -1603,67 +1603,144 @@ impl Target {
 mod tests {
     use super::*;
 
-    // TEMPORARY A/B probe (never committed): dumps or compares every gallery scene's guides.
+    /// Accumulated radiance, albedo and normal guides of `scene` at 96x64, one sample.
+    fn frame_guides(gpu: &mut Gpu, scene: &Scene) -> [Vec<[f32; 4]>; 3] {
+        let mut target = gpu.target(96, 64);
+        gpu.step(&mut target, scene, 1, 19, None, false);
+        [&target.accum, &target.albedo, &target.normal].map(|b| gpu.guide_sums(&target, b))
+    }
+
+    /// How far two normal guides are apart: the share of pixels hit in one and missed in the
+    /// other, and the mean normal difference over the pixels both hit.
+    fn normal_gap(a: &[[f32; 4]], b: &[[f32; 4]]) -> (f32, f32) {
+        let hit = |n: &[f32; 4]| n[..3] != [0.0; 3];
+        let (mut flips, mut both, mut sum) = (0usize, 0usize, 0.0f32);
+        for (x, y) in a.iter().zip(b) {
+            match (hit(x), hit(y)) {
+                (true, true) => {
+                    both += 1;
+                    sum += (0..3).map(|i| (x[i] - y[i]).abs()).sum::<f32>();
+                }
+                (false, false) => {}
+                _ => flips += 1,
+            }
+        }
+        (flips as f32 / a.len() as f32, sum / both.max(1) as f32)
+    }
+
+    /// Values the kernels must not read change nothing, bit for bit, on every gallery scene and
+    /// both routes: the inversion sphere at strength 0, the Julia constant at mix 0, the orbit
+    /// controls of the families without an orbit constant. (The neutral defaults against the
+    /// kernels before these parameters were compared once, A/B over the same scenes: 34 of 36
+    /// routes bit-identical, Hybrid on the world route within ULPs, normals within 2.6e-4,
+    /// because NVPTX's multiply-add fusion follows the code layout; a cross-build golden image
+    /// would pin that layout and the driver, so it is not a test.)
     #[test]
-    fn cuda_tmp_ab_probe() {
+    fn cuda_inactive_orbit_and_inversion_values_change_nothing() {
         let _gpu_test = crate::test_gpu::lock();
-        let path = std::path::PathBuf::from(std::env::var("WB_AB_OUT").unwrap());
         let mut gpu = Gpu::new().unwrap();
-        let mut out: Vec<f32> = Vec::new();
-        let mut names = Vec::new();
         for scene in Scene::gallery() {
+            let mut idle = scene.clone();
+            idle.inversion_center = [0.4, -0.3, 2.5];
+            idle.inversion_radius = 0.7;
+            if idle.julia_mix == 0.0 {
+                idle.julia = [0.6, -0.2, 0.1];
+            }
+            if !idle.formula.has_orbit_constant() {
+                idle.julia_mix = 0.5;
+                idle.orbit_offset = [0.3, 0.0, -0.2];
+            }
             for world in [false, true] {
-                let s = if world {
-                    crate::world::WorldDocument::from_scene(&scene).snapshot(0.0).unwrap()
-                } else {
-                    scene.clone()
+                let route = |s: &Scene| {
+                    if world {
+                        crate::world::WorldDocument::from_scene(s)
+                            .snapshot(0.0)
+                            .unwrap()
+                    } else {
+                        s.clone()
+                    }
                 };
-                let mut target = gpu.target(96, 64);
-                gpu.step(&mut target, &s, 2, 19, None, false);
-                let start = out.len();
-                for b in [&target.accum, &target.albedo, &target.normal] {
-                    for v in gpu.guide_sums(&target, b) {
-                        out.extend_from_slice(&v);
-                    }
-                }
-                names.push((format!("{} world={world}", scene.name), start, out.len()));
+                assert!(
+                    frame_guides(&mut gpu, &route(&scene)) == frame_guides(&mut gpu, &route(&idle)),
+                    "{} (world {world}): an unread value changed the render",
+                    scene.name
+                );
             }
         }
-        if path.exists() {
-            let bytes = std::fs::read(&path).unwrap();
-            let old: Vec<f32> = bytes
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect();
-            assert_eq!(old.len(), out.len());
-            let mut bad = 0;
-            for (name, a, b) in &names {
-                let third = (*b - *a) / 3;
-                let mut report = String::new();
-                let mut same = true;
-                for (k, label) in ["accum", "albedo", "normal"].iter().enumerate() {
-                    let r = *a + k * third..*a + (k + 1) * third;
-                    let (mut n, mut max) = (0, 0.0f32);
-                    for (x, y) in old[r.clone()].iter().zip(&out[r]) {
-                        if x.to_bits() != y.to_bits() {
-                            n += 1;
-                            max = max.max((x - y).abs());
-                        }
-                    }
-                    same &= n == 0;
-                    report += &format!(" {label}: {n} diff (max {max:e})");
-                }
-                eprintln!("AB {name}: {}{report}", if same { "identical" } else { "DIFFERENT" });
-                bad += (!same) as usize;
-            }
-            assert_eq!(bad, 0);
-        } else {
-            let bytes: Vec<u8> = out.iter().flat_map(|v| v.to_le_bytes()).collect();
-            std::fs::write(&path, bytes).unwrap();
-            for (name, ..) in &names {
-                eprintln!("AB dumped {name}");
+    }
+
+    /// Fractional iterations, the Julia mix, the orbit offset and the inversion strength morph
+    /// continuously: a step of 1e-3 moves the normals far less than the whole unit step does.
+    /// Iterations are probed inside the unit and on arriving at the next integer, not on
+    /// leaving one: at an integer n the pixels whose normal stencil lies inside the n-iteration
+    /// set (estimate 0, zero gradient: the kernels' fallback normal) gain the gradient of the
+    /// (n+1)-th estimate at any fraction above 0. Measured on this preset: the same 66 of 3366
+    /// hit pixels from 4.000001 to 4.5, every other pixel continuous.
+    #[test]
+    fn cuda_animated_formula_controls_are_continuous() {
+        let _gpu_test = crate::test_gpu::lock();
+        let mut gpu = Gpu::new().unwrap();
+        let mut base = Scene::preset(FAMILY_BULB);
+        base.render.iterations = 4.0;
+        let normals = |gpu: &mut Gpu, edit: &dyn Fn(&mut Scene)| {
+            let mut s = base.clone();
+            edit(&mut s);
+            let [_, _, normal] = frame_guides(gpu, &s);
+            normal
+        };
+        // (control, its value at v in 0..1, the starts of the 1e-3 steps probed)
+        type Edit = Box<dyn Fn(&mut Scene, f32)>;
+        let controls: [(&str, Edit, [f32; 2]); 4] = [
+            (
+                "iterations",
+                Box::new(|s, v| s.render.iterations = 4.0 + v),
+                [0.5, 0.999],
+            ),
+            (
+                "julia mix",
+                Box::new(|s, v| {
+                    s.julia = [0.35, 0.35, -0.4];
+                    s.julia_mix = v;
+                }),
+                [0.0, 0.999],
+            ),
+            (
+                "orbit offset",
+                Box::new(|s, v| s.orbit_offset = [0.3 * v, 0.0, 0.0]),
+                [0.0, 0.999],
+            ),
+            (
+                "inversion",
+                Box::new(|s, v| {
+                    s.inversion_center = [0.0, 0.0, 3.0];
+                    s.inversion_radius = 2.0;
+                    s.inversion_strength = v;
+                }),
+                [0.0, 0.999],
+            ),
+        ];
+        for (name, edit, starts) in &controls {
+            let whole = normal_gap(
+                &normals(&mut gpu, &|s| edit(s, 0.0)),
+                &normals(&mut gpu, &|s| edit(s, 1.0)),
+            );
+            assert!(whole.1 > 0.0, "{name}: the unit step must change the shape");
+            for start in *starts {
+                let a = normals(&mut gpu, &|s| edit(s, start));
+                let b = normals(&mut gpu, &|s| edit(s, start + 0.001));
+                let (flips, mean) = normal_gap(&a, &b);
+                assert!(
+                    flips <= whole.0.max(0.005) && 10.0 * mean < whole.1,
+                    "{name} at {start}: a 1e-3 step jumped (flips {flips}, normals {mean},                      unit step {whole:?})"
+                );
             }
         }
+        // Mix 1 is the Julia form: the constant alone, whatever the point.
+        let julia = normals(&mut gpu, &|s| {
+            s.julia = [0.35, 0.35, -0.4];
+            s.julia_mix = 1.0;
+        });
+        assert!(julia.iter().any(|n| n[..3] != [0.0; 3]));
     }
 
     /// Explicit visual probe; artifacts remain under target and are not scene templates.

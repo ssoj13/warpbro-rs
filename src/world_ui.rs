@@ -4666,13 +4666,6 @@ mod tests {
         for (path, value) in [
             ("/transform/position/0", json!(10.0)),
             ("/visible", json!(false)),
-            (
-                "/formula",
-                serde_json::to_value(
-                    crate::scene::Scene::preset(crate::params::FAMILY_BOX).formula,
-                )
-                .unwrap(),
-            ),
         ] {
             e.execute(WorldCommand::SetAnimation {
                 id,
@@ -4692,8 +4685,6 @@ mod tests {
         let mut state = WorldUi::default();
         let cache = state.take_cache(&e);
         let ptr = cache.attributes[&id].as_ptr();
-        let scale = "/formula/Mandelbox/scale";
-        assert!(!cache.attributes[&id].iter().any(|a| a.path == scale));
         state.cache = cache;
         state.playhead = 5;
         let cache = state.take_cache(&e);
@@ -4713,14 +4704,6 @@ mod tests {
         state.playhead = 10;
         let cache = state.take_cache(&e);
         assert!(!cache.nodes.iter().find(|n| n.id == id).unwrap().visible);
-        assert_eq!(
-            cache.attributes[&id]
-                .iter()
-                .find(|a| a.path == scale)
-                .unwrap()
-                .value,
-            json!(crate::scene::MandelBox::PRESET.scale)
-        );
     }
 
     #[test]

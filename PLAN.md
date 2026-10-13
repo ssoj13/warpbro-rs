@@ -23,6 +23,14 @@ egui-widgets-rs. Topic docs (how things work) live in docs/; this file only trac
   checked-in or operator files once with a throwaway script (and a backup).
 - References: D:\Projects\vfx.ref.
 
+## State (2026-10-13)
+
+- **Animatable formula parameters** (branch `mandelbulb-params`, fractal-rs ABI 5): Julia mix
+  (replaces the switch), orbit offset, fractional iterations (all families), spherical inversion
+  (all families, out-of-line `inverted_estimate`). Kernel float bits follow the code layout
+  (NVPTX multiply-add fusion per basic block): A/B against the former kernels was bit-identical
+  on 34 of 36 gallery routes, world Hybrid within ULPs. Details: MANDELBULB_PROGRESS.md.
+
 ## State (2026-10-12)
 
 - **Takes** play through node attributes: `/take/clip` (node data, set like `/material_id`),

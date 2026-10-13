@@ -13,10 +13,12 @@ Documentation: [render and quality profiles](docs/render-profiles.md), [workspac
 
 ## What it does
 
-- **Eight distance-estimated families:** Mandelbulb (Mandelbrot or Julia form, angle scales,
-  phases and per-iteration rotation), Mandelbox, quaternion Julia (a rotated 4D slice), KIFS
-  (tetrahedron, octahedron, Menger), Kleinian, pseudo-Kleinian, Apollonian, and Hybrid (up to
-  four bulb / box / KIFS-fold / inversion steps, repeated).
+- **Eight distance-estimated families:** Mandelbulb (a keyable Mandelbrot-to-Julia mix and
+  orbit offset, angle scales, phases and per-iteration rotation), Mandelbox, quaternion Julia (a
+  rotated 4D slice), KIFS (tetrahedron, octahedron, Menger), Kleinian, pseudo-Kleinian,
+  Apollonian, and Hybrid (up to four bulb / box / KIFS-fold / inversion steps, repeated). Every
+  family takes fractional iteration counts (smooth growth when keyed) and a spherical inversion
+  pre-transform with a strength.
 - **World objects:** Playa UUID nodes for fractals, cameras, directional lights, HDR environments,
   groups, masks and materials, with parent transforms, visibility, layer spans, lock and solo.
   A **Mask** node (sphere, box or cells, optionally inverted) sections the fractals of its
