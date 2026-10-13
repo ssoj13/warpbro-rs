@@ -6113,7 +6113,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(Settings::default().controls.look_sensitivity, 1.0);
+        assert_eq!(Settings::default().controls, Controls::default());
         app.controls.look_sensitivity = 0.4;
         app.controls.fly_speed = 3.0;
         let loaded: Controls =
