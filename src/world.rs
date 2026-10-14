@@ -1711,6 +1711,12 @@ fn attribute_choices(path: &str) -> Vec<Value> {
         p if p.ends_with("/kind") && p.starts_with("/formula") => {
             &["Tetrahedron", "Octahedron", "Menger"]
         }
+        // One Hybrid step slot: Off skips it, the rest run their sub-formula.
+        // The whole `/formula/Hybrid/steps` array keeps no choices: it edits
+        // slot by slot (`set_attribute` rejects a whole value outside choices).
+        p if p.starts_with("/formula/Hybrid/steps/") => {
+            &["Off", "Mandelbulb", "Mandelbox", "KifsFold", "Inversion"]
+        }
         _ => &[],
     };
     values.iter().map(|v| json!(v)).collect()
@@ -1783,6 +1789,10 @@ pub(crate) fn attribute_label(path: &str) -> String {
         "/camera/f_number" => return "f-number".into(),
         "/formula/Hybrid/mandelbox/min_radius_ratio" => return "Mandelbox · Min ratio".into(),
         "/formula/Hybrid/mandelbox/rotation_degrees" => return "Mandelbox · Rotate".into(),
+        "/formula/Hybrid/steps/0" => return "Step 1".into(),
+        "/formula/Hybrid/steps/1" => return "Step 2".into(),
+        "/formula/Hybrid/steps/2" => return "Step 3".into(),
+        "/formula/Hybrid/steps/3" => return "Step 4".into(),
         "/material/transmission_extra_roughness" => return "Refraction roughness".into(),
         CAMERA_ORBIT_SPEED => return "Orbit speed (°/s)".into(),
         CAMERA_ORBIT_PHASE => return "Orbit phase (°)".into(),
@@ -4061,6 +4071,18 @@ impl WorldDocument {
             {
                 continue;
             }
+            // A hybrid packs one rotation (the bulb's) and its own bailout
+            // (`Scene::pack`): these sub-formula rows are never read — hide them
+            // instead of a permanently grey row (`inactive_reason` keeps guarding
+            // direct API writes).
+            if matches!(
+                path.as_str(),
+                "/formula/Hybrid/mandelbox/rotation_degrees"
+                    | "/formula/Hybrid/kifs/rotation_degrees"
+                    | "/formula/Hybrid/bulb/bailout"
+            ) {
+                continue;
+            }
             let keyable = !matches!(
                 path.as_str(),
                 "/locked" | "/solo" | "/shy" | "/start" | "/end"
@@ -4163,6 +4185,34 @@ impl WorldDocument {
                         .unwrap_or_default();
                     out.push(attr);
                 }
+            }
+        }
+        // Hybrid steps are an array of enums: one choice row per slot so each
+        // sub-formula can be switched on (`inactive_reason` gates the rows by
+        // step). The slots are not keyable: keying a component requires a numeric
+        // channel (`set_attribute`), while steps key as a whole via `/formula`.
+        if let Some(steps) = out
+            .iter()
+            .find(|a| a.path == "/formula/Hybrid/steps")
+            .map(|a| a.value.clone())
+            .and_then(|v| v.as_array().cloned())
+        {
+            for (slot, value) in steps.iter().enumerate() {
+                let path = format!("/formula/Hybrid/steps/{slot}");
+                out.push(WorldAttribute {
+                    path: path.clone(),
+                    label: attribute_label(&path),
+                    value: value.clone(),
+                    frames: vec![],
+                    keyable: false,
+                    component: Some(slot),
+                    choices: attribute_choices(&path),
+                    choice_labels: vec![],
+                    range: None,
+                    slider: None,
+                    color: false,
+                    default: None,
+                });
             }
         }
         out.sort_by(|a, b| a.path.cmp(&b.path));
@@ -4268,6 +4318,30 @@ impl WorldDocument {
         }
         Ok(None)
     }
+    /// Refresh the `/formula` choice blob after a Hybrid steps write. Slot edits
+    /// land on the `/formula/Hybrid/steps` array entry, while `inactive_reason`
+    /// gates sub-formula rows by the steps the blob carries: without the sync
+    /// the rows would stay grey until the family itself is re-picked.
+    fn sync_formula_steps_blob(attrs: &mut Attrs, steps: &Value) {
+        let mut formula = match attrs.get("/formula").cloned().map(attr_json) {
+            Some(v) => v,
+            None => return,
+        };
+        let Some(slots) = formula
+            .pointer_mut("/Hybrid/steps")
+            .and_then(Value::as_array_mut)
+        else {
+            return;
+        };
+        let Some(fresh) = steps.as_array() else {
+            return;
+        };
+        if slots.len() != fresh.len() {
+            return;
+        }
+        slots.clone_from_slice(fresh);
+        attrs.set("/formula", to_attr(&formula));
+    }
     fn set_attribute(
         &mut self,
         id: NodeId,
@@ -4301,6 +4375,13 @@ impl WorldDocument {
         let value = clamp_to_range(path, value);
         let value = self.without_navigation_offset(id, path, value)?;
         if let Some((parent, component)) = self.component_path(id, path)? {
+            // Enum slots (Hybrid steps) only take their listed values; the grid
+            // offers exactly these, this guards direct API writes. Numeric
+            // components have no choices and skip the check.
+            let slot_choices = attribute_choices(path);
+            if !slot_choices.is_empty() && !slot_choices.contains(&value) {
+                return Err(format!("Invalid enum value: {path}"));
+            }
             let mut a = self.attrs(id)?;
             let mut vector = self.resolve_attribute(id, &parent, frame, &mut HashSet::new())?;
             vector[component] = value.clone();
@@ -4326,6 +4407,9 @@ impl WorldDocument {
                 }
             } else {
                 a.set(&parent, to_attr(&vector));
+                if parent == "/formula/Hybrid/steps" {
+                    Self::sync_formula_steps_blob(&mut a, &vector);
+                }
             }
             return self.store_attrs(id, &a);
         }
@@ -4398,6 +4482,9 @@ impl WorldDocument {
                 dict.remove(path);
             }
             a.set(path, to_attr(&value));
+            if path == "/formula/Hybrid/steps" {
+                Self::sync_formula_steps_blob(&mut a, &value);
+            }
         }
         if matches!(path, "/formula" | "/material/facing") && !key && !animated {
             let mut children = Attrs::new();

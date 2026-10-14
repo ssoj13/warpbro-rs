@@ -1973,6 +1973,102 @@ fn hybrid_marks_unpacked_sub_formula_parameters_and_limits_keep_their_floor() {
     assert_eq!(numeric_like(&json!(9), 2.0), json!(2));
 }
 
+#[test]
+fn hybrid_step_slots_edit_and_never_packed_rows_stay_hidden() {
+    let mut e = editor();
+    let id = find(&e, WorldKind::Fractal);
+    // Switch the fractal to Hybrid: the sub-formula rows appear.
+    set(
+        &mut e,
+        id,
+        "/formula",
+        serde_json::to_value(Scene::preset(crate::params::FAMILY_HYBRID).formula).unwrap(),
+        0.0,
+    );
+    let attrs = e.document.attributes(id, 0.0).unwrap();
+    // Never-packed rows are hidden, not grey.
+    for path in [
+        "/formula/Hybrid/mandelbox/rotation_degrees",
+        "/formula/Hybrid/kifs/rotation_degrees",
+        "/formula/Hybrid/bulb/bailout",
+    ] {
+        assert!(
+            attrs.iter().all(|a| a.path != path),
+            "{path} is never packed and stays hidden"
+        );
+    }
+    // One choice row per step slot.
+    for (slot, label) in ["Step 1", "Step 2", "Step 3", "Step 4"].iter().enumerate() {
+        let path = format!("/formula/Hybrid/steps/{slot}");
+        let row = attrs.iter().find(|a| a.path == path).unwrap();
+        assert_eq!(row.label, label.to_string(), "{path}");
+        assert_eq!(row.component, Some(slot));
+        assert!(!row.keyable, "{path} keys as a whole via /formula");
+        assert_eq!(
+            row.choices,
+            vec![
+                json!("Off"),
+                json!("Mandelbulb"),
+                json!("Mandelbox"),
+                json!("KifsFold"),
+                json!("Inversion"),
+            ],
+            "{path}"
+        );
+    }
+    // Default steps run bulb + box: kifs and the inversion stay inactive...
+    let inactive = |e: &WorldEditor, path: &str| {
+        let attrs = e.document.attributes(id, 0.0).unwrap();
+        let values: std::collections::HashMap<String, Value> =
+            attrs.into_iter().map(|a| (a.path, a.value)).collect();
+        inactive_reason(path, |p| values.get(p))
+    };
+    assert!(inactive(&e, "/formula/Hybrid/kifs/scale").is_some());
+    assert!(inactive(&e, "/formula/Hybrid/apollonian_scale").is_some());
+    assert!(inactive(&e, "/formula/Hybrid/mandelbox/scale").is_none());
+    // ...until their step runs.
+    set(
+        &mut e,
+        id,
+        "/formula/Hybrid/steps/2",
+        json!("KifsFold"),
+        0.0,
+    );
+    set(
+        &mut e,
+        id,
+        "/formula/Hybrid/steps/3",
+        json!("Inversion"),
+        0.0,
+    );
+    assert!(inactive(&e, "/formula/Hybrid/kifs/scale").is_none());
+    assert!(inactive(&e, "/formula/Hybrid/apollonian_scale").is_none());
+    // The kernel sees the switched steps.
+    let scene = e.document.node_scene(id, 0.0).unwrap();
+    match scene.formula {
+        crate::scene::Formula::Hybrid(h) => assert_eq!(
+            h.steps,
+            [
+                crate::scene::HybridStep::Mandelbulb,
+                crate::scene::HybridStep::Mandelbox,
+                crate::scene::HybridStep::KifsFold,
+                crate::scene::HybridStep::Inversion,
+            ]
+        ),
+        other => panic!("expected Hybrid, got {}", other.name()),
+    }
+    // Values outside the slot choices are rejected.
+    assert!(
+        e.execute(WorldCommand::SetAttribute {
+            id,
+            path: "/formula/Hybrid/steps/0".into(),
+            value: json!("Menger"),
+            frame: 0.0,
+        })
+        .is_err()
+    );
+}
+
 /// Every attribute the Attribute Editor shows (any family, any node kind) explains itself on
 /// hover: a new parameter without a line in `attribute_hint` fails here.
 #[test]
