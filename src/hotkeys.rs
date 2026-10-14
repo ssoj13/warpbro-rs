@@ -99,6 +99,9 @@ pub enum Command {
     Modified,
     /// Viewport tools: Q select (no manipulator), W move, E rotate, R scale.
     Tool(crate::app::ViewTool),
+    /// Viewport manipulator size (Settings > Controls), while a gizmo tool is on.
+    GizmoLarger,
+    GizmoSmaller,
 }
 
 #[derive(Clone, Copy)]
@@ -200,6 +203,10 @@ pub const VIEWPORT: &[Binding] = &[
         Key::R,
         Modifiers::NONE,
     ),
+    // + is Plus on the numpad and Shift+= on the main row; shift is ignored so both land.
+    property(Command::GizmoLarger, Key::Plus),
+    property(Command::GizmoLarger, Key::Equals),
+    property(Command::GizmoSmaller, Key::Minus),
 ];
 pub const TAKES: &[Binding] = &[binding(Command::Delete, Key::Delete, Modifiers::NONE)];
 pub const TIMELINE: &[Binding] = &[
@@ -748,6 +755,26 @@ mod tests {
         assert_eq!(
             resolve(t, Key::U, None, Modifiers::SHIFT, false),
             Some((t, Command::Keyed))
+        );
+    }
+    #[test]
+    fn gizmo_size_keys_belong_to_the_viewport() {
+        let v = Scope::Viewport;
+        assert_eq!(
+            resolve(v, Key::Plus, None, Modifiers::NONE, false),
+            Some((v, Command::GizmoLarger))
+        );
+        assert_eq!(
+            resolve(v, Key::Equals, None, Modifiers::SHIFT, false),
+            Some((v, Command::GizmoLarger))
+        );
+        assert_eq!(
+            resolve(v, Key::Minus, None, Modifiers::NONE, false),
+            Some((v, Command::GizmoSmaller))
+        );
+        assert_eq!(
+            resolve(Scope::Timeline, Key::Plus, None, Modifiers::NONE, false),
+            None
         );
     }
     #[test]

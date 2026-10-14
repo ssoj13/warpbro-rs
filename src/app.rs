@@ -382,6 +382,20 @@ impl SettingsPage {
     }
 }
 
+/// Settings > Controls span of the manipulator size, and the + / − step.
+const GIZMO_SIZE_MIN: f32 = 40.0;
+const GIZMO_SIZE_MAX: f32 = 400.0;
+const GIZMO_SIZE_STEP: f32 = 10.0;
+
+fn step_gizmo_size(size: f32, larger: bool) -> f32 {
+    let next = if larger {
+        size + GIZMO_SIZE_STEP
+    } else {
+        size - GIZMO_SIZE_STEP
+    };
+    next.clamp(GIZMO_SIZE_MIN, GIZMO_SIZE_MAX)
+}
+
 /// The Settings > Controls page: viewport flight preferences (`inertia` turns them into the
 /// shared `cam_controls` flight settings, the one place WarpBro configures the flight rig) and
 /// the mouse mapping of the slot strips.
@@ -920,7 +934,7 @@ impl App {
                         egui_prefs2::section_header(ui, "Manipulator");
                         let d = Controls::default();
                         prefs_grid(ui, am, &mut self.prefs_grids[3], vec![
-                            f_row("Size, pt", c.gizmo_size, 40.0..=400.0, d.gizmo_size),
+                            f_row("Size, pt", c.gizmo_size, GIZMO_SIZE_MIN..=GIZMO_SIZE_MAX, d.gizmo_size),
                             f_row("Line width, pt", c.gizmo_stroke, 0.5..=10.0, d.gizmo_stroke),
                         ], |label, v| match (label, v) {
                             ("Size, pt", AttrValue::Float(v)) => c.gizmo_size = v,
@@ -3770,12 +3784,19 @@ impl App {
         if self.fly.is_none() && !gizmo_owns {
             self.orbit_camera(ui, &resp, toolbar.contains_pointer);
         }
-        if self.fly.is_none() {
-            use crate::hotkeys::{self, Command as Hotkey, Scope};
-            for tool in ViewTool::ALL {
-                if hotkeys::consume(ui.ctx(), Scope::Viewport, Hotkey::Tool(tool)) {
-                    self.tool = tool;
-                }
+        // Q W E R stay live in flight: the rig already read this frame's held keys, and a
+        // press still switches the tool. + / − resize the manipulator and write Settings.
+        use crate::hotkeys::{self, Command as Hotkey, Scope};
+        for tool in ViewTool::ALL {
+            if hotkeys::consume(ui.ctx(), Scope::Viewport, Hotkey::Tool(tool)) {
+                self.tool = tool;
+            }
+        }
+        if self.tool != ViewTool::Select {
+            let larger = hotkeys::consume(ui.ctx(), Scope::Viewport, Hotkey::GizmoLarger);
+            let smaller = hotkeys::consume(ui.ctx(), Scope::Viewport, Hotkey::GizmoSmaller);
+            if larger || smaller {
+                self.controls.gizmo_size = step_gizmo_size(self.controls.gizmo_size, larger);
             }
         }
         if resp.double_clicked() {
@@ -4419,9 +4440,9 @@ impl ViewTool {
         use egui_widgets_config::icons as ph;
         match self {
             Self::Select => (ph::SELECT, "Select · Q (no manipulator)"),
-            Self::Move => (ph::MOVE, "Move · W"),
-            Self::Rotate => (ph::ROTATE, "Rotate · E"),
-            Self::Scale => (ph::SCALE, "Scale · R"),
+            Self::Move => (ph::MOVE, "Move · W · +/− gizmo size"),
+            Self::Rotate => (ph::ROTATE, "Rotate · E · +/− gizmo size"),
+            Self::Scale => (ph::SCALE, "Scale · R · +/− gizmo size"),
         }
     }
 }
@@ -4435,6 +4456,14 @@ fn nav_dt(ctx: &egui::Context) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gizmo_size_steps_stay_inside_the_settings_span() {
+        assert_eq!(step_gizmo_size(120.0, true), 130.0);
+        assert_eq!(step_gizmo_size(120.0, false), 110.0);
+        assert_eq!(step_gizmo_size(GIZMO_SIZE_MIN, false), GIZMO_SIZE_MIN);
+        assert_eq!(step_gizmo_size(GIZMO_SIZE_MAX, true), GIZMO_SIZE_MAX);
+    }
 
     #[test]
     fn library_preset_assigns_to_all_fractals_in_one_undo_step() {
