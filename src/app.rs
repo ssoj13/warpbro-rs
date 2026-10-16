@@ -779,9 +779,13 @@ impl App {
             }
             self.fonts = settings.fonts;
             if let Some(blob) = settings.layout {
-                match egui_dock_layout::from_blob(&blob) {
-                    Ok(layout) if dock::valid_layout(&layout) => self.dock = layout,
-                    _ => self.status = "Saved layout could not be restored; using default".into(),
+                // A layout saved before the dock engine change is refused here once (no compat).
+                match dock::restore_layout(&blob) {
+                    Ok(layout) => self.dock = layout,
+                    Err(error) => {
+                        self.status =
+                            format!("Saved layout could not be restored ({error}); using default")
+                    }
                 }
             }
             self.colour = crate::ocio::State::new(settings.colour.clone());

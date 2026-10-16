@@ -250,7 +250,8 @@ impl Default for Layouts {
     }
 }
 
-fn restore_layout(blob: &str) -> Result<Layout<Panel>, String> {
+/// A stored layout blob, read and checked ([`valid_layout`]).
+pub(super) fn restore_layout(blob: &str) -> Result<Layout<Panel>, String> {
     let layout = egui_dock_layout::from_blob(blob).map_err(|e| e.to_string())?;
     if valid_layout(&layout) {
         Ok(layout)
