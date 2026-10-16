@@ -1,6 +1,8 @@
 # HANDOFF (2026-10-13, ~00:00)
 
-Direct display (2026-10-16): CODE PUSHED, NOT YET TESTED (rate limit). fractal-rs 74147e2
+Direct display (2026-10-16): pushed; `cargo oxide test -- --release --locked -- direct` on the
+published pins: 7 passed, 0 failed (incl. cuda_direct_shades_each_world_object_with_its_material
+and display_modes_...). Still to do: the full suite, a look by eye. fractal-rs 74147e2
 (`world_direct`, per-object shading, all world lights), WarpBro: `DirectShading` on every
 render profile (`/render/direct`, Direct-only rows), `Scene::direct`, Direct kernels in
 render.rs, grid = largest square <= Samples, up to 16 x 16 (`DirectShading::MAX_GRID`),
