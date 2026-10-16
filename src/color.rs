@@ -144,7 +144,7 @@ pub fn default_selection() -> crate::ocio::Sel {
 pub const BT2408_SDR_WHITE_NITS: f32 = 203.0;
 
 /// Canonical display-light units shared by renderers and file exporters.
-pub use egui_display::export::DisplayLight;
+pub use video_io::export::DisplayLight;
 
 struct Cached {
     selection: crate::ocio::Sel,
@@ -243,7 +243,7 @@ impl ColorPipeline {
 /// with black at 0, `L^(1/2.4)`. A BT.709-tagged video is shown through BT.1886, so this code
 /// puts on a video display the light the viewport shows on an sRGB one (an ACES SDR view's
 /// sRGB and Rec.1886 displays differ in exactly this encoding). Every SDR video writer uses it.
-pub use egui_display::export::bt1886_code;
+pub use video_io::color::bt1886_code;
 
 /// Extended sRGB canvas encoding; preserves negative values and values above 1.
 pub fn oetf(v: f32) -> f32 {

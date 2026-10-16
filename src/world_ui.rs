@@ -6,7 +6,7 @@ use egui_attr_grid::{AnimIntent, AnimState, ChannelExpansion};
 use egui_attr_grid::{AttrField, AttrGridHooks, AttrValue as GridValue, render_grid_with_config};
 use egui_outliner::{ContextItem, OutlinerAction, OutlinerConfig, OutlinerModel, TreeNode};
 use egui_track_timeline::{
-    Band, Clip, KeyPos, Keyframe, PropLane, TimelineAction, TimelineConfig, TimelineModel,
+    Band, Clip, KeyPos, Keyframe, Marker, PropLane, TimelineAction, TimelineConfig, TimelineModel,
     TimelineView, Track, TrackTimeline, WorkArea,
 };
 use egui_widgets_config::AttrMetrics;
@@ -586,13 +586,22 @@ fn category(path: &str) -> &'static str {
         _ => "Custom",
     }
 }
+/// A timeline frame as a time-mark frame (marks are unsigned).
+fn mark_frame(frame: i64) -> u32 {
+    frame.clamp(0, i64::from(u32::MAX)) as u32
+}
+/// The document order after moving `moved` (contiguous, in order) under `parent` at child
+/// `index` of the list without them (the outliner's remove-then-insert contract).
 fn reparent_order(
     nodes: &[WorldNodeInfo],
-    id: NodeId,
+    moved: &[NodeId],
     parent: Option<NodeId>,
     index: usize,
 ) -> Vec<NodeId> {
-    let rest = nodes.iter().filter(|n| n.id != id).collect::<Vec<_>>();
+    let rest = nodes
+        .iter()
+        .filter(|n| !moved.contains(&n.id))
+        .collect::<Vec<_>>();
     let siblings = rest
         .iter()
         .filter(|n| n.parent == parent)
@@ -608,7 +617,7 @@ fn reparent_order(
             .unwrap_or(rest.len())
     };
     let mut ids = rest.into_iter().map(|n| n.id).collect::<Vec<_>>();
-    ids.insert(at, id);
+    ids.splice(at..at, moved.iter().copied());
     ids
 }
 fn tree(nodes: &[WorldNodeInfo], parent: Option<NodeId>, depth: usize) -> Vec<TreeNode> {
@@ -938,24 +947,16 @@ impl WorldUi {
             .inner;
         for a in actions {
             match a {
-                OutlinerAction::Select {
-                    id,
-                    additive,
-                    range,
-                } => {
-                    if let Some(id) = map.get(&id) {
-                        self.select(e, *id, additive, range, nodes);
-                    }
-                }
-                OutlinerAction::SelectMany { ids } => {
+                // The widget resolved the gesture: `ids` is the new selection. The Attribute
+                // Editor follows the row it landed on, else the last selected.
+                OutlinerAction::Select { ids, lead } => {
                     e.selected = ids.iter().filter_map(|id| map.get(id).copied()).collect();
-                    e.selection = e.selected.last().copied();
+                    e.selection = lead
+                        .and_then(|id| map.get(&id).copied())
+                        .filter(|id| e.selected.contains(id))
+                        .or_else(|| e.selected.last().copied());
                 }
-                OutlinerAction::ClearSelection => {
-                    e.selection = None;
-                    e.selected.clear();
-                }
-                OutlinerAction::ToggleVisible { id, visible } => {
+                OutlinerAction::ToggleVisible { id, visible, .. } => {
                     if let Some(id) = map.get(&id) {
                         self.command(
                             e,
@@ -974,20 +975,20 @@ impl WorldUi {
                     }
                 }
                 OutlinerAction::Move {
-                    id,
+                    ids,
                     new_parent,
                     index,
                 } => {
-                    if let Some(id) = map.get(&id).copied() {
+                    let ids: Vec<NodeId> = ids.iter().filter_map(|id| map.get(id).copied()).collect();
+                    if !ids.is_empty() {
                         let parent = new_parent.and_then(|p| map.get(&p).copied());
-                        let ids = reparent_order(nodes, id, parent, index);
-                        self.command(
-                            e,
-                            WorldCommand::Batch(vec![
-                                WorldCommand::Reparent { id, parent },
-                                WorldCommand::Reorder { ids },
-                            ]),
-                        );
+                        let order = reparent_order(nodes, &ids, parent, index);
+                        let mut batch: Vec<WorldCommand> = ids
+                            .iter()
+                            .map(|&id| WorldCommand::Reparent { id, parent })
+                            .collect();
+                        batch.push(WorldCommand::Reorder { ids: order });
+                        self.command(e, WorldCommand::Batch(batch));
                     }
                 }
                 OutlinerAction::ContextEmpty { action } => {
@@ -1548,9 +1549,13 @@ impl WorldUi {
             end: e.document.last as i64 + 1,
         });
         model.markers.clear();
-        model
-            .markers
-            .extend(e.document.marks.values().map(|&f| i64::from(f)));
+        // A marker's id is its time-mark slot (`timeline_action` maps edits back to slots).
+        model.markers.extend(
+            e.document
+                .marks
+                .iter()
+                .map(|(&slot, &f)| Marker::new(u64::from(slot), i64::from(f))),
+        );
         let cfg = TimelineConfig {
             row_height: self.attribute_metrics.row_height(),
             lane_height: self.attribute_metrics.row_height(),
@@ -2006,7 +2011,11 @@ impl WorldUi {
                     anim,
                 )
             }) {
-                self.command(e, anim_command(id, attr, frame, intent));
+                match anim_effect(id, attr, frame, intent) {
+                    Some(AnimEffect::Command(command)) => self.command(e, command),
+                    Some(AnimEffect::Seek(to)) => self.seek(to),
+                    None => {}
+                }
             }
             let label = Rect::from_min_max(
                 cells.label.min
@@ -2119,7 +2128,9 @@ impl WorldUi {
                 e.selection = None;
                 e.selected.clear();
             }
-            TimelineAction::SetWorkArea { start, end } => {
+            // Live drag frames and the closing Done (a cancel's Done restores the start range)
+            // each set the range, as every drag frame did before.
+            TimelineAction::SetWorkArea { start, end, .. } => {
                 self.command(
                     e,
                     WorldCommand::SetTimeRange {
@@ -2147,6 +2158,38 @@ impl WorldUi {
                     .collect();
             }
             TimelineAction::ClearKeySelection => self.keys.clear(),
+            // Markers are the document's ten time-mark slots (0-9); a marker's id is its slot.
+            TimelineAction::AddMarker { frame } => {
+                match (0..10).find(|slot| !e.document.marks.contains_key(slot)) {
+                    Some(slot) => self.command(
+                        e,
+                        WorldCommand::SetMark {
+                            slot,
+                            frame: Some(mark_frame(frame)),
+                        },
+                    ),
+                    None => self.error = Some("All ten time marks are set: clear one first".into()),
+                }
+            }
+            TimelineAction::MoveMarker { id, frame } => {
+                if let Ok(slot) = u8::try_from(id) {
+                    self.command(
+                        e,
+                        WorldCommand::SetMark {
+                            slot,
+                            frame: Some(mark_frame(frame)),
+                        },
+                    );
+                }
+            }
+            TimelineAction::DeleteMarkers { ids } => {
+                let cmds = ids
+                    .into_iter()
+                    .filter_map(|id| u8::try_from(id).ok())
+                    .map(|slot| WorldCommand::SetMark { slot, frame: None })
+                    .collect();
+                self.command(e, WorldCommand::Batch(cmds));
+            }
             TimelineAction::AddKey { track, lane, frame } => {
                 if let Some(k) = Self::key_identity(nodes, lanes, KeyPos { track, lane, frame }) {
                     self.command(
@@ -2695,8 +2738,7 @@ impl WorldUi {
                         .get(&id)
                         .is_some_and(|sections| sections.contains(group));
                     let section = cache.sections.entry((id, group)).or_default();
-                    let response = egui_titlebar::CollapsingSection::new(group)
-                        .id_salt((wid(id), group))
+                    let response = egui_titlebar::CollapsingSection::new((wid(id), group), group)
                         .open(open)
                         .tint(section_color(group), 0.16)
                         .show(ui, |ui| {
@@ -2728,9 +2770,12 @@ impl WorldUi {
                                 &config,
                                 &mut hooks,
                             );
-                            for (path, value) in changes {
+                            // One object: store each edit's value. A gesture's closing `Done`
+                            // that wrote nothing more (`parts` empty) carries no change.
+                            for edit in changes.into_iter().filter(|edit| !edit.parts.is_empty()) {
+                                let path = edit.key;
                                 if let Some(attr) = attrs.iter().find(|a| a.path == path) {
-                                    let value = grid_json(value, &attr.value);
+                                    let value = grid_json(edit.value, &attr.value);
                                     let eligible = value_gesture_eligible(attr, &value);
                                     let command = WorldCommand::SetAttribute {
                                         id,
@@ -2842,8 +2887,11 @@ impl AttrGridHooks for WorldGridHooks<'_> {
     fn anim_intent(&mut self, field: &AttrField, intent: AnimIntent) {
         if let Some(index) = self.index(field) {
             let attr = &self.attrs[self.indices[index]];
-            self.commands
-                .push(anim_command(self.id, attr, self.frame, intent));
+            match anim_effect(self.id, attr, self.frame, intent) {
+                Some(AnimEffect::Command(command)) => self.commands.push(command),
+                Some(AnimEffect::Seek(to)) => self.ui_state.seek(to),
+                None => {}
+            }
         }
     }
     /// One expansion per node, shared with the timeline's lanes.
@@ -2887,7 +2935,7 @@ impl AttrGridHooks for WorldGridHooks<'_> {
         &mut self,
         ui: &mut egui::Ui,
         field: &mut AttrField,
-        _mixed: bool,
+        _mixed: egui_attr_grid::Parts,
         _layout: &ValueEditorLayout,
         _extra: &egui_attr_grid::EditorCtx,
     ) -> Option<bool> {
@@ -3047,18 +3095,37 @@ fn transport_icon(
 fn component_label(index: usize) -> &'static str {
     ["X", "Y", "Z", "W"].get(index).copied().unwrap_or("")
 }
+/// The keys around `frame` on whole frames (half a frame of tolerance, egui-attr-grid `key_nav`).
+fn key_nav(attr: &WorldAttribute, frame: f64) -> egui_attr_grid::KeyNav {
+    egui_attr_grid::key_nav(attr.frames.iter().copied(), frame, 1.0)
+}
 /// An attribute's animation for the shared controls (egui-attr-grid): animated = it has keys,
-/// keyed = one of them at `frame`. None for a non-keyable attribute (no controls).
+/// keyed = one of them exactly at `frame` (what Unkey removes), prev / next = a key to jump to.
+/// None for a non-keyable attribute (no controls).
 fn anim_state(attr: &WorldAttribute, frame: f64) -> Option<AnimState> {
-    attr.keyable.then(|| AnimState {
-        animated: !attr.frames.is_empty(),
-        keyed: attr.frames.contains(&frame),
+    attr.keyable.then(|| {
+        let nav = key_nav(attr, frame);
+        AnimState {
+            animated: !attr.frames.is_empty(),
+            keyed: attr.frames.contains(&frame),
+            prev: nav.prev.is_some(),
+            next: nav.next.is_some(),
+        }
     })
 }
-/// The document command of a click on an attribute's animation controls.
-fn anim_command(id: NodeId, attr: &WorldAttribute, frame: f64, intent: AnimIntent) -> WorldCommand {
+/// What a click on an attribute's animation controls asks for.
+enum AnimEffect {
+    /// A document edit.
+    Command(WorldCommand),
+    /// Move the playhead to this frame (Prev / Next key).
+    Seek(u32),
+}
+/// The effect of `intent` on attribute `attr` of node `id` at `frame`; None when Prev / Next
+/// has no key to go to.
+fn anim_effect(id: NodeId, attr: &WorldAttribute, frame: f64, intent: AnimIntent) -> Option<AnimEffect> {
     let path = attr.path.clone();
-    match intent {
+    let seek = |key: Option<f64>| key.map(|k| AnimEffect::Seek(k.round().max(0.0) as u32));
+    Some(AnimEffect::Command(match intent {
         AnimIntent::Animate | AnimIntent::Static => WorldCommand::SetAnimation {
             id,
             path,
@@ -3067,7 +3134,9 @@ fn anim_command(id: NodeId, attr: &WorldAttribute, frame: f64, intent: AnimInten
         },
         AnimIntent::Key => WorldCommand::Key { id, path, frame },
         AnimIntent::Unkey => WorldCommand::RemoveKey { id, path, frame },
-    }
+        AnimIntent::PrevKey => return seek(key_nav(attr, frame).prev),
+        AnimIntent::NextKey => return seek(key_nav(attr, frame).next),
+    }))
 }
 
 fn numeric_value(template: &Value, n: f64) -> Value {
@@ -4247,7 +4316,7 @@ mod tests {
             .find(|n| n.kind == WorldKind::Group)
             .unwrap()
             .id;
-        let ids = reparent_order(&nodes, moved, Some(parent), 0);
+        let ids = reparent_order(&nodes, &[moved], Some(parent), 0);
         e.execute(WorldCommand::Batch(vec![
             WorldCommand::Reparent {
                 id: moved,
@@ -4277,7 +4346,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             original
         );
-        let reordered = reparent_order(&nodes, nodes[0].id, None, 2);
+        let reordered = reparent_order(&nodes, &[nodes[0].id], None, 2);
         assert_eq!(reordered[2], nodes[0].id);
     }
     #[test]

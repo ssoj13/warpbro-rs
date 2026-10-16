@@ -1,7 +1,12 @@
 //! One dock workspace for every tool panel, plus viewport-local chrome.
+//!
+//! The workspace is an `egui_dock_layout::Layout`: plain data the dock draws and reports
+//! actions for; every change goes through `Layout::apply_with_permissions` (atomic, validated).
 use super::{App, Tab};
-use egui_dock::{DockArea, DockState, NodeIndex, TabViewer};
-use egui_layout_manager::{LayoutAction, LayoutManager, LayoutStore};
+use egui_dock_layout::{
+    Action, DockArea, DockContent, DockError, DockLayoutBar, DockStyle, Layout, LayoutStore,
+    Location, Node, Permissions, Placement, SplitAxis, SplitSize,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(super) enum Panel {
@@ -46,85 +51,114 @@ impl Panel {
             Self::Takes => "Takes",
         }
     }
+    /// The Viewport is the workspace's one fixed panel: it never closes.
+    fn permissions(&self) -> Permissions {
+        Permissions {
+            closable: *self != Self::Viewport,
+            ..Permissions::default()
+        }
+    }
+}
+
+/// A tab group of `panels`, the first one shown.
+fn tabs(panels: &[Panel]) -> Node<Panel> {
+    Node::Tabs {
+        panels: panels.to_vec(),
+        active: 0,
+    }
+}
+
+/// `first` and `second` divided along `axis`, `first` taking `ratio` of the space.
+fn split(axis: SplitAxis, ratio: f32, first: Node<Panel>, second: Node<Panel>) -> Node<Panel> {
+    Node::Split {
+        axis,
+        size: SplitSize::Ratio(ratio),
+        first: Box::new(first),
+        second: Box::new(second),
+    }
 }
 
 /// The start layout: the Attribute Editor over Settings / Render on the right, the Timeline
 /// under the workspace, and Outliner / Gallery / Materials over Takes left of the Viewport.
-pub(super) fn default_layout() -> DockState<Panel> {
-    let mut state = DockState::new(vec![Panel::Viewport]);
-    let surface = state.main_surface_mut();
-    let [workspace, right] = surface.split_right(NodeIndex::root(), 0.70, vec![Panel::Inspector]);
-    surface.split_below(right, 0.62, vec![Panel::Settings, Panel::Export]);
-    let [top, _] = surface.split_below(workspace, 0.82, vec![Panel::Timeline]);
-    let [_, panels] = surface.split_left(
-        top,
-        0.23,
-        vec![Panel::Outliner, Panel::Gallery, Panel::Materials],
+pub(super) fn default_layout() -> Layout<Panel> {
+    use SplitAxis::{Horizontal, Vertical};
+    let panels = split(
+        Vertical,
+        0.52,
+        tabs(&[Panel::Outliner, Panel::Gallery, Panel::Materials]),
+        tabs(&[Panel::Takes]),
     );
-    surface.split_below(panels, 0.52, vec![Panel::Takes]);
-    state
-}
-
-pub(super) fn valid_layout(state: &DockState<Panel>) -> bool {
-    let mut seen = std::collections::HashSet::new();
-    state.iter_all_tabs().all(|(_, tab)| seen.insert(*tab)) && seen.contains(&Panel::Viewport)
-}
-
-// egui_dock 0.21 does not update WindowState::screen_rect. Preserve each
-// floating window's drawn outer size and position as next-frame requests.
-pub(super) fn layout_blob(
-    state: &DockState<Panel>,
-    ctx: &egui::Context,
-) -> Result<String, egui_dock_layout::Error> {
-    let mut portable = state.clone();
-    for (surface, _) in state.iter_surfaces_indexed() {
-        if let Some(window) = portable.get_window_state_mut(surface) {
-            // The id is the one used by egui_dock's window_surface.
-            if let Some(area) =
-                egui::AreaState::load(ctx, egui::Id::new(format!("window {surface:?}")))
-                && area.rect().is_finite()
-                && area.rect().width() > 0.0
-                && area.rect().height() > 0.0
-            {
-                window.set_size(area.rect().size());
-                window.set_position(area.left_top_pos());
-            }
-        }
+    let workspace = split(
+        Vertical,
+        0.82,
+        split(Horizontal, 0.23, panels, tabs(&[Panel::Viewport])),
+        tabs(&[Panel::Timeline]),
+    );
+    let right = split(
+        Vertical,
+        0.62,
+        tabs(&[Panel::Inspector]),
+        tabs(&[Panel::Settings, Panel::Export]),
+    );
+    Layout {
+        root: Some(split(Horizontal, 0.70, workspace, right)),
+        floating: Vec::new(),
     }
-    egui_dock_layout::to_blob(&portable)
 }
 
-fn open_panel(state: &mut DockState<Panel>, panel: Panel) {
-    if let Some(path) = state.find_tab(&panel) {
-        let _ = state.set_active_tab(path);
-        state.set_focused_node_and_surface(path.node_path());
-    } else if matches!(
+/// A usable workspace: valid (every panel once, finite geometry) and showing the Viewport.
+pub(super) fn valid_layout(layout: &Layout<Panel>) -> bool {
+    layout.validate().is_ok() && layout.contains(&Panel::Viewport)
+}
+
+/// Size of a tool window opened floating (Settings, Render / Encode, Material Library).
+const WINDOW_SIZE: egui::Vec2 = egui::vec2(850.0, 600.0);
+
+/// Bring `panel` forward: show its tab where it is, else open it. Settings, Render / Encode and
+/// the Material Library open as a floating window centred on `area` (the dock's rect); the
+/// others join the `focused` panel's group (else the Viewport's, else the first group).
+fn open_panel(
+    layout: &mut Layout<Panel>,
+    panel: Panel,
+    focused: Option<Panel>,
+    area: egui::Rect,
+) -> Result<(), DockError> {
+    if layout.contains(&panel) {
+        return layout.apply(Action::Activate { panel });
+    }
+    if matches!(
         panel,
         Panel::Settings | Panel::Export | Panel::MaterialLibrary
     ) {
-        let surface = state.add_window(vec![panel]);
-        if let Some(window) = state.get_window_state_mut(surface) {
-            window.set_size(egui::vec2(850.0, 600.0));
-        }
-    } else {
-        state.push_to_focused_leaf(panel);
+        let min = (area.center() - WINDOW_SIZE * 0.5).max(area.min);
+        let location = Location {
+            floating: Some([min.x, min.y, WINDOW_SIZE.x, WINDOW_SIZE.y]),
+            anchor: None,
+            placement: Placement::Tab { before: None },
+            size: None,
+            stack: None,
+            sibling: Vec::new(),
+            window: None,
+        };
+        return layout.restore(panel, &location);
     }
+    let anchor = focused
+        .filter(|p| layout.contains(p))
+        .or_else(|| layout.contains(&Panel::Viewport).then_some(Panel::Viewport))
+        .or_else(|| layout.panels().first().map(|p| **p));
+    layout.apply_with_permissions(Action::Open { panel, anchor }, Panel::permissions)
 }
 
 struct Viewer<'a> {
     app: &'a mut App,
 }
-impl TabViewer for Viewer<'_> {
-    type Tab = Panel;
-    fn id(&mut self, tab: &mut Panel) -> egui::Id {
-        egui::Id::new(("frac-panel", *tab))
+impl DockContent<Panel> for Viewer<'_> {
+    fn title(&self, panel: &Panel) -> String {
+        panel.title().into()
     }
-    fn title(&mut self, tab: &mut Panel) -> egui::WidgetText {
-        tab.title().into()
-    }
-    fn ui(&mut self, ui: &mut egui::Ui, tab: &mut Panel) {
+    fn body(&mut self, ui: &mut egui::Ui, panel: &Panel) {
         use crate::hotkeys::Scope;
-        let scope = match tab {
+        let scope = match panel {
             Panel::Viewport => Scope::Viewport,
             Panel::Timeline => Scope::Timeline,
             Panel::Gallery => Scope::Gallery,
@@ -138,7 +172,7 @@ impl TabViewer for Viewer<'_> {
             Panel::Takes => Scope::Takes,
         };
         crate::hotkeys::register(ui, scope, ui.max_rect());
-        ui.push_id(*tab, |ui| match tab {
+        ui.push_id(*panel, |ui| match panel {
             Panel::Viewport => self.app.viewport(ui),
             Panel::Inspector => self.app.inspector(ui),
             Panel::MaterialLibrary => self.app.material_library(ui),
@@ -148,7 +182,7 @@ impl TabViewer for Viewer<'_> {
             Panel::Outliner => self.app.world_ui.outliner(ui, &mut self.app.world),
             Panel::Takes => self.app.takes_panel(ui),
             Panel::Gallery | Panel::Bookmarks | Panel::Materials => {
-                self.app.tab = match tab {
+                self.app.tab = match panel {
                     Panel::Bookmarks => Tab::Bookmarks,
                     Panel::Materials => Tab::Materials,
                     _ => Tab::Gallery,
@@ -157,111 +191,36 @@ impl TabViewer for Viewer<'_> {
             }
         });
     }
-    fn is_closeable(&self, tab: &Panel) -> bool {
-        *tab != Panel::Viewport
+    fn permissions(&self, panel: &Panel) -> Permissions {
+        panel.permissions()
     }
-    fn scroll_bars(&self, _: &Panel) -> [bool; 2] {
-        [false, false]
-    }
-    fn context_menu(&mut self, ui: &mut egui::Ui, _: &mut Panel, _: egui_dock::NodePath) {
+    fn panel_menu(&mut self, ui: &mut egui::Ui, _: &Panel) {
         for panel in Panel::ALL {
             if ui.button(panel.title()).clicked() {
                 self.app.panels_to_open.push(panel);
                 ui.close();
             }
         }
+        ui.separator();
     }
 }
 
-/// A reusable, exact stamp of authored layout state. Pixel rectangles of docked
-/// leaves are derived during painting; floating outer rectangles are authored.
+/// The settings autosave's view of the workspace: its blob, serialised again only when the
+/// layout changed (the autosave asks every frame). `revision` counts blob changes.
 #[derive(Default)]
 pub(super) struct LayoutCache {
-    stamp: Vec<u64>,
-    scratch: Vec<u64>,
-    window_ids: Vec<egui::Id>,
+    layout: Option<Layout<Panel>>,
     pub blob: Option<String>,
     pub revision: u64,
     #[cfg(test)]
     pub serializations: usize,
 }
 impl LayoutCache {
-    pub fn refresh(
-        &mut self,
-        state: &DockState<Panel>,
-        ctx: &egui::Context,
-    ) -> Result<(), egui_dock_layout::Error> {
-        let stamp = &mut self.scratch;
-        stamp.clear();
-        let focused = state.focused_leaf();
-        stamp.extend([
-            focused.map_or(u64::MAX, |p| p.surface.0 as u64),
-            focused.map_or(u64::MAX, |p| p.node.0 as u64),
-        ]);
-        for (index, surface) in state.iter_surfaces_indexed() {
-            stamp.extend([
-                index.0 as u64,
-                match surface {
-                    egui_dock::Surface::Empty => 0,
-                    egui_dock::Surface::Main(_) => 1,
-                    egui_dock::Surface::Window(_, _) => 2,
-                },
-            ]);
-            let Some(tree) = surface.node_tree() else {
-                continue;
-            };
-            stamp.push(tree.focused_leaf().map_or(u64::MAX, |p| p.0 as u64));
-            for node in surface.iter_nodes() {
-                match node {
-                    egui_dock::Node::Empty => stamp.push(0),
-                    egui_dock::Node::Leaf(leaf) => {
-                        stamp.extend([
-                            1,
-                            leaf.tabs.len() as u64,
-                            leaf.active.0 as u64,
-                            leaf.scroll.to_bits() as u64,
-                            leaf.collapsed as u64,
-                            leaf.tab_bar_hidden as u64,
-                        ]);
-                        stamp.extend(leaf.tabs.iter().map(|panel| *panel as u64));
-                    }
-                    egui_dock::Node::Horizontal(split) | egui_dock::Node::Vertical(split) => {
-                        stamp.extend([
-                            if matches!(node, egui_dock::Node::Horizontal(_)) {
-                                2
-                            } else {
-                                3
-                            },
-                            split.fraction.to_bits() as u64,
-                            split.fully_collapsed as u64,
-                            split.collapsed_leaf_count as u64,
-                        ]);
-                    }
-                }
-            }
-            stamp.push(u64::MAX - 1);
-            if let egui_dock::Surface::Window(_, window) = surface {
-                while self.window_ids.len() <= index.0 {
-                    let surface = egui_dock::SurfaceIndex(self.window_ids.len());
-                    self.window_ids
-                        .push(egui::Id::new(format!("window {surface:?}")));
-                }
-                let rect = egui::AreaState::load(ctx, self.window_ids[index.0])
-                    .map(|area| area.rect())
-                    .filter(|rect| rect.is_finite() && rect.is_positive())
-                    .unwrap_or_else(|| window.rect());
-                stamp.extend([
-                    rect.min.x.to_bits() as u64,
-                    rect.min.y.to_bits() as u64,
-                    rect.max.x.to_bits() as u64,
-                    rect.max.y.to_bits() as u64,
-                ]);
-            }
-        }
-        if self.blob.is_some() && self.stamp == self.scratch {
+    pub fn refresh(&mut self, layout: &Layout<Panel>) -> Result<(), egui_dock_layout::Error> {
+        if self.blob.is_some() && self.layout.as_ref() == Some(layout) {
             return Ok(());
         }
-        let blob = layout_blob(state, ctx)?;
+        let blob = egui_dock_layout::to_blob(layout)?;
         #[cfg(test)]
         {
             self.serializations += 1;
@@ -270,97 +229,97 @@ impl LayoutCache {
             self.revision = self.revision.wrapping_add(1);
             self.blob = Some(blob);
         }
-        std::mem::swap(&mut self.stamp, &mut self.scratch);
+        self.layout = Some(layout.clone());
         Ok(())
-    }
-    pub fn invalidate(&mut self) {
-        self.stamp.clear();
     }
 }
 
 /// Persistent presets are separate from transient widget state.
 pub(super) struct Layouts {
     pub store: LayoutStore,
-    manager: LayoutManager,
+    bar: DockLayoutBar,
     pub cache: LayoutCache,
 }
 impl Default for Layouts {
     fn default() -> Self {
         Self {
             store: LayoutStore::new(),
-            manager: LayoutManager::new().with_combo_width(140.0),
+            bar: DockLayoutBar::new().with_combo_width(140.0),
             cache: LayoutCache::default(),
         }
     }
 }
 
-fn restore_layout(blob: &str) -> Result<DockState<Panel>, String> {
-    let state = egui_dock_layout::from_blob(blob).map_err(|e| e.to_string())?;
-    if valid_layout(&state) {
-        Ok(state)
+/// A stored layout blob, read and checked ([`valid_layout`]).
+pub(super) fn restore_layout(blob: &str) -> Result<Layout<Panel>, String> {
+    let layout = egui_dock_layout::from_blob(blob).map_err(|e| e.to_string())?;
+    if valid_layout(&layout) {
+        Ok(layout)
     } else {
-        Err("Layout must contain one viewport and no duplicate panels".into())
+        Err(INVALID_LAYOUT.into())
     }
 }
+
+/// Why a stored layout is refused ([`valid_layout`]).
+const INVALID_LAYOUT: &str = "Layout must contain one viewport and no duplicate panels";
 
 impl App {
     /// The host places this inline in the top-right of its main toolbar.
     pub(super) fn layout_manager_ui(&mut self, ui: &mut egui::Ui) {
-        let mut cache = std::mem::take(&mut self.layouts.cache);
-        if let Err(error) = cache.refresh(&self.dock, ui.ctx()) {
-            self.layouts.cache = cache;
-            ui.label("Layouts unavailable")
-                .on_hover_text(error.to_string());
-            return;
-        }
-        let blob = cache.blob.as_deref().unwrap_or_default();
-        let mut restored = false;
         let previous = self.layouts.store.current().to_owned();
         ui.push_id("frac-layout-manager", |ui| {
-            if let Some(LayoutAction::Restore(saved)) =
-                self.layouts.manager.show(ui, &mut self.layouts.store, blob)
-            {
-                match restore_layout(&saved) {
-                    Ok(state) => {
-                        self.dock = state;
+            // The bar reads a picked layout before selecting it; WarpBro also needs the Viewport.
+            match self.layouts.bar.show(ui, &mut self.layouts.store, &self.dock) {
+                Ok(output) => match output.restored {
+                    Some(layout) if valid_layout(&layout) => {
+                        self.dock = layout;
                         self.panels_to_open.clear();
-                        restored = true;
                     }
-                    Err(error) => {
+                    Some(_) => {
                         if !previous.is_empty() {
                             self.layouts.store.select(&previous);
                         }
-                        self.status = format!("Layout restore failed: {error}");
+                        self.status = format!("Layout restore failed: {INVALID_LAYOUT}");
                     }
-                }
+                    None => {}
+                },
+                Err(error) => self.status = format!("Layout: {error}"),
             }
             ui.menu_button("Layout", |ui| {
                 let selected = self.layouts.store.current().to_owned();
                 if ui
-                    .add_enabled(!selected.is_empty(), egui::Button::new("Update selected"))
+                    .add_enabled(
+                        !selected.is_empty() && !self.layouts.store.is_builtin(&selected),
+                        egui::Button::new("Update selected"),
+                    )
                     .clicked()
                 {
-                    self.layouts.store.save(selected, blob.to_owned());
+                    let saved = egui_dock_layout::to_blob(&self.dock)
+                        .map_err(|e| e.to_string())
+                        .and_then(|blob| {
+                            self.layouts
+                                .store
+                                .save(&selected, blob)
+                                .map_err(|e| e.to_string())
+                        });
+                    if let Err(error) = saved {
+                        self.status = format!("Layout save failed: {error}");
+                    }
                     ui.close();
                 }
                 if ui.button("Reset to default").clicked() {
                     self.dock = default_layout();
                     self.panels_to_open.clear();
-                    restored = true;
                     ui.close();
                 }
             });
         });
-        if restored {
-            cache.invalidate();
-        }
-        self.layouts.cache = cache;
     }
 
     pub(super) fn window_menu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("Window", |ui| {
             for panel in Panel::ALL {
-                let open = self.dock.find_tab(&panel).is_some();
+                let open = self.dock.contains(&panel);
                 if ui.selectable_label(open, panel.title()).clicked() {
                     self.panels_to_open.push(panel);
                     ui.close();
@@ -380,23 +339,43 @@ impl App {
         });
     }
 
-    pub(super) fn dock_ui(&mut self, ui: &mut egui::Ui) {
-        for panel in self.panels_to_open.drain(..) {
-            open_panel(&mut self.dock, panel);
+    /// Open the requested panels (`panels_to_open`) in the workspace.
+    fn open_panels(&mut self, area: egui::Rect) {
+        for panel in std::mem::take(&mut self.panels_to_open) {
+            if let Err(error) = open_panel(&mut self.dock, panel, self.dock_focus, area) {
+                self.status = format!("Cannot open {}: {error}", panel.title());
+            }
         }
-        let mut state = std::mem::replace(&mut self.dock, DockState::new(Vec::new()));
-        DockArea::new(&mut state)
-            .id(egui::Id::new("frac-workspace"))
-            .style(egui_dock::Style::from_egui(ui.style().as_ref()))
-            .show_inside(ui, &mut Viewer { app: self });
+    }
+
+    pub(super) fn dock_ui(&mut self, ui: &mut egui::Ui) {
+        let area = ui.available_rect_before_wrap();
+        self.open_panels(area);
+        // The bodies borrow the whole App; the layout is only read while drawing.
+        let layout = std::mem::take(&mut self.dock);
+        let output = DockArea::new(egui::Id::new("frac-workspace")).show_with(
+            ui,
+            &layout,
+            &DockStyle::from_ui(ui),
+            &mut Viewer { app: self },
+        );
+        self.dock = layout;
+        if let Some(error) = output.error {
+            self.status = format!("Dock layout not shown: {error}");
+        }
+        if output.focused.is_some() {
+            self.dock_focus = output.focused;
+        }
+        for action in output.actions {
+            if let Err(error) = self.dock.apply_with_permissions(action, Panel::permissions) {
+                self.status = format!("Dock: {error}");
+            }
+        }
         // Attribute Editor > Show in timeline brings the Timeline forward.
         if self.world_ui.take_timeline_request() {
             self.panels_to_open.push(Panel::Timeline);
         }
-        for panel in self.panels_to_open.drain(..) {
-            open_panel(&mut state, panel);
-        }
-        self.dock = state;
+        self.open_panels(area);
     }
 
     pub(super) fn viewport_toolbar(
@@ -470,6 +449,7 @@ impl App {
                             &mut exposure,
                             &mut self.exposure_hold,
                             -10.0..=10.0,
+                            None,
                         );
                         if exposure != effective.render.exposure_stops {
                             let gesture = ui
@@ -741,116 +721,108 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A 1600 x 900 dock, as the window gives it.
+    fn area() -> egui::Rect {
+        egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1600.0, 900.0))
+    }
+
+    /// The floating group holding `panel`.
+    fn floating(layout: &Layout<Panel>, panel: Panel) -> Option<&egui_dock_layout::Floating<Panel>> {
+        layout.floating.iter().find(|g| g.panels.contains(&panel))
+    }
+
     #[test]
     fn layout_cache_reuses_idle_blob_and_observes_authored_edits() {
-        let ctx = egui::Context::default();
-        let mut state = default_layout();
+        let mut layout = default_layout();
         let mut cache = LayoutCache::default();
-        cache.refresh(&state, &ctx).unwrap();
+        cache.refresh(&layout).unwrap();
         let pointer = cache.blob.as_ref().unwrap().as_ptr();
         let revision = cache.revision;
         for _ in 0..32 {
-            cache.refresh(&state, &ctx).unwrap();
+            cache.refresh(&layout).unwrap();
         }
         assert_eq!(cache.serializations, 1);
         assert_eq!(cache.revision, revision);
         assert_eq!(cache.blob.as_ref().unwrap().as_ptr(), pointer);
-        let path = state.find_tab(&Panel::Timeline).unwrap();
-        state[path.surface][path.node]
-            .get_leaf_mut()
-            .unwrap()
-            .tab_bar_hidden = true;
-        cache.refresh(&state, &ctx).unwrap();
+        layout
+            .apply(Action::Activate {
+                panel: Panel::Gallery,
+            })
+            .unwrap();
+        cache.refresh(&layout).unwrap();
         assert_eq!(cache.serializations, 2);
         assert_ne!(cache.revision, revision);
-        open_panel(&mut state, Panel::Export);
-        cache.refresh(&state, &ctx).unwrap();
+        layout
+            .apply(Action::Close {
+                panel: Panel::Export,
+            })
+            .unwrap();
+        open_panel(&mut layout, Panel::Export, None, area()).unwrap();
+        cache.refresh(&layout).unwrap();
         let restored = restore_layout(cache.blob.as_deref().unwrap()).unwrap();
-        assert!(restored.find_tab(&Panel::Export).is_some());
+        assert!(floating(&restored, Panel::Export).is_some());
         let count = cache.serializations;
-        cache.refresh(&state, &ctx).unwrap();
+        cache.refresh(&layout).unwrap();
         assert_eq!(cache.serializations, count);
     }
 
     #[test]
     fn fresh_and_floating_layouts_restore_and_tabs_do_not_duplicate() {
-        let mut state = default_layout();
-        open_panel(&mut state, Panel::Settings);
-        open_panel(&mut state, Panel::Settings);
+        let mut layout = default_layout();
+        open_panel(&mut layout, Panel::Settings, None, area()).unwrap();
+        open_panel(&mut layout, Panel::Settings, None, area()).unwrap();
         assert_eq!(
-            state
-                .iter_all_tabs()
-                .filter(|(_, p)| **p == Panel::Settings)
+            layout
+                .panels()
+                .into_iter()
+                .filter(|p| **p == Panel::Settings)
                 .count(),
             1
         );
-        let blob = layout_blob(&state, &egui::Context::default()).unwrap();
+        let blob = egui_dock_layout::to_blob(&layout).unwrap();
         let restored = egui_dock_layout::from_blob::<Panel>(&blob).unwrap();
         assert!(valid_layout(&restored));
-        assert_eq!(restored.iter_all_tabs().count(), 9);
+        assert_eq!(restored.panels().len(), 9);
     }
+
+    /// A tool panel the focused group lacks joins that group; a tool window floats centred.
     #[test]
-    fn floating_geometry_survives_a_new_egui_context() {
-        struct Placeholder;
-        impl TabViewer for Placeholder {
-            type Tab = Panel;
-            fn id(&mut self, tab: &mut Panel) -> egui::Id {
-                egui::Id::new(tab)
-            }
-            fn title(&mut self, tab: &mut Panel) -> egui::WidgetText {
-                tab.title().into()
-            }
-            fn ui(&mut self, ui: &mut egui::Ui, _: &mut Panel) {
-                ui.allocate_space(ui.available_size());
-            }
-        }
-        fn draw(ctx: &egui::Context, state: &mut DockState<Panel>) {
-            for _ in 0..3 {
-                let _ = ctx.run_ui(
-                    egui::RawInput {
-                        screen_rect: Some(egui::Rect::from_min_size(
-                            egui::Pos2::ZERO,
-                            egui::vec2(1600.0, 900.0),
-                        )),
-                        ..Default::default()
-                    },
-                    |root| {
-                        egui::CentralPanel::default().show(root, |ui| {
-                            DockArea::new(state).show_inside(ui, &mut Placeholder);
-                        });
-                    },
-                );
-            }
-        }
-        let mut state = DockState::new(vec![Panel::Viewport]);
-        open_panel(&mut state, Panel::Settings);
-        let surface = state.find_tab(&Panel::Settings).unwrap().surface;
-        state
-            .get_window_state_mut(surface)
-            .unwrap()
-            .set_position(egui::pos2(100.0, 120.0));
-        let ctx = egui::Context::default();
-        draw(&ctx, &mut state);
-        let before = state[surface].root_node().unwrap().rect().unwrap();
-        let blob = layout_blob(&state, &ctx).unwrap();
-        let mut restored = egui_dock_layout::from_blob::<Panel>(&blob).unwrap();
-        draw(&egui::Context::default(), &mut restored);
-        let after = restored[surface].root_node().unwrap().rect().unwrap();
-        assert!(
-            (after.min - before.min).length() <= 1.0,
-            "{before:?} -> {after:?}"
-        );
-        assert!(
-            (after.size() - before.size()).length() <= 1.0,
-            "{before:?} -> {after:?}"
+    fn panels_open_beside_the_focus_or_float() {
+        let mut layout = default_layout();
+        open_panel(&mut layout, Panel::Bookmarks, Some(Panel::Timeline), area()).unwrap();
+        let blob = egui_dock_layout::to_blob(&layout).unwrap();
+        assert!(blob.contains(r#"["Timeline","Bookmarks"]"#), "{blob}");
+        open_panel(&mut layout, Panel::MaterialLibrary, None, area()).unwrap();
+        let group = floating(&layout, Panel::MaterialLibrary).unwrap();
+        assert_eq!(group.rect, [375.0, 150.0, 850.0, 600.0]);
+    }
+
+    #[test]
+    fn floating_geometry_survives_a_blob() {
+        let mut layout = Layout {
+            root: Some(tabs(&[Panel::Viewport])),
+            floating: Vec::new(),
+        };
+        open_panel(&mut layout, Panel::Settings, None, area()).unwrap();
+        layout
+            .apply(Action::MoveFloating {
+                panel: Panel::Settings,
+                rect: [100.0, 120.0, 700.0, 500.0],
+            })
+            .unwrap();
+        let blob = egui_dock_layout::to_blob(&layout).unwrap();
+        let restored = egui_dock_layout::from_blob::<Panel>(&blob).unwrap();
+        assert_eq!(
+            floating(&restored, Panel::Settings).unwrap().rect,
+            [100.0, 120.0, 700.0, 500.0]
         );
     }
 
     #[test]
     fn named_layout_preserves_floating_export_and_default_workspaces() {
-        let ctx = egui::Context::default();
-        let default_blob = layout_blob(
-            &DockState::new(vec![
+        let default_blob = egui_dock_layout::to_blob(&Layout {
+            root: Some(tabs(&[
                 Panel::Viewport,
                 Panel::Timeline,
                 Panel::Outliner,
@@ -858,49 +830,58 @@ mod tests {
                 Panel::Bookmarks,
                 Panel::Materials,
                 Panel::Inspector,
-            ]),
-            &ctx,
-        )
+            ])),
+            floating: Vec::new(),
+        })
         .unwrap();
-        let mut state = DockState::new(vec![Panel::Viewport]);
-        open_panel(&mut state, Panel::Settings);
-        open_panel(&mut state, Panel::Export);
-        let surface = state.find_tab(&Panel::Export).unwrap().surface;
-        let window = state.get_window_state_mut(surface).unwrap();
-        window.set_position(egui::pos2(125.0, 80.0));
-        window.set_size(egui::vec2(700.0, 500.0));
+        let mut layout = Layout {
+            root: Some(tabs(&[Panel::Viewport])),
+            floating: Vec::new(),
+        };
+        open_panel(&mut layout, Panel::Settings, None, area()).unwrap();
+        open_panel(&mut layout, Panel::Export, None, area()).unwrap();
+        layout
+            .apply(Action::MoveFloating {
+                panel: Panel::Export,
+                rect: [125.0, 80.0, 700.0, 500.0],
+            })
+            .unwrap();
         let mut store = LayoutStore::new();
-        store.save("Default", default_blob);
-        store.save("Render", layout_blob(&state, &ctx).unwrap());
-        assert!(store.rename("Render", "Export workspace"));
+        store.save("Default", default_blob).unwrap();
+        store
+            .save("Render", egui_dock_layout::to_blob(&layout).unwrap())
+            .unwrap();
+        store.rename("Render", "Export workspace").unwrap();
         let json = serde_json::to_string(&store).unwrap();
         let mut restored_store: LayoutStore = serde_json::from_str(&json).unwrap();
-        let mut restored =
+        let restored =
             restore_layout(&restored_store.select("Export workspace").unwrap()).unwrap();
-        assert_eq!(restored.iter_all_tabs().count(), 3);
-        assert!(restored.find_tab(&Panel::Export).is_some());
-        let window = restored.get_window_state_mut(surface).unwrap();
-        let geometry = serde_json::to_value(window).unwrap();
+        assert_eq!(restored.panels().len(), 3);
         assert_eq!(
-            geometry["next_size"],
-            serde_json::to_value(egui::vec2(700.0, 500.0)).unwrap()
-        );
-        assert_eq!(
-            geometry["next_position"],
-            serde_json::to_value(egui::pos2(125.0, 80.0)).unwrap()
+            floating(&restored, Panel::Export).unwrap().rect,
+            [125.0, 80.0, 700.0, 500.0]
         );
         let default_restored = restore_layout(&restored_store.select("Default").unwrap()).unwrap();
-        assert_eq!(default_restored.iter_all_tabs().count(), 7);
-        assert!(restored_store.delete("Export workspace"));
+        assert_eq!(default_restored.panels().len(), 7);
+        restored_store.delete("Export workspace").unwrap();
         assert_eq!(restored_store.len(), 1);
     }
 
     #[test]
     fn incomplete_or_duplicate_layouts_are_rejected() {
-        assert!(!valid_layout(&DockState::new(vec![Panel::Inspector])));
-        assert!(!valid_layout(&DockState::new(vec![
-            Panel::Viewport,
-            Panel::Viewport
-        ])));
+        let only = |panels: &[Panel]| Layout {
+            root: Some(tabs(panels)),
+            floating: Vec::new(),
+        };
+        assert!(valid_layout(&default_layout()));
+        assert!(!valid_layout(&only(&[Panel::Inspector])));
+        assert!(!valid_layout(&only(&[Panel::Viewport, Panel::Viewport])));
+    }
+
+    /// A layout saved by the egui_dock-era build is refused, not misread: the app falls back to
+    /// its default workspace once.
+    #[test]
+    fn pre_engine_blobs_are_refused() {
+        assert!(restore_layout(r#"{"surfaces":[]}"#).is_err());
     }
 }

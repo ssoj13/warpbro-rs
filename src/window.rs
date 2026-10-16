@@ -233,7 +233,7 @@ impl Native {
             other => anyhow::bail!("surface acquisition: {other:?}"),
         };
         let mut encoder = self.device.create_command_encoder(&Default::default());
-        let buffers = paint_canvas(
+        let buffers = match paint_canvas(
             &self.device,
             &self.queue,
             &mut self.renderer,
@@ -242,7 +242,15 @@ impl Native {
             &jobs,
             &screen,
             wgpu::Color::BLACK,
-        );
+        ) {
+            Ok(buffers) => buffers,
+            // The window outgrew the device's texture limit: no frame until it fits again.
+            Err(error @ egui_display::CanvasError::TooLarge { .. }) => {
+                log::error!("{error}");
+                return Ok(());
+            }
+            Err(error) => anyhow::bail!("window canvas: {error}"),
+        };
         let view = frame.texture.create_view(&Default::default());
         self.present.draw(&self.queue, &mut encoder, &view, target);
         // This queue belongs exclusively to Native. The shared submit helper's
@@ -275,7 +283,8 @@ impl Native {
 /// Paint tessellated egui `jobs` into `present`'s float canvas, cleared to `clear` (canvas
 /// values: extended sRGB, so the window's black, or HDR and negative values in the headless
 /// test), at the size of `screen`: buffer uploads and the egui pass, recorded into `encoder`.
-/// Returns egui's own command buffers, to submit before `encoder`. The window's redraw and the
+/// Returns egui's own command buffers, to submit before `encoder`, or why the canvas could not
+/// be (re)allocated at that size (nothing was recorded then). The window's redraw and the
 /// headless window-screenshot test draw through here, so a test frame is composited exactly
 /// like a presented one.
 #[allow(
@@ -291,11 +300,11 @@ pub(crate) fn paint_canvas(
     jobs: &[egui::ClippedPrimitive],
     screen: &egui_wgpu::ScreenDescriptor,
     clear: wgpu::Color,
-) -> Vec<wgpu::CommandBuffer> {
+) -> Result<Vec<wgpu::CommandBuffer>, egui_display::CanvasError> {
     let [width, height] = screen.size_in_pixels;
-    present.prepare_canvas(device, queue, width, height);
+    present.prepare_canvas(device, queue, width, height)?;
+    let canvas = present.canvas(device, width, height)?;
     let buffers = renderer.update_buffers(device, queue, encoder, jobs, screen);
-    let canvas = present.canvas(device, width, height);
     let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
         label: Some("frac.egui"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -310,7 +319,7 @@ pub(crate) fn paint_canvas(
         ..Default::default()
     });
     renderer.render(&mut pass.forget_lifetime(), jobs, screen);
-    buffers
+    Ok(buffers)
 }
 impl ApplicationHandler for Host {
     fn device_event(
@@ -434,7 +443,8 @@ mod tests {
                 b: f64::from(clear[2]),
                 a: 1.0,
             },
-        );
+        )
+        .unwrap();
         queue.submit(buffers.into_iter().chain([encoder.finish()]));
 
         let root = std::env::temp_dir().join(format!("warpbro-window-gpu-{}", std::process::id()));

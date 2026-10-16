@@ -82,8 +82,9 @@ impl VideoEncoder {
     }
 }
 
-pub use egui_display::export::PngVideo;
-use egui_display::export::ffmpeg;
+pub use video_io::video::PngVideo;
+use video_io::cli::ffmpeg;
+use video_io::video::{Outcome, Ticket};
 
 /// The encode recipe of an export: the values of the document's `OutputSettings` node (branch
 /// `/output`), deserialized strictly. Its `Default` seeds that node in a fresh document, so the
@@ -382,8 +383,8 @@ impl ExportSettings {
         }
     }
     /// Thin settings adapter to the shared PNG-video exporter.
-    fn video_options<'a>(&self, input: &'a Path) -> egui_display::export::PngVideoOptions<'a> {
-        egui_display::export::PngVideoOptions {
+    fn video_options<'a>(&self, input: &'a Path) -> video_io::video::PngVideoOptions<'a> {
+        video_io::video::PngVideoOptions {
             codec: self.output.png_video,
             encoding: self.output.png,
             input,
@@ -398,7 +399,8 @@ impl ExportSettings {
     #[cfg(test)]
     fn ffmpeg_args(&self, levels: Option<HdrLevels>, output: &Path) -> Result<Vec<String>, String> {
         let input = self.video_input();
-        egui_display::export::ffmpeg_args(&self.video_options(&input), levels, output)?
+        video_io::cli::ffmpeg_args(&self.video_options(&input), levels, output)
+            .map_err(|e| e.to_string())?
             .into_iter()
             .map(|arg| {
                 arg.into_string()
@@ -422,7 +424,7 @@ impl ExportSettings {
             return Err("FPS numerator and denominator must be positive".into());
         }
         if self.video_output().is_some() {
-            ffmpeg()?;
+            ffmpeg().map_err(|e| e.to_string())?;
         }
         Ok(())
     }
@@ -475,10 +477,14 @@ struct Run {
     progress: Arc<Mutex<Progress>>,
     cancel: Arc<AtomicBool>,
     coordinator: Option<std::thread::JoinHandle<()>>,
+    /// The video encode the coordinator started after the last PNG, handed to the UI thread.
+    video: Arc<Mutex<Option<VideoRun>>>,
+    /// That encode once the UI took it over (`ExportController::update` polls it).
+    encoding: Option<VideoRun>,
 }
 impl Drop for Run {
-    /// Cancel and wait: closing WarpBro mid-export stops the render and an ffmpeg child (killed
-    /// by `encode_video`) instead of orphaning them.
+    /// Cancel and wait: closing WarpBro mid-export stops the render and an ffmpeg child (a
+    /// dropped video-io `Ticket` cancels and joins its encode) instead of orphaning them.
     fn drop(&mut self) {
         self.cancel.store(true, Ordering::Release);
         if let Some(thread) = self.coordinator.take()
@@ -516,16 +522,40 @@ impl ExportController {
     }
     /// Sequence events use a dedicated bus. This hook keeps the host's event dispatch uniform.
     pub fn handle(&mut self, _event: &RenderEvent, _service: &RenderService) {}
+    /// Once per UI frame: the coordinator's progress, then the video encode it started, which
+    /// is polled here (never blocks) until it ends the run.
     pub fn update(&mut self, _service: &RenderService) {
-        let snapshot = self
-            .run
-            .as_ref()
-            .and_then(|run| run.progress.try_lock().ok().map(|p| p.clone()));
-        if let Some(progress) = snapshot {
+        let Some(run) = self.run.as_mut() else {
+            return;
+        };
+        if run.encoding.is_none() {
+            let Some(progress) = run.progress.try_lock().ok().map(|p| p.clone()) else {
+                return;
+            };
             self.status = progress.status;
             self.completed = progress.completed;
             self.sample_progress = progress.samples;
-            if progress.done {
+            if !progress.done {
+                return;
+            }
+            let Some(encoding) = run.video.lock().unwrap_or_else(|e| e.into_inner()).take()
+            else {
+                self.run = None;
+                return;
+            };
+            // A Cancel that came while the coordinator was handing the encode over.
+            if run.cancel.load(Ordering::Acquire) {
+                encoding.ticket.cancel();
+            }
+            run.encoding = Some(encoding);
+        }
+        let Some(encoding) = run.encoding.as_mut() else {
+            return;
+        };
+        match encoding.ticket.try_finish() {
+            None => self.status = encoding.status(),
+            Some(result) => {
+                self.status = encoding.finished(result);
                 self.run = None;
             }
         }
@@ -568,8 +598,10 @@ impl ExportController {
             ..Default::default()
         }));
         let cancel = Arc::new(AtomicBool::new(false));
+        let video_slot = Arc::new(Mutex::new(None));
         let shared = progress.clone();
         let stop = cancel.clone();
+        let handover = video_slot.clone();
         let config = settings.clone();
         let coordinator = std::thread::Builder::new()
             .name("frac-export-coordinator".into())
@@ -584,20 +616,28 @@ impl ExportController {
                         let Some(video) = config.video_output() else {
                             return Ok(Some(format!("Export complete: {folder}")));
                         };
+                        if stop.load(Ordering::Acquire) {
+                            return Ok(Some(format!(
+                                "Video cancelled; the PNG sequence is in {folder}"
+                            )));
+                        }
                         let levels = shared.lock().unwrap_or_else(|e| e.into_inner()).levels;
-                        Ok(Some(
-                            match encode_video(&config, levels, &video, &shared, &stop) {
-                                Ok(true) => {
-                                    format!("Export complete: {folder}; video {}", video.display())
-                                }
-                                Ok(false) => {
-                                    format!("Video cancelled; the PNG sequence is in {folder}")
-                                }
-                                Err(error) => format!(
-                                    "Video failed: {error}; the PNG sequence is in {folder}"
-                                ),
-                            },
-                        ))
+                        // The UI polls the started encode (`ExportController::update`).
+                        Ok(Some(match config.encode_video(levels, &video) {
+                            Ok(ticket) => {
+                                let run = VideoRun {
+                                    ticket,
+                                    video,
+                                    folder: config.dir.clone(),
+                                };
+                                let status = run.status();
+                                *handover.lock().unwrap_or_else(|e| e.into_inner()) = Some(run);
+                                status
+                            }
+                            Err(error) => {
+                                format!("Video failed: {error}; the PNG sequence is in {folder}")
+                            }
+                        }))
                     },
                 ));
                 let status = match result {
@@ -632,12 +672,17 @@ impl ExportController {
             progress,
             cancel,
             coordinator: Some(coordinator),
+            video: video_slot,
+            encoding: None,
         });
         Ok(())
     }
     pub fn cancel(&mut self, _service: &RenderService) {
         if let Some(run) = &self.run {
             run.cancel.store(true, Ordering::Release);
+            if let Some(encoding) = &run.encoding {
+                encoding.ticket.cancel();
+            }
             self.status = "Cancelling export…".into();
         }
     }
@@ -714,7 +759,7 @@ impl ExportController {
                         for video in PngVideo::ALL {
                             ui.selectable_value(&mut self.settings.output.png_video, video, video.label());
                         }
-                    }).response.on_hover_text(found.unwrap_or_else(|e| e)); ui.end_row();
+                    }).response.on_hover_text(found.unwrap_or_else(|e| e.to_string())); ui.end_row();
                     if self.settings.output.png_video != PngVideo::Off {
                         self.fps_row(ui);
                     }
@@ -1070,37 +1115,51 @@ fn acknowledge(progress: &Mutex<Progress>, first: u32, written: u32) -> Result<(
     Ok(())
 }
 
-/// Encode the finished PNG sequence into `video` with ffmpeg (`ExportSettings::ffmpeg_args`)
-/// through `AtomicOut`, the one atomic file write of every export: ffmpeg writes its temp
-/// sibling, published only when ffmpeg succeeds and removed on failure, Cancel or a panic.
-/// Progress shows ffmpeg's encoded frames. Ok(false): cancelled.
-fn encode_video(
-    settings: &ExportSettings,
-    levels: Option<HdrLevels>,
-    video: &Path,
-    progress: &Mutex<Progress>,
-    cancel: &AtomicBool,
-) -> Result<bool, String> {
-    let input = settings.video_input();
-    let options = settings.video_options(&input);
-    let name = video
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let total = settings.frame_count();
-    progress.lock().unwrap_or_else(|e| e.into_inner()).status =
-        format!("Encoding {name} with ffmpeg");
-    egui_display::export::encode_video(
-        &options,
-        levels,
-        video,
-        settings.job.overwrite,
-        cancel,
-        |done| {
-            progress.lock().unwrap_or_else(|e| e.into_inner()).status =
-                format!("Encoding {name}: frame {done} / {total}");
-        },
-    )
+impl ExportSettings {
+    /// Start encoding the finished PNG sequence into `video` (video-io's ffmpeg backend): ffmpeg
+    /// writes a temp sibling, published only when it succeeds and removed on failure, Cancel or
+    /// a dropped ticket. `levels`: the sequence's merged HDR levels (`HdrLevels::merge`).
+    fn encode_video(
+        &self,
+        levels: Option<HdrLevels>,
+        video: &Path,
+    ) -> Result<Ticket, video_io::Error> {
+        let input = self.video_input();
+        video_io::video::encode(&self.video_options(&input), levels, video, self.job.overwrite)
+    }
+}
+
+/// A PNG sequence's video encode: started by the export coordinator once every frame is
+/// written, then polled by the UI thread (`ExportController::update`).
+struct VideoRun {
+    ticket: Ticket,
+    video: PathBuf,
+    /// The export folder, named in the final status.
+    folder: PathBuf,
+}
+impl VideoRun {
+    /// The status line while it encodes: ffmpeg's encoded frames.
+    fn status(&self) -> String {
+        let name = self
+            .video
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let (done, total) = (self.ticket.progress(), self.ticket.frames());
+        format!("Encoding {name}: frame {done} / {total}")
+    }
+
+    /// The status line of how it ended.
+    fn finished(&self, result: Result<Outcome, video_io::Error>) -> String {
+        let folder = self.folder.display();
+        match result {
+            Ok(Outcome::Published) => {
+                format!("Export complete: {folder}; video {}", self.video.display())
+            }
+            Ok(Outcome::Cancelled) => format!("Video cancelled; the PNG sequence is in {folder}"),
+            Err(error) => format!("Video failed: {error}; the PNG sequence is in {folder}"),
+        }
+    }
 }
 
 enum WriteEvent {
@@ -1708,17 +1767,8 @@ mod tests {
                 }
             };
             let output = settings.video_output().unwrap();
-            let progress = Mutex::new(Progress::default());
-            assert!(
-                encode_video(
-                    &settings,
-                    levels,
-                    &output,
-                    &progress,
-                    &AtomicBool::new(false)
-                )
-                .unwrap()
-            );
+            let ticket = settings.encode_video(levels, &output).unwrap();
+            assert_eq!(ticket.wait().unwrap(), Outcome::Published);
 
             let stream = probe(&output, "-show_streams");
             let [primaries, transfer, matrix] = tags;

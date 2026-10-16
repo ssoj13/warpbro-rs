@@ -18,7 +18,7 @@
 //! - EXR (`render_service::write_display_exr`, the viewport's display EXR writer): float RGB of
 //!   that linear light, `chromaticities` BT.709 / D65, `whiteLuminance` = the reference white, so
 //!   value x whiteLuminance = nits on screen.
-//! - PQ PNG (`egui_display::export::write_png`, HDR10): 16-bit SMPTE ST 2084 of BT.2020 nits
+//! - PQ PNG (`video_io::export::write_png`, HDR10): 16-bit SMPTE ST 2084 of BT.2020 nits
 //!   (reference white at those nits), `cICP` 9/16/0/1, `mDCV` and a measured `cLLI`.
 //!
 //! [`ShotKind::Displayed`] is the window's own surface signal instead (`FRAC_SNAP`, the README
@@ -253,7 +253,8 @@ pub fn write_linear(
             encoding,
             scale,
             false,
-        );
+        )
+        .map_err(|e| e.to_string());
         if let Err(message) = result {
             let error = ShotError::Write { path, message };
             return Err(if written.is_empty() {
