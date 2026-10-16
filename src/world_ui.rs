@@ -393,6 +393,10 @@ pub struct WorldUi {
     pub preview_action: Option<PreviewAction>,
     /// A take picked on the timeline, for the Takes panel to select (`take_picked`).
     picked_take: Option<u64>,
+    /// The undo step a panel drag keeps open (outliner eye sweep, timeline work-area drag):
+    /// `held_gesture` reports it while a button is down, so the per-frame closer folds the
+    /// whole drag into one step.
+    panel_gesture: Option<u64>,
     pub playback_range: Option<(u32, u32)>,
     pub cached_frames: std::sync::Arc<[u32]>,
     pub cache_draft: bool,
@@ -445,6 +449,7 @@ impl Default for WorldUi {
             material_library_requested: false,
             preview_action: None,
             picked_take: None,
+            panel_gesture: None,
             playback_range: None,
             cached_frames: Default::default(),
             cache_draft: false,
@@ -834,6 +839,30 @@ impl WorldUi {
             self.error = Some(err);
         }
     }
+    /// Delete `ids` as one undo step: the outliner's trash button, the layer menu and the
+    /// outliner's Delete key (`App`'s hotkeys) all end here.
+    pub(crate) fn delete(&mut self, e: &mut WorldEditor, ids: Vec<NodeId>) {
+        self.command(
+            e,
+            WorldCommand::Batch(ids.into_iter().map(WorldCommand::Delete).collect()),
+        );
+    }
+    /// One step of a panel drag (`key` names it): the edit joins the drag's open undo step.
+    fn panel_command(&mut self, e: &mut WorldEditor, key: impl egui::AsId, c: WorldCommand) {
+        let gesture = egui::Id::new(key).value();
+        self.panel_gesture = Some(gesture);
+        if let Err(err) = e.execute_edit(c, Some(gesture)) {
+            self.error = Some(err);
+        }
+    }
+    /// The edit gesture this UI keeps open: an Attribute Editor drag, or a panel drag while a
+    /// pointer button is held. Whatever else is pending closes (`WorldEditor::finish_edit_unless`).
+    pub fn held_gesture(&mut self, ctx: &egui::Context) -> Option<u64> {
+        if !ctx.input(|i| i.pointer.any_down()) {
+            self.panel_gesture = None;
+        }
+        egui_attr_grid::edit_gesture(ctx).or(self.panel_gesture)
+    }
     fn value_command(&mut self, ui: &egui::Ui, e: &mut WorldEditor, c: WorldCommand) {
         let gesture = egui_attr_grid::edit_gesture(ui.ctx()).or_else(|| {
             if ui.input(|input| input.pointer.primary_released()) {
@@ -930,10 +959,7 @@ impl WorldUi {
                 .clicked()
             {
                 let ids = e.selected.clone();
-                self.command(
-                    e,
-                    WorldCommand::Batch(ids.into_iter().map(WorldCommand::Delete).collect()),
-                );
+                self.delete(e, ids);
             }
         });
         self.status(ui);
@@ -956,10 +982,16 @@ impl WorldUi {
                         .filter(|id| e.selected.contains(id))
                         .or_else(|| e.selected.last().copied());
                 }
-                OutlinerAction::ToggleVisible { id, visible, .. } => {
+                // Every toggle of one press-and-sweep shares `gesture`: one undo step.
+                OutlinerAction::ToggleVisible {
+                    id,
+                    visible,
+                    gesture,
+                } => {
                     if let Some(id) = map.get(&id) {
-                        self.command(
+                        self.panel_command(
                             e,
+                            ("outliner_eye", gesture),
                             WorldCommand::SetAttribute {
                                 id: *id,
                                 path: "/visible".into(),
@@ -1025,6 +1057,9 @@ impl WorldUi {
                         }
                     }
                 }
+                // WarpBro's hotkey tables own these keys (Delete in the Outliner scope,
+                // Ctrl+D global): acting on the widget's copy too would run them twice.
+                OutlinerAction::Delete { .. } | OutlinerAction::Duplicate { .. } => {}
                 _ => {}
             }
         }
@@ -1920,10 +1955,7 @@ impl WorldUi {
                     } else {
                         vec![n.id]
                     };
-                    self.command(
-                        e,
-                        WorldCommand::Batch(ids.into_iter().map(WorldCommand::Delete).collect()),
-                    );
+                    self.delete(e, ids);
                     ui.close();
                 }
             });
@@ -2129,11 +2161,12 @@ impl WorldUi {
                 e.selection = None;
                 e.selected.clear();
             }
-            // Live drag frames and the closing Done (a cancel's Done restores the start range)
-            // each set the range, as every drag frame did before.
+            // Live drag frames and the closing Done (a cancel restores the start range) join one
+            // undo step; a cancelled drag leaves the document as it was, so it records none.
             TimelineAction::SetWorkArea { start, end, .. } => {
-                self.command(
+                self.panel_command(
                     e,
+                    "timeline_work_area",
                     WorldCommand::SetTimeRange {
                         first: start.max(0) as u32,
                         last: (end - 1).max(start).max(0) as u32,
@@ -2191,6 +2224,9 @@ impl WorldUi {
                     .collect();
                 self.command(e, WorldCommand::Batch(cmds));
             }
+            // Time marks are single frames: no marker gets `with_duration`, so the widget draws
+            // no duration handle and never reports this.
+            TimelineAction::SetMarkerDuration { .. } => {}
             TimelineAction::AddKey { track, lane, frame } => {
                 if let Some(k) = Self::key_identity(nodes, lanes, KeyPos { track, lane, frame }) {
                     self.command(
@@ -5010,6 +5046,62 @@ mod tests {
     }
 
     #[test]
+    fn a_panel_drag_is_one_undo_step_closed_on_release() {
+        let mut e = editor();
+        let mut state = WorldUi::default();
+        let ctx = egui::Context::default();
+        let (first, last) = (e.document.first, e.document.last);
+        let button = |pressed| egui::Event::PointerButton {
+            pos: Pos2::new(10.0, 10.0),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let fps = e.document.fps;
+        let range = |last: u32| WorldCommand::SetTimeRange { first, last, fps };
+        // One frame: the drag's edit (if any), then the closer `App` runs after the UI.
+        let frame = |state: &mut WorldUi,
+                     e: &mut WorldEditor,
+                     events: Vec<egui::Event>,
+                     edit: Option<WorldCommand>| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |_| {},
+            );
+            output.textures_delta.clear();
+            if let Some(c) = edit {
+                state.panel_command(e, "timeline_work_area", c);
+            }
+            e.finish_edit_unless(state.held_gesture(&ctx));
+        };
+        frame(
+            &mut state,
+            &mut e,
+            vec![button(true)],
+            Some(range(last + 5)),
+        );
+        frame(&mut state, &mut e, vec![], Some(range(last + 9)));
+        assert!(
+            e.active_edit().is_some(),
+            "held: the drag stays one open step"
+        );
+        frame(
+            &mut state,
+            &mut e,
+            vec![button(false)],
+            Some(range(last + 12)),
+        );
+        assert!(e.active_edit().is_none(), "released: the step closes");
+        assert_eq!(e.document.last, last + 12);
+        assert!(e.undo());
+        assert_eq!((e.document.first, e.document.last), (first, last));
+        assert!(!e.undo(), "the whole drag is one history item");
+    }
+
+    #[test]
     fn actual_inspector_numeric_drag_is_one_undo_after_release() {
         let mut e = editor();
         let id = e.selection.unwrap();
@@ -5034,7 +5126,7 @@ mod tests {
                 },
             );
             output.textures_delta.clear();
-            e.finish_edit_unless(egui_attr_grid::edit_gesture(&ctx));
+            e.finish_edit_unless(state.held_gesture(&ctx));
             GRID_RECT_TRACES.with(|trace| trace.borrow()["/transform/position"])
         };
         let cell = render(&mut state, &mut e, vec![], 0.0);

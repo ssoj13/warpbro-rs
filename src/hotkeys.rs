@@ -93,7 +93,7 @@ pub enum Command {
     /// Time mark slot 0-9: set at the time cursor, or jump to it.
     SetMark(u8),
     Mark(u8),
-    /// Delete the panel's selection (Takes).
+    /// Delete the panel's selection (Takes, Outliner).
     Delete,
     /// Timeline: show the modified properties of the selected layers (After Effects U U).
     Modified,
@@ -209,6 +209,7 @@ pub const VIEWPORT: &[Binding] = &[
     property(Command::GizmoSmaller, Key::Minus),
 ];
 pub const TAKES: &[Binding] = &[binding(Command::Delete, Key::Delete, Modifiers::NONE)];
+pub const OUTLINER: &[Binding] = &[binding(Command::Delete, Key::Delete, Modifiers::NONE)];
 pub const TIMELINE: &[Binding] = &[
     binding(Command::Fit, Key::F, Modifiers::NONE),
     property(Command::Translate, Key::P),
@@ -258,6 +259,7 @@ pub fn bindings(scope: Scope) -> &'static [Binding] {
         Scope::Viewport => VIEWPORT,
         Scope::Timeline => TIMELINE,
         Scope::Takes => TAKES,
+        Scope::Outliner => OUTLINER,
         _ => &[],
     }
 }
@@ -755,6 +757,19 @@ mod tests {
         assert_eq!(
             resolve(t, Key::U, None, Modifiers::SHIFT, false),
             Some((t, Command::Keyed))
+        );
+    }
+    #[test]
+    fn delete_belongs_to_the_outliner_and_the_takes() {
+        for scope in [Scope::Outliner, Scope::Takes] {
+            assert_eq!(
+                resolve(scope, Key::Delete, None, Modifiers::NONE, false),
+                Some((scope, Command::Delete))
+            );
+        }
+        assert_eq!(
+            resolve(Scope::Viewport, Key::Delete, None, Modifiers::NONE, false),
+            None
         );
     }
     #[test]

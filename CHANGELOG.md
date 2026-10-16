@@ -2,6 +2,10 @@
 
 ## 0.1.0 — 2026-10-14
 
+- Panels use the egui-dock-layout engine and export runs through video-io. Layouts saved by the previous dock are not read: the app reports it and starts from the default layout.
+- One undo step per outliner eye sweep and per timeline work-area drag, instead of one per frame.
+- Delete removes the outliner selection from the keyboard, as the trash button does.
+
 - While RMB is held the keyboard flies the camera; once it is released, Q / W / E / R switch viewport tools and + / − resize the gizmo, even while the flight still coasts.
 - Step the manipulator size with + and − while Move, Rotate or Scale is on. The value is Settings > Controls and is saved with the app.
 - Edit a Hybrid's four steps in the Attribute Editor (Off, Mandelbulb, Mandelbox, Kifs fold, Inversion). Sub-formula rows follow the steps that actually run.

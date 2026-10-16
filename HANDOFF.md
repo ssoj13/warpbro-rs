@@ -11,9 +11,13 @@ TODO:
       now reaches WarpBro (frame colour, export). Run the full CUDA suite on these pins and
       compare viewport and exported PNG / EXR / HEVC by eye against v0.1.0 (operator: renders OK
       at first look, 2026-10-16).
-- [ ] Panel drags as one undo step (outliner eye sweep, timeline work-area drag): WIP
-      `WorldUi::panel_gesture` / `held_gesture`, wire App's closer and the handlers.
-- [ ] Outliner keyboard Delete / Duplicate, timeline SetMarkerDuration: still ignored.
+- [x] Panel drags as one undo step (outliner eye sweep, timeline work-area drag):
+      `WorldUi::panel_command` / `held_gesture`, the one gesture source of App's closer.
+- [x] Outliner Delete key: `hotkeys::OUTLINER` -> `WorldUi::delete` (button, layer menu, key).
+      The widget's own Delete / Duplicate stay ignored (Ctrl+D is global): one action per key.
+      SetMarkerDuration cannot occur (time marks carry no duration).
+- [x] HEVC exports keep `hvc1` (the ffmpeg-rs writer defaults to `hev1`).
+Full CUDA suite on these pins: 325 passed, 0 failed, 13 ignored (2026-10-16).
 
 Export model for the video-io lift (2026-10-15, answer to egui-widgets-rs): video-io becomes the
 one encoder (backends `native` / `cli`, default `cli`: PNG sequence then MP4/HEVC PQ or SDR).

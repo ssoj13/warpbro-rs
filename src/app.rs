@@ -2875,6 +2875,10 @@ impl App {
                 Err(error) => error,
             };
         }
+        if hotkeys::consume(ctx, Scope::Outliner, Hotkey::Delete) && !selected.is_empty() {
+            self.world.finish_edit();
+            self.world_ui.delete(&mut self.world, selected.clone());
+        }
         if hotkeys::take_copy(ctx, !selected.is_empty()) {
             self.status = match self.world.document.copy_fragment(&selected) {
                 Ok(text) => {
@@ -4555,7 +4559,8 @@ impl App {
         self.process_preview_intent(&ctx);
         self.process_picked_take();
         self.world.finish_edit_unless(
-            egui_attr_grid::edit_gesture(&ctx)
+            self.world_ui
+                .held_gesture(&ctx)
                 .or(camera_gesture)
                 .or(self.gizmo_gesture),
         );
