@@ -578,13 +578,18 @@ fn category(path: &str) -> &'static str {
         _ => "Custom",
     }
 }
+/// The document order after moving `moved` (contiguous, in order) under `parent` at child
+/// `index` of the list without them (the outliner's remove-then-insert contract).
 fn reparent_order(
     nodes: &[WorldNodeInfo],
-    id: NodeId,
+    moved: &[NodeId],
     parent: Option<NodeId>,
     index: usize,
 ) -> Vec<NodeId> {
-    let rest = nodes.iter().filter(|n| n.id != id).collect::<Vec<_>>();
+    let rest = nodes
+        .iter()
+        .filter(|n| !moved.contains(&n.id))
+        .collect::<Vec<_>>();
     let siblings = rest
         .iter()
         .filter(|n| n.parent == parent)
@@ -600,7 +605,7 @@ fn reparent_order(
             .unwrap_or(rest.len())
     };
     let mut ids = rest.into_iter().map(|n| n.id).collect::<Vec<_>>();
-    ids.insert(at, id);
+    ids.splice(at..at, moved.iter().copied());
     ids
 }
 fn tree(nodes: &[WorldNodeInfo], parent: Option<NodeId>, depth: usize) -> Vec<TreeNode> {
@@ -930,24 +935,16 @@ impl WorldUi {
             .inner;
         for a in actions {
             match a {
-                OutlinerAction::Select {
-                    id,
-                    additive,
-                    range,
-                } => {
-                    if let Some(id) = map.get(&id) {
-                        self.select(e, *id, additive, range, nodes);
-                    }
-                }
-                OutlinerAction::SelectMany { ids } => {
+                // The widget resolved the gesture: `ids` is the new selection. The Attribute
+                // Editor follows the row it landed on, else the last selected.
+                OutlinerAction::Select { ids, lead } => {
                     e.selected = ids.iter().filter_map(|id| map.get(id).copied()).collect();
-                    e.selection = e.selected.last().copied();
+                    e.selection = lead
+                        .and_then(|id| map.get(&id).copied())
+                        .filter(|id| e.selected.contains(id))
+                        .or_else(|| e.selected.last().copied());
                 }
-                OutlinerAction::ClearSelection => {
-                    e.selection = None;
-                    e.selected.clear();
-                }
-                OutlinerAction::ToggleVisible { id, visible } => {
+                OutlinerAction::ToggleVisible { id, visible, .. } => {
                     if let Some(id) = map.get(&id) {
                         self.command(
                             e,
@@ -966,20 +963,20 @@ impl WorldUi {
                     }
                 }
                 OutlinerAction::Move {
-                    id,
+                    ids,
                     new_parent,
                     index,
                 } => {
-                    if let Some(id) = map.get(&id).copied() {
+                    let ids: Vec<NodeId> = ids.iter().filter_map(|id| map.get(id).copied()).collect();
+                    if !ids.is_empty() {
                         let parent = new_parent.and_then(|p| map.get(&p).copied());
-                        let ids = reparent_order(nodes, id, parent, index);
-                        self.command(
-                            e,
-                            WorldCommand::Batch(vec![
-                                WorldCommand::Reparent { id, parent },
-                                WorldCommand::Reorder { ids },
-                            ]),
-                        );
+                        let order = reparent_order(nodes, &ids, parent, index);
+                        let mut batch: Vec<WorldCommand> = ids
+                            .iter()
+                            .map(|&id| WorldCommand::Reparent { id, parent })
+                            .collect();
+                        batch.push(WorldCommand::Reorder { ids: order });
+                        self.command(e, WorldCommand::Batch(batch));
                     }
                 }
                 OutlinerAction::ContextEmpty { action } => {
@@ -4237,7 +4234,7 @@ mod tests {
             .find(|n| n.kind == WorldKind::Group)
             .unwrap()
             .id;
-        let ids = reparent_order(&nodes, moved, Some(parent), 0);
+        let ids = reparent_order(&nodes, &[moved], Some(parent), 0);
         e.execute(WorldCommand::Batch(vec![
             WorldCommand::Reparent {
                 id: moved,
@@ -4267,7 +4264,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             original
         );
-        let reordered = reparent_order(&nodes, nodes[0].id, None, 2);
+        let reordered = reparent_order(&nodes, &[nodes[0].id], None, 2);
         assert_eq!(reordered[2], nodes[0].id);
     }
     #[test]

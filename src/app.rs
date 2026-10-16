@@ -146,7 +146,9 @@ pub(crate) struct App {
     drag_recorder: crate::takes::DragRecorder,
     /// Splitter state of the three Settings > Controls grids.
     prefs_grids: [AttrGridState; 5],
-    dock: egui_dock::DockState<dock::Panel>,
+    dock: egui_dock_layout::Layout<dock::Panel>,
+    /// The panel the user last clicked into: new tabs join its group.
+    dock_focus: Option<dock::Panel>,
     panels_to_open: Vec<dock::Panel>,
     toolbar: egui_viewport_toolbar::ToolbarState,
     fonts: dock::Fonts,
@@ -593,10 +595,14 @@ fn prefs_grid(
                 .map_or(13.0, |f| f.size);
             state.table.widths.push(130.0 * (body / 13.0).max(1.0));
         }
-        for (label, value) in
+        // One object per row: store the value. A gesture's closing `Done` that wrote nothing
+        // more (`parts` empty) carries no change.
+        for edit in
             render_grid_with_config(ui, &mut rows, state, &HashSet::new(), &config, &mut Plain)
         {
-            apply(&label, value);
+            if !edit.parts.is_empty() {
+                apply(&edit.key, edit.value);
+            }
         }
     });
 }
@@ -677,6 +683,7 @@ impl App {
             drag_recorder: Default::default(),
             prefs_grids: Default::default(),
             dock: dock::default_layout(),
+            dock_focus: None,
             panels_to_open: Vec::new(),
             toolbar: Default::default(),
             fonts: Default::default(),
@@ -854,17 +861,19 @@ impl App {
             }));
         let mut browse = false;
         let mut changed = false;
-        let mut reset = false;
         let mut category = self.prefs.selected;
         let mut destination = None;
         let mut prefs = std::mem::take(&mut self.prefs);
-        ui.push_id("settings", |ui| {
-            let categories = SettingsPage::ALL.map(SettingsPage::category);
-            egui_prefs2::draw(ui, &mut prefs, &categories, |ui, idx| {
+        let categories = SettingsPage::ALL.map(SettingsPage::category);
+        let opts = egui_prefs2::PanelOpts {
+            reset: true,
+            ..Default::default()
+        };
+        let reset = egui_prefs2::draw(ui, "settings", &mut prefs, &categories, &opts, |ui, idx| {
                 category = idx;
                 match SettingsPage::ALL.get(idx).copied().unwrap_or(SettingsPage::Display) {
                     SettingsPage::Display => {
-                        egui_display::settings_ui(ui, &mut self.display, state.as_ref());
+                        egui_display::settings_ui(ui, "settings.display", &mut self.display, state.as_ref());
                         if state.as_ref().is_some_and(|s| !s.available.iter().any(|o| o.is_hdr())) {
                             ui.label("This window surface offers SDR only. PQ/HDR targets in Color still render and export HDR; the screen uses an SDR preview.");
                         }
@@ -978,8 +987,7 @@ impl App {
                         ui.label("H: restore camera · F: frame bounds (without RMB)");
                     }
                 }
-            }, Some(|| reset = true));
-        });
+            });
         self.prefs = prefs;
         if reset {
             if category == 0 {
@@ -1350,7 +1358,7 @@ impl App {
             }
             let _ = self.renderer.try_command(Command::ReloadColour);
         }
-        match self.changed_settings_json(ctx) {
+        match self.changed_settings_json() {
             Ok(Some(json)) => {
                 self.io.settings(settings_path(), json);
             }
@@ -1385,10 +1393,10 @@ impl App {
             && export == previous
     }
 
-    fn changed_settings_json(&mut self, ctx: &egui::Context) -> Result<Option<String>, String> {
+    fn changed_settings_json(&mut self) -> Result<Option<String>, String> {
         self.layouts
             .cache
-            .refresh(&self.dock, ctx)
+            .refresh(&self.dock)
             .map_err(|error| format!("Layout save failed: {error}"))?;
         if self.persisted_layout_revision == self.layouts.cache.revision
             && self
@@ -3841,7 +3849,19 @@ impl App {
                 } else {
                     (egui_hdr_view::HdrFormat::Rgba8, t.sdr_bytes.clone())
                 };
-                view.stage_frame(format, bytes, t.width, t.height, mvp);
+                // Straight: the blend the view always drew these frames with.
+                let staged = view.stage_frame(
+                    format,
+                    egui_hdr_view::AlphaMode::Straight,
+                    bytes,
+                    t.width,
+                    t.height,
+                    mvp,
+                );
+                // On an error the previous frame stays; the same input is not retried.
+                if let Err(error) = staged {
+                    self.status = format!("Viewport frame not shown: {error}");
+                }
                 self.staged_frame = Some(t);
                 self.staged_output = Some((output_hdr, white));
             }
@@ -5165,15 +5185,14 @@ mod tests {
     fn auto_key_preference_serializes_once_and_defaults_off() {
         let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
-        let ctx = egui::Context::default();
         assert!(!Settings::default().auto_key);
         assert!(serde_json::from_str::<Settings>("{}").is_err());
-        app.changed_settings_json(&ctx).unwrap();
+        app.changed_settings_json().unwrap();
         app.world_ui.auto_key = true;
-        let json = app.changed_settings_json(&ctx).unwrap().unwrap();
+        let json = app.changed_settings_json().unwrap().unwrap();
         assert!(serde_json::from_str::<Settings>(&json).unwrap().auto_key);
         for _ in 0..16 {
-            assert!(app.changed_settings_json(&ctx).unwrap().is_none());
+            assert!(app.changed_settings_json().unwrap().is_none());
         }
     }
 
@@ -5267,16 +5286,15 @@ mod tests {
     fn settings_and_layouts_serialize_only_after_actual_changes() {
         let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
-        let ctx = egui::Context::default();
         app.refresh_scene().unwrap();
-        assert!(app.changed_settings_json(&ctx).unwrap().is_some());
+        assert!(app.changed_settings_json().unwrap().is_some());
         let serializations = app.settings_serializations;
         let dock_serializations = app.layouts.cache.serializations;
         let baseline = app.snapshot_before.as_ref().unwrap().objects.as_ptr();
         let snapshots = app.snapshot_clones;
         for _ in 0..32 {
             app.refresh_scene().unwrap();
-            assert!(app.changed_settings_json(&ctx).unwrap().is_none());
+            assert!(app.changed_settings_json().unwrap().is_none());
             assert_eq!(
                 app.snapshot_before.as_ref().unwrap().objects.as_ptr(),
                 baseline
@@ -5293,7 +5311,7 @@ mod tests {
         export.name = "new".into();
         export.last = 19;
         app.export.restore(export);
-        let json = app.changed_settings_json(&ctx).unwrap().unwrap();
+        let json = app.changed_settings_json().unwrap().unwrap();
         assert!(
             !json.contains("png_peak_nits"),
             "the encode recipe lives in the document, not in preferences"
@@ -5305,23 +5323,26 @@ mod tests {
         assert_eq!(saved.gui_fps, 144);
         assert_eq!(saved.export.name, "new");
         assert_eq!(saved.export.last, 19);
-        assert!(app.changed_settings_json(&ctx).unwrap().is_none());
+        assert!(app.changed_settings_json().unwrap().is_none());
         let current = app.colour.sel.clone();
         assert!(app.colour.presets.store(1, "Custom colour", &current));
-        let json = app.changed_settings_json(&ctx).unwrap().unwrap();
+        let json = app.changed_settings_json().unwrap().unwrap();
         let saved: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(saved.colour_presets, app.colour.presets);
         assert_eq!(saved.colour_presets.slots[1].name, "Custom colour");
-        assert!(app.changed_settings_json(&ctx).unwrap().is_none());
+        assert!(app.changed_settings_json().unwrap().is_none());
         assert!(serde_json::from_str::<Settings>("{}").is_err());
-        app.layouts.store.save(
-            "Edited workspace",
-            app.layouts.cache.blob.as_ref().unwrap().clone(),
-        );
-        let json = app.changed_settings_json(&ctx).unwrap().unwrap();
+        app.layouts
+            .store
+            .save(
+                "Edited workspace",
+                app.layouts.cache.blob.as_ref().unwrap().clone(),
+            )
+            .unwrap();
+        let json = app.changed_settings_json().unwrap().unwrap();
         let saved: Settings = serde_json::from_str(&json).unwrap();
         assert_eq!(saved.layouts.current(), "Edited workspace");
-        assert!(app.changed_settings_json(&ctx).unwrap().is_none());
+        assert!(app.changed_settings_json().unwrap().is_none());
     }
 
     #[test]

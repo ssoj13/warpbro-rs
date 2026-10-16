@@ -2757,7 +2757,7 @@ fn output_settings_node_is_the_typed_static_export_recipe() {
     // The panel's edits: one command per changed field, and the document reads them back.
     let png = OutputSettings {
         format: ExportFormat::Png,
-        png: egui_display::export::PngEncoding::Hdr10,
+        png: video_io::export::PngEncoding::Hdr10,
         width: 640,
         ..OutputSettings::default()
     };

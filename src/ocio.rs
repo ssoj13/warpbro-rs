@@ -37,8 +37,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context as _, Result, anyhow, bail};
-pub use egui_display::export::OutputKind;
-use egui_display::export::{OutputView, OutputViewEncoding, resolve_output_view};
+pub use video_io::output_view::OutputKind;
+use video_io::output_view::{OutputView, ViewSignal, resolve_output_view};
 use serde::{Deserialize, Serialize};
 use vfx_ocio::builtin::embedded;
 use vfx_ocio::color_matrix::{Adaptation, REC709, conversion_matrix_from_xyz_d65};
@@ -46,6 +46,21 @@ use vfx_ocio::{
     DisplayViewTransform, Encoding, GpuLanguage, GpuProcessor, GpuShaderCode, GroupTransform,
     MatrixTransform, Processor, ReferenceSpaceType, TransformDirection,
 };
+
+/// The signal of an HDR (`encoding: hdr-video`) view of `display`. OCIO records only
+/// "hdr-video", not PQ or HLG, so HDR displays are told apart by their names (the ACES configs'
+/// convention, as Nuke and Resolve do); the export panel shows the choice and lets it be
+/// overridden. An HDR display named neither way carries no signal an export writes (`Data`).
+fn hdr_signal(display: &str) -> ViewSignal {
+    let name = display.to_ascii_uppercase();
+    if name.contains("PQ") || name.contains("ST2084") || name.contains("ST-2084") {
+        ViewSignal::Pq
+    } else if name.contains("HLG") {
+        ViewSignal::Hlg
+    } else {
+        ViewSignal::Data
+    }
+}
 
 /// What the user picked; persisted (`persist::Config::ocio`). Empty names mean the
 /// config's defaults ([`Ocio::resolve`]).
@@ -228,27 +243,28 @@ impl Ocio {
         self.encoding(display, v)
     }
 
-    /// Whether `display` is a `kind` display. OCIO records only "hdr-video", not PQ or HLG, so
-    /// HDR displays are told apart by their names (the ACES configs' convention, as Nuke and
-    /// Resolve do); the export panel shows the choice and lets it be overridden.
+    /// Whether `display` is a `kind` display: every display is an SDR one, an HDR kind needs
+    /// the display's name to say it ([`hdr_signal`]).
     pub fn display_is(&self, display: &str, kind: OutputKind) -> bool {
-        kind.display_is(display)
+        kind == OutputKind::Sdr || hdr_signal(display).fits(kind)
     }
 
-    /// Whether view `view` of `display` renders for `kind` (HDR views for PQ / HLG, picture SDR
-    /// views for SDR).
+    /// Whether view `view` of `display` renders for `kind` (HDR views of a PQ / HLG display for
+    /// PQ / HLG, picture SDR views for SDR).
     pub fn view_is(&self, display: &str, view: &str, kind: OutputKind) -> bool {
-        self.output_view(display, view).encoding.fits(kind)
+        self.output_view(display, view).fits(kind)
     }
 
+    /// The view as video-io's output-view selection sees it: its signal is classified here
+    /// (video-io takes it as host data and never guesses it from names).
     fn output_view<'a>(&self, display: &'a str, view: &'a str) -> OutputView<'a> {
         OutputView {
             display,
             view,
-            encoding: match self.view_encoding(display, view) {
-                Some(Encoding::Hdr) => OutputViewEncoding::Hdr,
-                Some(Encoding::Data) => OutputViewEncoding::Data,
-                _ => OutputViewEncoding::Picture,
+            signal: match self.view_encoding(display, view) {
+                Some(Encoding::Hdr) => hdr_signal(display),
+                Some(Encoding::Data) => ViewSignal::Data,
+                _ => ViewSignal::Sdr,
             },
         }
     }
@@ -502,7 +518,8 @@ impl Transform {
             return Ok(crate::color::DisplayLight::Relative);
         }
         let peak_nits =
-            egui_display::export::measure_display_peak(|probe| self.proc.apply_rgb(probe), 100.0)?;
+            video_io::export::measure_display_peak(|probe| self.proc.apply_rgb(probe), 100.0)
+                .map_err(|e| e.to_string())?;
         Ok(crate::color::DisplayLight::Absolute { peak_nits })
     }
 

@@ -11,8 +11,8 @@ use crate::render::{Gpu, Target};
 use crate::scene::Scene;
 
 #[cfg(test)]
-use egui_display::export::{HLG_REFERENCE_PEAK_NITS, HdrScale};
-pub use egui_display::export::{HdrLevels, PngEncoding, hdr_scale, write_png};
+use video_io::{color::HLG_REF_PEAK, export::HdrScale};
+pub use video_io::export::{HdrLevels, PngEncoding, hdr_scale, write_png};
 
 const QUEUE_LIMIT: usize = 16;
 
@@ -207,6 +207,7 @@ impl Frame {
             scale,
             overwrite,
         )
+        .map_err(|e| e.to_string())
     }
     /// The display EXR ([`write_display_exr`]); `sdr_white_nits` as in [`Self::save_png`].
     pub fn save_display_exr(&self, path: &Path, sdr_white_nits: f32) -> Result<(), String> {
@@ -1978,7 +1979,7 @@ mod tests {
             hlg,
             HdrScale {
                 unit_nits: 203.0,
-                peak_nits: HLG_REFERENCE_PEAK_NITS
+                peak_nits: HLG_REF_PEAK
             }
         );
         let absolute = hdr_scale(

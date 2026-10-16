@@ -1575,6 +1575,7 @@ impl Target {
             overwrite,
         )
         .map(|_| ())
+        .map_err(|e| e.to_string())
     }
 
     /// Display light, linear Rec.709 (`render_service::write_display_exr`): `whiteLuminance` 100

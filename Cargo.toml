@@ -35,7 +35,6 @@ cuda-host = { git = "ssh://git@github.com/ssoj13/cuda-rust-windows.git", branch 
 # The monorepo ships cuda-core next to cuda-host; one source keeps a single cuda-core in the graph.
 cuda-core = { git = "ssh://git@github.com/ssoj13/cuda-rust-windows.git", branch = "main" }
 egui = "0.36"
-egui_dock = { version = "0.21", features = ["serde"] }
 egui-dock-layout = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
 egui-viewport-toolbar = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
 # Viewport transform manipulator (Q / W / E / R tools, as in Playa).
