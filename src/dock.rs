@@ -448,6 +448,7 @@ impl App {
                             &mut exposure,
                             &mut self.exposure_hold,
                             -10.0..=10.0,
+                            None,
                         );
                         if exposure != effective.render.exposure_stops {
                             let gesture = ui
