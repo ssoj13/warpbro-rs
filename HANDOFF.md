@@ -8,8 +8,13 @@ render profile (`/render/direct`, Direct-only rows), `Scene::direct`, Direct ker
 render.rs, grid = largest square <= Samples, up to 16 x 16 (`DirectShading::MAX_GRID`),
 adaptive off under Direct. Operator templates converted (`*.json.bak3`). NEXT: run
 `cargo oxide test -- --release --locked -- direct`, then `display_modes`, then the full suite;
-look at a Direct render by eye. A Bounds display on the Output profile exports an empty image:
-TODO decide (refuse Bounds on Output, or keep as is).
+look at a Direct render by eye. - [ ] Bounds on the Output profile (operator: decide later). `EffectiveRender::show` clears
+      the objects and only the viewport draws the cubes, so an export renders the sky alone,
+      silently. Proposed: `ExportController::start` refuses it with "The Output profile shows
+      Bounds: nothing to render; pick Path traced or Direct", and the `/render/display` hint
+      says so; viewport profiles keep Bounds. Alternative (a new feature): draw the bounds
+      into exported frames.
+Release: v0.1.0 moved to 9f985dc without a backup (operator), tag CI run 38874497522.
 Original analysis: `Display::Direct` was only path tracing with
 `max_bounces = 0` (`EffectiveRender::apply_to`), so it looked and cost the same as PathTraced.
 The operator means fractal-kernels' fast Direct body (feature `direct`, from OFX): no path
