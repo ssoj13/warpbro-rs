@@ -37,8 +37,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use anyhow::{Context as _, Result, anyhow, bail};
-pub use video_io::output_view::OutputKind;
-use video_io::output_view::{OutputView, ViewSignal, resolve_output_view};
 use serde::{Deserialize, Serialize};
 use vfx_ocio::builtin::embedded;
 use vfx_ocio::color_matrix::{Adaptation, REC709, conversion_matrix_from_xyz_d65};
@@ -46,6 +44,8 @@ use vfx_ocio::{
     DisplayViewTransform, Encoding, GpuLanguage, GpuProcessor, GpuShaderCode, GroupTransform,
     MatrixTransform, Processor, ReferenceSpaceType, TransformDirection,
 };
+pub use video_io::output_view::OutputKind;
+use video_io::output_view::{OutputView, ViewSignal, resolve_output_view};
 
 /// The signal of an HDR (`encoding: hdr-video`) view of `display`. OCIO records only
 /// "hdr-video", not PQ or HLG, so HDR displays are told apart by their names (the ACES configs'

@@ -979,7 +979,8 @@ impl WorldUi {
                     new_parent,
                     index,
                 } => {
-                    let ids: Vec<NodeId> = ids.iter().filter_map(|id| map.get(id).copied()).collect();
+                    let ids: Vec<NodeId> =
+                        ids.iter().filter_map(|id| map.get(id).copied()).collect();
                     if !ids.is_empty() {
                         let parent = new_parent.and_then(|p| map.get(&p).copied());
                         let order = reparent_order(nodes, &ids, parent, index);
@@ -3122,7 +3123,12 @@ enum AnimEffect {
 }
 /// The effect of `intent` on attribute `attr` of node `id` at `frame`; None when Prev / Next
 /// has no key to go to.
-fn anim_effect(id: NodeId, attr: &WorldAttribute, frame: f64, intent: AnimIntent) -> Option<AnimEffect> {
+fn anim_effect(
+    id: NodeId,
+    attr: &WorldAttribute,
+    frame: f64,
+    intent: AnimIntent,
+) -> Option<AnimEffect> {
     let path = attr.path.clone();
     let seek = |key: Option<f64>| key.map(|k| AnimEffect::Seek(k.round().max(0.0) as u32));
     Some(AnimEffect::Command(match intent {

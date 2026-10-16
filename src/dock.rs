@@ -269,7 +269,11 @@ impl App {
         let previous = self.layouts.store.current().to_owned();
         ui.push_id("frac-layout-manager", |ui| {
             // The bar reads a picked layout before selecting it; WarpBro also needs the Viewport.
-            match self.layouts.bar.show(ui, &mut self.layouts.store, &self.dock) {
+            match self
+                .layouts
+                .bar
+                .show(ui, &mut self.layouts.store, &self.dock)
+            {
                 Ok(output) => match output.restored {
                     Some(layout) if valid_layout(&layout) => {
                         self.dock = layout;
@@ -728,7 +732,10 @@ mod tests {
     }
 
     /// The floating group holding `panel`.
-    fn floating(layout: &Layout<Panel>, panel: Panel) -> Option<&egui_dock_layout::Floating<Panel>> {
+    fn floating(
+        layout: &Layout<Panel>,
+        panel: Panel,
+    ) -> Option<&egui_dock_layout::Floating<Panel>> {
         layout.floating.iter().find(|g| g.panels.contains(&panel))
     }
 
@@ -854,8 +861,7 @@ mod tests {
         store.rename("Render", "Export workspace").unwrap();
         let json = serde_json::to_string(&store).unwrap();
         let mut restored_store: LayoutStore = serde_json::from_str(&json).unwrap();
-        let restored =
-            restore_layout(&restored_store.select("Export workspace").unwrap()).unwrap();
+        let restored = restore_layout(&restored_store.select("Export workspace").unwrap()).unwrap();
         assert_eq!(restored.panels().len(), 3);
         assert_eq!(
             floating(&restored, Panel::Export).unwrap().rect,

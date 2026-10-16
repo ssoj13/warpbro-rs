@@ -82,8 +82,8 @@ impl VideoEncoder {
     }
 }
 
-pub use video_io::video::PngVideo;
 use video_io::cli::ffmpeg;
+pub use video_io::video::PngVideo;
 use video_io::video::{Outcome, Ticket};
 
 /// The encode recipe of an export: the values of the document's `OutputSettings` node (branch
@@ -538,8 +538,7 @@ impl ExportController {
             if !progress.done {
                 return;
             }
-            let Some(encoding) = run.video.lock().unwrap_or_else(|e| e.into_inner()).take()
-            else {
+            let Some(encoding) = run.video.lock().unwrap_or_else(|e| e.into_inner()).take() else {
                 self.run = None;
                 return;
             };
@@ -1125,7 +1124,12 @@ impl ExportSettings {
         video: &Path,
     ) -> Result<Ticket, video_io::Error> {
         let input = self.video_input();
-        video_io::video::encode(&self.video_options(&input), levels, video, self.job.overwrite)
+        video_io::video::encode(
+            &self.video_options(&input),
+            levels,
+            video,
+            self.job.overwrite,
+        )
     }
 }
 

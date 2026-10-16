@@ -10,9 +10,9 @@ use std::time::{Duration, Instant};
 use crate::render::{Gpu, Target};
 use crate::scene::Scene;
 
+pub use video_io::export::{HdrLevels, PngEncoding, hdr_scale, write_png};
 #[cfg(test)]
 use video_io::{color::HLG_REF_PEAK, export::HdrScale};
-pub use video_io::export::{HdrLevels, PngEncoding, hdr_scale, write_png};
 
 const QUEUE_LIMIT: usize = 16;
 
