@@ -1020,6 +1020,22 @@ impl Gpu {
         bounces_cap: Option<u32>,
         final_pass: bool,
     ) {
+        self.step_with_display(target, scene, spp, seed, bounces_cap, final_pass, |_| true);
+    }
+
+    /// Like [`Self::step`], but runs OIDN, tonemap, readback and OCIO only when `display(target)`
+    /// asks to present the updated film after sample accumulation and convergence checks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_display(
+        &mut self,
+        target: &mut Target,
+        scene: &Scene,
+        spp: u32,
+        seed: u32,
+        bounces_cap: Option<u32>,
+        final_pass: bool,
+        display: impl FnOnce(&Target) -> bool,
+    ) {
         let prepared = match self
             .preparation
             .get(scene, target.width as u32, target.height as u32)
@@ -1143,8 +1159,16 @@ impl Gpu {
                 }
             }
             target.samples += spp;
+            target.display_key = None;
             self.tally(target);
             self.adapt(target, scene);
+        }
+        if !display(target) {
+            if spp > 0 {
+                target.last_ms = t0.elapsed().as_secs_f32() * 1000.0;
+                target.last_spp = spp;
+            }
+            return;
         }
         // Converging early ends the render: run the final-pass work (OIDN at completion) now.
         let final_pass = final_pass || target.converged;
@@ -1321,7 +1345,7 @@ pub(crate) fn scene_trace_data(scene: &Scene) -> Vec<f32> {
         } else {
             values.push(0.0);
         }
-        values.extend(build_lut(object.palette).into_iter().flatten());
+        values.push(object.palette as u8 as f32);
         for m in &object.masks {
             values.extend(mask_row(m).unwrap_or([f32::NAN; MASK_STRIDE]));
         }
@@ -3831,6 +3855,20 @@ mod tests {
         assert!(
             red > 20 && blue > 20,
             "each object keeps its own colour: {red} red, {blue} blue"
+        );
+        scene.lights.clear();
+        scene.objects[0].material.base = 0.0;
+        scene.objects[0].material.specular = 1.0;
+        scene.objects[0].material.transmission = 1.0;
+        scene.objects[0].material.transmission_color = [0.05, 1.0, 0.05];
+        let glass = render(&scene);
+        let green = glass
+            .iter()
+            .filter(|p| p[1] > 0.02 && p[1] > 2.0 * p[0] && p[1] > 2.0 * p[2])
+            .count();
+        assert!(
+            green > 20,
+            "transmissive object refracts sky with its transmission tint in Direct mode: {green} green"
         );
     }
 

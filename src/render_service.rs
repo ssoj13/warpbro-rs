@@ -1009,13 +1009,14 @@ fn step_preview(
     gpu.prepare_target(&mut job.target, &job.scene, None);
     let batch = batch_size(&job.target, job.spp.saturating_sub(job.target.samples));
     let final_pass = job.target.samples.saturating_add(batch) >= job.spp;
-    gpu.step(
+    gpu.step_with_display(
         &mut job.target,
         &job.scene,
         batch,
         session.cache.request.seed,
         None,
         final_pass,
+        |target| target.complete(job.spp),
     );
     worked = true;
     if !preview_current(shared, generation) {
@@ -1433,13 +1434,14 @@ fn run_worker(shared: &Shared) {
         }) {
             let batch = batch_size(&job.target, job.spp.saturating_sub(job.target.samples));
             let final_pass = job.target.samples.saturating_add(batch) >= job.spp;
-            gpu.step(
+            gpu.step_with_display(
                 &mut job.target,
                 &job.scene,
                 batch,
                 job.id as u32,
                 None,
                 final_pass,
+                |target| target.complete(job.spp),
             );
             worked = true;
             let cancelled = shared.state.lock().unwrap().cancel_export;
@@ -1481,7 +1483,15 @@ fn run_worker(shared: &Shared) {
             if !interactive && !job.target.complete(job.spp) {
                 let batch = batch_size(&job.target, job.spp.saturating_sub(job.target.samples));
                 let final_pass = job.target.samples.saturating_add(batch) >= job.spp;
-                gpu.step(&mut job.target, &job.scene, batch, 7, None, final_pass);
+                gpu.step_with_display(
+                    &mut job.target,
+                    &job.scene,
+                    batch,
+                    7,
+                    None,
+                    final_pass,
+                    |target| target.complete(job.spp),
+                );
                 worked = true;
             }
             if job.target.complete(job.spp)
@@ -1575,13 +1585,22 @@ fn step_viewport(gpu: &mut Gpu, active: &mut Viewport, shared: &Shared) -> bool 
         return false;
     }
     let final_pass = target.samples.saturating_add(spp) >= goal;
-    gpu.step(target, &request.scene, spp, request.seed, None, final_pass);
-    if active.dirty
-        || fresh
-        || active.last_preview != preview
-        || target.complete(goal)
-        || active.last_publish.elapsed() >= Duration::from_secs_f32(1.0 / request.target_fps)
-    {
+    let mut publish = active.dirty || fresh || active.last_preview != preview;
+    gpu.step_with_display(
+        target,
+        &request.scene,
+        spp,
+        request.seed,
+        None,
+        final_pass,
+        |target| {
+            publish |= target.complete(goal)
+                || active.last_publish.elapsed()
+                    >= Duration::from_secs_f32(1.0 / request.target_fps);
+            publish
+        },
+    );
+    if publish {
         let frame = Arc::new(Frame::snapshot(
             target,
             request.generation,
@@ -2414,6 +2433,9 @@ mod tests {
         assert_ne!(trace_key(&original), trace_key(&changed));
         changed = original.clone();
         changed.scene.lights[0].sun_azimuth += 1.0;
+        assert_ne!(trace_key(&original), trace_key(&changed));
+        changed = original.clone();
+        changed.scene.objects[0].palette = crate::palette::PaletteScheme::Fire;
         assert_ne!(trace_key(&original), trace_key(&changed));
         changed = original.clone();
         changed.scene.objects.clear();

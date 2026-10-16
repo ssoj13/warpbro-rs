@@ -2595,26 +2595,29 @@ impl App {
         };
         // Frozen keeps the previous request, so the previous selection stays the displayed one.
         if policy.frozen {
-            if let Some(request) = &mut self.request {
+            if let Some(request) = &mut self.request
+                && (!request.paused || request.interactive)
+            {
                 request.paused = true;
                 request.interactive = false;
                 self.renderer.request_viewport(request.clone());
             }
             return;
         }
-        let mut snapshot = self.scene.clone();
-        snapshot.animation = Default::default();
-        let mut traced = snapshot.clone();
-        traced.render.exposure_stops = self.last_scene.render.exposure_stops;
-        traced.render.saturation = self.last_scene.render.saturation;
-        traced.render.reinhard = self.last_scene.render.reinhard;
-        traced.render.denoise = self.last_scene.render.denoise;
-        traced.colour = self.last_scene.colour.clone();
-        if traced != self.last_scene {
-            self.last_change = Instant::now();
+        if self.scene != self.last_scene {
+            let mut traced = self.scene.clone();
+            traced.animation = self.last_scene.animation.clone();
+            traced.render.exposure_stops = self.last_scene.render.exposure_stops;
+            traced.render.saturation = self.last_scene.render.saturation;
+            traced.render.reinhard = self.last_scene.render.reinhard;
+            traced.render.denoise = self.last_scene.render.denoise;
+            traced.colour = self.last_scene.colour.clone();
+            if traced != self.last_scene {
+                self.last_change = Instant::now();
+            }
+            // Compare the authored output snapshot, never the previously selected moving profile.
+            self.last_scene = self.scene.clone();
         }
-        // Compare the authored output snapshot, never the previously selected moving profile.
-        self.last_scene = snapshot.clone();
         let moving = self.world_ui.playing
             || self.last_change.elapsed().as_secs_f32() * 1000.0 < policy.settle_delay_ms;
         let selection = match self
@@ -2655,7 +2658,7 @@ impl App {
                 }
             }
         }
-        snapshot = self
+        let mut snapshot = self
             .viewport_scene
             .as_ref()
             .expect("evaluated selected profile")
@@ -2707,8 +2710,10 @@ impl App {
             self.world_ui.playhead,
         ));
         self.viewport_render = Some(selection);
-        self.renderer.request_viewport(req.clone());
-        self.request = Some(req);
+        if self.request.as_ref() != Some(&req) {
+            self.renderer.request_viewport(req.clone());
+            self.request = Some(req);
+        }
     }
     fn poll_events(&mut self, ctx: &egui::Context) {
         let frozen = self
@@ -4493,7 +4498,9 @@ impl App {
         self.world_ui.add_menu_ui(root.ctx(), &mut self.world);
 
         if !self.viewport_visible {
-            if let Some(request) = &mut self.request {
+            if let Some(request) = &mut self.request
+                && request.active
+            {
                 request.active = false;
                 self.renderer.request_viewport(request.clone());
             }

@@ -597,7 +597,7 @@ def run_ci(args: argparse.Namespace) -> int:
 # kernels: registers, local memory, spills
 # =============================================================================
 
-KERNEL_PTX = ROOT_DIR / "target" / "oxide-ptx" / "WarpBro.ptx"
+KERNEL_PTX = ROOT_DIR / "target" / "oxide-ptx" / "fractal_kernels.ptx"
 KERNEL_REPORT_DIR = ROOT_DIR / "target" / "oxide-ptx" / "kernels"
 
 

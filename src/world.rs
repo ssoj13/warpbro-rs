@@ -127,14 +127,16 @@ pub struct WorldDocument {
 }
 impl PartialEq for WorldDocument {
     fn eq(&self, other: &Self) -> bool {
-        let edits = |d: &Self| {
-            let mut value = serde_json::to_value(d).ok()?;
-            let object = value.as_object_mut()?;
-            object.remove("takes");
-            object.remove("camera_slots");
-            Some(value)
-        };
-        edits(self) == edits(other)
+        self.first == other.first
+            && self.last == other.last
+            && self.fps == other.fps
+            && self.active_camera == other.active_camera
+            && self.active_environment == other.active_environment
+            && self.marks == other.marks
+            && self.graph.format_version == other.graph.format_version
+            && self.graph.id == other.graph.id
+            && self.graph.bus_slots == other.graph.bus_slots
+            && self.graph.nodes == other.graph.nodes
     }
 }
 #[derive(Clone, Debug)]
@@ -2935,8 +2937,7 @@ impl WorldDocument {
         let values = self.settings_values(id, "output", f64::from(self.first))?;
         serde_json::from_value(values).map_err(|e| format!("Invalid OutputSettings {id}: {e}"))
     }
-    fn static_settings_value(&self, id: NodeId, path: &str) -> Result<Value, String> {
-        let attrs = self.attrs(id)?;
+    fn static_settings_value_with(attrs: &Attrs, path: &str) -> Result<Value, String> {
         if attrs.anim(path).is_some() || attrs.conn(path).is_some() {
             return Err(format!("Settings attribute {path} must be static"));
         }
@@ -2945,6 +2946,16 @@ impl WorldDocument {
             .cloned()
             .map(attr_json)
             .ok_or_else(|| format!("Missing settings attribute {path}"))
+    }
+    fn static_settings_value(&self, id: NodeId, path: &str) -> Result<Value, String> {
+        let attrs = self.attrs(id)?;
+        Self::static_settings_value_with(&attrs, path)
+    }
+    fn static_settings_reference_with(attrs: &Attrs, path: &str) -> Result<NodeId, String> {
+        Self::static_settings_value_with(attrs, path)?
+            .as_str()
+            .and_then(NodeId::parse)
+            .ok_or_else(|| format!("Settings reference {path} must be a UUID"))
     }
     fn static_settings_reference(&self, id: NodeId, path: &str) -> Result<NodeId, String> {
         self.static_settings_value(id, path)?
@@ -3101,9 +3112,18 @@ impl WorldDocument {
             return Err("Invalid render profile time".into());
         }
         let quality = self.render_quality(profile)?;
-        let method: RenderMethod =
-            serde_json::from_value(self.attribute_value(profile, "/render/method", frame)?)
-                .map_err(|e| format!("Invalid render method: {e}"))?;
+        let profile_node = self.node(profile)?;
+        let profile_attrs = self.attrs(profile)?;
+        let quality_node = self.node(quality)?;
+        let quality_attrs = self.attrs(quality)?;
+        let method: RenderMethod = serde_json::from_value(self.attribute_value_with(
+            profile,
+            profile_node,
+            &profile_attrs,
+            "/render/method",
+            frame,
+        )?)
+        .map_err(|e| format!("Invalid render method: {e}"))?;
         let mut values = serde_json::Map::new();
         // World kernels read geometry iterations from each object's block. The transient root
         // block carries a neutral value; it must never proxy a particular fractal's geometry.
@@ -3111,7 +3131,9 @@ impl WorldDocument {
             "iterations".into(),
             json!(Scene::preset(crate::params::FAMILY_BULB).render.iterations),
         );
-        let evaluated_quality = json!({"quality":self.settings_values(quality, "quality", frame)?});
+        let evaluated_quality = json!({
+            "quality": self.settings_values_with(quality, quality_node, &quality_attrs, "quality", frame)?
+        });
         for key in QUALITY_RENDER_FIELDS {
             let mut value = evaluated_quality["quality"][*key].clone();
             if value.is_null() {
@@ -3133,23 +3155,37 @@ impl WorldDocument {
             }
             values.insert((*key).into(), value);
         }
-        let evaluated = json!({"render":self.settings_values(profile, "render", frame)?});
+        let evaluated = json!({
+            "render": self.settings_values_with(profile, profile_node, &profile_attrs, "render", frame)?
+        });
         for key in PROFILE_RENDER_FIELDS {
             values.insert((*key).into(), evaluated["render"][*key].clone());
         }
         let render: crate::scene::Render = serde_json::from_value(Value::Object(values))
             .map_err(|e| format!("Invalid effective RenderSettings: {e}"))?;
-        let samples_value = self.attribute_value(quality, "/quality/samples", frame)?;
+        let samples_value = self.attribute_value_with(
+            quality,
+            quality_node,
+            &quality_attrs,
+            "/quality/samples",
+            frame,
+        )?;
         let samples = samples_value
             .as_f64()
             .filter(|v| v.is_finite() && (1.0..=65536.0).contains(v))
             .ok_or("Samples must be from 1 to 65536")?
             .round() as u32;
         let resolution_scale =
-            self.attribute_value(quality, "/quality/resolution_scale", frame)?
-                .as_f64()
-                .filter(|v| v.is_finite() && (0.0625..=1.0).contains(v))
-                .ok_or("Resolution scale must be between 1/16 and 1")? as f32;
+            self.attribute_value_with(
+                quality,
+                quality_node,
+                &quality_attrs,
+                "/quality/resolution_scale",
+                frame,
+            )?
+            .as_f64()
+            .filter(|v| v.is_finite() && (0.0625..=1.0).contains(v))
+            .ok_or("Resolution scale must be between 1/16 and 1")? as f32;
         if render.max_steps == 0
             || render.glass_probes == 0
             || render.max_bounces > 64
@@ -3166,10 +3202,22 @@ impl WorldDocument {
             return Err("QualitySettings contain invalid tracing or adaptive limits".into());
         }
         let display: crate::render_profiles::Display =
-            serde_json::from_value(self.attribute_value(profile, "/render/display", frame)?)
-                .map_err(|e| format!("Invalid display: {e}"))?;
+            serde_json::from_value(self.attribute_value_with(
+                profile,
+                profile_node,
+                &profile_attrs,
+                "/render/display",
+                frame,
+            )?)
+            .map_err(|e| format!("Invalid display: {e}"))?;
         let thinning = self
-            .attribute_value(profile, "/render/thinning", frame)?
+            .attribute_value_with(
+                profile,
+                profile_node,
+                &profile_attrs,
+                "/render/thinning",
+                frame,
+            )?
             .as_f64()
             .filter(|v| (0.0..=1.0).contains(v))
             .ok_or("Thinning must be between 0 and 1")? as f32;
@@ -3211,9 +3259,10 @@ impl WorldDocument {
             return Err("Invalid viewport policy time".into());
         }
         let id = self.viewport_settings_id()?;
-        let value = |path: &str| self.static_settings_value(id, path);
+        let attrs = self.attrs(id)?;
+        let value = |path: &str| Self::static_settings_value_with(&attrs, path);
         let reference = |path| -> Result<NodeId, String> {
-            let target = self.static_settings_reference(id, path)?;
+            let target = Self::static_settings_reference_with(&attrs, path)?;
             self.require_live_settings(target, WorldKind::RenderSettings)?;
             Ok(target)
         };
@@ -3263,14 +3312,26 @@ impl WorldDocument {
         })
     }
     fn settings_values(&self, id: NodeId, branch: &str, frame: f64) -> Result<Value, String> {
-        let mut value = self.node(id)?["gpu"][branch].clone();
+        let node = self.node(id)?;
+        let attrs = self.attrs(id)?;
+        self.settings_values_with(id, node, &attrs, branch, frame)
+    }
+    fn settings_values_with(
+        &self,
+        id: NodeId,
+        node: &Value,
+        attrs: &Attrs,
+        branch: &str,
+        frame: f64,
+    ) -> Result<Value, String> {
+        let mut value = node["gpu"][branch].clone();
         if !value.is_object() {
             return Err(format!("Settings schema {branch} missing"));
         }
         let mut schema = Attrs::new();
         discover(&value, &format!("/{branch}"), &mut schema);
         for (path, base) in schema.iter() {
-            let mut current = self.attribute_value(id, path, frame)?;
+            let mut current = self.attribute_value_with(id, node, attrs, path, frame)?;
             if let Some((min, max)) = attribute_range(path) {
                 let number = current
                     .as_f64()
@@ -3787,8 +3848,10 @@ impl WorldDocument {
 
     /// `node`'s local transform at `frame` from its attributes and keys.
     pub fn authored_trs(&self, node: NodeId, frame: f64) -> Result<crate::takes::Trs, String> {
+        let data = self.node(node)?;
+        let attrs = self.attrs(node)?;
         let vec = |path: &str, default: [f32; 3]| -> Result<[f32; 3], String> {
-            let v = self.attribute_value(node, path, frame)?;
+            let v = self.attribute_value_with(node, data, &attrs, path, frame)?;
             Ok(v.as_array()
                 .filter(|v| v.len() == 3)
                 .map(|v| {
@@ -3998,6 +4061,9 @@ impl WorldDocument {
     pub fn info(&self, id: NodeId) -> Result<WorldNodeInfo, String> {
         let data = self.node(id)?;
         let a = self.attrs(id)?;
+        self.info_with(id, data, &a)
+    }
+    fn info_with(&self, id: NodeId, data: &Value, a: &Attrs) -> Result<WorldNodeInfo, String> {
         let kind: WorldKind =
             serde_json::from_value(data["type"].clone()).map_err(|e| e.to_string())?;
         Ok(WorldNodeInfo {
@@ -4145,8 +4211,9 @@ impl WorldDocument {
         Ok(self.node(id)?["metadata"].clone())
     }
     pub fn attributes(&self, id: NodeId, frame: f64) -> Result<Vec<WorldAttribute>, String> {
+        let node = self.node(id)?;
         let attrs = self.attrs(id)?;
-        let kind = self.info(id)?.kind;
+        let kind = self.info_with(id, node, &attrs)?.kind;
         let mut out = vec![];
         for (path, _) in attrs.iter() {
             if path.starts_with("/_navigation/") {
@@ -4177,7 +4244,7 @@ impl WorldDocument {
             out.push(WorldAttribute {
                 path: path.clone(),
                 label: attribute_label(path),
-                value: self.attribute_value(id, path, frame)?,
+                value: self.attribute_value_with(id, node, &attrs, path, frame)?,
                 frames: attrs.key_frames(path),
                 keyable,
                 component: None,
@@ -4202,7 +4269,7 @@ impl WorldDocument {
             out.push(WorldAttribute {
                 path: TAKE_CLIP.into(),
                 label: attribute_label(TAKE_CLIP),
-                value: self.node(id)?["take"].clone(),
+                value: node["take"].clone(),
                 frames: vec![],
                 keyable: false,
                 component: None,
@@ -4222,7 +4289,7 @@ impl WorldDocument {
             out.push(WorldAttribute {
                 path: "/material_id".into(),
                 label: "Material".into(),
-                value: self.node(id)?["material"].clone(),
+                value: node["material"].clone(),
                 frames: vec![],
                 keyable: false,
                 component: None,
@@ -4312,15 +4379,28 @@ impl WorldDocument {
         )) || self.node(id)?["discrete"].get(path).is_some())
     }
     pub fn attribute_value(&self, id: NodeId, path: &str, frame: f64) -> Result<Value, String> {
-        if let Some((parent, component)) = self.component_path(id, path)? {
-            let value = self.attribute_value(id, &parent, frame)?;
+        let node = self.node(id)?;
+        let attrs = self.attrs(id)?;
+        self.attribute_value_with(id, node, &attrs, path, frame)
+    }
+    fn attribute_value_with(
+        &self,
+        id: NodeId,
+        node: &Value,
+        attrs: &Attrs,
+        path: &str,
+        frame: f64,
+    ) -> Result<Value, String> {
+        if let Some((parent, component)) = Self::component_path_with(attrs, path) {
+            let value = self.attribute_value_with(id, node, attrs, &parent, frame)?;
             return value
                 .get(component)
                 .cloned()
                 .ok_or("Invalid component".into());
         }
-        let value = self.resolve_attribute(id, path, frame, &mut HashSet::new())?;
-        self.with_navigation_offset(id, path, value)
+        let value =
+            self.resolve_attribute_with(id, Some((node, attrs)), path, frame, &mut HashSet::new())?;
+        Self::with_navigation_offset_with(node, attrs, path, value)
     }
     fn resolve_attribute(
         &self,
@@ -4329,23 +4409,48 @@ impl WorldDocument {
         frame: f64,
         visiting: &mut HashSet<(NodeId, String)>,
     ) -> Result<Value, String> {
+        self.resolve_attribute_with(id, None, path, frame, visiting)
+    }
+    fn resolve_attribute_with(
+        &self,
+        id: NodeId,
+        cached: Option<(&Value, &Attrs)>,
+        path: &str,
+        frame: f64,
+        visiting: &mut HashSet<(NodeId, String)>,
+    ) -> Result<Value, String> {
         if !frame.is_finite() {
             return Err("Invalid frame".into());
         }
+        let node = match cached {
+            Some((node, _)) => node,
+            None => self.node(id)?,
+        };
         if path == "/material_id" {
-            return Ok(self.node(id)?["material"].clone());
+            return Ok(node["material"].clone());
         }
         if path == TAKE_CLIP {
-            return Ok(self.node(id)?["take"].clone());
+            return Ok(node["take"].clone());
         }
-        if !visiting.insert((id, path.into())) {
-            return Err("Attribute connection cycle".into());
-        }
-        let a = self.attrs(id)?;
+        let owned_attrs;
+        let a = match cached {
+            Some((_, attrs)) => attrs,
+            None => {
+                owned_attrs = self.attrs(id)?;
+                &owned_attrs
+            }
+        };
         if !a.is_animated(path) {
             for parent in ["/formula", "/material/facing"] {
-                if path.starts_with(&format!("{parent}/")) && a.is_animated(parent) {
-                    let v = self.resolve_attribute(id, parent, frame, visiting)?;
+                if path.starts_with(parent)
+                    && path.as_bytes().get(parent.len()) == Some(&b'/')
+                    && a.is_animated(parent)
+                {
+                    if !visiting.insert((id, path.into())) {
+                        return Err("Attribute connection cycle".into());
+                    }
+                    let v =
+                        self.resolve_attribute_with(id, Some((node, a)), parent, frame, visiting)?;
                     if let Some(value) = v.pointer(&path[parent.len()..]) {
                         return Ok(value.clone());
                     }
@@ -4353,17 +4458,18 @@ impl WorldDocument {
             }
         }
         if let Some(conn) = a.conn(path) {
+            if !visiting.insert((id, path.into())) {
+                return Err("Attribute connection cycle".into());
+            }
             let source = NodeId(conn.source_layer);
-            let value = self.resolve_attribute(source, &conn.source_key, frame, visiting)?;
+            let value =
+                self.resolve_attribute_with(source, None, &conn.source_key, frame, visiting)?;
             return self.with_navigation_offset(source, &conn.source_key, value);
         }
         let value = a
             .eval_at(path, frame)
             .ok_or_else(|| format!("Unavailable parameter {path}"))?;
-        if let Some(dict) = self.node(id)?["discrete"]
-            .get(path)
-            .and_then(Value::as_array)
-        {
+        if let Some(dict) = node["discrete"].get(path).and_then(Value::as_array) {
             let index = attr_json(value).as_f64().unwrap_or(0.0).round().max(0.0) as usize;
             return dict
                 .get(index)
@@ -4391,8 +4497,11 @@ impl WorldDocument {
     }
     fn component_path(&self, id: NodeId, path: &str) -> Result<Option<(String, usize)>, String> {
         let attrs = self.attrs(id)?;
+        Ok(Self::component_path_with(&attrs, path))
+    }
+    fn component_path_with(attrs: &Attrs, path: &str) -> Option<(String, usize)> {
         if attrs.contains(path) {
-            return Ok(None);
+            return None;
         }
         if let Some((parent, last)) = path.rsplit_once('/')
             && let Ok(component) = last.parse::<usize>()
@@ -4401,9 +4510,9 @@ impl WorldDocument {
                 .as_array()
                 .is_some_and(|v| component < v.len())
         {
-            return Ok(Some((parent.into(), component)));
+            return Some((parent.into(), component));
         }
-        Ok(None)
+        None
     }
     /// Refresh the `/formula` choice blob after a Hybrid steps write. Slot edits
     /// land on the `/formula/Hybrid/steps` array entry, while `inactive_reason`
@@ -4642,10 +4751,15 @@ impl WorldDocument {
             // Evaluation includes persisted channels hidden by the inspector schema.
             // Parent structural switches sort before their variant/optional children.
             if v.pointer(path).is_some() {
-                set_pointer(&mut v, path, self.attribute_value(id, path, frame)?, false)?;
+                set_pointer(
+                    &mut v,
+                    path,
+                    self.attribute_value_with(id, data, &attrs, path, frame)?,
+                    false,
+                )?;
             }
         }
-        if self.info(id)?.kind == WorldKind::Fractal {
+        if self.info_with(id, data, &attrs)?.kind == WorldKind::Fractal {
             let iterations = v["render"]["iterations"].clone();
             v["render"] = serde_json::to_value(
                 self.effective_render(self.output_render_profile()?, frame)?
@@ -4668,8 +4782,10 @@ impl WorldDocument {
         {
             return Err("Invalid camera navigation pose".into());
         }
+        let data = self.node(id)?;
+        let attrs = self.attrs(id)?;
         let parent = self
-            .info(id)?
+            .info_with(id, data, &attrs)?
             .parent
             .map(|parent| self.world_matrix(parent, frame, &mut HashSet::new()))
             .transpose()?
@@ -4679,7 +4795,7 @@ impl WorldDocument {
         }
         let inverse = parent.inverse();
         let vector = |path| -> Result<Vec3, String> {
-            let value = self.attribute_value(id, path, frame)?;
+            let value = self.attribute_value_with(id, data, &attrs, path, frame)?;
             let items = value
                 .as_array()
                 .filter(|v| v.len() == 3)
@@ -4763,9 +4879,22 @@ impl WorldDocument {
         &self,
         id: NodeId,
         path: &str,
+        value: Value,
+    ) -> Result<Value, String> {
+        let node = self.node(id)?;
+        if node["type"].as_str() != Some("Camera") {
+            return Ok(value);
+        }
+        let attrs = self.attrs(id)?;
+        Self::with_navigation_offset_with(node, &attrs, path, value)
+    }
+    fn with_navigation_offset_with(
+        node: &Value,
+        attrs: &Attrs,
+        path: &str,
         mut value: Value,
     ) -> Result<Value, String> {
-        if let Some(offset) = self.navigation_offset(id, path)? {
+        if let Some(offset) = Self::navigation_offset_with(node, attrs, path) {
             if let Some(items) = value.as_array_mut() {
                 for (index, item) in items.iter_mut().enumerate() {
                     *item = json!(
@@ -4783,7 +4912,15 @@ impl WorldDocument {
         Ok(value)
     }
     fn navigation_offset(&self, id: NodeId, path: &str) -> Result<Option<Value>, String> {
-        if self.node(id)?["type"].as_str() != Some("Camera")
+        let node = self.node(id)?;
+        if node["type"].as_str() != Some("Camera") {
+            return Ok(None);
+        }
+        let attrs = self.attrs(id)?;
+        Ok(Self::navigation_offset_with(node, &attrs, path))
+    }
+    fn navigation_offset_with(node: &Value, attrs: &Attrs, path: &str) -> Option<Value> {
+        if node["type"].as_str() != Some("Camera")
             || !matches!(
                 path,
                 "/transform/position"
@@ -4794,13 +4931,12 @@ impl WorldDocument {
                     | "/camera/focus_distance"
             )
         {
-            return Ok(None);
+            return None;
         }
-        Ok(self
-            .attrs(id)?
+        attrs
             .get(&format!("/_navigation{path}"))
             .cloned()
-            .map(attr_json))
+            .map(attr_json)
     }
 
     fn without_navigation_offset(
@@ -4929,14 +5065,16 @@ impl WorldDocument {
     /// `T R S`, where the handles sit and rotation turns around) and the parent's world matrix
     /// (identity at the root) that an edit is expressed under ([`local_pose`]).
     pub fn manip_frame(&self, id: NodeId, frame: f64) -> Result<(glam::Mat4, glam::Mat4), String> {
+        let data = self.node(id)?;
+        let attrs = self.attrs(id)?;
         let pivot = self
-            .attribute_value(id, "/transform/pivot", frame)?
+            .attribute_value_with(id, data, &attrs, "/transform/pivot", frame)?
             .as_array()
             .filter(|v| v.len() == 3)
             .map(|v| glam::Vec3::from(std::array::from_fn(|i| v[i].as_f64().unwrap_or(0.0) as f32)))
             .unwrap_or(glam::Vec3::ZERO);
         let world = self.world_matrix(id, frame, &mut HashSet::new())?;
-        let parent = match self.info(id)?.parent {
+        let parent = match self.info_with(id, data, &attrs)?.parent {
             Some(parent) => self.world_matrix(parent, frame, &mut HashSet::new())?,
             None => glam::Mat4::IDENTITY,
         };
@@ -4949,7 +5087,12 @@ impl WorldDocument {
         for _ in 0..=self.graph.nodes.len() {
             match current {
                 Some(id) if id == ancestor => return true,
-                Some(id) => current = self.info(id).ok().and_then(|n| n.parent),
+                Some(id) => {
+                    current = self
+                        .node(id)
+                        .ok()
+                        .and_then(|d| d["parent"].as_str().and_then(NodeId::parse))
+                }
                 None => return false,
             }
         }
@@ -4965,8 +5108,10 @@ impl WorldDocument {
         if !seen.insert(id) {
             return Err("Parent cycle".into());
         }
+        let data = self.node(id)?;
+        let attrs = self.attrs(id)?;
         let vec = |path: &str, default: [f32; 3]| -> Result<[f32; 3], String> {
-            let v = self.attribute_value(id, path, frame)?;
+            let v = self.attribute_value_with(id, data, &attrs, path, frame)?;
             Ok(v.as_array()
                 .filter(|v| v.len() == 3)
                 .map(|v| std::array::from_fn(|i| v[i].as_f64().unwrap_or(default[i] as f64) as f32))
@@ -4987,7 +5132,7 @@ impl WorldDocument {
             &playa_engine::entities::transform::build_model_matrix(p, r, s, pivot)
                 .to_cols_array_2d(),
         );
-        if let Some(parent) = self.info(id)?.parent {
+        if let Some(parent) = self.info_with(id, data, &attrs)?.parent {
             Ok(self.world_matrix(parent, frame, seen)? * local)
         } else {
             Ok(local)
@@ -5075,22 +5220,24 @@ impl WorldDocument {
         if !seen.insert(id) {
             return Err("Parent cycle".into());
         }
+        let data = self.node(id)?;
+        let attrs = self.attrs(id)?;
         let visible = self
-            .attribute_value(id, "/visible", frame)?
+            .attribute_value_with(id, data, &attrs, "/visible", frame)?
             .as_bool()
             .unwrap_or(true);
         let start = self
-            .attribute_value(id, "/start", frame)?
+            .attribute_value_with(id, data, &attrs, "/start", frame)?
             .as_f64()
             .unwrap_or(0.0);
         let end = self
-            .attribute_value(id, "/end", frame)?
+            .attribute_value_with(id, data, &attrs, "/end", frame)?
             .as_f64()
             .unwrap_or(self.last as f64 + 1.0);
         if !visible || frame < start || frame >= end {
             return Ok(false);
         }
-        if let Some(parent) = self.info(id)?.parent {
+        if let Some(parent) = self.info_with(id, data, &attrs)?.parent {
             self.visible_at(parent, frame, seen)
         } else {
             Ok(true)
@@ -5116,27 +5263,35 @@ impl WorldDocument {
         scene.camera_reference = global.camera_reference;
         scene.environment = global.environment;
         scene.lighting = global.lighting;
-        if self.info(id)?.kind != WorldKind::Fractal {
+        let data = self.node(id)?;
+        let attrs = self.attrs(id)?;
+        let kind = self.info_with(id, data, &attrs)?.kind;
+        if kind != WorldKind::Fractal {
             scene.render = global.render;
         }
         scene.colour = global.colour;
         scene.document = None;
-        if self.info(id)?.kind == WorldKind::Fractal {
+        if kind == WorldKind::Fractal {
             scene.object_world = Some(
                 self.world_matrix(id, frame, &mut HashSet::new())?
                     .to_cols_array_2d(),
             );
-            scene.object.offset =
-                serde_json::from_value(self.attribute_value(id, "/transform/position", frame)?)
-                    .map_err(|e| e.to_string())?;
+            scene.object.offset = serde_json::from_value(self.attribute_value_with(
+                id,
+                data,
+                &attrs,
+                "/transform/position",
+                frame,
+            )?)
+            .map_err(|e| e.to_string())?;
             scene.object.rotation_degrees = serde_json::from_value::<[f32; 3]>(
-                self.attribute_value(id, "/transform/rotation_degrees", frame)?,
+                self.attribute_value_with(id, data, &attrs, "/transform/rotation_degrees", frame)?,
             )
             .map_err(|e| e.to_string())?
             .map(|v| -v);
-            let scale = self.attribute_value(id, "/transform/scale", frame)?;
+            let scale = self.attribute_value_with(id, data, &attrs, "/transform/scale", frame)?;
             scene.object.scale = scale[0].as_f64().unwrap_or(1.0) as f32;
-            if let Some(mat) = self.node(id)?["material"].as_str().and_then(NodeId::parse) {
+            if let Some(mat) = data["material"].as_str().and_then(NodeId::parse) {
                 scene.material =
                     serde_json::from_value(self.evaluated_node(mat, frame)?["material"].clone())
                         .map_err(|e| e.to_string())?;
@@ -5156,10 +5311,10 @@ impl WorldDocument {
         if !visiting.insert((id, path.into())) {
             return Err("Attribute connection cycle".into());
         }
-        let (storage_path, component) = self
-            .component_path(id, path)?
-            .unwrap_or_else(|| (path.into(), 0));
+        let data = self.node(id)?;
         let attrs = self.attrs(id)?;
+        let (storage_path, component) =
+            Self::component_path_with(&attrs, path).unwrap_or_else(|| (path.into(), 0));
         if let Some(conn) = attrs.conn(&storage_path) {
             let source_path = if storage_path != path {
                 format!("{}/{}", conn.source_key, component)
@@ -5182,7 +5337,7 @@ impl WorldDocument {
             return Ok(crate::camera_orbit::integrate(channel, from, to));
         }
         let value = self
-            .attribute_value(id, path, from)?
+            .attribute_value_with(id, data, &attrs, path, from)?
             .as_f64()
             .filter(|value| value.is_finite())
             .ok_or("Orbit speed must be a finite number")?;
@@ -5266,14 +5421,14 @@ impl WorldDocument {
             return Err("Invalid frame".into());
         }
         self.validate_render_profiles(frame)?;
+        let effective = self.effective_render(profile, frame)?;
         let mut base = self
             .graph
             .bus_slots
             .get("world")
             .ok_or("World settings missing")?
             .clone();
-        base["render"] = serde_json::to_value(self.effective_render(profile, frame)?.render)
-            .map_err(|e| e.to_string())?;
+        base["render"] = serde_json::to_value(effective.render).map_err(|e| e.to_string())?;
         let mut scene: Scene =
             serde_json::from_value(base).map_err(|e| format!("Invalid world settings: {e}"))?;
         scene.document = None;
@@ -5293,23 +5448,19 @@ impl WorldDocument {
             Some(id) if self.shows(id, WorldKind::Environment, frame, shown)? => Some(id),
             _ => None,
         };
-        if let Some(id) = environment {
+        let environment_light = if let Some(id) = environment {
             let v = self.evaluated_node(id, frame)?;
             scene.environment =
                 serde_json::from_value(v["environment"].clone()).map_err(|e| e.to_string())?;
             scene.environment.revision =
                 self.node(id)?["environment_revision"].as_u64().unwrap_or(0);
+            Some(
+                serde_json::from_value::<crate::scene::Lighting>(v["lighting"].clone())
+                    .map_err(|e| e.to_string())?,
+            )
         } else {
             scene.environment.enabled = false;
-        }
-        let environment_light = match environment {
-            Some(id) => Some(
-                serde_json::from_value::<crate::scene::Lighting>(
-                    self.evaluated_node(id, frame)?["lighting"].clone(),
-                )
-                .map_err(|e| e.to_string())?,
-            ),
-            None => None,
+            None
         };
         let solo = nodes.iter().any(|n| n.solo);
         for node in &nodes {
@@ -5345,6 +5496,7 @@ impl WorldDocument {
             let world = self.node_world(node.id, frame)?.to_cols_array_2d();
             masks.push((node.parent, crate::scene::MaskInstance { mask, world }));
         }
+        let mut evaluated_materials: HashMap<NodeId, crate::scene::Material> = HashMap::new();
         for node in nodes {
             if node.kind != WorldKind::Fractal
                 || (solo && !node.solo)
@@ -5364,10 +5516,17 @@ impl WorldDocument {
                 .as_str()
                 .and_then(NodeId::parse)
             {
-                object.material = serde_json::from_value(
-                    self.evaluated_node(material, frame)?["material"].clone(),
-                )
-                .map_err(|e| e.to_string())?;
+                let mat = if let Some(cached) = evaluated_materials.get(&material) {
+                    cached.clone()
+                } else {
+                    let parsed: crate::scene::Material = serde_json::from_value(
+                        self.evaluated_node(material, frame)?["material"].clone(),
+                    )
+                    .map_err(|e| e.to_string())?;
+                    evaluated_materials.insert(material, parsed.clone());
+                    parsed
+                };
+                object.material = mat;
             }
             object.camera = scene.camera;
             object.camera_reference = scene.camera_reference;
@@ -5406,7 +5565,6 @@ impl WorldDocument {
             scene.trap_axis = first.trap_axis;
             scene.trap_scale = first.trap_scale;
         }
-        let effective = self.effective_render(profile, frame)?;
         effective.apply_to(&mut scene);
         effective.show(&mut scene)?;
         scene.camera.validate_lens()?;
@@ -5532,7 +5690,7 @@ impl WorldDocument {
         if needs_render_profiles {
             let mut seed_scene = default_scene.clone();
             let mut render_val =
-                serde_json::to_value(&seed_scene.render).map_err(|e| e.to_string())?;
+                serde_json::to_value(seed_scene.render).map_err(|e| e.to_string())?;
             let mut legacy_samples = None;
             if let Some(world_render) = self
                 .graph
@@ -5582,7 +5740,7 @@ impl WorldDocument {
                 }
             }
             let render_schema =
-                serde_json::to_value(&default_scene.render).map_err(|e| e.to_string())?;
+                serde_json::to_value(default_scene.render).map_err(|e| e.to_string())?;
             Self::merge_schema_value(
                 &mut render_val,
                 &render_schema,

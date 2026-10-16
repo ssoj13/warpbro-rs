@@ -2644,48 +2644,91 @@ impl WorldUi {
     /// The same editor can display a referenced node without changing selection.
     pub fn attribute_editor(&mut self, ui: &mut egui::Ui, e: &mut WorldEditor, id: NodeId) {
         self.attribute_metrics.apply(ui);
-        if let Some((id, picker)) = &mut self.picker {
+        let mut cache = self.take_cache(e);
+        let Some(node) = cache.nodes.iter().find(|n| n.id == id).cloned() else {
+            self.cache = cache;
+            return;
+        };
+        let targets: Vec<NodeId> = if e.selection == Some(id) && e.selected.contains(&id) {
+            e.selected
+                .iter()
+                .copied()
+                .filter(|&sel| {
+                    cache
+                        .nodes
+                        .iter()
+                        .any(|n| n.id == sel && n.kind == node.kind && !n.locked)
+                })
+                .collect()
+        } else {
+            vec![id]
+        };
+        let targets = if targets.is_empty() {
+            vec![id]
+        } else {
+            targets
+        };
+        if let Some((picked_id, picker)) = &mut self.picker {
             picker.update(ui.ctx());
             self.file_dialogs
                 .observe(crate::file_dialogs::ENVIRONMENT, picker);
             if let Some(path) = picker.take_picked() {
-                let id = *id;
+                let picked_id = *picked_id;
+                let picked_targets = if picked_id == id {
+                    targets.clone()
+                } else {
+                    vec![picked_id]
+                };
+                let frame = self.playhead as f64;
+                let path_val = json!(path.to_string_lossy());
                 self.command(
                     e,
-                    WorldCommand::Batch(vec![
-                        WorldCommand::SetAttribute {
-                            id,
-                            path: "/environment/path".into(),
-                            value: json!(path.to_string_lossy()),
-                            frame: self.playhead as f64,
-                        },
-                        WorldCommand::SetAttribute {
-                            id,
-                            path: "/environment/enabled".into(),
-                            value: json!(true),
-                            frame: self.playhead as f64,
-                        },
-                    ]),
+                    WorldCommand::Batch(
+                        picked_targets
+                            .into_iter()
+                            .flat_map(|id| {
+                                [
+                                    WorldCommand::SetAttribute {
+                                        id,
+                                        path: "/environment/path".into(),
+                                        value: path_val.clone(),
+                                        frame,
+                                    },
+                                    WorldCommand::SetAttribute {
+                                        id,
+                                        path: "/environment/enabled".into(),
+                                        value: json!(true),
+                                        frame,
+                                    },
+                                ]
+                            })
+                            .collect(),
+                    ),
                 );
                 self.picker = None;
             }
         }
         self.status(ui);
-        let mut cache = self.take_cache(e);
-        let Some(node) = cache.nodes.iter().find(|n| n.id == id) else {
-            self.cache = cache;
-            return;
-        };
         ui.horizontal(|ui| {
             ui.colored_label(kind_color(node.kind), kind_icon(node.kind));
             ui.heading(&node.name);
         });
         if e.selection == Some(id) && e.selected.len() > 1 {
-            ui.weak(format!(
-                "{} objects selected; editing {}",
-                e.selected.len(),
-                node.name
-            ));
+            if targets.len() > 1 {
+                ui.weak(format!(
+                    "{} selected; showing {}, editing {} {}s",
+                    e.selected.len(),
+                    node.name,
+                    targets.len(),
+                    kind_label(node.kind),
+                ));
+            } else {
+                ui.weak(format!(
+                    "{} objects selected; editing {}",
+                    e.selected.len(),
+                    node.name
+                ));
+            }
         }
         let mut name = node.name.clone();
         if ui
@@ -2708,25 +2751,43 @@ impl WorldUi {
         if node.kind == WorldKind::Environment {
             ui.horizontal(|ui| {
                 if ui.button("Reload").clicked() {
-                    self.command(e, WorldCommand::ReloadEnvironment(id));
-                }
-                if ui.button("Clear").clicked() {
                     self.command(
                         e,
-                        WorldCommand::Batch(vec![
-                            WorldCommand::SetAttribute {
-                                id,
-                                path: "/environment/path".into(),
-                                value: json!(""),
-                                frame: self.playhead as f64,
-                            },
-                            WorldCommand::SetAttribute {
-                                id,
-                                path: "/environment/enabled".into(),
-                                value: json!(false),
-                                frame: self.playhead as f64,
-                            },
-                        ]),
+                        WorldCommand::Batch(
+                            targets
+                                .iter()
+                                .copied()
+                                .map(WorldCommand::ReloadEnvironment)
+                                .collect(),
+                        ),
+                    );
+                }
+                if ui.button("Clear").clicked() {
+                    let frame = self.playhead as f64;
+                    self.command(
+                        e,
+                        WorldCommand::Batch(
+                            targets
+                                .iter()
+                                .copied()
+                                .flat_map(|id| {
+                                    [
+                                        WorldCommand::SetAttribute {
+                                            id,
+                                            path: "/environment/path".into(),
+                                            value: json!(""),
+                                            frame,
+                                        },
+                                        WorldCommand::SetAttribute {
+                                            id,
+                                            path: "/environment/enabled".into(),
+                                            value: json!(false),
+                                            frame,
+                                        },
+                                    ]
+                                })
+                                .collect(),
+                        ),
                     );
                 }
                 if ui.button("Use environment").clicked() {
@@ -2790,6 +2851,7 @@ impl WorldUi {
                             let mut hooks = WorldGridHooks {
                                 ui_state: self,
                                 id,
+                                targets: &targets,
                                 frame: f64::from_bits(frame),
                                 attrs,
                                 indices: &section.indices,
@@ -2807,23 +2869,48 @@ impl WorldUi {
                                 &config,
                                 &mut hooks,
                             );
-                            // One object: store each edit's value. A gesture's closing `Done`
-                            // that wrote nothing more (`parts` empty) carries no change.
+                            // Store each edit's value across all same-kind targets. For vector edits,
+                            // write only the touched components (`edit.parts`) on additional targets so
+                            // untouched axes keep each layer's own values.
                             for edit in changes.into_iter().filter(|edit| !edit.parts.is_empty()) {
                                 let path = edit.key;
                                 if let Some(attr) = attrs.iter().find(|a| a.path == path) {
                                     let value = grid_json(edit.value, &attr.value);
                                     let eligible = value_gesture_eligible(attr, &value);
-                                    let command = WorldCommand::SetAttribute {
-                                        id,
-                                        path,
-                                        value,
-                                        frame: f64::from_bits(frame),
-                                    };
-                                    if eligible {
-                                        value_commands.push(command);
+                                    let out = if eligible {
+                                        &mut value_commands
                                     } else {
-                                        commands.push(command);
+                                        &mut commands
+                                    };
+                                    let frame = f64::from_bits(frame);
+                                    let partial_components = value.as_array().filter(|arr| {
+                                        attr.component.is_none()
+                                            && !attr.color
+                                            && !edit.parts.is_all()
+                                            && (0..arr.len()).any(|i| !edit.parts.has(i))
+                                    });
+                                    for &target in &targets {
+                                        if let Some(arr) = partial_components
+                                            && target != id
+                                        {
+                                            for (i, comp_val) in arr.iter().enumerate() {
+                                                if edit.parts.has(i) {
+                                                    out.push(WorldCommand::SetAttribute {
+                                                        id: target,
+                                                        path: format!("{path}/{i}"),
+                                                        value: comp_val.clone(),
+                                                        frame,
+                                                    });
+                                                }
+                                            }
+                                        } else {
+                                            out.push(WorldCommand::SetAttribute {
+                                                id: target,
+                                                path: path.clone(),
+                                                value: value.clone(),
+                                                frame,
+                                            });
+                                        }
                                     }
                                 }
                             }
@@ -2860,14 +2947,23 @@ impl WorldUi {
                         .clicked()
                     {
                         let name = self.custom_name.trim().replace('/', "_");
+                        let path = format!("/custom/{name}");
+                        let value = json!(self.custom_value);
+                        let frame = self.playhead as f64;
                         self.command(
                             e,
-                            WorldCommand::SetAttribute {
-                                id,
-                                path: format!("/custom/{name}"),
-                                value: json!(self.custom_value),
-                                frame: self.playhead as f64,
-                            },
+                            WorldCommand::Batch(
+                                targets
+                                    .iter()
+                                    .copied()
+                                    .map(|id| WorldCommand::SetAttribute {
+                                        id,
+                                        path: path.clone(),
+                                        value: value.clone(),
+                                        frame,
+                                    })
+                                    .collect(),
+                            ),
                         );
                         self.custom_name.clear();
                     }
@@ -2896,6 +2992,7 @@ impl WorldUi {
 struct WorldGridHooks<'a> {
     ui_state: &'a mut WorldUi,
     id: NodeId,
+    targets: &'a [NodeId],
     frame: f64,
     attrs: &'a [WorldAttribute],
     indices: &'a [usize],
@@ -2924,10 +3021,23 @@ impl AttrGridHooks for WorldGridHooks<'_> {
     fn anim_intent(&mut self, field: &AttrField, intent: AnimIntent) {
         if let Some(index) = self.index(field) {
             let attr = &self.attrs[self.indices[index]];
-            match anim_effect(self.id, attr, self.frame, intent) {
-                Some(AnimEffect::Command(command)) => self.commands.push(*command),
-                Some(AnimEffect::Seek(to)) => self.ui_state.seek(to),
-                None => {}
+            match intent {
+                AnimIntent::PrevKey | AnimIntent::NextKey => {
+                    if let Some(AnimEffect::Seek(to)) =
+                        anim_effect(self.id, attr, self.frame, intent)
+                    {
+                        self.ui_state.seek(to);
+                    }
+                }
+                _ => {
+                    for &target in self.targets {
+                        if let Some(AnimEffect::Command(command)) =
+                            anim_effect(target, attr, self.frame, intent)
+                        {
+                            self.commands.push(*command);
+                        }
+                    }
+                }
             }
         }
     }
@@ -2951,7 +3061,9 @@ impl AttrGridHooks for WorldGridHooks<'_> {
             .on_disabled_hover_text("Not an animatable property")
             .clicked()
         {
-            self.ui_state.reveal_in_timeline(self.id, attr);
+            for &target in self.targets {
+                self.ui_state.reveal_in_timeline(target, attr);
+            }
             ui.close();
         }
         // The grid resets only the rows it edits itself; a row this host edits resets here.
@@ -2959,12 +3071,14 @@ impl AttrGridHooks for WorldGridHooks<'_> {
             && let Some(default) = attr.default.as_ref().filter(|d| **d != self.values[index])
             && ui.button("Reset to default").clicked()
         {
-            self.commands.push(WorldCommand::SetAttribute {
-                id: self.id,
-                path: attr.path.clone(),
-                value: default.clone(),
-                frame: self.frame,
-            });
+            for &target in self.targets {
+                self.commands.push(WorldCommand::SetAttribute {
+                    id: target,
+                    path: attr.path.clone(),
+                    value: default.clone(),
+                    frame: self.frame,
+                });
+            }
             ui.close();
         }
     }
@@ -2988,16 +3102,18 @@ impl AttrGridHooks for WorldGridHooks<'_> {
                 self.materials,
             );
             if changed {
-                let command = WorldCommand::SetAttribute {
-                    id: self.id,
-                    path: attr.path.clone(),
-                    value: self.values[index].clone(),
-                    frame: self.frame,
-                };
-                if value_gesture_eligible(attr, &self.values[index]) {
-                    self.value_commands.push(command);
+                let out = if value_gesture_eligible(attr, &self.values[index]) {
+                    &mut *self.value_commands
                 } else {
-                    self.commands.push(command);
+                    &mut *self.commands
+                };
+                for &target in self.targets {
+                    out.push(WorldCommand::SetAttribute {
+                        id: target,
+                        path: attr.path.clone(),
+                        value: self.values[index].clone(),
+                        frame: self.frame,
+                    });
                 }
             }
             // Host-special values already emitted a typed command; do not also emit the
@@ -5348,9 +5464,11 @@ mod tests {
                     let config = grid_config(state.attribute_metrics);
                     let mut commands = Vec::new();
                     let mut value_commands = Vec::new();
+                    let targets = [id];
                     let mut hooks = WorldGridHooks {
                         ui_state: &mut state,
                         id,
+                        targets: &targets,
                         frame: 0.0,
                         attrs: &attrs,
                         indices: &section.indices,
@@ -5579,6 +5697,7 @@ mod tests {
         let mut state = WorldUi::default();
         let mut commands = Vec::new();
         let mut value_commands = Vec::new();
+        let targets = [id];
         let ctx = egui::Context::default();
         let mut draw = |events| {
             ctx.run_ui(
@@ -5591,6 +5710,7 @@ mod tests {
                         WorldGridHooks {
                             ui_state: &mut state,
                             id,
+                            targets: &targets,
                             frame: 0.0,
                             attrs: &attrs,
                             indices: &indices,
@@ -5640,5 +5760,126 @@ mod tests {
         );
         assert!(e.undo());
         assert_eq!(e.document, changed);
+    }
+
+    #[test]
+    fn inspector_edits_all_selected_same_kind_layers_in_one_undo_while_showing_last_selected() {
+        let mut e = editor();
+        let first_fractal = e.selection.unwrap();
+        e.execute(WorldCommand::Duplicate(vec![first_fractal]))
+            .unwrap();
+        let second_fractal = e.selection.unwrap();
+        assert_ne!(first_fractal, second_fractal);
+        e.execute(WorldCommand::SetAttribute {
+            id: first_fractal,
+            path: "/transform/position".into(),
+            value: json!([1.0, 2.0, 3.0]),
+            frame: 0.0,
+        })
+        .unwrap();
+        e.execute(WorldCommand::SetAttribute {
+            id: second_fractal,
+            path: "/transform/position".into(),
+            value: json!([4.0, 5.0, 6.0]),
+            frame: 0.0,
+        })
+        .unwrap();
+        let camera = e.document.active_camera.unwrap();
+        let cam_initial = e
+            .document
+            .attribute_value(camera, "/transform/position", 0.0)
+            .unwrap();
+        // Select first_fractal, camera (different kind), then second_fractal (lead / last selected).
+        e.click_select(Some(first_fractal), false);
+        e.click_select(Some(camera), true);
+        e.click_select(Some(second_fractal), true);
+        assert_eq!(e.selection, Some(second_fractal));
+
+        let mut state = WorldUi::default();
+        let ctx = egui::Context::default();
+        let render = |state: &mut WorldUi, e: &mut WorldEditor, events, time| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800.0, 4000.0))),
+                    events,
+                    time: Some(time),
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        state.inspector(ui, e);
+                    });
+                },
+            );
+            output.textures_delta.clear();
+            e.finish_edit_unless(state.held_gesture(&ctx));
+            GRID_RECT_TRACES.with(|trace| trace.borrow()["/transform/position"])
+        };
+        let cell = render(&mut state, &mut e, vec![], 0.0);
+        // Drag X component of /transform/position.
+        let at = state
+            .attribute_metrics
+            .value_layout()
+            .spread_cells(cell, 3)
+            .next()
+            .unwrap()
+            .center();
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            pressed,
+            button: egui::PointerButton::Primary,
+            modifiers: egui::Modifiers::NONE,
+        };
+        render(
+            &mut state,
+            &mut e,
+            vec![egui::Event::PointerMoved(at), button(at, true)],
+            0.1,
+        );
+        let final_pos = at + Vec2::new(30.0, 0.0);
+        render(
+            &mut state,
+            &mut e,
+            vec![egui::Event::PointerMoved(final_pos)],
+            0.2,
+        );
+        render(&mut state, &mut e, vec![button(final_pos, false)], 0.3);
+
+        let first_pos = e
+            .document
+            .attribute_value(first_fractal, "/transform/position", 0.0)
+            .unwrap();
+        let second_pos = e
+            .document
+            .attribute_value(second_fractal, "/transform/position", 0.0)
+            .unwrap();
+        // Both fractals get the new X value, while first_fractal preserves its own Y and Z!
+        assert_eq!(first_pos[0], second_pos[0]);
+        assert_ne!(second_pos[0], json!(4.0));
+        assert_eq!(first_pos[1], json!(2.0));
+        assert_eq!(first_pos[2], json!(3.0));
+        assert_eq!(second_pos[1], json!(5.0));
+        assert_eq!(second_pos[2], json!(6.0));
+        // Camera (different kind) is untouched.
+        assert_eq!(
+            e.document
+                .attribute_value(camera, "/transform/position", 0.0)
+                .unwrap(),
+            cam_initial
+        );
+        // One undo restores both fractals at once.
+        assert!(e.undo());
+        assert_eq!(
+            e.document
+                .attribute_value(first_fractal, "/transform/position", 0.0)
+                .unwrap(),
+            json!([1.0, 2.0, 3.0])
+        );
+        assert_eq!(
+            e.document
+                .attribute_value(second_fractal, "/transform/position", 0.0)
+                .unwrap(),
+            json!([4.0, 5.0, 6.0])
+        );
     }
 }
