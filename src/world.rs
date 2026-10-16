@@ -1739,7 +1739,12 @@ pub(crate) fn attribute_range(path: &str) -> Option<(f64, f64)> {
         // Bounds the time warp's integration span (`WorldDocument::take_frame`).
         TAKE_OFFSET => Some((-100_000.0, 100_000.0)),
         TAKE_SPEED => Some((-1000.0, 1000.0)),
-        "/mask/density" | "/render/thinning" => Some((0.0, 1.0)),
+        "/mask/density"
+        | "/render/thinning"
+        | "/render/direct/shadow_strength"
+        | "/render/direct/ao_strength" => Some((0.0, 1.0)),
+        "/render/direct/shadow_steps" | "/render/direct/ao_steps" => Some((0.0, 256.0)),
+        "/render/direct/ao_radius" => Some((1.0e-4, 1.0e4)),
         "/mask/seed" => Some((0.0, 16_777_215.0)),
         "/mask/array/count" => Some((1.0, fractal_core::params::ARRAY_MAX as f64)),
         "/mask/array/sweep_degrees" => Some((0.0, 360.0)),
@@ -1985,7 +1990,12 @@ fn attribute_slider(path: &str) -> Option<Slider> {
         "/transform/position" | "/transform/pivot" => lin(-10.0, 10.0),
         "/transform/rotation_degrees" => lin(-180.0, 180.0),
         "/transform/scale" => log(0.01, 10.0),
-        "/render/thinning" => lin(0.0, 1.0),
+        "/render/thinning" | "/render/direct/shadow_strength" | "/render/direct/ao_strength" => {
+            lin(0.0, 1.0)
+        }
+        "/render/direct/shadow_steps" => lin(0.0, 64.0),
+        "/render/direct/ao_steps" => lin(0.0, 16.0),
+        "/render/direct/ao_radius" => log(0.01, 4.0),
         TAKE_OFFSET => lin(-240.0, 240.0),
         TAKE_SPEED => lin(-4.0, 4.0),
         "/camera/target" => lin(-5.0, 5.0),
@@ -2140,8 +2150,21 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
     }
     Some(match path {
         "/render/display" => {
-            "What this profile shows of the fractals: path traced, the direct light of the first hit only (fast), or their bounds alone (nothing traced). Use it on the viewport's Moving / Still profiles; the Output profile renders the scene as authored."
+            "What this profile shows of the fractals: path traced; Direct, one fast noise-free pass (key lights with soft shadows, ambient occlusion, the sky's soft light; no bounces, done after the largest square number of samples up to Samples, at most 16 x 16 = 256); or their bounds alone (nothing traced, drawn by the viewport only)."
         }
+        "/render/direct/shadow_strength" => {
+            "Direct: how dark a light's shadow gets, 0 (no shadow) to 1 (black)."
+        }
+        "/render/direct/shadow_steps" => {
+            "Direct: march steps of each shadow ray; more find thinner occluders. 0 turns shadows off."
+        }
+        "/render/direct/ao_strength" => {
+            "Direct: ambient occlusion, how much nearby surfaces darken the sky light, 0 (none) to 1."
+        }
+        "/render/direct/ao_steps" => {
+            "Direct: occlusion probes per direction (five directions). 0 turns occlusion off."
+        }
+        "/render/direct/ao_radius" => "Direct: how far the occlusion probes reach, in scene units.",
         "/render/thinning" => {
             "Leaves part of every fractal out, 0 (all of it) to 1 (none): a 3D grid of cells is removed at random, so the march has less to trace."
         }
@@ -2441,6 +2464,10 @@ pub(crate) fn inactive_reason<'a>(
         path.strip_prefix(prefix)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
     };
+    if under("/render/direct") {
+        return (value("/render/display")?.as_str()? != "Direct")
+            .then(|| "Only the Direct display shades with these".into());
+    }
     if under("/mask/array") {
         if value("/mask/shape")?.as_str()? == "Cells" {
             return Some("A cell grid is not an array of copies".into());
@@ -3146,6 +3173,23 @@ impl WorldDocument {
             .as_f64()
             .filter(|v| (0.0..=1.0).contains(v))
             .ok_or("Thinning must be between 0 and 1")? as f32;
+        // Integer channels evaluate as float: round them to the shading's integer fields.
+        let mut direct = evaluated["render"]["direct"].clone();
+        for key in ["shadow_steps", "ao_steps"] {
+            let steps = direct[key]
+                .as_f64()
+                .filter(|v| v.is_finite() && (0.0..=256.0).contains(v))
+                .ok_or("Direct shadow and occlusion steps must be 0 to 256")?;
+            direct[key] = json!(steps.round() as u32);
+        }
+        let direct: crate::render_profiles::DirectShading =
+            serde_json::from_value(direct).map_err(|e| format!("Invalid Direct shading: {e}"))?;
+        // Direct's image is final once every stratum of its grid has its one sample.
+        let samples = if display == crate::render_profiles::Display::Direct {
+            crate::render_profiles::DirectShading::grid(samples).pow(2)
+        } else {
+            samples
+        };
         Ok(EffectiveRender {
             profile,
             quality,
@@ -3154,6 +3198,7 @@ impl WorldDocument {
             samples,
             resolution_scale,
             display,
+            direct,
             thinning,
         })
     }

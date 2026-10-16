@@ -3518,7 +3518,15 @@ fn display_modes_thin_trace_direct_or_show_bounds_on_their_profile_only() {
         assert_eq!(cells.mask.density, 0.5);
     }
     set(&mut e, still, "/render/display", json!("Direct"), 0.0);
-    assert_eq!(shown(&e, still).render.max_bounces, 0);
+    let direct = shown(&e, still);
+    assert!(direct.direct.is_some() && !direct.render.adaptive.enabled);
+    // Direct is final after one sample per stratum of its grid.
+    let samples = e.document.effective_render(still, 0.0).unwrap().samples;
+    let grid = (samples as f64).sqrt() as u32;
+    assert_eq!(grid * grid, samples, "a square: {samples}");
+    assert_eq!(crate::render_profiles::DirectShading::grid(1000), 16);
+    assert_eq!(crate::render_profiles::DirectShading::grid(100), 10);
+    assert_eq!(crate::render_profiles::DirectShading::grid(3), 1);
     set(&mut e, still, "/render/display", json!("Bounds"), 0.0);
     let boxes = shown(&e, still);
     assert!(boxes.objects.is_empty());

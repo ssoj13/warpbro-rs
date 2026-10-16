@@ -720,6 +720,10 @@ pub struct Scene {
     /// The fractals a Bounds display draws instead of tracing (`EffectiveRender::show`).
     #[serde(skip)]
     pub bounds: Vec<Bounds>,
+    /// Some: shade with Direct instead of path tracing (`EffectiveRender::apply_to`), packed
+    /// into the Direct slots and launched on the Direct kernels (`render.rs`).
+    #[serde(skip)]
+    pub direct: Option<crate::render_profiles::DirectRender>,
     /// The world node a world object was evaluated from (`WorldDocument::snapshot`): what a
     /// viewport pick of it selects.
     #[serde(skip)]
@@ -985,6 +989,7 @@ impl Scene {
             object_world: None,
             masks: Vec::new(),
             bounds: Vec::new(),
+            direct: None,
             node: None,
             mask: Mask::default(),
             document: None,
@@ -1457,6 +1462,18 @@ impl Scene {
         p[P_CAMERA_SUN] = l.sun_disc as u32 as f32;
         // Luminance weights of the working space (ACEScg).
         put3(&mut p, P_LUMA, fractal_core::luma::Luma::AcesCg.weights());
+        // Direct shading (fractal-kernels `kernels/direct.rs`); left zero, nothing reads it.
+        if let Some(d) = self.direct {
+            p[P_DIRECT] = 1.0;
+            p[P_DIRECT_GRID] = d.grid as f32;
+            p[P_SHADOW_STRENGTH] = d.shading.shadow_strength;
+            p[P_SHADOW_STEPS] = d.shading.shadow_steps as f32;
+            p[P_AO_STRENGTH] = d.shading.ao_strength;
+            p[P_AO_STEPS] = d.shading.ao_steps as f32;
+            p[P_AO_RADIUS] = d.shading.ao_radius;
+            // The single-object key light's radius; world lights carry their cones.
+            p[P_LIGHT_HALF_ANGLE] = (l.sun_angle * 0.5).to_radians().max(0.0);
+        }
 
         // --- material
         let m = &self.material;

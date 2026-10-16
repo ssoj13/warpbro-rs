@@ -61,6 +61,7 @@ struct PreparationInputs {
     trap_axis: u32,
     trap_scale: f32,
     render: crate::scene::Render,
+    direct: Option<crate::render_profiles::DirectRender>,
     environment: crate::environment::Environment,
     objects: Vec<PreparationInputs>,
     masks: Vec<crate::scene::MaskInstance>,
@@ -148,6 +149,7 @@ impl PreparationInputs {
             trap_axis,
             trap_scale,
             render: _,
+            direct,
             environment,
             // Authoring and display state: never packed into the upload (`mask` reaches it
             // resolved, as `masks`; `bounds` are drawn by the viewport, never traced; `node`
@@ -181,6 +183,7 @@ impl PreparationInputs {
             trap_axis: *trap_axis,
             trap_scale: *trap_scale,
             render: preparation_render(scene, root),
+            direct: *direct,
             environment: environment.clone(),
             objects: objects
                 .iter()
@@ -215,6 +218,7 @@ impl PreparationInputs {
             trap_axis,
             trap_scale,
             render: _,
+            direct,
             environment,
             mask: _,
             bounds: _,
@@ -244,6 +248,7 @@ impl PreparationInputs {
             && self.trap_axis == *trap_axis
             && self.trap_scale == *trap_scale
             && self.render == preparation_render(scene, root)
+            && self.direct == *direct
             && self.environment == *environment
             && self.lights == *lights
             && self.masks == *masks
@@ -1080,7 +1085,24 @@ impl Gpu {
                     .expect(stringify!($run));
                 }};
             }
-            if scene.world_render {
+            if scene.direct.is_some() {
+                if scene.world_render {
+                    launch!(prepare_world_direct, world_direct)
+                } else {
+                    match scene.formula.code() {
+                        FAMILY_BULB => launch!(prepare_direct_bulb, direct_bulb),
+                        FAMILY_BOX => launch!(prepare_direct_box, direct_box),
+                        FAMILY_QUAT => launch!(prepare_direct_quat, direct_quat),
+                        FAMILY_KIFS => launch!(prepare_direct_kifs, direct_kifs),
+                        FAMILY_KLEINIAN => launch!(prepare_direct_kleinian, direct_kleinian),
+                        FAMILY_PSEUDO_KLEINIAN => {
+                            launch!(prepare_direct_pseudo_kleinian, direct_pseudo_kleinian)
+                        }
+                        FAMILY_APOLLONIAN => launch!(prepare_direct_apollonian, direct_apollonian),
+                        _ => launch!(prepare_direct_hybrid, direct_hybrid),
+                    }
+                }
+            } else if scene.world_render {
                 #[cfg(test)]
                 let world_material = if self.force_mixed_world {
                     WorldMaterial::Mixed
@@ -3758,6 +3780,58 @@ mod tests {
             world: glam::Mat4::IDENTITY.to_cols_array_2d(),
         }];
         assert_eq!(lit(&masked), 0, "density 1 removes every cell");
+    }
+
+    /// The Direct display on a world (`world_direct`): each object is shaded with its own
+    /// material under the world's lights, the image is deterministic (one sample per stratum
+    /// of the grid) and it is not the path-traced image.
+    #[test]
+    fn cuda_direct_shades_each_world_object_with_its_material() {
+        use crate::render_profiles::{DirectRender, DirectShading};
+        let _gpu_test = crate::test_gpu::lock();
+        let mut gpu = Gpu::new().unwrap();
+        let mut scene = dark_world();
+        scene.lighting.sky_intensity = 1.0;
+        scene.lights = vec![scene.lighting];
+        scene.objects = [
+            ([-1.1, 0.0, 0.0], [1.0, 0.05, 0.05]),
+            ([1.1, 0.0, 0.0], [0.05, 0.05, 1.0]),
+        ]
+        .into_iter()
+        .map(|(at, color)| {
+            let mut object = world_object(FAMILY_BULB, at, [0.9; 3], color);
+            object.material.emission = 0.0;
+            object
+        })
+        .collect();
+        let grid = 2;
+        let mut render = |scene: &Scene| {
+            let mut target = gpu.target(64, 40);
+            gpu.step(&mut target, scene, grid * grid, 0, None, false);
+            assert!(target.colour_error.is_none(), "{:?}", target.colour_error);
+            rec709(&gpu.scene_linear(&target))
+        };
+        let traced = render(&scene);
+        scene.direct = Some(DirectRender {
+            shading: DirectShading::default(),
+            grid,
+        });
+        let direct = render(&scene);
+        assert!(direct.iter().flatten().all(|v| v.is_finite()));
+        assert_eq!(render(&scene), direct, "Direct is deterministic");
+        assert_ne!(direct, traced, "Direct is not the path-traced image");
+        let red = direct
+            .iter()
+            .filter(|p| p[0] > 0.02 && p[0] > 3.0 * p[2])
+            .count();
+        let blue = direct
+            .iter()
+            .filter(|p| p[2] > 0.02 && p[2] > 3.0 * p[0])
+            .count();
+        assert!(
+            red > 20 && blue > 20,
+            "each object keeps its own colour: {red} red, {blue} blue"
+        );
     }
 
     #[test]

@@ -14,9 +14,9 @@ pub enum RenderMethod {
     Fast,
     Full,
 }
-/// What a render profile shows of the fractals: their path-traced light, the direct light of
-/// their first hit only (no bounces), or their bounds alone (drawn by the viewport, nothing
-/// traced). Viewport profiles pick it; the Output profile renders the scene as authored.
+/// What a render profile shows of the fractals: their path-traced light, Direct shading (one
+/// deterministic pass: key lights with soft shadows, occlusion, the sky's harmonics; no path
+/// tracing), or their bounds alone (drawn by the viewport, nothing traced).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Display {
     #[default]
@@ -24,6 +24,55 @@ pub enum Display {
     Direct,
     Bounds,
 }
+/// The Direct display's shading (fractal-kernels `kernels/direct.rs`, OFX's Direct mode): a
+/// soft shadow per light and five-probe ambient occlusion over the sky's harmonics. Defaults
+/// are OFX's (`fractal3d` Lighting3d).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirectShading {
+    /// 0 (no shadow) .. 1 (black umbra).
+    pub shadow_strength: f32,
+    /// March steps of a shadow ray; 0 turns shadows off.
+    pub shadow_steps: u32,
+    /// 0 (none) .. 1 (full occlusion).
+    pub ao_strength: f32,
+    /// Probes per occlusion direction; 0 turns occlusion off.
+    pub ao_steps: u32,
+    /// Distance the occlusion probes reach, in scene units.
+    pub ao_radius: f32,
+}
+impl Default for DirectShading {
+    fn default() -> Self {
+        Self {
+            shadow_strength: 1.0,
+            shadow_steps: 16,
+            ao_strength: 1.0,
+            ao_steps: 4,
+            ao_radius: 0.2,
+        }
+    }
+}
+impl DirectShading {
+    /// Largest side of the stratum grid: 16 x 16 = 256 samples per pixel. OFX stops at 3
+    /// because its CPU and WGSL engines share the 1 / 4 / 9 table; the CUDA kernel takes any
+    /// side (`trace_pixel`: `index % grid`, `index / grid`).
+    pub const MAX_GRID: u32 = 16;
+    /// Side of Direct's per-pixel stratum grid for a profile's sample target: the largest
+    /// square not above it, one deterministic sample per stratum, so the image is final after
+    /// `grid²` samples.
+    pub fn grid(samples: u32) -> u32 {
+        (f64::from(samples).sqrt() as u32).clamp(1, Self::MAX_GRID)
+    }
+}
+
+/// What a Direct render carries to the parameter pack (`Scene::direct`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DirectRender {
+    pub shading: DirectShading,
+    /// `DirectShading::grid` of the profile's samples.
+    pub grid: u32,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ViewportMode {
     Auto,
@@ -55,6 +104,8 @@ pub struct EffectiveRender {
     pub samples: u32,
     pub resolution_scale: f32,
     pub display: Display,
+    /// The Direct display's shading; read only when `display` is Direct.
+    pub direct: DirectShading,
     /// The share of each fractal left out, 0 (all of it) .. 1 (none): a Cells mask of that
     /// density over the object (`EffectiveRender::show`).
     pub thinning: f32,
@@ -68,9 +119,15 @@ impl EffectiveRender {
         if self.method == RenderMethod::Fast && scene.material.transmission <= 0.0 {
             scene.material.model = crate::scene::MaterialModel::Fast;
         }
-        if self.display == Display::Direct {
-            scene.render.max_bounces = 0;
-        }
+        // Direct shades each stratum of its grid once (no path, no noise): adaptive sampling
+        // would leave strata unsampled.
+        scene.direct = (self.display == Display::Direct).then(|| {
+            scene.render.adaptive.enabled = false;
+            DirectRender {
+                shading: self.direct,
+                grid: DirectShading::grid(self.samples),
+            }
+        });
         for object in &mut scene.objects {
             self.apply_to(object);
         }
@@ -223,6 +280,7 @@ pub(crate) fn render_values(render: &Value, quality: NodeId) -> Value {
     }
     values.insert("method".into(), json!(RenderMethod::Full));
     values.insert("display".into(), json!(Display::PathTraced));
+    values.insert("direct".into(), json!(DirectShading::default()));
     values.insert("thinning".into(), json!(0.0));
     values.insert("quality_id".into(), json!(quality));
     Value::Object(values)

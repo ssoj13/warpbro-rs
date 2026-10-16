@@ -16,7 +16,8 @@ default = []
 # The fractal path tracer shared with ofx-rs: parameter ABI and sampling, the CUDA kernels
 # (built into this binary through #[cuda_module]) and the material presets.
 fractal-core = { git = "ssh://git@github.com/ssoj13/fractal-rs.git", branch = "main" }
-fractal-kernels = { git = "ssh://git@github.com/ssoj13/fractal-rs.git", branch = "main" }
+# `direct`: the Direct display's deterministic shading kernels (`world_direct`, `direct_<family>`).
+fractal-kernels = { git = "ssh://git@github.com/ssoj13/fractal-rs.git", branch = "main", features = ["direct"] }
 fractal-env = { git = "ssh://git@github.com/ssoj13/fractal-rs.git", branch = "main" }
 fractal-materials = { git = "ssh://git@github.com/ssoj13/fractal-rs.git", branch = "main" }
 playa-player = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "main", default-features = false }
