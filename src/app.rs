@@ -2877,8 +2877,7 @@ impl App {
         if hotkeys::consume(ui.ctx(), Scope::Viewport, Hotkey::Flight) {
             self.toggle_flight_mode();
         }
-        let held = resp.is_pointer_button_down_on()
-            && ui.input(|i| i.focused && i.pointer.secondary_down());
+        let held = flight_held(ui, resp);
         if hotkeys::consume(ui.ctx(), Scope::Viewport, Hotkey::Home) {
             self.scene.camera = self.origin.camera;
             self.fly = None;
@@ -3784,19 +3783,22 @@ impl App {
         if self.fly.is_none() && !gizmo_owns {
             self.orbit_camera(ui, &resp, toolbar.contains_pointer);
         }
-        // Q W E R stay live in flight: the rig already read this frame's held keys, and a
-        // press still switches the tool. + / − resize the manipulator and write Settings.
+        // Held RMB gives the keyboard to the flight rig (W, Q, E, R are thrust and roll there);
+        // released, Q W E R pick tools and + / − resize the manipulator, also while the flight
+        // still coasts. Gated on the button, not on `self.fly`, which outlives the release.
         use crate::hotkeys::{self, Command as Hotkey, Scope};
-        for tool in ViewTool::ALL {
-            if hotkeys::consume(ui.ctx(), Scope::Viewport, Hotkey::Tool(tool)) {
-                self.tool = tool;
+        if !flight_held(ui, &resp) {
+            for tool in ViewTool::ALL {
+                if hotkeys::consume(ui.ctx(), Scope::Viewport, Hotkey::Tool(tool)) {
+                    self.tool = tool;
+                }
             }
-        }
-        if self.tool != ViewTool::Select {
-            let larger = hotkeys::consume(ui.ctx(), Scope::Viewport, Hotkey::GizmoLarger);
-            let smaller = hotkeys::consume(ui.ctx(), Scope::Viewport, Hotkey::GizmoSmaller);
-            if larger || smaller {
-                self.controls.gizmo_size = step_gizmo_size(self.controls.gizmo_size, larger);
+            if self.tool != ViewTool::Select {
+                let larger = hotkeys::consume(ui.ctx(), Scope::Viewport, Hotkey::GizmoLarger);
+                let smaller = hotkeys::consume(ui.ctx(), Scope::Viewport, Hotkey::GizmoSmaller);
+                if larger || smaller {
+                    self.controls.gizmo_size = step_gizmo_size(self.controls.gizmo_size, larger);
+                }
             }
         }
         if resp.double_clicked() {
@@ -4451,6 +4453,12 @@ impl ViewTool {
 /// are timed by, so a played take moves at the speed it was flown.
 fn nav_dt(ctx: &egui::Context) -> f32 {
     ctx.input(|i| i.stable_dt).clamp(1.0e-4, 0.1)
+}
+
+/// RMB held on the viewport: flight steers and owns the keyboard (`App::fly_camera`), so
+/// the viewport's tool keys stand down until the button is released.
+fn flight_held(ui: &egui::Ui, resp: &egui::Response) -> bool {
+    resp.is_pointer_button_down_on() && ui.input(|i| i.focused && i.pointer.secondary_down())
 }
 
 #[cfg(test)]
@@ -5737,6 +5745,7 @@ mod tests {
         );
         let before = app.fly.as_ref().unwrap().pose();
         let generation = app.generation;
+        app.tool = ViewTool::Select;
         frame(
             &mut app,
             vec![
@@ -5760,19 +5769,37 @@ mod tests {
             app.generation > generation + 10,
             "flight must continuously submit changing camera poses"
         );
+        assert_eq!(app.tool, ViewTool::Select, "W in flight thrusts, not Move");
+        let w = |pressed| egui::Event::Key {
+            key: egui::Key::W,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers: Default::default(),
+        };
         let output = frame(
             &mut app,
-            vec![egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Secondary,
-                pressed: false,
-                modifiers: Default::default(),
-            }],
+            vec![
+                w(false),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Secondary,
+                    pressed: false,
+                    modifiers: Default::default(),
+                },
+            ],
         );
         assert!(
             output.viewport_output[&egui::ViewportId::ROOT]
                 .commands
                 .contains(&egui::ViewportCommand::CursorGrab(egui::CursorGrab::None))
+        );
+        assert!(app.fly.is_some(), "the release coasts");
+        frame(&mut app, vec![w(true)]);
+        assert_eq!(
+            app.tool,
+            ViewTool::Move,
+            "released, W picks Move even while coasting"
         );
     }
 

@@ -2,7 +2,7 @@
 
 ## 0.1.0 — 2026-10-14
 
-- Switch viewport tools with Q / W / E / R during flight as well as at rest. The flight rig still reads the held keys.
+- While RMB is held the keyboard flies the camera; once it is released, Q / W / E / R switch viewport tools and + / − resize the gizmo, even while the flight still coasts.
 - Step the manipulator size with + and − while Move, Rotate or Scale is on. The value is Settings > Controls and is saved with the app.
 - Edit a Hybrid's four steps in the Attribute Editor (Off, Mandelbulb, Mandelbox, Kifs fold, Inversion). Sub-formula rows follow the steps that actually run.
 - Hide the Hybrid rows the kernel never reads: the Mandelbox and KIFS rotations, and the bulb bailout.
