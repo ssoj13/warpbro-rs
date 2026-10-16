@@ -1704,6 +1704,8 @@ fn attribute_choices(path: &str) -> Vec<Value> {
         ],
         "/coloring" => &["Radius", "TrapOrigin", "TrapPlane", "TrapPoint"],
         "/mask/shape" => &["Sphere", "Box", "Cells"],
+        "/mask/array/kind" => &["Linear", "Radial"],
+        "/mask/array/axis" => &["X", "Y", "Z"],
         "/render/denoise/mode" => &["Color", "ColorAlbedo", "ColorAlbedoNormal"],
         "/render/denoise/quality" => &["Fast", "Balanced"],
         "/material/model" => &["Fast", "StandardSurface"],
@@ -1739,6 +1741,9 @@ pub(crate) fn attribute_range(path: &str) -> Option<(f64, f64)> {
         TAKE_SPEED => Some((-1000.0, 1000.0)),
         "/mask/density" | "/render/thinning" => Some((0.0, 1.0)),
         "/mask/seed" => Some((0.0, 16_777_215.0)),
+        "/mask/array/count" => Some((1.0, fractal_core::params::ARRAY_MAX as f64)),
+        "/mask/array/sweep_degrees" => Some((0.0, 360.0)),
+        "/mask/array/radius" => Some((1.0e-4, 1.0e4)),
         "/viewport/target_fps" => Some((1.0, 240.0)),
         "/viewport/settle_delay_ms" => Some((0.0, 10000.0)),
         "/viewport/batch_budget_ms" => Some((0.1, 1000.0)),
@@ -1812,6 +1817,7 @@ pub(crate) fn attribute_label(path: &str) -> String {
     let tail = match parts.as_slice() {
         ["formula", "Hybrid", rest @ ..] => rest,
         ["formula", _, rest @ ..] if !rest.is_empty() => rest,
+        ["mask", "array", rest @ ..] if !rest.is_empty() => rest,
         [_, rest @ ..] if !rest.is_empty() => rest,
         all => all,
     };
@@ -1972,6 +1978,10 @@ fn attribute_slider(path: &str) -> Option<Slider> {
         "/trap_point" => lin(-16.0, 16.0),
         "/trap_scale" => log(0.001, 32.0),
         "/trap_axis" => lin(0.0, 2.0),
+        "/mask/array/count" => lin(1.0, fractal_core::params::ARRAY_MAX as f64),
+        "/mask/array/offset" => lin(-16.0, 16.0),
+        "/mask/array/radius" => log(0.01, 32.0),
+        "/mask/array/sweep_degrees" => lin(0.0, 360.0),
         "/transform/position" | "/transform/pivot" => lin(-10.0, 10.0),
         "/transform/rotation_degrees" => lin(-180.0, 180.0),
         "/transform/scale" => log(0.01, 10.0),
@@ -2242,6 +2252,21 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
         "/mask/density" => "Cells: the share of cells removed, 0 keeps all, 1 removes all.",
         "/mask/seed" => "Cells: which cells are removed.",
         "/mask/invert" => "Cut the shape away instead of keeping only what is inside it.",
+        "/mask/array/kind" => {
+            "Linear steps copies by Offset (Blender Array Line). Radial places them on a ring (Blender Array Circle)."
+        }
+        "/mask/array/count" => "How many copies. 1 is the single shape.",
+        "/mask/array/offset" => {
+            "Linear: the step to the next copy, in the mask's own space. The first copy stays at the origin."
+        }
+        "/mask/array/radius" => "Radial: distance from the mask origin to each copy.",
+        "/mask/array/axis" => "Radial: the axis the ring stands on (Blender Central Axis).",
+        "/mask/array/sweep_degrees" => {
+            "Radial arc in degrees. 0 is a full circle, copies spaced by 360 / count."
+        }
+        "/mask/array/align" => {
+            "Radial boxes turn so their X axis faces out from the ring. A sphere is unchanged."
+        }
         "/camera/yaw_degrees" => "Camera heading around world up.",
         "/camera/pitch_degrees" => "Camera tilt up / down.",
         "/camera/roll_degrees" => "Camera roll around the view axis.",
@@ -2416,6 +2441,23 @@ pub(crate) fn inactive_reason<'a>(
         path.strip_prefix(prefix)
             .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
     };
+    if under("/mask/array") {
+        if value("/mask/shape")?.as_str()? == "Cells" {
+            return Some("A cell grid is not an array of copies".into());
+        }
+        let kind = value("/mask/array/kind")?.as_str()?;
+        let radial = under("/mask/array/radius")
+            || under("/mask/array/axis")
+            || under("/mask/array/sweep_degrees")
+            || under("/mask/array/align");
+        if kind == "Linear" && radial {
+            return Some("A linear array steps by its offset".into());
+        }
+        if kind == "Radial" && under("/mask/array/offset") {
+            return Some("A radial array steps around its axis".into());
+        }
+        return None;
+    }
     if under("/julia") || under("/julia_mix") || under("/orbit_offset") {
         let family = value("/formula")?.as_object()?.keys().next()?.clone();
         if !matches!(family.as_str(), "Mandelbulb" | "Mandelbox") {

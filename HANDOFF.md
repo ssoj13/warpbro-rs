@@ -1,5 +1,12 @@
 # HANDOFF (2026-10-13, ~00:00)
 
+Mask arrays (2026-10-15): sphere/box masks get an Array section (`MaskArray`: linear offset or
+radial ring about X/Y/Z, count up to 32, sweep in degrees with 0 = full circle, box align).
+fractal-rs main 08305c9 (world ABI 6, `fractal_core::mask_array` = the one copy placement used
+by the kernel and `Mask::copy_frames` / overlay wires). Cells ignores the array. Operator
+templates in `~/.warpbro/templates` were converted once (backups `*.json.bak2`); the template
+probe test loads them. Not yet checked by eye in the running app.
+
 Active release/upstream follow-up (2026-10-13): see
 [RELEASE_PROGRESS.md](RELEASE_PROGRESS.md) before resuming. NVIDIA PRs
 [#1509](https://github.com/NVIDIA/cuda-rust/pull/1509),

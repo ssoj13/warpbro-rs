@@ -343,8 +343,63 @@ pub enum MaskShape {
     /// Half extents `size`.
     Box,
     /// A grid of cubes of edge `size.x`, a `density` share of them removed (by `seed`): the
-    /// fractal thinned out in space.
+    /// fractal thinned out in space. Not an array of copies.
     Cells,
+}
+
+/// How a sphere or box mask is repeated. Copies are a union; count 1 with a zero linear
+/// offset is the single shape. A radial sweep of 0 is a full circle (Blender Array Circle).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArrayKind {
+    #[default]
+    Linear,
+    Radial,
+}
+
+/// Ring axis of a radial array (Blender Central Axis).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArrayAxis {
+    X,
+    #[default]
+    Y,
+    Z,
+}
+impl ArrayAxis {
+    pub const fn code(self) -> u32 {
+        match self {
+            Self::X => 0,
+            Self::Y => 1,
+            Self::Z => 2,
+        }
+    }
+}
+
+/// The Array section of a mask: a line of copies or a ring of copies.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaskArray {
+    pub kind: ArrayKind,
+    pub count: u32,
+    pub offset: [f32; 3],
+    pub radius: f32,
+    pub axis: ArrayAxis,
+    /// Degrees. 0 is a full circle.
+    pub sweep_degrees: f32,
+    /// Radial boxes turn so local X faces out from the ring.
+    pub align: bool,
+}
+impl Default for MaskArray {
+    fn default() -> Self {
+        Self {
+            kind: ArrayKind::Linear,
+            count: 1,
+            offset: [0.0; 3],
+            radius: 1.0,
+            axis: ArrayAxis::Y,
+            sweep_degrees: 0.0,
+            align: true,
+        }
+    }
 }
 
 /// A scene mask: the shape fractals in its scope are intersected with (kept inside, or with
@@ -358,6 +413,8 @@ pub struct Mask {
     pub density: f32,
     pub seed: u32,
     pub invert: bool,
+    /// Linear or radial copies of a sphere or box. Cells ignores it.
+    pub array: MaskArray,
 }
 impl Default for Mask {
     fn default() -> Self {
@@ -367,7 +424,47 @@ impl Default for Mask {
             density: 0.5,
             seed: 0,
             invert: false,
+            array: MaskArray::default(),
         }
+    }
+}
+impl Mask {
+    /// One local frame per array copy (identity for Cells and for a single unmoved shape):
+    /// the placement the kernel unions (`fractal_core::mask_array`).
+    pub fn copy_frames(self) -> Vec<glam::Mat4> {
+        use fractal_core::mask_array;
+        use glam::{Mat3, Mat4, Vec3};
+        if self.shape == MaskShape::Cells {
+            return vec![Mat4::IDENTITY];
+        }
+        let array = self.array;
+        let count = mask_array::count(array.count);
+        (0..count)
+            .map(|index| match array.kind {
+                ArrayKind::Linear => {
+                    Mat4::from_translation(Vec3::from_array(array.offset) * index as f32)
+                }
+                ArrayKind::Radial => {
+                    let sweep = array.sweep_degrees.to_radians();
+                    let (sn, cs) = mask_array::angle(index, count, sweep).sin_cos();
+                    let axis = array.axis.code();
+                    let centre =
+                        Vec3::from_array(mask_array::ring_point(axis, array.radius, sn, cs));
+                    if !(array.align && self.shape == MaskShape::Box) {
+                        return Mat4::from_translation(centre);
+                    }
+                    // The basis rows take mask space into the copy; its columns place the copy.
+                    let [out, up, tan] = mask_array::ring_basis(axis, sn, cs).map(Vec3::from_array);
+                    let rot = Mat3::from_cols(out, up, tan);
+                    Mat4::from_cols(
+                        rot.x_axis.extend(0.0),
+                        rot.y_axis.extend(0.0),
+                        rot.z_axis.extend(0.0),
+                        centre.extend(1.0),
+                    )
+                }
+            })
+            .collect()
     }
 }
 

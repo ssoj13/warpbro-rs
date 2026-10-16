@@ -102,8 +102,7 @@ impl EffectiveRender {
                         shape: MaskShape::Cells,
                         size: [edge; 3],
                         density: self.thinning,
-                        seed: 0,
-                        invert: false,
+                        ..Mask::default()
                     },
                     world: world(object),
                 });

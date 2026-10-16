@@ -1413,10 +1413,66 @@ fn mask_row(m: &crate::scene::MaskInstance) -> Result<[f32; MASK_STRIDE], String
     row[M_SIZE..M_SIZE + 3].copy_from_slice(&mask.size);
     row[M_DENSITY] = mask.density;
     row[M_SEED] = mask.seed as f32;
+    if mask.shape == MaskShape::Cells {
+        row[M_ARRAY] = 0.0;
+    } else {
+        use fractal_core::params::{ARRAY_LINEAR, ARRAY_RADIAL};
+        row[M_ARRAY] = match mask.array.kind {
+            crate::scene::ArrayKind::Linear => ARRAY_LINEAR,
+            crate::scene::ArrayKind::Radial => ARRAY_RADIAL,
+        } as f32;
+        row[M_ARRAY_COUNT] = fractal_core::mask_array::count(mask.array.count) as f32;
+        row[M_ARRAY_OFFSET..M_ARRAY_OFFSET + 3].copy_from_slice(&mask.array.offset);
+        row[M_ARRAY_RADIUS] = mask.array.radius;
+        row[M_ARRAY_AXIS] = mask.array.axis.code() as f32;
+        // 0 stays exactly 0: the kernel reads it as a full circle.
+        row[M_ARRAY_SWEEP] = mask.array.sweep_degrees.to_radians();
+        row[M_ARRAY_ALIGN] = f32::from(u8::from(mask.array.align));
+    }
     if !row.iter().all(|v| v.is_finite()) || row[M_SCALE] <= 0.0 {
         return Err("a mask transform is unusable".into());
     }
     Ok(row)
+}
+
+#[cfg(test)]
+fn packed_array(mask: crate::scene::Mask) -> [f32; MASK_STRIDE] {
+    mask_row(&crate::scene::MaskInstance {
+        mask,
+        world: glam::Mat4::IDENTITY.to_cols_array_2d(),
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_radial_mask_packs_its_ring_and_cells_pack_no_array() {
+    use crate::scene::{ArrayAxis, ArrayKind, Mask, MaskArray, MaskShape};
+    let row = packed_array(Mask {
+        array: MaskArray {
+            kind: ArrayKind::Radial,
+            count: 4,
+            radius: 2.0,
+            axis: ArrayAxis::Y,
+            sweep_degrees: 180.0,
+            ..MaskArray::default()
+        },
+        ..Mask::default()
+    });
+    assert_eq!(row[M_ARRAY], ARRAY_RADIAL as f32);
+    assert_eq!(row[M_ARRAY_COUNT], 4.0);
+    assert_eq!(row[M_ARRAY_RADIUS], 2.0);
+    assert_eq!(row[M_ARRAY_AXIS], 1.0);
+    assert!((row[M_ARRAY_SWEEP] - std::f32::consts::PI).abs() < 1e-5);
+    assert_eq!(row[M_ARRAY_ALIGN], 1.0);
+    let cells = packed_array(Mask {
+        shape: MaskShape::Cells,
+        array: MaskArray {
+            count: 8,
+            ..MaskArray::default()
+        },
+        ..Mask::default()
+    });
+    assert_eq!(cells[M_ARRAY], 0.0);
 }
 
 #[cfg(test)]
@@ -3701,6 +3757,74 @@ mod tests {
             world: glam::Mat4::IDENTITY.to_cols_array_2d(),
         }];
         assert_eq!(lit(&masked), 0, "density 1 removes every cell");
+    }
+
+    #[test]
+    fn cuda_mask_arrays_union_their_copies() {
+        use crate::scene::{ArrayAxis, ArrayKind, Mask, MaskArray, MaskInstance, MaskShape};
+        let _gpu_test = crate::test_gpu::lock();
+        let mut gpu = Gpu::new().unwrap();
+        let mut target = gpu.target(48, 36);
+        let mut scene = dark_world();
+        scene
+            .objects
+            .push(world_object(FAMILY_BULB, [0.0; 3], [1.0; 3], [1.0; 3]));
+        let mut render = |array: MaskArray, at: glam::Vec3| {
+            let mut masked = scene.clone();
+            masked.objects[0].masks = vec![MaskInstance {
+                mask: Mask {
+                    shape: MaskShape::Sphere,
+                    size: [0.3; 3],
+                    array,
+                    ..Mask::default()
+                },
+                world: glam::Mat4::from_translation(at).to_cols_array_2d(),
+            }];
+            gpu.step(&mut target, &masked, 4, 0, None, false);
+            assert!(target.colour_error.is_none(), "{:?}", target.colour_error);
+            gpu.scene_linear(&target)
+        };
+        let lit = |pixels: &[[f32; 4]]| pixels.iter().filter(|p| p[0] > 0.01).count();
+        let left = glam::Vec3::new(-0.6, 0.0, 0.0);
+        // One copy of a linear array is the shape itself, to the bit.
+        let single = render(MaskArray::default(), left);
+        let one_copy = MaskArray {
+            offset: [1.2, 0.0, 0.0],
+            ..MaskArray::default()
+        };
+        assert_eq!(
+            render(one_copy, left),
+            single,
+            "a one-copy array is the plain mask"
+        );
+        let piece = lit(&single);
+        assert!(piece > 10, "the sphere keeps a piece of the bulb: {piece}");
+        // A second copy one step along +X keeps the mirror piece too.
+        let two = lit(&render(
+            MaskArray {
+                count: 2,
+                ..one_copy
+            },
+            left,
+        ));
+        assert!(
+            two > piece * 3 / 2,
+            "two linear copies keep two pieces: {two} vs {piece}"
+        );
+        // A ring of four around Z through the bulb keeps more than one copy of it does.
+        let ring = |count| MaskArray {
+            kind: ArrayKind::Radial,
+            count,
+            radius: 0.6,
+            axis: ArrayAxis::Z,
+            ..MaskArray::default()
+        };
+        let one = lit(&render(ring(1), glam::Vec3::ZERO));
+        let four = lit(&render(ring(4), glam::Vec3::ZERO));
+        assert!(
+            one > 10 && four > one * 2,
+            "a radial ring of four: {four} vs {one}"
+        );
     }
 
     /// Cost of a Cells mask on the world march: the same bulb unmasked, with a Cells mask

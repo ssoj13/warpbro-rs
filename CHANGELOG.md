@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.0 — 2026-10-14
+
+- Switch viewport tools with Q / W / E / R during flight as well as at rest. The flight rig still reads the held keys.
+- Step the manipulator size with + and − while Move, Rotate or Scale is on. The value is Settings > Controls and is saved with the app.
+- Edit a Hybrid's four steps in the Attribute Editor (Off, Mandelbulb, Mandelbox, Kifs fold, Inversion). Sub-formula rows follow the steps that actually run.
+- Hide the Hybrid rows the kernel never reads: the Mandelbox and KIFS rotations, and the bulb bailout.
+- Repeat a sphere or box mask as an array (Mask > Array, as Blender's Array): Linear steps copies by an offset in the mask's space, Radial places them on a ring around an axis (full circle, or a sweep in degrees), radial boxes optionally facing outward. The copies are one union in the kernel (fractal-rs world ABI 6, up to 32 copies) and are drawn in the viewport; Cells ignores it.
+
 ## 0.1.0 — 2026-10-13 (reissued)
 
 - Animate Julia mix, orbit offset, fractional iterations and spherical inversion.

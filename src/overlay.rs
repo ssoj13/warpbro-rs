@@ -69,7 +69,16 @@ fn cube(m: Mat4, half: Vec3, style: Style) -> impl Iterator<Item = Wire> {
 
 /// A mask's shape: a sphere's three great circles, a box's edges, or the grid of a Cells mask's
 /// 3x3x3 cells around its origin (which cells it removes is its seed's, not drawn).
-fn mask(m: Mat4, mask: &crate::scene::Mask, style: Style) -> Vec<Wire> {
+fn mask(m: Mat4, settings: &crate::scene::Mask, style: Style) -> Vec<Wire> {
+    let mut wires = Vec::new();
+    for frame in settings.copy_frames() {
+        wires.extend(mask_shape(m * frame, settings, style));
+    }
+    wires
+}
+
+/// One copy of a mask's shape, drawn around the local origin of `m`.
+fn mask_shape(m: Mat4, mask: &crate::scene::Mask, style: Style) -> Vec<Wire> {
     let s = Vec3::from_array(mask.size);
     match mask.shape {
         MaskShape::Sphere => [(Vec3::X, Vec3::Y), (Vec3::Y, Vec3::Z), (Vec3::Z, Vec3::X)]

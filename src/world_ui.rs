@@ -556,6 +556,7 @@ pub(crate) fn section_color(group: &str) -> Color32 {
         "Quality" => kind_color(WorldKind::QualitySettings),
         "Viewport" => kind_color(WorldKind::ViewportSettings),
         "Output" => kind_color(WorldKind::OutputSettings),
+        "Mask" | "Array" => kind_color(WorldKind::Mask),
         "Color" => Color32::from_rgb(100, 180, 210),
         _ => Color32::from_rgb(150, 150, 150),
     }
@@ -574,6 +575,13 @@ fn category(path: &str) -> &'static str {
         "quality" => "Quality",
         "viewport" => "Viewport",
         "output" => "Output",
+        "mask" => {
+            if path.split('/').nth(2) == Some("array") {
+                "Array"
+            } else {
+                "Mask"
+            }
+        }
         "colour" | "color" => "Color",
         _ => "Custom",
     }
@@ -3002,8 +3010,10 @@ fn grid_json(value: GridValue, template: &Value) -> Value {
     }
 }
 
-const ATTRIBUTE_GROUPS: [&str; 11] = [
+const ATTRIBUTE_GROUPS: [&str; 13] = [
     "Transform",
+    "Mask",
+    "Array",
     "Fractal",
     "Camera",
     "Light",

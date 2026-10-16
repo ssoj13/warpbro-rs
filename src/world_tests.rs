@@ -3730,3 +3730,66 @@ fn a_new_scene_starts_with_marks_one_and_two_on_its_range_ends() {
         std::collections::BTreeMap::from([(1, document.first), (2, document.last)])
     );
 }
+
+#[test]
+fn a_mask_array_is_a_line_or_a_ring_and_cells_are_not_copies() {
+    use crate::scene::{ArrayAxis, ArrayKind};
+    use glam::Vec3;
+    let mut e = editor();
+    e.execute(WorldCommand::Create {
+        kind: WorldKind::Mask,
+        name: "Clip".into(),
+        parent: None,
+    })
+    .unwrap();
+    let id = e.selection.unwrap();
+    let mask = e.document.mask(id, 0.0).unwrap();
+    assert_eq!(mask.array.kind, ArrayKind::Linear);
+    assert_eq!(mask.array.count, 1);
+    assert_eq!(mask.copy_frames().len(), 1);
+
+    set(&mut e, id, "/mask/array/count", json!(3), 0.0);
+    set(
+        &mut e,
+        id,
+        "/mask/array/offset",
+        json!([2.0, 0.0, 0.0]),
+        0.0,
+    );
+    let line = e.document.mask(id, 0.0).unwrap().copy_frames();
+    assert_eq!(line.len(), 3);
+    assert!((line[2].transform_point3(Vec3::ZERO).x - 4.0).abs() < 1e-4);
+
+    set(&mut e, id, "/mask/array/kind", json!("Radial"), 0.0);
+    set(&mut e, id, "/mask/array/count", json!(4), 0.0);
+    set(&mut e, id, "/mask/array/radius", json!(2.0), 0.0);
+    set(&mut e, id, "/mask/array/axis", json!("Y"), 0.0);
+    let ring = e.document.mask(id, 0.0).unwrap();
+    assert_eq!(ring.array.kind, ArrayKind::Radial);
+    assert_eq!(ring.array.axis, ArrayAxis::Y);
+    let frames = ring.copy_frames();
+    let at = |i: usize| frames[i].transform_point3(Vec3::ZERO);
+    assert!((at(0) - Vec3::new(2.0, 0.0, 0.0)).length() < 1e-4);
+    assert!((at(1) - Vec3::new(0.0, 0.0, 2.0)).length() < 1e-4);
+
+    set(&mut e, id, "/mask/shape", json!("Box"), 0.0);
+    let turned = e.document.mask(id, 0.0).unwrap().copy_frames();
+    let x_axis = turned[0].x_axis.truncate();
+    assert!(
+        (x_axis - Vec3::X).length() < 1e-4,
+        "a box faces out along local X"
+    );
+
+    let attrs = e.document.attributes(id, 0.0).unwrap();
+    let values: std::collections::HashMap<String, Value> =
+        attrs.into_iter().map(|a| (a.path, a.value)).collect();
+    assert!(inactive_reason("/mask/array/offset", |p| values.get(p)).is_some());
+    assert!(inactive_reason("/mask/array/radius", |p| values.get(p)).is_none());
+
+    set(&mut e, id, "/mask/shape", json!("Cells"), 0.0);
+    assert_eq!(e.document.mask(id, 0.0).unwrap().copy_frames().len(), 1);
+    let attrs = e.document.attributes(id, 0.0).unwrap();
+    let values: std::collections::HashMap<String, Value> =
+        attrs.into_iter().map(|a| (a.path, a.value)).collect();
+    assert!(inactive_reason("/mask/array/count", |p| values.get(p)).is_some());
+}
