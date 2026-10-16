@@ -1,5 +1,20 @@
 # HANDOFF (2026-10-13, ~00:00)
 
+Pin bump (2026-10-16): egui-widgets-rs 9d46416, video-io-rs 8fa41ad, ffmpeg-rs 6b2eb09
+(was split 0a7ced9 / e5c7f22), playa 7e3e844. The new playa pulled fresh mains of oiio-rs
+(vfx-ocio, vfx-color, ...), render-rs (render-color), usd-rs, openvdb and otio. The merged
+mig/video-io lock had collapsed 6 crates to windows-sys 0.52 (cargo update trap); restored to
+the release's 4 x 0.52 / 16 x 0.61. `export.rs` HEVC sink ported off the removed
+`cfr_pts` / `cfr_duration` / `to_media_ticks` / `set_video_colr_for`.
+TODO:
+- [ ] Colour risk: render-rs and oiio-rs mains carried compiled-but-never-run colour code; it
+      now reaches WarpBro (frame colour, export). Run the full CUDA suite on these pins and
+      compare viewport and exported PNG / EXR / HEVC by eye against v0.1.0 (operator: renders OK
+      at first look, 2026-10-16).
+- [ ] Panel drags as one undo step (outliner eye sweep, timeline work-area drag): WIP
+      `WorldUi::panel_gesture` / `held_gesture`, wire App's closer and the handlers.
+- [ ] Outliner keyboard Delete / Duplicate, timeline SetMarkerDuration: still ignored.
+
 Export model for the video-io lift (2026-10-15, answer to egui-widgets-rs): video-io becomes the
 one encoder (backends `native` / `cli`, default `cli`: PNG sequence then MP4/HEVC PQ or SDR).
 - Stable, lift as is: `fs_name` (slug, stem, check, frame_file, sequence_pattern); `ExportJob`

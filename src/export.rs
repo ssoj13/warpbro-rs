@@ -1472,10 +1472,25 @@ impl HevcSink {
             .map_err(av_error)?;
         // BT.709 primaries, BT.709 transfer (BT.1886 codes, `color::bt1886_code`), BT.709
         // matrix, limited YUV: the one SDR video description, as the PNG export's video.
-        let colr = av_format::video_colr_nclx(self.ctx.color_metadata()).map_err(av_error)?;
-        writer.set_video_colr_for(track, &colr).map_err(av_error)?;
+        let colour = self.ctx.color_metadata();
+        writer
+            .set_video_color_for(
+                track,
+                colour.primaries as i32,
+                colour.transfer as i32,
+                colour.matrix as i32,
+                colour.range == av_util_pixfmt::AVColorRange::AVCOL_RANGE_JPEG,
+            )
+            .map_err(av_error)?;
         self.header = true;
         Ok(())
+    }
+    /// Encoder time-base ticks (`fps_den / fps_num`) as track ticks (`1 / fps_num`, the
+    /// timescale `add_video` declares): exactly `v * fps_den`, the rescale C does between the
+    /// encoder and the stream time base.
+    fn ticks(&self, v: i64) -> Result<i64, String> {
+        v.checked_mul(i64::from(self.fps.1))
+            .ok_or_else(|| "HEVC timestamp overflow".to_string())
     }
     fn write(&mut self, frame: &Frame) -> Result<(), String> {
         if frame.light_kind.hdr() {
@@ -1504,8 +1519,9 @@ impl HevcSink {
         }
         let dst = &mut self.yuv;
         av_swscale::sws_scale_frame(&self.sws, dst, src).map_err(av_error)?;
-        dst.pts = self.ctx.cfr_pts(self.frames);
-        dst.duration = self.ctx.cfr_duration();
+        // `set_cfr_timing`: one frame is one tick of the encoder time base, frame n at pts n.
+        dst.pts = self.frames;
+        dst.duration = 1;
         self.ctx.color_metadata().apply_to_frame(dst);
         if self.hardware {
             let pool = self
@@ -1540,9 +1556,9 @@ impl HevcSink {
                     if !self.header {
                         self.header(packet.data())?;
                     }
-                    let pts = self.ctx.to_media_ticks(packet.pts);
-                    let dts = self.ctx.to_media_ticks(packet.dts);
-                    let duration = self.ctx.to_media_ticks(packet.duration);
+                    let pts = self.ticks(packet.pts)?;
+                    let dts = self.ticks(packet.dts)?;
+                    let duration = self.ticks(packet.duration)?;
                     self.timing.record(pts, dts, duration)?;
                     if duration != i64::from(self.fps.1) {
                         return Err("Unexpected HEVC packet duration".into());
