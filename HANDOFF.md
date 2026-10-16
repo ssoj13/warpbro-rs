@@ -1,5 +1,21 @@
 # HANDOFF (2026-10-13, ~00:00)
 
+Export model for the video-io lift (2026-10-15, answer to egui-widgets-rs): video-io becomes the
+one encoder (backends `native` / `cli`, default `cli`: PNG sequence then MP4/HEVC PQ or SDR).
+- Stable, lift as is: `fs_name` (slug, stem, check, frame_file, sequence_pattern); `ExportJob`
+  (stem, frame range, rational fps with broadcast-rate recognition in `set_fps`, overwrite);
+  the one-dated-folder-per-export layout (`ExportSettings::resolve` / `output` / `frame_path`).
+  `AtomicOut` is already shared (`av_util_core::outfile`), nothing to lift.
+- In flux, lift only after it is reshaped: `OutputSettings` mixes a generic recipe (format,
+  size, qp, png encoding / peak, png_video) with WarpBro-only fields (`denoise_at_completion`,
+  OCIO override `output_display` / `output_view`, `resolve_transform` / `output_kind` on
+  `crate::ocio`), and `VideoEncoder {Vulkan, Kvazaar}` is the built-in HEVC path that video-io's
+  backends replace. `ExportSettings` carries renderer values (`samples`, `transform`).
+  `ExportController` is host glue (RenderService, CUDA frames, UI); only its Ticket polling
+  (`update` -> progress / try_finish, `cancel`) is the generic part.
+- Merged on branch `merge/video-io` (mig/video-io ecca7e5 onto main 5dceeb2) with `cargo fmt`;
+  pins egui-widgets-rs 76f512b and video-io 9689958 as verified there (both mains have moved on).
+
 Mask arrays (2026-10-15): sphere/box masks get an Array section (`MaskArray`: linear offset or
 radial ring about X/Y/Z, count up to 32, sweep in degrees with 0 = full circle, box align).
 fractal-rs main 08305c9 (world ABI 6, `fractal_core::mask_array` = the one copy placement used

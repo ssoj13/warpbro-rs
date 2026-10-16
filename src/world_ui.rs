@@ -2013,7 +2013,7 @@ impl WorldUi {
                 )
             }) {
                 match anim_effect(id, attr, frame, intent) {
-                    Some(AnimEffect::Command(command)) => self.command(e, command),
+                    Some(AnimEffect::Command(command)) => self.command(e, *command),
                     Some(AnimEffect::Seek(to)) => self.seek(to),
                     None => {}
                 }
@@ -2889,7 +2889,7 @@ impl AttrGridHooks for WorldGridHooks<'_> {
         if let Some(index) = self.index(field) {
             let attr = &self.attrs[self.indices[index]];
             match anim_effect(self.id, attr, self.frame, intent) {
-                Some(AnimEffect::Command(command)) => self.commands.push(command),
+                Some(AnimEffect::Command(command)) => self.commands.push(*command),
                 Some(AnimEffect::Seek(to)) => self.ui_state.seek(to),
                 None => {}
             }
@@ -3116,8 +3116,8 @@ fn anim_state(attr: &WorldAttribute, frame: f64) -> Option<AnimState> {
 }
 /// What a click on an attribute's animation controls asks for.
 enum AnimEffect {
-    /// A document edit.
-    Command(WorldCommand),
+    /// A document edit (boxed: a command is far larger than a seek).
+    Command(Box<WorldCommand>),
     /// Move the playhead to this frame (Prev / Next key).
     Seek(u32),
 }
@@ -3131,7 +3131,7 @@ fn anim_effect(
 ) -> Option<AnimEffect> {
     let path = attr.path.clone();
     let seek = |key: Option<f64>| key.map(|k| AnimEffect::Seek(k.round().max(0.0) as u32));
-    Some(AnimEffect::Command(match intent {
+    Some(AnimEffect::Command(Box::new(match intent {
         AnimIntent::Animate | AnimIntent::Static => WorldCommand::SetAnimation {
             id,
             path,
@@ -3142,7 +3142,7 @@ fn anim_effect(
         AnimIntent::Unkey => WorldCommand::RemoveKey { id, path, frame },
         AnimIntent::PrevKey => return seek(key_nav(attr, frame).prev),
         AnimIntent::NextKey => return seek(key_nav(attr, frame).next),
-    }))
+    })))
 }
 
 fn numeric_value(template: &Value, n: f64) -> Value {
