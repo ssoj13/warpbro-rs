@@ -1472,6 +1472,11 @@ impl HevcSink {
             .map_err(av_error)?;
         // BT.709 primaries, BT.709 transfer (BT.1886 codes, `color::bt1886_code`), BT.709
         // matrix, limited YUV: the one SDR video description, as the PNG export's video.
+        // `hvc1` (parameter sets only in hvcC), which QuickTime and Apple players require; the
+        // writer defaults to C's `hev1`.
+        writer
+            .set_video_fourcc_for(track, *b"hvc1")
+            .map_err(av_error)?;
         let colour = self.ctx.color_metadata();
         writer
             .set_video_color_for(
