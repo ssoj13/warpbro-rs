@@ -5412,4 +5412,571 @@ impl WorldDocument {
         scene.camera.validate_lens()?;
         Ok(scene)
     }
+
+    /// Decode a persisted `WorldDocument` from JSON text and hydrate any added, removed or renamed
+    /// schema fields in-place so older scene, template and bookmark files load cleanly while
+    /// current documents round-trip byte-for-byte unchanged.
+    pub fn decode_json(text: &str) -> Result<Self, String> {
+        let mut raw: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
+        let Some(top) = raw.as_object_mut() else {
+            return Err("Expected world document object".into());
+        };
+        if !top.get("graph").is_some_and(Value::is_object)
+            || !top["graph"].get("nodes").is_some_and(Value::is_object)
+        {
+            return Err("Missing world graph".into());
+        }
+        top.retain(|k, _| {
+            matches!(
+                k.as_str(),
+                "graph"
+                    | "active_camera"
+                    | "active_environment"
+                    | "first"
+                    | "last"
+                    | "fps"
+                    | "marks"
+                    | "takes"
+                    | "camera_slots"
+            )
+        });
+        top.entry("active_camera").or_insert(Value::Null);
+        top.entry("active_environment").or_insert(Value::Null);
+        top.entry("first").or_insert_with(|| json!(0));
+        top.entry("last").or_insert_with(|| json!(120));
+        top.entry("fps").or_insert_with(|| json!(24.0));
+        top.entry("marks").or_insert_with(|| json!({}));
+        let mut document: Self = serde_json::from_value(raw).map_err(|e| e.to_string())?;
+        document.hydrate_schema()?;
+        Ok(document)
+    }
+
+    /// Fill missing parameters from canonical preset schemas and strip removed parameters on
+    /// `bus_slots["world"]`, each node's `gpu` payload, and each node's `host` (`Attrs`).
+    pub fn hydrate_schema(&mut self) -> Result<(), String> {
+        if self.graph.format_version != playa_graph::SUBNET_FORMAT_VERSION {
+            return Ok(());
+        }
+        // 1. Upgrade legacy pre-Track animation channels (`{"keys": [...]}`) before deserializing `Attrs`.
+        for node in self.graph.nodes.values_mut() {
+            let Some(map) = node
+                .get_mut("host")
+                .and_then(|h| h.get_mut("map"))
+                .and_then(Value::as_object_mut)
+            else {
+                continue;
+            };
+            for slot in map.values_mut() {
+                let Some(channels) = slot
+                    .get_mut("anim")
+                    .and_then(|a| a.get_mut("channels"))
+                    .and_then(Value::as_array_mut)
+                else {
+                    continue;
+                };
+                for ch in channels {
+                    if ch.get("track").is_some() {
+                        continue;
+                    }
+                    let Some(legacy_keys) = ch.get("keys").and_then(Value::as_array) else {
+                        continue;
+                    };
+                    let mut converted = Channel::new();
+                    for k in legacy_keys {
+                        if let (Some(frame), Some(val)) = (
+                            k.get("frame").and_then(Value::as_f64),
+                            k.get("value").and_then(Value::as_f64),
+                        ) {
+                            let tan =
+                                match k.get("interp").and_then(Value::as_str).unwrap_or("Smooth") {
+                                    "Constant" | "constant" | "Step" | "step" => Tan::Constant,
+                                    "Linear" | "linear" => Tan::Linear,
+                                    _ => Tan::Smooth,
+                                };
+                            converted.upsert_key(Keyframe::with_tan(frame, val as f32, tan));
+                        }
+                    }
+                    *ch = serde_json::to_value(converted).map_err(|e| e.to_string())?;
+                }
+            }
+        }
+
+        let default_scene = Scene::preset(crate::params::FAMILY_BULB);
+        let default_scene_json = scene_json(&default_scene)?;
+        let mut default_world = default_scene_json.clone();
+        if let Some(obj) = default_world.as_object_mut() {
+            obj.remove("render");
+        }
+        let formula_presets: Vec<Value> = (0..8)
+            .filter_map(|family| serde_json::to_value(Scene::preset(family).formula).ok())
+            .collect();
+        let facing_schema = json!({
+            "color": [1.0, 1.0, 1.0],
+            "roughness": 0.3,
+            "metallic": 0.0,
+            "exponent": 2.3,
+        });
+
+        // 2. Upgrade pre-render-profiles documents (single `settings_node` / `world.render`).
+        let needs_render_profiles = ["output_render", "viewport_settings", "output_settings"]
+            .iter()
+            .any(|k| {
+                !self
+                    .graph
+                    .bus_slots
+                    .get(*k)
+                    .and_then(Value::as_str)
+                    .and_then(NodeId::parse)
+                    .is_some_and(|id| self.graph.nodes.contains_key(&id.to_string()))
+            });
+        if needs_render_profiles {
+            let mut seed_scene = default_scene.clone();
+            let mut render_val =
+                serde_json::to_value(&seed_scene.render).map_err(|e| e.to_string())?;
+            let mut legacy_samples = None;
+            if let Some(world_render) = self
+                .graph
+                .bus_slots
+                .get("world")
+                .and_then(|w| w.get("render"))
+            {
+                legacy_samples = world_render.get("samples").and_then(Value::as_u64);
+                if let (Some(rmap), Some(wmap)) =
+                    (render_val.as_object_mut(), world_render.as_object())
+                {
+                    for (k, v) in wmap {
+                        if rmap.contains_key(k) {
+                            rmap.insert(k.clone(), v.clone());
+                        }
+                    }
+                }
+            }
+            if let Some(settings_id) = self
+                .graph
+                .bus_slots
+                .remove("settings_node")
+                .and_then(|v| v.as_str().map(str::to_owned))
+            {
+                if let Some(settings_node) = self.graph.nodes.remove(&settings_id)
+                    && let Ok(settings_attrs) =
+                        serde_json::from_value::<Attrs>(settings_node["host"].clone())
+                {
+                    for (path, val) in settings_attrs.iter() {
+                        if path == "/render/samples" {
+                            legacy_samples = attr_json(val.clone()).as_u64().or(legacy_samples);
+                        } else if let Some(tail) = path.strip_prefix("/render")
+                            && render_val.pointer(tail).is_some()
+                        {
+                            let _ =
+                                set_pointer(&mut render_val, tail, attr_json(val.clone()), false);
+                        }
+                    }
+                }
+                if let Some(order) = self
+                    .graph
+                    .bus_slots
+                    .get_mut("layer_order")
+                    .and_then(Value::as_array_mut)
+                {
+                    order.retain(|v| v.as_str() != Some(settings_id.as_str()));
+                }
+            }
+            let render_schema =
+                serde_json::to_value(&default_scene.render).map_err(|e| e.to_string())?;
+            Self::merge_schema_value(
+                &mut render_val,
+                &render_schema,
+                &formula_presets,
+                &facing_schema,
+            );
+            if let Ok(parsed_render) = serde_json::from_value(render_val) {
+                seed_scene.render = parsed_render;
+            }
+            self.seed_settings(&seed_scene)?;
+            if let Some(samples) = legacy_samples {
+                let quality_ids: Vec<NodeId> = self
+                    .nodes()
+                    .into_iter()
+                    .filter(|n| n.kind == WorldKind::QualitySettings && n.name != "Moving Quality")
+                    .map(|n| n.id)
+                    .collect();
+                for qid in quality_ids {
+                    let _ = self.set_attribute(
+                        qid,
+                        "/quality/samples",
+                        json!(samples),
+                        0.0,
+                        false,
+                        Tan::Constant,
+                    );
+                }
+            }
+        }
+
+        // 3. Hydrate `bus_slots["world"]`.
+        let world_slot = self
+            .graph
+            .bus_slots
+            .entry("world".into())
+            .or_insert_with(|| default_world.clone());
+        Self::migrate_legacy_json(world_slot);
+        Self::merge_schema_value(world_slot, &default_world, &formula_presets, &facing_schema);
+
+        // Precompute all valid `/formula/<Family>/*` attributes across all 8 formula families.
+        let mut all_formula_attrs = Attrs::new();
+        for preset in &formula_presets {
+            discover(preset, "/formula", &mut all_formula_attrs);
+        }
+
+        // 4. Hydrate every node's `gpu`, `metadata`, and `host` (`Attrs`).
+        let node_keys: Vec<String> = self.graph.nodes.keys().cloned().collect();
+        for key in node_keys {
+            let Some(id) = NodeId::parse(&key) else {
+                continue;
+            };
+            let Ok(kind) = serde_json::from_value::<WorldKind>(self.node(id)?["type"].clone())
+            else {
+                continue;
+            };
+            let gpu_schema = if crate::render_profiles::setting_kind(kind) {
+                let mut schema = self.settings_template(kind, &default_scene)?;
+                for ref_path in [
+                    "/render/quality_id",
+                    "/viewport/moving_id",
+                    "/viewport/still_id",
+                    "/viewport/manual_id",
+                ] {
+                    if let Some(existing) = self.node(id)?["gpu"].pointer(ref_path).cloned()
+                        && existing.is_string()
+                        && let Some(slot) = schema.pointer_mut(ref_path)
+                    {
+                        *slot = existing;
+                    }
+                }
+                schema
+            } else if kind == WorldKind::Fractal {
+                let mut schema = default_world.clone();
+                schema["render"] = json!({"iterations": default_scene.render.iterations});
+                schema
+            } else {
+                default_scene_json.clone()
+            };
+
+            {
+                let node_val = self.node_mut(id)?;
+                if let Some(node_obj) = node_val.as_object_mut() {
+                    node_obj.entry("children").or_insert_with(|| json!([]));
+                    node_obj.entry("discrete").or_insert_with(|| json!({}));
+                    node_obj.entry("metadata").or_insert_with(|| json!({}));
+                    node_obj.entry("material").or_insert(Value::Null);
+                    node_obj
+                        .entry("environment_revision")
+                        .or_insert_with(|| json!(0));
+                }
+                if crate::render_profiles::setting_kind(kind)
+                    && node_val["metadata"]["catalog_role"].is_null()
+                {
+                    node_val["metadata"]["catalog_role"] =
+                        json!(crate::render_profiles::CatalogRole::Profile);
+                }
+                let gpu = &mut node_val["gpu"];
+                Self::migrate_legacy_json(gpu);
+                Self::merge_schema_value(gpu, &gpu_schema, &formula_presets, &facing_schema);
+                if let Some(arr) = node_val["discrete"]
+                    .get_mut("/formula")
+                    .and_then(Value::as_array_mut)
+                {
+                    for item in arr {
+                        let f_schema = Self::formula_schema(item, &formula_presets);
+                        Self::merge_schema_value(item, &f_schema, &formula_presets, &facing_schema);
+                    }
+                }
+                if let Some(arr) = node_val["discrete"]
+                    .get_mut("/material/facing")
+                    .and_then(Value::as_array_mut)
+                {
+                    for item in arr {
+                        if item.is_object() {
+                            Self::merge_schema_value(
+                                item,
+                                &facing_schema,
+                                &formula_presets,
+                                &facing_schema,
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Build `canonical_attrs` for this node and hydrate `attrs`.
+            let mut attrs = self.attrs(id)?;
+            let mut attrs_changed = false;
+
+            // Legacy `/camera/aperture` -> `/camera/f_number` migration in `Attrs`.
+            if kind == WorldKind::Camera && !attrs.contains("/camera/f_number") {
+                if let Some(ap) = attrs.get("/camera/aperture").cloned() {
+                    attrs.set("/camera/f_number", ap);
+                    if let Some(anim) = attrs.anim("/camera/aperture").cloned() {
+                        attrs.set_anim("/camera/f_number", Some(anim));
+                    }
+                    if let Some(conn) = attrs.conn("/camera/aperture").cloned() {
+                        attrs.set_conn("/camera/f_number", Some(conn));
+                    }
+                    attrs_changed = true;
+                }
+                if let Some(nav_ap) = attrs.get("/_navigation/camera/aperture").cloned() {
+                    attrs.set("/_navigation/camera/f_number", nav_ap);
+                    attrs.remove("/_navigation/camera/aperture");
+                    attrs_changed = true;
+                }
+            }
+            // Legacy `/julia` Vec3 without `/julia_mix`: preserve active Julia constant (`julia_mix = 1.0`).
+            if kind == WorldKind::Fractal
+                && !attrs.contains("/julia_mix")
+                && matches!(attrs.get("/julia"), Some(AttrValue::Vec3(_)))
+            {
+                attrs.set("/julia_mix", AttrValue::Float(1.0));
+                attrs_changed = true;
+            }
+
+            let mut canonical_attrs = Attrs::new();
+            let gpu_snapshot = self.node(id)?["gpu"].clone();
+            for branch in branches(kind) {
+                if let Some(v) = gpu_snapshot.get(*branch) {
+                    discover(v, &format!("/{branch}"), &mut canonical_attrs);
+                }
+            }
+            for (path, value) in [
+                ("/visible", json!(true)),
+                ("/locked", json!(false)),
+                ("/solo", json!(false)),
+                ("/shy", json!(crate::render_profiles::setting_kind(kind))),
+                ("/start", json!(self.first as f64)),
+                ("/end", json!(self.last as f64 + 1.0)),
+                ("/transform/position", json!([0.0, 0.0, 0.0])),
+                ("/transform/rotation_degrees", json!([0.0, 0.0, 0.0])),
+                ("/transform/scale", json!([1.0, 1.0, 1.0])),
+                ("/transform/pivot", json!([0.0, 0.0, 0.0])),
+            ] {
+                canonical_attrs.set(path, to_attr(&value));
+            }
+            if kind == WorldKind::Camera {
+                for path in [CAMERA_ORBIT_SPEED, CAMERA_ORBIT_PHASE] {
+                    canonical_attrs.set(path, to_attr(&json!(0.0)));
+                }
+            }
+
+            // Hydrate JSON blobs stored in `attrs` (`/formula`, `/material/facing`) and discover their children.
+            if let Some(AttrValue::Json(s)) = attrs.get("/formula").cloned()
+                && let Ok(mut f_val) = serde_json::from_str::<Value>(&s)
+            {
+                let before = f_val.clone();
+                let f_schema = Self::formula_schema(&f_val, &formula_presets);
+                Self::merge_schema_value(&mut f_val, &f_schema, &formula_presets, &facing_schema);
+                if f_val != before {
+                    attrs.set("/formula", to_attr(&f_val));
+                    attrs_changed = true;
+                }
+                discover(&f_val, "/formula", &mut canonical_attrs);
+            }
+            if let Some(AttrValue::Json(s)) = attrs.get("/material/facing").cloned()
+                && let Ok(mut facing_val) = serde_json::from_str::<Value>(&s)
+                && facing_val.is_object()
+            {
+                let before = facing_val.clone();
+                Self::merge_schema_value(
+                    &mut facing_val,
+                    &facing_schema,
+                    &formula_presets,
+                    &facing_schema,
+                );
+                if facing_val != before {
+                    attrs.set("/material/facing", to_attr(&facing_val));
+                    attrs_changed = true;
+                }
+                discover(&facing_val, "/material/facing", &mut canonical_attrs);
+            }
+
+            // Add missing attributes from `canonical_attrs`, or replace legacy `Json("null")` when non-null now.
+            for (path, default_val) in canonical_attrs.iter() {
+                match attrs.get(path) {
+                    None => {
+                        attrs.set(path, default_val.clone());
+                        attrs_changed = true;
+                    }
+                    Some(AttrValue::Json(s))
+                        if s == "null"
+                            && !matches!(default_val, AttrValue::Json(ds) if ds == "null") =>
+                    {
+                        attrs.set(path, default_val.clone());
+                        attrs_changed = true;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Remove obsolete paths and align `Int64 <-> Float` numeric types with current schema.
+            let existing_paths: Vec<String> = attrs.iter().map(|(p, _)| p.clone()).collect();
+            let discrete_obj = self.node(id)?["discrete"].clone();
+            for path in existing_paths {
+                let expected = canonical_attrs.get(&path).or_else(|| {
+                    (kind == WorldKind::Fractal && path.starts_with("/formula/"))
+                        .then(|| all_formula_attrs.get(&path))
+                        .flatten()
+                });
+                if let Some(expected_val) = expected {
+                    if discrete_obj.get(&path).is_none() {
+                        match (attrs.get(&path), expected_val) {
+                            (Some(AttrValue::Int64(v)), AttrValue::Float(_)) => {
+                                attrs.set(&path, AttrValue::Float(*v as f32));
+                                attrs_changed = true;
+                            }
+                            (Some(AttrValue::Float(v)), AttrValue::Int64(_)) => {
+                                attrs.set(&path, AttrValue::Int64(v.round() as i64));
+                                attrs_changed = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                } else if !path.starts_with("/_navigation/")
+                    && !path.starts_with("/custom/")
+                    && !matches!(path.as_str(), TAKE_OFFSET | TAKE_SPEED)
+                {
+                    attrs.remove(&path);
+                    if let Some(dmap) = self.node_mut(id)?["discrete"].as_object_mut() {
+                        dmap.remove(&path);
+                    }
+                    attrs_changed = true;
+                }
+            }
+
+            if attrs_changed {
+                self.store_attrs(id, &attrs)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn formula_schema(target_formula: &Value, formula_presets: &[Value]) -> Value {
+        if let Some(variant) = target_formula.as_object().and_then(|map| map.keys().next())
+            && let Some(preset) = formula_presets
+                .iter()
+                .find(|p| p.as_object().is_some_and(|m| m.contains_key(variant)))
+        {
+            return preset.clone();
+        }
+        formula_presets
+            .first()
+            .cloned()
+            .unwrap_or_else(|| json!({}))
+    }
+
+    fn migrate_legacy_json(target: &mut Value) {
+        let Some(map) = target.as_object_mut() else {
+            return;
+        };
+        if let Some(cam) = map.get_mut("camera").and_then(Value::as_object_mut)
+            && !cam.contains_key("f_number")
+            && let Some(aperture) = cam.get("aperture").cloned()
+        {
+            cam.insert("f_number".into(), aperture);
+        }
+        if map.get("julia").is_some_and(Value::is_array) && !map.contains_key("julia_mix") {
+            map.insert("julia_mix".into(), json!(1.0));
+        }
+    }
+
+    fn merge_schema_value(
+        target: &mut Value,
+        schema: &Value,
+        formula_presets: &[Value],
+        facing_schema: &Value,
+    ) {
+        match schema {
+            Value::Object(smap) => {
+                if !target.is_object() {
+                    *target = schema.clone();
+                    return;
+                }
+                let tmap = target.as_object_mut().expect("checked object");
+                tmap.retain(|k, _| smap.contains_key(k));
+                for (k, sv) in smap {
+                    if k == "formula" {
+                        if let Some(tv) = tmap.get_mut(k) {
+                            let f_schema = Self::formula_schema(tv, formula_presets);
+                            Self::merge_schema_value(tv, &f_schema, formula_presets, facing_schema);
+                        } else {
+                            tmap.insert(k.clone(), sv.clone());
+                        }
+                    } else if k == "facing" {
+                        if let Some(tv) = tmap.get_mut(k) {
+                            if tv.is_object() {
+                                Self::merge_schema_value(
+                                    tv,
+                                    facing_schema,
+                                    formula_presets,
+                                    facing_schema,
+                                );
+                            } else if !tv.is_null() {
+                                *tv = Value::Null;
+                            }
+                        } else {
+                            tmap.insert(k.clone(), Value::Null);
+                        }
+                    } else if k == "preset" && sv.is_null() {
+                        if let Some(tv) = tmap.get_mut(k) {
+                            if !tv.is_string() && !tv.is_null() {
+                                *tv = Value::Null;
+                            }
+                        } else {
+                            tmap.insert(k.clone(), Value::Null);
+                        }
+                    } else if let Some(tv) = tmap.get_mut(k) {
+                        Self::merge_schema_value(tv, sv, formula_presets, facing_schema);
+                    } else {
+                        tmap.insert(k.clone(), sv.clone());
+                    }
+                }
+            }
+            Value::Array(sarr) => {
+                if let Value::Array(tarr) = target {
+                    if tarr.len() != sarr.len() {
+                        *target = schema.clone();
+                    } else {
+                        for (tv, sv) in tarr.iter_mut().zip(sarr.iter()) {
+                            Self::merge_schema_value(tv, sv, formula_presets, facing_schema);
+                        }
+                    }
+                } else {
+                    *target = schema.clone();
+                }
+            }
+            Value::Number(sn) => {
+                if let Value::Number(tn) = target {
+                    if sn.is_f64() && (tn.is_i64() || tn.is_u64()) {
+                        *target = json!(tn.as_f64().unwrap_or(0.0));
+                    } else if (sn.is_i64() || sn.is_u64()) && tn.is_f64() {
+                        *target = json!(tn.as_f64().unwrap_or(0.0).round() as i64);
+                    }
+                } else {
+                    *target = schema.clone();
+                }
+            }
+            Value::Bool(_) => {
+                if !target.is_boolean() {
+                    *target = schema.clone();
+                }
+            }
+            Value::String(_) => {
+                if !target.is_string() {
+                    *target = schema.clone();
+                }
+            }
+            Value::Null => {
+                if !target.is_null() {
+                    *target = Value::Null;
+                }
+            }
+        }
+    }
 }

@@ -79,7 +79,7 @@ pub struct SceneEvent {
 }
 
 pub(crate) fn decode_scene(text: &str) -> Result<crate::scene::Scene, String> {
-    let document = serde_json::from_str::<crate::world::WorldDocument>(text)
+    let document = crate::world::WorldDocument::decode_json(text)
         .map_err(|e| format!("Invalid scene: {e}"))?;
     let mut scene = document.snapshot(f64::from(document.first))?;
     scene.animation.first = document.first;

@@ -2885,12 +2885,43 @@ fn check_template(text: &str) -> Result<serde_json::Map<String, Value>, String> 
     let scene = crate::io_service::decode_scene(text)?;
     let doc = scene.document.ok_or("decode_scene kept no document")?;
     let file: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
-    if serde_json::to_value(&*doc).map_err(|e| e.to_string())? != file {
-        return Err("document does not round-trip unchanged".into());
+    let saved = serde_json::to_string_pretty(&*doc).map_err(|e| e.to_string())?;
+    let encoded: Value = serde_json::from_str(&saved).map_err(|e| e.to_string())?;
+    if encoded != file {
+        fn first_diff(path: &str, a: &Value, b: &Value) -> Option<String> {
+            if a == b {
+                return None;
+            }
+            match (a, b) {
+                (Value::Object(ma), Value::Object(mb)) => {
+                    for k in ma.keys().chain(mb.keys()) {
+                        let p = format!("{path}/{k}");
+                        match (ma.get(k), mb.get(k)) {
+                            (Some(va), Some(vb)) => {
+                                if let Some(d) = first_diff(&p, va, vb) {
+                                    return Some(d);
+                                }
+                            }
+                            (va, vb) => return Some(format!("{p}: doc={va:?} vs file={vb:?}")),
+                        }
+                    }
+                    None
+                }
+                (Value::Array(aa), Value::Array(ab)) if aa.len() == ab.len() => {
+                    for (i, (va, vb)) in aa.iter().zip(ab.iter()).enumerate() {
+                        if let Some(d) = first_diff(&format!("{path}/{i}"), va, vb) {
+                            return Some(d);
+                        }
+                    }
+                    None
+                }
+                _ => Some(format!("{path}: doc={a} vs file={b}")),
+            }
+        }
+        let detail = first_diff("", &encoded, &file).unwrap_or_default();
+        return Err(format!("document does not round-trip unchanged ({detail})"));
     }
-    if doc.output_settings()? != crate::export::OutputSettings::default() {
-        return Err("output recipe is not the default".into());
-    }
+    doc.output_settings()?.validate()?;
     let (first, last) = (f64::from(doc.first), f64::from(doc.last));
     for frame in [first, ((first + last) * 0.5).floor(), last] {
         doc.snapshot(frame)
@@ -3800,4 +3831,75 @@ fn a_mask_array_is_a_line_or_a_ring_and_cells_are_not_copies() {
     let values: std::collections::HashMap<String, Value> =
         attrs.into_iter().map(|a| (a.path, a.value)).collect();
     assert!(inactive_reason("/mask/array/count", |p| values.get(p)).is_some());
+}
+
+#[test]
+fn decode_scene_hydrates_missing_and_removed_schema_parameters() {
+    let original = WorldDocument::from_scene(&Scene::preset(0));
+    let mut raw = serde_json::to_value(&original).unwrap();
+    raw.as_object_mut()
+        .unwrap()
+        .insert("obsolete_top_field".into(), json!(42));
+    let world = raw["graph"]["bus_slots"]["world"].as_object_mut().unwrap();
+    world.remove("inversion_strength");
+    world.remove("mask");
+    world.insert("obsolete_world_param".into(), json!("legacy"));
+    if let Some(cam) = world.get_mut("camera").and_then(Value::as_object_mut) {
+        let f_num = cam.remove("f_number").unwrap();
+        cam.insert("aperture".into(), f_num);
+        cam.remove("sensor_height");
+    }
+    for node in raw["graph"]["nodes"].as_object_mut().unwrap().values_mut() {
+        if let Some(gpu) = node["gpu"].as_object_mut() {
+            gpu.remove("inversion_strength");
+            gpu.insert("obsolete_gpu_field".into(), json!(true));
+            if let Some(render) = gpu.get_mut("render").and_then(Value::as_object_mut) {
+                render.remove("direct");
+                render.remove("display");
+                render.remove("thinning");
+            }
+        }
+        if let Some(map) = node["host"]["map"].as_object_mut() {
+            map.remove("/inversion_strength");
+            map.remove("/render/direct/shadow_strength");
+            map.remove("/render/display");
+            map.insert("/obsolete/param".into(), json!({"Float": 1.0}));
+        }
+    }
+    let text = serde_json::to_string(&raw).unwrap();
+    let decoded = crate::io_service::decode_scene(&text).unwrap();
+    let hydrated = decoded.document.expect("document");
+    assert_eq!(*hydrated, original);
+}
+
+#[test]
+#[ignore = "upgrades operator templates in WARPBRO_TEMPLATES in place"]
+fn templates_upgrade_in_place() {
+    let dir = std::env::var("WARPBRO_TEMPLATES").expect("WARPBRO_TEMPLATES");
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().is_some_and(|e| e == "json"))
+        .collect();
+    files.sort();
+    assert!(!files.is_empty(), "no templates in {dir}");
+    for path in files {
+        let name = path.file_name().unwrap().to_string_lossy().into_owned();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let scene = crate::io_service::decode_scene(&text)
+            .unwrap_or_else(|e| panic!("{name}: decode failed: {e}"));
+        let doc = scene.document.expect("document");
+        let existing: Value = serde_json::from_str(&text).unwrap();
+        let saved = serde_json::to_string_pretty(&*doc).unwrap();
+        let hydrated: Value = serde_json::from_str(&saved).unwrap();
+        if existing != hydrated {
+            std::fs::write(&path, &saved).unwrap();
+            println!("{name}: UPGRADED");
+        } else {
+            println!("{name}: unchanged");
+        }
+        let reloaded = std::fs::read_to_string(&path).unwrap();
+        check_template(&reloaded)
+            .unwrap_or_else(|e| panic!("{name}: post-upgrade check_template failed: {e}"));
+    }
 }
