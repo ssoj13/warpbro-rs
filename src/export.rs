@@ -7,7 +7,6 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    fs::File,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -16,17 +15,16 @@ use std::{
     },
     time::Duration,
 };
+pub use video_io::catalog::PngVideo;
+use video_io::cli::ffmpeg;
+pub use video_io::job::{ExportJob, MAX_AXIS, MAX_QP, PEAK_NITS};
+use video_io::video::{Outcome, Ticket};
 
 const HIGH_QUALITY_QP: u8 = 18;
 /// The HDR PNG export's default target peak (`ExportSettings::png_peak_nits`).
 const DEFAULT_PNG_PEAK_NITS: f32 = 1000.0;
-/// Recipe limits, one source for `OutputSettings::validate`, the document's attribute ranges
-/// (`world::attribute_range`) and the Render / Encode widgets.
-pub const MAX_AXIS: usize = 16384;
 /// The renderer's 64 megapixel frame limit.
 const MAX_PIXELS: usize = 67_108_864;
-pub const MAX_QP: u8 = 51;
-pub const PEAK_NITS: std::ops::RangeInclusive<f32> = 100.0..=10000.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExportFormat {
@@ -81,10 +79,6 @@ impl VideoEncoder {
         }
     }
 }
-
-use video_io::cli::ffmpeg;
-pub use video_io::video::PngVideo;
-use video_io::video::{Outcome, Ticket};
 
 /// The encode recipe of an export: the values of the document's `OutputSettings` node (branch
 /// `/output`), deserialized strictly. Its `Default` seeds that node in a fresh document, so the
@@ -227,32 +221,6 @@ impl OutputSettings {
     }
 }
 
-/// The per-run export choices kept in preferences: file stem, frame range and video cadence.
-/// A preset recipe never carries them (`OutputSettings` lives in the document).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExportJob {
-    /// File name stem; every export writes into a new `~/.warpbro/out/<timestamp>` folder.
-    pub name: String,
-    pub first: u32,
-    pub last: u32,
-    pub fps_num: u32,
-    pub fps_den: u32,
-    pub overwrite: bool,
-}
-impl Default for ExportJob {
-    fn default() -> Self {
-        Self {
-            name: "frame".into(),
-            first: 1,
-            last: 1,
-            fps_num: 24,
-            fps_den: 1,
-            overwrite: false,
-        }
-    }
-}
-
 /// One export: the preferences job, the document's recipe and the values fixed when it
 /// starts. Assembled at runtime, never persisted as a whole.
 #[derive(Clone, Debug, PartialEq)]
@@ -278,34 +246,6 @@ impl Default for ExportSettings {
             samples: 32,
             transform: None,
         }
-    }
-}
-impl ExportJob {
-    pub fn fps(&self) -> f64 {
-        self.fps_num as f64 / self.fps_den.max(1) as f64
-    }
-    /// UI values use ordinary frames/second. Recognize broadcast rates before
-    /// reducing the custom millisecond fraction, preserving exact encoder timing.
-    pub fn set_fps(&mut self, fps: f64) {
-        let fps = if fps.is_finite() {
-            fps.clamp(1.0, 240.0)
-        } else {
-            24.0
-        };
-        for (num, den) in [(24000, 1001), (30000, 1001), (60000, 1001), (120000, 1001)] {
-            if (fps - num as f64 / den as f64).abs() < 0.0005 {
-                self.fps_num = num;
-                self.fps_den = den;
-                return;
-            }
-        }
-        let num = (fps * 1000.0).round() as u32;
-        let (mut a, mut b) = (num, 1000);
-        while b != 0 {
-            (a, b) = (b, a % b);
-        }
-        self.fps_num = num / a;
-        self.fps_den = 1000 / a;
     }
 }
 impl ExportSettings {
@@ -382,24 +322,27 @@ impl ExportSettings {
             ))
         }
     }
-    /// Thin settings adapter to the shared PNG-video exporter.
-    fn video_options<'a>(&self, input: &'a Path) -> video_io::video::PngVideoOptions<'a> {
-        video_io::video::PngVideoOptions {
-            codec: self.output.png_video,
+    /// Thin settings adapter to the shared PNG-video sequence exporter.
+    fn sequence<'a>(&self, input: &'a Path) -> video_io::video::SequenceJob<'a> {
+        video_io::video::SequenceJob {
             encoding: self.output.png,
             input,
             start_number: self.job.first,
             frame_count: self.frame_count(),
             fps_num: self.job.fps_num,
             fps_den: self.job.fps_den,
-            qp: self.output.qp as u32,
         }
     }
     /// Inspect the host settings adapter through the existing argument oracles.
     #[cfg(test)]
     fn ffmpeg_args(&self, levels: Option<HdrLevels>, output: &Path) -> Result<Vec<String>, String> {
         let input = self.video_input();
-        video_io::cli::ffmpeg_args(&self.video_options(&input), levels, output)
+        let settings = self
+            .output
+            .png_video
+            .settings(u32::from(self.output.qp))
+            .ok_or_else(|| "PNG video export is off".to_string())?;
+        video_io::cli::ffmpeg_args(&self.sequence(&input), &settings, levels, output)
             .map_err(|e| e.to_string())?
             .into_iter()
             .map(|arg| {
@@ -1124,8 +1067,15 @@ impl ExportSettings {
         video: &Path,
     ) -> Result<Ticket, video_io::Error> {
         let input = self.video_input();
+        let settings = self
+            .output
+            .png_video
+            .settings(u32::from(self.output.qp))
+            .ok_or_else(|| video_io::Error::Invalid("PNG video export is off".into()))?;
         video_io::video::encode(
-            &self.video_options(&input),
+            &self.sequence(&input),
+            &settings,
+            video_io::video::Backend::Cli,
             levels,
             video,
             self.job.overwrite,
@@ -1291,211 +1241,63 @@ fn write_exr(path: &Path, frame: &Frame, overwrite: bool) -> Result<(), String> 
     )
 }
 
+/// Thin SDR HEVC adapter over [`video_io::native::Encoder`]: encodes linear BT.709 display light
+/// (`frame.light`) into 8-bit BT.1886 RGB24 (`crate::color::bt1886_code`) and pushes it into the
+/// shared native encoder (`hevc_vulkan` or `hevc_kvz`).
 struct HevcSink {
-    ctx: av_codec_core::AVCodecContext,
-    sws: Box<av_swscale::SwsContext>,
-    upload_sws: Option<Box<av_swscale::SwsContext>>,
-    rgb: Box<av_util_frame::AVFrame>,
-    yuv: Box<av_util_frame::AVFrame>,
-    nv12: Option<Box<av_util_frame::AVFrame>>,
-    hardware: bool,
-    writer: Option<av_format_movenc::MovWriter<File>>,
-    output: Option<av_util_core::outfile::AtomicOut>,
+    encoder: video_io::native::Encoder,
+    rgb: Vec<u8>,
     width: usize,
     height: usize,
-    fps: (u32, u32),
-    frames: i64,
-    header: bool,
-    timing: VideoTiming,
-}
-
-/// Presentation interval on MovWriter's implicit decode clock. B-frame reordering
-/// must not introduce a leading empty edit into a clip that starts at frame zero.
-#[derive(Default)]
-struct VideoTiming {
-    first_dts: Option<i64>,
-    bounds: Option<(i64, i64)>,
-}
-impl VideoTiming {
-    fn record(&mut self, pts: i64, dts: i64, duration: i64) -> Result<(), String> {
-        if duration <= 0 {
-            return Err("Invalid HEVC packet duration".into());
-        }
-        let end = pts.checked_add(duration).ok_or("HEVC timestamp overflow")?;
-        self.first_dts.get_or_insert(dts);
-        self.bounds = Some(match self.bounds {
-            Some((first, last)) => (first.min(pts), last.max(end)),
-            None => (pts, end),
-        });
-        Ok(())
-    }
-    fn window(&self) -> Result<(i64, i64), String> {
-        let origin = self.first_dts.ok_or("HEVC output has no packets")?;
-        let (first, last) = self
-            .bounds
-            .ok_or("HEVC output has no presentation interval")?;
-        let start = first
-            .checked_sub(origin)
-            .ok_or("HEVC edit start overflow")?;
-        let end = last.checked_sub(origin).ok_or("HEVC edit end overflow")?;
-        if start < 0 || end <= start {
-            return Err("Invalid HEVC presentation interval".into());
-        }
-        Ok((start, end))
-    }
-}
-
-fn av_error(error: impl std::fmt::Debug) -> String {
-    format!("{error:?}")
-}
-/// Fixed-size conversion buffers belong to one export writer and are reused
-/// for its lifetime. CPU encoding copies input; Vulkan upload owns its surface.
-fn video_buffer(
-    width: usize,
-    height: usize,
-    format: av_util_pixfmt::AVPixelFormat,
-) -> Result<Box<av_util_frame::AVFrame>, String> {
-    let mut frame = av_util_frame::av_frame_alloc();
-    frame.format = format as i32;
-    frame.width = width as i32;
-    frame.height = height as i32;
-    av_util_frame::av_frame_get_buffer(&mut frame, 0).map_err(av_error)?;
-    Ok(frame)
+    frames: usize,
 }
 impl HevcSink {
     fn new(settings: &ExportSettings) -> Result<Self, String> {
-        use av_util_pixfmt::{AVColorSpace as C, AVPixelFormat as P};
+        use video_io::catalog::{Chroma, Codec, Container, Depth, Encoder, Rate, VideoSettings};
         let hardware = settings.output.encoder == VideoEncoder::Vulkan;
-        let entry = av_codec::avcodec_find_encoder_by_name(if hardware {
-            "hevc_vulkan"
-        } else {
-            "hevc_kvz"
-        })
-        .ok_or("Selected ffmpeg-rs HEVC encoder is not registered")?;
-        let sw_format = if hardware { P::NV12 } else { P::YUV420P };
-        let mut ctx = av_codec_core::avcodec_alloc_context3();
-        ctx.width = settings.output.width as i32;
-        ctx.height = settings.output.height as i32;
-        ctx.pix_fmt = if hardware { P::VULKAN } else { sw_format };
-        ctx.set_cfr_timing(settings.job.fps_num, settings.job.fps_den)
-            .map_err(av_error)?;
-        ctx.set_color_metadata(av_codec_core::AVCodecColorMetadata::bt709_limited());
-        if hardware {
-            ctx.hw_frames_ctx = Some(av_hwaccel_vulkan::hevc_vulkan_alloc_src_frames(
-                ctx.width, ctx.height, 4, sw_format,
-            ).map_err(|error| format!("Vulkan Video unavailable: {error:?}. Select CPU · Kvazaar to use software encoding."))?.into());
-            ctx.max_b_frames = 0;
-            ctx.gop_size = (settings.job.fps_num / settings.job.fps_den).max(1) as i32;
-        }
-        ctx.flags |=
-            av_codec_core::AV_CODEC_FLAG_GLOBAL_HEADER | av_codec_core::AV_CODEC_FLAG_QSCALE;
-        ctx.global_quality = i32::from(settings.output.qp) * av_codec_core::FF_QP2LAMBDA;
-        if hardware {
-            let qp = settings.output.qp.to_string();
-            ctx.open_with_opts((entry.make)(), &[("qp", &qp), ("async_depth", "1")])
-                .map_err(|error| format!("Vulkan Video cannot encode {}×{}: {error:?}. Select CPU · Kvazaar for software encoding.", settings.output.width, settings.output.height))?;
-        } else {
-            // The pinned Kvazaar inter path produces block displacement on
-            // moving sources. Its no-preset route is bounded all-intra, with
-            // QP still controlled by global_quality; no temporal references.
-            ctx.gop_size = 1;
-            ctx.open_with_opts((entry.make)(), &[]).map_err(av_error)?;
-        }
-        let mut sws = av_swscale::sws_alloc_context();
-        sws.set_src(settings.output.width, settings.output.height, P::RGB24);
-        sws.set_dst(settings.output.width, settings.output.height, P::YUV420P);
-        sws.set_colorspace(C::AVCOL_SPC_BT709);
-        sws.set_range(true, false);
-        av_swscale::sws_init_context(&mut sws)
-            .map_err(|e| format!("RGB to YUV conversion: {e:?}"))?;
-        // RGB → NV12 is not yet supported by the shared scaler. Convert color
-        // once to planar 4:2:0, then only repack chroma for Vulkan upload.
-        let upload_sws = if hardware {
-            let mut packing = av_swscale::sws_alloc_context();
-            packing.set_src(settings.output.width, settings.output.height, P::YUV420P);
-            packing.set_dst(settings.output.width, settings.output.height, P::NV12);
-            packing.set_range(false, false);
-            av_swscale::sws_init_context(&mut packing).map_err(av_error)?;
-            Some(packing)
-        } else {
-            None
-        };
-        let mut output =
-            av_util_core::outfile::AtomicOut::create(&settings.output(), settings.job.overwrite)
-                .map_err(|e| e.to_string())?;
-        let writer =
-            av_format_movenc::MovWriter::new(output.take_file().map_err(|e| e.to_string())?)
-                .map_err(av_error)?;
-        let mut sink = Self {
-            ctx,
-            sws,
-            upload_sws,
-            rgb: video_buffer(settings.output.width, settings.output.height, P::RGB24)?,
-            yuv: video_buffer(settings.output.width, settings.output.height, P::YUV420P)?,
-            nv12: if hardware {
-                Some(video_buffer(
-                    settings.output.width,
-                    settings.output.height,
-                    P::NV12,
-                )?)
+        let video = VideoSettings {
+            codec: Codec::Hevc,
+            container: Container::Mp4,
+            depth: Depth::Eight,
+            chroma: Chroma::Yuv420,
+            rate: Rate::Crf(u32::from(settings.output.qp)),
+            preset: None,
+            encoder: Some(if hardware {
+                Encoder::HevcVulkan
             } else {
-                None
-            },
-            hardware,
-            writer: Some(writer),
-            output: Some(output),
+                Encoder::Kvazaar
+            }),
+            ..VideoSettings::default()
+        };
+        let params = video_io::native::Params {
+            video: &video,
+            signal: PngEncoding::Sdr8,
+            width: settings.output.width as u32,
+            height: settings.output.height as u32,
+            fps_num: settings.job.fps_num,
+            fps_den: settings.job.fps_den,
+            levels: None,
+            audio: None,
+        };
+        let encoder =
+            video_io::native::Encoder::open(&params, &settings.output(), settings.job.overwrite)
+                .map_err(|error| {
+                    if hardware {
+                        format!(
+                            "Vulkan Video cannot encode {}×{}: {error}. Select CPU · Kvazaar for software encoding.",
+                            settings.output.width, settings.output.height
+                        )
+                    } else {
+                        error.to_string()
+                    }
+                })?;
+        Ok(Self {
+            encoder,
+            rgb: vec![0u8; settings.output.width * settings.output.height * 3],
             width: settings.output.width,
             height: settings.output.height,
-            fps: (settings.job.fps_num, settings.job.fps_den),
             frames: 0,
-            header: false,
-            timing: VideoTiming::default(),
-        };
-        if !sink.ctx.extradata.is_empty() {
-            sink.header(&sink.ctx.extradata.clone())?;
-        }
-        Ok(sink)
-    }
-    fn header(&mut self, au: &[u8]) -> Result<(), String> {
-        let config =
-            av_codec::hvcc_from_au(au).map_err(|e| format!("HEVC configuration: {e:?}"))?;
-        let writer = self.writer.as_mut().ok_or("HEVC writer is closed")?;
-        let track = writer
-            .add_video(
-                av_format_core::Codec::Hevc,
-                &config,
-                self.width as u32,
-                self.height as u32,
-                self.fps.0,
-                &av_format_core::UNITY_MATRIX,
-            )
-            .map_err(av_error)?;
-        // BT.709 primaries, BT.709 transfer (BT.1886 codes, `color::bt1886_code`), BT.709
-        // matrix, limited YUV: the one SDR video description, as the PNG export's video.
-        // `hvc1` (parameter sets only in hvcC), which QuickTime and Apple players require; the
-        // writer defaults to C's `hev1`.
-        writer
-            .set_video_fourcc_for(track, *b"hvc1")
-            .map_err(av_error)?;
-        let colour = self.ctx.color_metadata();
-        writer
-            .set_video_color_for(
-                track,
-                colour.primaries as i32,
-                colour.transfer as i32,
-                colour.matrix as i32,
-                colour.range == av_util_pixfmt::AVColorRange::AVCOL_RANGE_JPEG,
-            )
-            .map_err(av_error)?;
-        self.header = true;
-        Ok(())
-    }
-    /// Encoder time-base ticks (`fps_den / fps_num`) as track ticks (`1 / fps_num`, the
-    /// timescale `add_video` declares): exactly `v * fps_den`, the rescale C does between the
-    /// encoder and the stream time base.
-    fn ticks(&self, v: i64) -> Result<i64, String> {
-        v.checked_mul(i64::from(self.fps.1))
-            .ok_or_else(|| "HEVC timestamp overflow".to_string())
+        })
     }
     fn write(&mut self, frame: &Frame) -> Result<(), String> {
         if frame.light_kind.hdr() {
@@ -1507,120 +1309,24 @@ impl HevcSink {
         if frame.light.len() != self.width * self.height {
             return Err("Linear display pixel buffer is incomplete".into());
         }
-        let src = &mut self.rgb;
-        let stride = src.linesize[0] as usize;
-        let plane = src.data[0]
-            .as_mut()
-            .and_then(|b| b.data_mut())
-            .ok_or("RGB input plane is not writable")?;
-        for y in 0..self.height {
-            for x in 0..self.width {
-                let p = frame.light[y * self.width + x];
-                let i = y * stride + x * 3;
-                for c in 0..3 {
-                    plane[i + c] = (crate::color::bt1886_code(p[c]) * 255.0 + 0.5) as u8;
-                }
+        for (dst, p) in self.rgb.as_chunks_mut::<3>().0.iter_mut().zip(&frame.light) {
+            for c in 0..3 {
+                dst[c] = (crate::color::bt1886_code(p[c]) * 255.0 + 0.5) as u8;
             }
         }
-        let dst = &mut self.yuv;
-        av_swscale::sws_scale_frame(&self.sws, dst, src).map_err(av_error)?;
-        // `set_cfr_timing`: one frame is one tick of the encoder time base, frame n at pts n.
-        dst.pts = self.frames;
-        dst.duration = 1;
-        self.ctx.color_metadata().apply_to_frame(dst);
-        if self.hardware {
-            let pool = self
-                .ctx
-                .hw_frames_ctx
-                .as_ref()
-                .ok_or("Vulkan frame pool is missing")?;
-            let nv = self.nv12.as_mut().ok_or("NV12 buffer missing")?;
-            av_swscale::sws_scale_frame(
-                self.upload_sws.as_ref().ok_or("NV12 packer missing")?,
-                nv,
-                dst,
-            )
-            .map_err(av_error)?;
-            self.ctx.color_metadata().apply_to_frame(nv);
-            let mut hw = av_hwaccel_vulkan::hwupload_frame(pool, nv).map_err(av_error)?;
-            hw.pts = dst.pts;
-            hw.duration = dst.duration;
-            self.ctx.color_metadata().apply_to_frame(&mut hw);
-            self.ctx.avcodec_send_frame(Some(&hw)).map_err(av_error)?;
-        } else {
-            self.ctx.avcodec_send_frame(Some(dst)).map_err(av_error)?;
-        }
+        self.encoder
+            .push(video_io::native::Pixels::Rgb24(&self.rgb))
+            .map_err(|e| e.to_string())?;
         self.frames += 1;
-        self.drain()
+        Ok(())
     }
-    fn drain(&mut self) -> Result<(), String> {
-        loop {
-            let mut packet = av_codec_core::AVPacket::new();
-            match self.ctx.avcodec_receive_packet(&mut packet) {
-                Ok(()) => {
-                    if !self.header {
-                        self.header(packet.data())?;
-                    }
-                    let pts = self.ticks(packet.pts)?;
-                    let dts = self.ticks(packet.dts)?;
-                    let duration = self.ticks(packet.duration)?;
-                    self.timing.record(pts, dts, duration)?;
-                    if duration != i64::from(self.fps.1) {
-                        return Err("Unexpected HEVC packet duration".into());
-                    }
-                    let delta = i32::try_from(
-                        pts.checked_sub(dts)
-                            .ok_or("HEVC composition timestamp overflow")?,
-                    )
-                    .map_err(|_| "HEVC composition timestamp exceeds i32")?;
-                    if delta < 0 {
-                        return Err("HEVC packet has PTS before DTS".into());
-                    }
-                    self.writer
-                        .as_mut()
-                        .ok_or("HEVC writer closed")?
-                        .write_sample(
-                            0,
-                            &av_codec::annexb_to_length_prefixed(packet.data()),
-                            self.fps.1,
-                            delta,
-                            packet.flags & av_codec_core::AV_PKT_FLAG_KEY != 0,
-                        )
-                        .map_err(av_error)?;
-                }
-                Err(av_util_core::AvError::Posix(11)) | Err(av_util_core::AvError::Eof) => {
-                    return Ok(());
-                }
-                Err(error) => return Err(av_error(error)),
-            }
-        }
-    }
-    fn finish(mut self, cancel: &AtomicBool) -> Result<(), String> {
+    fn finish(self, cancel: &AtomicBool) -> Result<(), String> {
         if cancel.load(Ordering::Acquire) || self.frames == 0 {
             return Ok(());
         }
-        self.ctx.avcodec_send_frame(None).map_err(av_error)?;
-        self.drain()?;
-        if cancel.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        self.writer
-            .as_mut()
-            .ok_or("HEVC writer closed")?
-            .set_video_edits(&[self.timing.window()?])
-            .map_err(av_error)?;
-        self.writer
-            .take()
-            .ok_or("HEVC writer closed")?
-            .finish()
-            .map_err(av_error)?;
-        if cancel.load(Ordering::Acquire) {
-            return Ok(());
-        }
-        self.output
-            .take()
-            .ok_or("HEVC output closed")?
-            .commit()
+        self.encoder
+            .finish_or_cancel(&|| cancel.load(Ordering::Acquire))
+            .map(|_| ())
             .map_err(|e| e.to_string())
     }
 }
@@ -2262,7 +1968,7 @@ mod tests {
             .map(PathBuf::from)
             .unwrap_or_else(|| temp_dir("motion"));
         std::fs::create_dir_all(&dir).unwrap();
-        let mut reference = File::create(dir.join("motion.rgb")).unwrap();
+        let mut reference = std::fs::File::create(dir.join("motion.rgb")).unwrap();
         let mut source = frame(256, 256);
         let mut sinks: Vec<_> = [VideoEncoder::Kvazaar, VideoEncoder::Vulkan]
             .into_iter()

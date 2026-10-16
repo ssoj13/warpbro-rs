@@ -1693,7 +1693,7 @@ fn attribute_choices(path: &str) -> Vec<Value> {
         "/output/format" => return variants(crate::export::ExportFormat::ALL),
         "/output/encoder" => return variants(crate::export::VideoEncoder::ALL),
         "/output/png" => return variants(video_io::export::PngEncoding::ALL),
-        "/output/png_video" => return variants(video_io::video::PngVideo::ALL),
+        "/output/png_video" => return variants(video_io::catalog::PngVideo::ALL),
         _ => {}
     }
     let values: &[&str] = match path {

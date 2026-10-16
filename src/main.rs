@@ -79,25 +79,7 @@ pub fn out_root() -> std::path::PathBuf {
 
 /// A new, unique `<root>/<local timestamp>` folder for one export or screenshot.
 pub fn new_out_dir(root: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    std::fs::create_dir_all(root).map_err(|e| format!("{}: {e}", root.display()))?;
-    let stamp = jiff::Zoned::now().strftime("%Y-%m-%d_%H-%M-%S").to_string();
-    // Two outputs within one second get -2, -3, ...: `create_dir` is the atomic claim.
-    for n in 1..1000 {
-        let dir = root.join(if n == 1 {
-            stamp.clone()
-        } else {
-            format!("{stamp}-{n}")
-        });
-        match std::fs::create_dir(&dir) {
-            Ok(()) => return Ok(dir),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(format!("{}: {e}", dir.display())),
-        }
-    }
-    Err(format!(
-        "{}: no free folder name for {stamp}",
-        root.display()
-    ))
+    video_io::job::new_out_dir(root).map_err(|e| e.to_string())
 }
 
 /// Render (or only time) every gallery preset offscreen.
