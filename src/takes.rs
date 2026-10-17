@@ -934,6 +934,13 @@ impl Default for Recorder {
 }
 
 impl Recorder {
+    pub fn with_min_secs(min_secs: f64) -> Self {
+        Self {
+            min_secs,
+            ..Self::default()
+        }
+    }
+
     /// Abandon a gesture in progress (the document was replaced).
     pub fn cancel(&mut self) {
         self.live = None;
@@ -1019,6 +1026,12 @@ impl Default for DragRecorder {
 }
 
 impl DragRecorder {
+    pub fn with_min_secs(min_secs: f64) -> Self {
+        Self {
+            min_secs,
+            ..Self::default()
+        }
+    }
     /// One frame of a drag: the dragged nodes' local transforms after this frame's edit. The
     /// first call starts the drag at document frame `frame`.
     pub fn sample(&mut self, dt: f64, frame: f64, poses: &[(NodeId, Trs)]) {

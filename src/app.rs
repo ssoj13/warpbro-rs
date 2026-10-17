@@ -730,19 +730,15 @@ impl App {
             record_takes: true,
             min_take_secs: crate::takes::DEFAULT_MIN_SECS,
             camera_slots: Default::default(),
-            takes_recorder: crate::takes::Recorder {
-                min_secs: crate::takes::DEFAULT_MIN_SECS,
-                ..Default::default()
-            },
+            takes_recorder: crate::takes::Recorder::with_min_secs(crate::takes::DEFAULT_MIN_SECS),
             navigated: false,
             takes_view: Default::default(),
             tool: ViewTool::Select,
             gizmo: soluwell_viewport::gizmo::Gizmo::new(soluwell_viewport::gizmo::GizmoConfig::default()),
             gizmo_gesture: None,
-            drag_recorder: crate::takes::DragRecorder {
-                min_secs: crate::takes::DEFAULT_MIN_SECS,
-                ..Default::default()
-            },
+            drag_recorder: crate::takes::DragRecorder::with_min_secs(
+                crate::takes::DEFAULT_MIN_SECS,
+            ),
             prefs_grids: Default::default(),
             dock: dock::default_layout(),
             dock_focus: None,
