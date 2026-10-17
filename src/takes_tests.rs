@@ -363,3 +363,52 @@ fn non_destructive_take_filters_toggle_live_and_roundtrip_through_json_and_clips
     assert_eq!(restored.effective_poses(), &raw_poses);
     assert_eq!(restored.trs_at(120.0, 0, 239, 24.0).unwrap(), raw_mid);
 }
+
+#[test]
+fn recorder_and_drag_recorder_respect_custom_min_secs_threshold() {
+    // 0.5 s gesture (30 frames at 60 Hz) is dropped when min_secs = 1.0 s, kept when min_secs = 0.4 s.
+    let mut r = Recorder {
+        min_secs: 1.0,
+        ..Default::default()
+    };
+    let mut yaw = 0.0;
+    for _ in 0..30 {
+        let next = yaw + 1.0;
+        tick(&mut r, cam(yaw), cam(next), true);
+        yaw = next;
+    }
+    let mut finished = None;
+    for _ in 0..30 {
+        finished = finished.or(tick(&mut r, cam(yaw), cam(yaw), false).finished);
+    }
+    assert!(finished.is_none(), "0.5 s camera take dropped when min_secs = 1.0");
+
+    r.min_secs = 0.4;
+    for _ in 0..30 {
+        let next = yaw + 1.0;
+        tick(&mut r, cam(yaw), cam(next), true);
+        yaw = next;
+    }
+    for _ in 0..30 {
+        finished = finished.or(tick(&mut r, cam(yaw), cam(yaw), false).finished);
+    }
+    assert!(finished.is_some(), "0.5 s camera take kept when min_secs = 0.4");
+
+    // DragRecorder: 0.5 s drag is dropped when min_secs = 1.0 s, kept when min_secs = 0.4 s.
+    let mut d = DragRecorder {
+        min_secs: 1.0,
+        ..Default::default()
+    };
+    let a = node(1);
+    for i in 0..=30 {
+        d.sample(1.0 / 60.0, 0.0, &[(a, trs(0.0, i as f32))]);
+    }
+    assert!(d.finish().is_empty(), "0.5 s drag take dropped when min_secs = 1.0");
+
+    d.min_secs = 0.4;
+    for i in 0..=30 {
+        d.sample(1.0 / 60.0, 0.0, &[(a, trs(0.0, i as f32))]);
+    }
+    assert_eq!(d.finish().len(), 1, "0.5 s drag take kept when min_secs = 0.4");
+}
+

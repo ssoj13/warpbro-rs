@@ -128,6 +128,8 @@ pub(crate) struct App {
     recorder_options: crate::camera_recorder::Options,
     /// Navigation gestures become takes (`Settings::record_takes`).
     record_takes: bool,
+    /// Minimum duration (seconds) required to keep a recorded take (`Settings::min_take_secs`).
+    min_take_secs: f64,
     /// The viewport toolbar's CamClip: application state (a new scene keeps it), saved with a
     /// scene (`WorldDocument::camera_slots`) and replaced by a scene that carries one.
     camera_slots: crate::camera_slots::CameraSlots,
@@ -550,6 +552,9 @@ struct Settings {
     recorder: crate::camera_recorder::Options,
     /// Navigation gestures are recorded as takes (the Takes panel's record switch).
     record_takes: bool,
+    /// Minimum gesture duration (seconds) required to keep a recorded take.
+    #[serde(default = "default_min_take_secs")]
+    min_take_secs: f64,
     /// The CamClip's last state, kept between scenes and runs (`App::camera_slots`).
     camera_slots: crate::camera_slots::CameraSlots,
     fonts: dock::Fonts,
@@ -567,6 +572,9 @@ struct Settings {
     file_dialogs: crate::file_dialogs::History,
     add_menu: crate::world_ui::AddMenuMemory,
 }
+fn default_min_take_secs() -> f64 {
+    crate::takes::MIN_SECS
+}
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -577,6 +585,7 @@ impl Default for Settings {
             controls: Default::default(),
             recorder: Default::default(),
             record_takes: true,
+            min_take_secs: default_min_take_secs(),
             camera_slots: Default::default(),
             fonts: Default::default(),
             layout: None,
@@ -719,6 +728,7 @@ impl App {
             prefs: Default::default(),
             recorder_options: Default::default(),
             record_takes: true,
+            min_take_secs: crate::takes::MIN_SECS,
             camera_slots: Default::default(),
             takes_recorder: Default::default(),
             navigated: false,
@@ -810,6 +820,11 @@ impl App {
             self.recorder_options = settings.recorder;
             self.toolbar = settings.toolbar;
             self.record_takes = settings.record_takes;
+            if settings.min_take_secs.is_finite() {
+                self.min_take_secs = settings.min_take_secs.clamp(crate::takes::MIN_SECS, 600.0);
+                self.takes_recorder.min_secs = self.min_take_secs;
+                self.drag_recorder.min_secs = self.min_take_secs;
+            }
             self.camera_slots = settings.camera_slots;
             self.layouts.store = settings.layouts;
             self.export.restore(settings.export);
@@ -1449,6 +1464,7 @@ impl App {
     /// A manipulator drag ended: its transform takes go to the document.
     fn end_drag(&mut self) {
         if self.gizmo_gesture.take().is_some() {
+            self.drag_recorder.min_secs = self.min_take_secs;
             for take in self.drag_recorder.finish() {
                 self.world.add_take(take);
             }
@@ -1471,6 +1487,7 @@ impl App {
             before
         };
         // Recording off (the Takes panel's switch): gestures make no takes.
+        self.takes_recorder.min_secs = self.min_take_secs;
         let update = if !self.record_takes {
             crate::takes::Update::default()
         } else {
@@ -1558,6 +1575,7 @@ impl App {
             && saved.recorder == self.recorder_options
             && saved.toolbar == self.toolbar
             && saved.record_takes == self.record_takes
+            && saved.min_take_secs == self.min_take_secs
             && saved.camera_slots == self.camera_slots
             && saved.fonts == self.fonts
             && saved.layouts == self.layouts.store
@@ -1598,6 +1616,7 @@ impl App {
             layout,
             toolbar: self.toolbar,
             record_takes: self.record_takes,
+            min_take_secs: self.min_take_secs,
             camera_slots: self.camera_slots,
             fonts: self.fonts.clone(),
             layouts: self.layouts.store.clone(),

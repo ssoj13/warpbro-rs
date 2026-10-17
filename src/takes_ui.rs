@@ -99,6 +99,7 @@ impl App {
     /// The takes passing the filter, newest first: the order rows are drawn and ranges select in.
     fn visible_takes(&self) -> Vec<u64> {
         let needle = self.takes_view.filter.to_lowercase();
+        let min_secs = self.min_take_secs;
         self.world
             .document
             .takes
@@ -106,6 +107,12 @@ impl App {
             .iter()
             .rev()
             .filter(|t| !self.takes_view.pinned_only || t.pinned)
+            .filter(|t| {
+                min_secs <= crate::takes::MIN_SECS
+                    || t.pinned
+                    || t.duration() >= min_secs
+                    || !self.world.document.take_users(t.id).is_empty()
+            })
             .filter(|t| needle.is_empty() || t.name.to_lowercase().contains(&needle))
             .map(|t| t.id)
             .collect()
@@ -149,6 +156,21 @@ impl App {
                     self.takes_recorder.cancel();
                     self.drag_recorder.finish();
                 }
+            }
+            if ui
+                .add(
+                    egui::DragValue::new(&mut self.min_take_secs)
+                        .range(crate::takes::MIN_SECS..=600.0)
+                        .speed(0.05)
+                        .max_decimals(2)
+                        .prefix("> ")
+                        .suffix(" s"),
+                )
+                .on_hover_text("Keep only takes longer than this duration (seconds)")
+                .changed()
+            {
+                self.takes_recorder.min_secs = self.min_take_secs;
+                self.drag_recorder.min_secs = self.min_take_secs;
             }
             ui.separator();
             if ui

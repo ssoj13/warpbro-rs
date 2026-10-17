@@ -26,7 +26,7 @@ pub const CLIP_VERSION: u32 = 2;
 /// merges the separate ticks of a mouse wheel into one take.
 const SETTLE_SECS: f64 = 0.3;
 /// Shorter gestures (a Home / Fit jump, a stray click) are not worth a take.
-const MIN_SECS: f64 = 0.1;
+pub const MIN_SECS: f64 = 0.1;
 /// A runaway gesture is cut here (about ten minutes at 60 Hz) and the next move starts a new take.
 const MAX_SAMPLES: usize = 36_000;
 /// Marker of WarpBro takes on the system clipboard, so other text is never pasted as takes.
@@ -916,9 +916,19 @@ struct Live {
 
 /// Cuts viewport navigation gestures into camera takes; one instance per app. A gesture runs
 /// from the first move until the input has ended and the camera has come to rest.
-#[derive(Default)]
 pub struct Recorder {
+    /// Minimum gesture duration (seconds) required to keep a recorded take.
+    pub min_secs: f64,
     live: Option<Live>,
+}
+
+impl Default for Recorder {
+    fn default() -> Self {
+        Self {
+            min_secs: MIN_SECS,
+            live: None,
+        }
+    }
 }
 
 impl Recorder {
@@ -978,7 +988,8 @@ impl Recorder {
     fn finish(&mut self) -> Option<Take> {
         let mut live = self.live.take()?;
         live.samples.truncate(live.moved + 1);
-        (duration(&live.samples) >= MIN_SECS)
+        let min_secs = self.min_secs.max(MIN_SECS);
+        (duration(&live.samples) >= min_secs)
             .then(|| Take::new(live.start, None, live.samples).ok())
             .flatten()
     }
@@ -986,11 +997,23 @@ impl Recorder {
 
 /// Records manipulator drags: each dragged node's local transform every frame of the drag,
 /// cut into one transform take per node when the drag ends.
-#[derive(Default)]
 pub struct DragRecorder {
+    /// Minimum gesture duration (seconds) required to keep a recorded take.
+    pub min_secs: f64,
     start: f64,
     clock: f64,
     live: Vec<(NodeId, Vec<Sample<Trs>>)>,
+}
+
+impl Default for DragRecorder {
+    fn default() -> Self {
+        Self {
+            min_secs: MIN_SECS,
+            start: 0.0,
+            clock: 0.0,
+            live: Vec::new(),
+        }
+    }
 }
 
 impl DragRecorder {
@@ -1019,6 +1042,7 @@ impl DragRecorder {
     /// (rebased to its own first sample, its still head and tail dropped).
     pub fn finish(&mut self) -> Vec<Take> {
         let start = self.start;
+        let min_secs = self.min_secs.max(MIN_SECS);
         std::mem::take(&mut self.live)
             .into_iter()
             .filter_map(|(node, samples)| {
@@ -1032,7 +1056,7 @@ impl DragRecorder {
                         pose: s.pose,
                     })
                     .collect();
-                (duration(&kept) >= MIN_SECS)
+                (duration(&kept) >= min_secs)
                     .then(|| Take::new(start, Some(node), kept).ok())
                     .flatten()
             })
