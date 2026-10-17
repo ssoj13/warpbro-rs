@@ -5999,6 +5999,63 @@ impl WorldDocument {
                 self.store_attrs(id, &attrs)?;
             }
         }
+        if !quality_nodes.is_empty()
+            && let Ok(vp_id) = self.viewport_settings_id()
+            && let Ok(vp_attrs) = self.attrs(vp_id)
+            && let Some(AttrValue::Str(still_key)) = vp_attrs.get("/viewport/still_id").cloned()
+            && let Some(AttrValue::Str(moving_key)) = vp_attrs.get("/viewport/moving_id").cloned()
+            && let Some(AttrValue::Str(manual_key)) = vp_attrs.get("/viewport/manual_id").cloned()
+        {
+            if let Some(out_key) = self
+                .graph
+                .bus_slots
+                .get("output_render")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+                && out_key != still_key
+                && out_key != moving_key
+                && out_key != manual_key
+                && let Some(out_node) = self.graph.nodes.get(&out_key)
+                && out_node["name"].as_str() == Some("Output")
+                && out_node["metadata"]["catalog_role"].as_str() == Some("Profile")
+            {
+                self.graph
+                    .bus_slots
+                    .insert("output_render".into(), json!(still_key));
+                self.graph.nodes.remove(&out_key);
+                if let Some(order) = self
+                    .graph
+                    .bus_slots
+                    .get_mut("layer_order")
+                    .and_then(Value::as_array_mut)
+                {
+                    order.retain(|v| v.as_str() != Some(out_key.as_str()));
+                }
+            }
+            if moving_key != still_key
+                && let Some(moving_id) = NodeId::parse(&moving_key)
+                && let Some(moving_node) = self.graph.nodes.get(&moving_key)
+                && moving_node["name"].as_str() == Some("Moving")
+                && moving_node["metadata"]["catalog_role"].as_str() == Some("Profile")
+                && let Ok(mut m_attrs) = self.attrs(moving_id)
+            {
+                if let Some(m_node) = self.graph.nodes.get_mut(&moving_key) {
+                    m_node["gpu"]["render"]["method"] = json!("Fast");
+                    m_node["gpu"]["render"]["display"] = json!("PathTraced");
+                    m_node["gpu"]["quality"]["samples"] = json!(8);
+                    m_node["gpu"]["quality"]["resolution_scale"] = json!(1.0);
+                    m_node["gpu"]["quality"]["max_bounces"] = json!(2);
+                    m_node["gpu"]["quality"]["adaptive"]["enabled"] = json!(false);
+                }
+                m_attrs.set("/render/method", AttrValue::Str("Fast".into()));
+                m_attrs.set("/render/display", AttrValue::Str("PathTraced".into()));
+                m_attrs.set("/quality/samples", AttrValue::Int64(8));
+                m_attrs.set("/quality/resolution_scale", AttrValue::Float(1.0));
+                m_attrs.set("/quality/max_bounces", AttrValue::Int64(2));
+                m_attrs.set("/quality/adaptive/enabled", AttrValue::Bool(false));
+                self.store_attrs(moving_id, &m_attrs)?;
+            }
+        }
         Ok(())
     }
 

@@ -3925,9 +3925,49 @@ fn templates_upgrade_in_place() {
         let text = std::fs::read_to_string(&path).unwrap();
         let scene = crate::io_service::decode_scene(&text)
             .unwrap_or_else(|e| panic!("{name}: decode failed: {e}"));
-        let doc = scene.document.expect("document");
+        let mut doc = *scene.document.expect("document");
+        let policy = doc.viewport_policy(0.0).unwrap();
+        let out_id = doc.output_render_profile().unwrap();
+        if out_id != policy.still_id
+            && out_id != policy.moving_id
+            && out_id != policy.manual_id
+            && doc.node(out_id).unwrap()["name"].as_str() == Some("Output")
+        {
+            let still_key = policy.still_id.to_string();
+            let out_key = out_id.to_string();
+            doc.graph
+                .bus_slots
+                .insert("output_render".into(), json!(still_key));
+            doc.graph.nodes.remove(&out_key);
+            if let Some(order) = doc
+                .graph
+                .bus_slots
+                .get_mut("layer_order")
+                .and_then(Value::as_array_mut)
+            {
+                order.retain(|v| v.as_str() != Some(out_key.as_str()));
+            }
+        }
+        let moving_key = policy.moving_id.to_string();
+        if let Some(m_node) = doc.graph.nodes.get_mut(&moving_key) {
+            m_node["gpu"]["render"]["method"] = json!("Fast");
+            m_node["gpu"]["render"]["display"] = json!("PathTraced");
+            m_node["gpu"]["quality"]["samples"] = json!(8);
+            m_node["gpu"]["quality"]["resolution_scale"] = json!(1.0);
+            m_node["gpu"]["quality"]["max_bounces"] = json!(2);
+            m_node["gpu"]["quality"]["adaptive"]["enabled"] = json!(false);
+        }
+        let mut m_attrs = doc.attrs(policy.moving_id).unwrap();
+        m_attrs.set("/render/method", AttrValue::Str("Fast".into()));
+        m_attrs.set("/render/display", AttrValue::Str("PathTraced".into()));
+        m_attrs.set("/quality/samples", AttrValue::Int64(8));
+        m_attrs.set("/quality/resolution_scale", AttrValue::Float(1.0));
+        m_attrs.set("/quality/max_bounces", AttrValue::Int64(2));
+        m_attrs.set("/quality/adaptive/enabled", AttrValue::Bool(false));
+        doc.store_attrs(policy.moving_id, &m_attrs).unwrap();
+
         let existing: Value = serde_json::from_str(&text).unwrap();
-        let saved = serde_json::to_string_pretty(&*doc).unwrap();
+        let saved = serde_json::to_string_pretty(&doc).unwrap();
         let hydrated: Value = serde_json::from_str(&saved).unwrap();
         if existing != hydrated {
             std::fs::write(&path, &saved).unwrap();
