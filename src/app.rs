@@ -10,8 +10,8 @@ use egui::{self, Color32, ColorImage, RichText, Sense, TextureHandle, TextureOpt
 use crate::render_service::{Command, Frame, RenderEvent, RenderService, ViewportRequest};
 use crate::scene::*;
 use crate::world::WorldDocument;
-use egui_attr_grid::{AttrField, AttrGridHooks, AttrGridState, AttrValue, render_grid_with_config};
-use egui_widgets_config::AttrMetrics;
+use soluwell_panels::attr_grid::{AttrField, AttrGridHooks, AttrGridState, AttrValue, render_grid_with_config};
+use soluwell_config::AttrMetrics;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -120,10 +120,10 @@ pub(crate) struct App {
     origin: Scene,
 
     showing_preview: bool,
-    hdr_view: std::sync::Arc<std::sync::Mutex<egui_hdr_view::HdrView>>,
-    pub display: egui_display::DisplayPrefs,
+    hdr_view: std::sync::Arc<std::sync::Mutex<soluwell_viewport::hdr_view::HdrView>>,
+    pub display: soluwell_viewport::display::DisplayPrefs,
     colour: crate::ocio::State,
-    prefs: egui_prefs2::PrefsPanelState,
+    prefs: soluwell_panels::prefs::PrefsPanelState,
     /// Channels, tolerance and timing of "Bake to keys" (Takes panel; saved with the settings).
     recorder_options: crate::camera_recorder::Options,
     /// Navigation gestures become takes (`Settings::record_takes`).
@@ -139,18 +139,18 @@ pub(crate) struct App {
     takes_view: takes_ui::View,
     /// The viewport tool (Q / W / E / R) and its manipulator, drawn on the selected objects.
     tool: ViewTool,
-    gizmo: egui_gizmo::Gizmo,
+    gizmo: soluwell_viewport::gizmo::Gizmo,
     /// The manipulator drag in progress: its edits share one undo step.
     gizmo_gesture: Option<u64>,
     /// Records each manipulator drag as transform takes of the dragged nodes.
     drag_recorder: crate::takes::DragRecorder,
     /// Splitter state of the three Settings > Controls grids.
     prefs_grids: [AttrGridState; 5],
-    dock: egui_dock_layout::Layout<dock::Panel>,
+    dock: soluwell_chrome::dock_layout::Layout<dock::Panel>,
     /// The panel the user last clicked into: new tabs join its group.
     dock_focus: Option<dock::Panel>,
     panels_to_open: Vec<dock::Panel>,
-    toolbar: egui_viewport_toolbar::ToolbarState,
+    toolbar: soluwell_viewport::toolbar::ToolbarState,
     fonts: dock::Fonts,
     applied_fonts: Option<dock::Fonts>,
     viewport_visible: bool,
@@ -170,7 +170,7 @@ pub(crate) struct App {
     settings_serializations: usize,
     #[cfg(test)]
     snapshot_clones: usize,
-    status_layout: egui_statusbar::StatusBarLayout,
+    status_layout: soluwell_chrome::statusbar::StatusBarLayout,
     status_resizable: bool,
     gallery: Vec<Entry>,
     bookmarks: Vec<Entry>,
@@ -280,7 +280,7 @@ fn pending_thumbnail_entry(entries: &[Entry], scene: &Scene) -> Option<usize> {
     })
 }
 
-/// What the window shows the viewport on, read from `egui_display::DisplayState` by everything
+/// What the window shows the viewport on, read from `soluwell_viewport::display::DisplayState` by everything
 /// that depends on it (the viewport canvas and its snapshots): HDR output or not, and the SDR
 /// white in nits the present pass maps canvas 1.0 to. No window state yet: SDR, 100 nits.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -291,7 +291,7 @@ pub(crate) struct Monitor {
 impl Monitor {
     pub(crate) fn read(ctx: &egui::Context) -> Self {
         let state =
-            ctx.data(|d| d.get_temp::<egui_display::DisplayState>(egui_display::state_id()));
+            ctx.data(|d| d.get_temp::<soluwell_viewport::display::DisplayState>(soluwell_viewport::display::state_id()));
         Self {
             hdr: state.as_ref().is_some_and(|s| s.output.is_hdr()),
             white_nits: state.as_ref().map_or(100.0, |s| s.target.white),
@@ -412,15 +412,15 @@ impl SettingsPage {
         Self::Animation,
         Self::Render,
     ];
-    fn category(self) -> egui_prefs2::Category<'static> {
-        use egui_widgets_config::icons as ph;
+    fn category(self) -> soluwell_panels::prefs::Category<'static> {
+        use soluwell_config::icons as ph;
         match self {
-            Self::Display => egui_prefs2::Category::new(ph::MONITOR, "Display"),
-            Self::Color => egui_prefs2::Category::new(ph::MONITOR, "Color"),
-            Self::Controls => egui_prefs2::Category::new(ph::MONITOR, "Controls"),
-            Self::Fonts => egui_prefs2::Category::new(ph::TEXT, "Fonts"),
-            Self::Animation => egui_prefs2::Category::new(ph::MEDIA, "Animation"),
-            Self::Render => egui_prefs2::Category::new(ph::GEAR, "Render & Viewport"),
+            Self::Display => soluwell_panels::prefs::Category::new(ph::MONITOR, "Display"),
+            Self::Color => soluwell_panels::prefs::Category::new(ph::MONITOR, "Color"),
+            Self::Controls => soluwell_panels::prefs::Category::new(ph::MONITOR, "Controls"),
+            Self::Fonts => soluwell_panels::prefs::Category::new(ph::TEXT, "Fonts"),
+            Self::Animation => soluwell_panels::prefs::Category::new(ph::MEDIA, "Animation"),
+            Self::Render => soluwell_panels::prefs::Category::new(ph::GEAR, "Render & Viewport"),
         }
     }
     /// The page named `name` (case-insensitive tab label).
@@ -542,10 +542,10 @@ impl Controls {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Settings {
-    display: egui_display::DisplayPrefs,
+    display: soluwell_viewport::display::DisplayPrefs,
     colour: crate::ocio::Sel,
     colour_presets: crate::ocio::ColourPresets,
-    panel: egui_prefs2::PrefsPanelState,
+    panel: soluwell_panels::prefs::PrefsPanelState,
     controls: Controls,
     recorder: crate::camera_recorder::Options,
     /// Navigation gestures are recorded as takes (the Takes panel's record switch).
@@ -554,13 +554,13 @@ struct Settings {
     camera_slots: crate::camera_slots::CameraSlots,
     fonts: dock::Fonts,
     layout: Option<String>,
-    toolbar: egui_viewport_toolbar::ToolbarState,
-    layouts: egui_layout_manager::LayoutStore,
+    toolbar: soluwell_viewport::toolbar::ToolbarState,
+    layouts: soluwell_chrome::layout_manager::LayoutStore,
     export: crate::export::ExportJob,
     gui_fps: u32,
-    status_layout: egui_statusbar::StatusBarLayout,
+    status_layout: soluwell_chrome::statusbar::StatusBarLayout,
     status_resizable: bool,
-    attribute_metrics: egui_widgets_config::AttrMetrics,
+    attribute_metrics: soluwell_config::AttrMetrics,
     auto_key: bool,
     new_key: curves::Tan,
     timeline_outline_width: f32,
@@ -619,7 +619,7 @@ fn prefs_grid(
     let metrics = metrics.normalized();
     // Preferences are scalar rows with no animation controls: the editor needs one field, not the
     // attribute grid's three, and the label column keeps the room (a label never collapses to "...").
-    let mut config = egui_attr_grid::AttrGridConfig {
+    let mut config = soluwell_panels::attr_grid::AttrGridConfig {
         prefix_width: 0.0,
         action_width: 0.0,
         min_editor_width: metrics.numeric_width + metrics.component_gap + metrics.field_height,
@@ -627,7 +627,7 @@ fn prefs_grid(
     };
     ui.scope(|ui| {
         metrics.apply(ui);
-        config.value_box_width = Some(egui_attr_grid::value_box_width(
+        config.value_box_width = Some(soluwell_panels::attr_grid::value_box_width(
             ui,
             &rows,
             metrics.numeric_width,
@@ -713,7 +713,7 @@ impl App {
             load_revision: 0,
 
             showing_preview: false,
-            hdr_view: std::sync::Arc::new(std::sync::Mutex::new(egui_hdr_view::HdrView::new())),
+            hdr_view: std::sync::Arc::new(std::sync::Mutex::new(soluwell_viewport::hdr_view::HdrView::new())),
             display: Default::default(),
             colour: crate::ocio::State::new(scene.colour.clone()),
             prefs: Default::default(),
@@ -724,7 +724,7 @@ impl App {
             navigated: false,
             takes_view: Default::default(),
             tool: ViewTool::Select,
-            gizmo: egui_gizmo::Gizmo::new(egui_gizmo::GizmoConfig::default()),
+            gizmo: soluwell_viewport::gizmo::Gizmo::new(soluwell_viewport::gizmo::GizmoConfig::default()),
             gizmo_gesture: None,
             drag_recorder: Default::default(),
             prefs_grids: Default::default(),
@@ -901,7 +901,7 @@ impl App {
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let state =
-            ctx.data(|d| d.get_temp::<egui_display::DisplayState>(egui_display::state_id()));
+            ctx.data(|d| d.get_temp::<soluwell_viewport::display::DisplayState>(soluwell_viewport::display::state_id()));
         // Colour chooses the rendering/export target; SDR presentation has its own preview.
         self.colour.set_hdr(true);
         self.colour
@@ -916,11 +916,11 @@ impl App {
         let mut destination = None;
         let mut prefs = std::mem::take(&mut self.prefs);
         let categories = SettingsPage::ALL.map(SettingsPage::category);
-        let opts = egui_prefs2::PanelOpts {
+        let opts = soluwell_panels::prefs::PanelOpts {
             reset: true,
             ..Default::default()
         };
-        let reset = egui_prefs2::draw(ui, "settings", &mut prefs, &categories, &opts, |ui, idx| {
+        let reset = soluwell_panels::prefs::draw(ui, "settings", &mut prefs, &categories, &opts, |ui, idx| {
             category = idx;
             match SettingsPage::ALL
                 .get(idx)
@@ -928,7 +928,7 @@ impl App {
                 .unwrap_or(SettingsPage::Display)
             {
                 SettingsPage::Display => {
-                    egui_display::settings_ui(
+                    soluwell_viewport::display::settings_ui(
                         ui,
                         "settings.display",
                         &mut self.display,
@@ -951,7 +951,7 @@ impl App {
                     }
                 }
                 SettingsPage::Color => {
-                    egui_prefs2::section_header(ui, "Colour management");
+                    soluwell_panels::prefs::section_header(ui, "Colour management");
                     if let Some(state) = &state {
                         ui.label(format!("Window output: {}.", state.output.label()));
                     }
@@ -974,7 +974,7 @@ impl App {
                 }
                 SettingsPage::Fonts => self.fonts_ui(ui),
                 SettingsPage::Animation => {
-                    egui_prefs2::section_header(ui, "Keys");
+                    soluwell_panels::prefs::section_header(ui, "Keys");
                     ui.horizontal(|ui| {
                             ui.label("New key type")
                                 .on_hover_text("Interpolation of every key created by Key, Auto Key and edits of animated values.");
@@ -984,7 +984,7 @@ impl App {
                         });
                 }
                 SettingsPage::Controls => {
-                    egui_prefs2::section_header(ui, "Camera controls");
+                    soluwell_panels::prefs::section_header(ui, "Camera controls");
                     let am = self.world_ui.attribute_metrics;
                     let c = &mut self.controls;
                     let d = Controls::default();
@@ -1051,7 +1051,7 @@ impl App {
                             _ => {}
                         },
                     );
-                    egui_prefs2::section_header(ui, "Camera alignment (hold Ctrl)");
+                    soluwell_panels::prefs::section_header(ui, "Camera alignment (hold Ctrl)");
                     prefs_grid(
                         ui,
                         am,
@@ -1068,7 +1068,7 @@ impl App {
                             }
                         },
                     );
-                    egui_prefs2::section_header(ui, "Manipulator");
+                    soluwell_panels::prefs::section_header(ui, "Manipulator");
                     let d = Controls::default();
                     prefs_grid(
                         ui,
@@ -1089,7 +1089,7 @@ impl App {
                             _ => {}
                         },
                     );
-                    egui_prefs2::section_header(ui, "Slot buttons");
+                    soluwell_panels::prefs::section_header(ui, "Slot buttons");
                     prefs_grid(
                         ui,
                         am,
@@ -1109,7 +1109,7 @@ impl App {
                         "CamClip and colour presets · {}",
                         crate::hotkeys::slot_hint(self.controls.swap_slot_buttons, "copy", "paste")
                     ));
-                    egui_prefs2::section_header(ui, "Attribute controls");
+                    soluwell_panels::prefs::section_header(ui, "Attribute controls");
                     let defaults = AttrMetrics::default();
                     let metrics = &mut self.world_ui.attribute_metrics;
                     let m = *metrics;
@@ -1283,7 +1283,7 @@ impl App {
     }
 
     fn manipulate(&mut self, ui: &egui::Ui, rect: egui::Rect) {
-        use egui_gizmo::{GizmoConfig, GizmoOrientation, GizmoSpace, GizmoTool, Transform};
+        use soluwell_viewport::gizmo::{GizmoConfig, GizmoOrientation, GizmoSpace, GizmoTool, Transform};
         let tool = match self.tool {
             ViewTool::Select => None,
             ViewTool::Move => Some(GizmoTool::Move),
@@ -1374,7 +1374,7 @@ impl App {
             snapping: tool != GizmoTool::Move && ui.input(|i| i.modifiers.shift),
             snap_angle: 5.0_f32.to_radians(),
             snap_scale: 0.1,
-            visuals: egui_gizmo::GizmoVisuals {
+            visuals: soluwell_viewport::gizmo::GizmoVisuals {
                 gizmo_size: self.controls.gizmo_size,
                 stroke_width: self.controls.gizmo_stroke,
                 ..Default::default()
@@ -2583,7 +2583,7 @@ impl App {
         &mut self,
         ctx: &egui::Context,
         shot: crate::window_shot::WindowShot,
-        capture: Result<egui_display::PendingCapture, egui_display::CaptureError>,
+        capture: Result<soluwell_viewport::display::PendingCapture, soluwell_viewport::display::CaptureError>,
         device: &wgpu::Device,
     ) {
         use crate::window_shot::ShotError;
@@ -3039,7 +3039,7 @@ impl App {
                     }
                     self.world.execute_edit(
                         crate::world::WorldCommand::Batch(commands),
-                        egui_attr_grid::edit_gesture(ui.ctx()),
+                        soluwell_panels::attr_grid::edit_gesture(ui.ctx()),
                     )
                 });
         if let Err(error) = authored {
@@ -3711,7 +3711,7 @@ impl App {
         let frame = self.frame.as_deref();
         let preview = self.showing_preview;
         let target_spp = self.target_spp;
-        egui_statusbar::StatusBar::new().show_with(
+        soluwell_chrome::statusbar::StatusBar::new().show_with(
             ui,
             &mut self.status_layout,
             &WIDTHS,
@@ -4028,21 +4028,21 @@ impl App {
                         .as_ref()
                         .is_none_or(|old| !Arc::ptr_eq(old, &t)))
             {
-                let mvp = egui_hdr_view::Mvp {
+                let mvp = soluwell_viewport::hdr_view::Mvp {
                     model: glam::Mat4::from_scale(glam::vec3(2.0, 2.0, 1.0)).to_cols_array_2d(),
                     ..Default::default()
                 };
                 let mut view = self.hdr_view.lock().unwrap();
-                view.set_output_format(egui_display::CANVAS_FORMAT);
+                view.set_output_format(soluwell_viewport::display::CANVAS_FORMAT);
                 let (format, bytes) = if output_hdr {
-                    (egui_hdr_view::HdrFormat::Rgba32F, t.hdr_bytes.clone())
+                    (soluwell_viewport::hdr_view::HdrFormat::Rgba32F, t.hdr_bytes.clone())
                 } else {
-                    (egui_hdr_view::HdrFormat::Rgba8, t.sdr_bytes.clone())
+                    (soluwell_viewport::hdr_view::HdrFormat::Rgba8, t.sdr_bytes.clone())
                 };
                 // Straight: the blend the view always drew these frames with.
                 let staged = view.stage_frame(
                     format,
-                    egui_hdr_view::AlphaMode::Straight,
+                    soluwell_viewport::hdr_view::AlphaMode::Straight,
                     bytes,
                     t.width,
                     t.height,
@@ -4057,7 +4057,7 @@ impl App {
             }
             ui.painter().add(egui_wgpu::Callback::new_paint_callback(
                 rect,
-                egui_hdr_view::HdrPaintCallback {
+                soluwell_viewport::hdr_view::HdrPaintCallback {
                     inner: self.hdr_view.clone(),
                 },
             ));
@@ -4161,7 +4161,7 @@ impl App {
     /// Identify cached render content without serializing the document on repaint.
     fn preview_identity(&self, ctx: &egui::Context) -> PreviewKey {
         let state =
-            ctx.data(|d| d.get_temp::<egui_display::DisplayState>(egui_display::state_id()));
+            ctx.data(|d| d.get_temp::<soluwell_viewport::display::DisplayState>(soluwell_viewport::display::state_id()));
         let effective = self
             .world
             .document
@@ -4586,7 +4586,7 @@ impl App {
                 self.fly = None;
                 self.status = error;
             }
-            let gesture = egui_attr_grid::edit_gesture(&ctx)
+            let gesture = soluwell_panels::attr_grid::edit_gesture(&ctx)
                 .or(camera_gesture)
                 .or_else(|| {
                     ctx.input(|input| input.pointer.primary_released())
@@ -4650,7 +4650,7 @@ pub enum ViewTool {
 impl ViewTool {
     pub const ALL: [Self; 4] = [Self::Select, Self::Move, Self::Rotate, Self::Scale];
     pub fn label(self) -> (&'static str, &'static str) {
-        use egui_widgets_config::icons as ph;
+        use soluwell_config::icons as ph;
         match self {
             Self::Select => (ph::SELECT, "Select · Q (no manipulator)"),
             Self::Move => (ph::MOVE, "Move · W · +/− gizmo size"),

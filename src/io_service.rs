@@ -39,7 +39,7 @@ pub enum Command {
     /// its files (`window_shot::save`); the result arrives as a [`WindowEvent`].
     SaveWindow {
         shot: crate::window_shot::WindowShot,
-        capture: egui_display::PendingCapture,
+        capture: soluwell_viewport::display::PendingCapture,
         /// The window's device: the readback waits on it here, never on the window's thread.
         device: wgpu::Device,
     },

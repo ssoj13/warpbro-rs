@@ -1,7 +1,7 @@
 //! Native window shell. egui renders to egui-display's float canvas; presentation
 //! selects BOTH the swapchain format and colour space (eframe only offered SDR).
 use anyhow::{Context, Result};
-use egui_display::{Output, PresentPass};
+use soluwell_viewport::display::{Output, PresentPass};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::{
@@ -84,7 +84,7 @@ impl Native {
         surface.configure(&device, &config);
         let ctx = egui::Context::default();
         let mut fonts = egui::FontDefinitions::default();
-        egui_widgets_config::add_icon_font(&mut fonts);
+        soluwell_config::add_icon_font(&mut fonts);
         ctx.set_fonts(fonts);
         // Solid scroll bars reserve their width: egui's default floating bars paint over the
         // right edge of every scroll area (e.g. the Attribute Editor's per-row expand buttons).
@@ -98,7 +98,7 @@ impl Native {
             Some(device.limits().max_texture_dimension_2d as usize),
         );
         let renderer =
-            egui_wgpu::Renderer::new(&device, egui_display::CANVAS_FORMAT, Default::default());
+            egui_wgpu::Renderer::new(&device, soluwell_viewport::display::CANVAS_FORMAT, Default::default());
         let present = PresentPass::new(&device, format, Output::Sdr8);
         Ok(Self {
             window,
@@ -164,8 +164,8 @@ impl Native {
         let target = self.app.display.target(self.output, &info);
         self.ctx.data_mut(|d| {
             d.insert_temp(
-                egui_display::state_id(),
-                egui_display::DisplayState {
+                soluwell_viewport::display::state_id(),
+                soluwell_viewport::display::DisplayState {
                     output: self.output,
                     target,
                     info,
@@ -245,7 +245,7 @@ impl Native {
         ) {
             Ok(buffers) => buffers,
             // The window outgrew the device's texture limit: no frame until it fits again.
-            Err(error @ egui_display::CanvasError::TooLarge { .. }) => {
+            Err(error @ soluwell_viewport::display::CanvasError::TooLarge { .. }) => {
                 log::error!("{error}");
                 return Ok(());
             }
@@ -300,7 +300,7 @@ pub(crate) fn paint_canvas(
     jobs: &[egui::ClippedPrimitive],
     screen: &egui_wgpu::ScreenDescriptor,
     clear: wgpu::Color,
-) -> Result<Vec<wgpu::CommandBuffer>, egui_display::CanvasError> {
+) -> Result<Vec<wgpu::CommandBuffer>, soluwell_viewport::display::CanvasError> {
     let [width, height] = screen.size_in_pixels;
     present.prepare_canvas(device, queue, width, height)?;
     let canvas = present.canvas(device, width, height)?;
@@ -416,7 +416,7 @@ mod tests {
         assert_eq!(full.pixels_per_point, 1.0);
 
         let mut renderer =
-            egui_wgpu::Renderer::new(&device, egui_display::CANVAS_FORMAT, Default::default());
+            egui_wgpu::Renderer::new(&device, soluwell_viewport::display::CANVAS_FORMAT, Default::default());
         let mut present = PresentPass::new(&device, wgpu::TextureFormat::Rgba8Unorm, Output::Sdr8);
         for (id, deltas) in &full.textures_delta.set {
             for delta in deltas {
@@ -460,7 +460,7 @@ mod tests {
             quit: false,
         };
         // An HDR window's levels: the capture must not inherit its white (canvas 1.0 stays 1.0).
-        let shown = egui_display::Target {
+        let shown = soluwell_viewport::display::Target {
             hdr: true,
             white: 240.0,
             peak: 1000.0,
@@ -481,7 +481,7 @@ mod tests {
         let (exr, png) = (&paths[0], &paths[1]);
         assert!(exr.ends_with("ui.window.exr") && png.ends_with("ui.window.pq.png"));
 
-        let grey = egui_display::transfer::eotf(128.0 / 255.0);
+        let grey = soluwell_viewport::display::transfer::eotf(128.0 / 255.0);
         let at = |x: u32, y: u32| (y * w + x) as usize;
         let image = crate::exr_io::read_rgb(exr).unwrap();
         assert_eq!((image.width, image.height), (w, h));
@@ -489,7 +489,7 @@ mod tests {
             assert!((c - grey).abs() < 0.005, "grey block {c}, want {grey}");
         }
         // The clear colour, decoded on the CPU: f16 canvas storage bounds the error.
-        let hdr = clear.map(|c| egui_display::transfer::eotf(half::f16::from_f32(c).to_f32()));
+        let hdr = clear.map(|c| soluwell_viewport::display::transfer::eotf(half::f16::from_f32(c).to_f32()));
         let got = image.pixels[at(4, 60)];
         assert!(
             hdr[0] > 20.0 && hdr[1] < 0.0,
@@ -518,15 +518,15 @@ mod tests {
         let mut buf = vec![0; reader.output_buffer_size().unwrap()];
         reader.next_frame(&mut buf).unwrap();
         let sample = |i: usize| u16::from_be_bytes([buf[2 * i], buf[2 * i + 1]]);
-        let nits = egui_display::pq_nits(f32::from(sample(4 * at(80, 40))) / 65535.0);
+        let nits = soluwell_viewport::display::pq_nits(f32::from(sample(4 * at(80, 40))) / 65535.0);
         assert!(
             (nits - grey * white).abs() < 1.5,
             "grey block at {nits} nits, want {}",
             grey * white
         );
         // The HDR clear colour: PQ of its BT.2020 nits (negative ones black), not clipped at white.
-        let want = egui_display::rec2020_nits(hdr, white)
-            .map(|n| (egui_display::pq(n.clamp(0.0, 10_000.0)) * 65535.0).round() as u16);
+        let want = soluwell_viewport::display::rec2020_nits(hdr, white)
+            .map(|n| (soluwell_viewport::display::pq(n.clamp(0.0, 10_000.0)) * 65535.0).round() as u16);
         let got: Vec<u16> = (0..3).map(|c| sample(4 * at(4, 60) + c)).collect();
         // SDR white (203 nits) is code 38055; red sits near 3200 nits.
         assert!(

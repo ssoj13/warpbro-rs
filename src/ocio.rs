@@ -947,7 +947,7 @@ impl State {
             ui.horizontal(|ui| {
                 combo(ui, "ocio.working_input", &mut self.sel.working_input, &inputs, &auto_input);
                 if let Some(name) = &input_warning {
-                    ui.colored_label(egui_widgets_config::semantic(ui).warn, egui_widgets_config::icons::WARNING)
+                    ui.colored_label(soluwell_config::semantic(ui).warn, soluwell_config::icons::WARNING)
                         .on_hover_text(format!("\"{name}\" is not linear AP1: colours will be wrong."));
                 }
             });

@@ -2,16 +2,16 @@
 use crate::world::{NodeId, WorldAttribute, WorldCommand, WorldEditor, WorldKind, WorldNodeInfo};
 use curves::Tan;
 use egui::{Color32, Pos2, Rect, Sense, Vec2};
-use egui_attr_grid::{AnimIntent, AnimState, ChannelExpansion};
-use egui_attr_grid::{AttrField, AttrGridHooks, AttrValue as GridValue, render_grid_with_config};
-use egui_outliner::{ContextItem, OutlinerAction, OutlinerConfig, OutlinerModel, TreeNode};
-use egui_track_timeline::{
+use soluwell_panels::attr_grid::{AnimIntent, AnimState, ChannelExpansion};
+use soluwell_panels::attr_grid::{AttrField, AttrGridHooks, AttrValue as GridValue, render_grid_with_config};
+use soluwell_panels::outliner::{ContextItem, OutlinerAction, OutlinerConfig, OutlinerModel, TreeNode};
+use soluwell_timeline::track_timeline::{
     Band, Clip, KeyPos, Keyframe, Marker, PropLane, TimelineAction, TimelineConfig, TimelineModel,
     TimelineView, Track, TrackTimeline, WorkArea,
 };
-use egui_widgets_config::AttrMetrics;
-use egui_widgets_config::attr_layout::{ValueEditorLayout, cell_ui, square_icon};
-use egui_widgets_config::icons as ph;
+use soluwell_config::AttrMetrics;
+use soluwell_config::attr_layout::{ValueEditorLayout, cell_ui, square_icon};
+use soluwell_config::icons as ph;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -32,7 +32,7 @@ pub struct PreviewAction {
 }
 
 /// The Tab-key node creation menu's remembered history, favorites and usage counts
-/// (`egui_tab_menu::TabMenu`), saved in `settings.json`.
+/// (`soluwell_chrome::tab_menu::TabMenu`), saved in `settings.json`.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AddMenuMemory {
@@ -163,8 +163,8 @@ struct OutlinerCache {
 }
 /// What a user creates: every Add menu shows this one list (the Tab menu, the outliner's
 /// + Add and right-click Add, a timeline layer's Add child), grouped as in a DCC's Tab menu.
-fn add_items() -> Vec<egui_tab_menu::MenuItem<WorldKind>> {
-    use egui_tab_menu::MenuItem;
+fn add_items() -> Vec<soluwell_chrome::tab_menu::MenuItem<WorldKind>> {
+    use soluwell_chrome::tab_menu::MenuItem;
     let item = |kind: WorldKind, group: &str, keywords: &str| {
         MenuItem::new(kind, kind_label(kind))
             .icon(kind_icon(kind))
@@ -204,10 +204,10 @@ fn add_action(action: &str) -> Option<WorldKind> {
     add_items().get(index).map(|item| item.key)
 }
 /// The outliner's Add submenu: the tree of [`add_items`] as nested context items.
-fn add_context_item(menu: &egui_tab_menu::TabMenu<WorldKind>) -> ContextItem {
+fn add_context_item(menu: &soluwell_chrome::tab_menu::TabMenu<WorldKind>) -> ContextItem {
     fn level(
-        tree: &egui_tab_menu::MenuTree,
-        items: &[egui_tab_menu::MenuItem<WorldKind>],
+        tree: &soluwell_chrome::tab_menu::MenuTree,
+        items: &[soluwell_chrome::tab_menu::MenuItem<WorldKind>],
     ) -> Vec<ContextItem> {
         let mut out: Vec<ContextItem> = tree
             .groups
@@ -354,8 +354,8 @@ struct TimelineCache {
 }
 #[derive(Default)]
 struct GridSectionCache {
-    state: egui_attr_grid::AttrGridState,
-    fields: Vec<egui_attr_grid::AttrField>,
+    state: soluwell_panels::attr_grid::AttrGridState,
+    fields: Vec<soluwell_panels::attr_grid::AttrField>,
     values: Vec<Value>,
     labels: Vec<String>,
     indices: Vec<usize>,
@@ -368,11 +368,11 @@ struct GridSectionCache {
 /// the value actions WarpBro offers (reset, copy, paste). The timeline projects its rows from the
 /// same config, so the action buttons cannot shift its columns.
 pub(crate) fn grid_config(
-    metrics: egui_widgets_config::AttrMetrics,
-) -> egui_attr_grid::AttrGridConfig {
-    egui_attr_grid::AttrGridConfig {
-        actions: egui_attr_grid::ValueActions::BASIC,
-        ..egui_attr_grid::grid_config(metrics)
+    metrics: soluwell_config::AttrMetrics,
+) -> soluwell_panels::attr_grid::AttrGridConfig {
+    soluwell_panels::attr_grid::AttrGridConfig {
+        actions: soluwell_panels::attr_grid::ValueActions::BASIC,
+        ..soluwell_panels::attr_grid::grid_config(metrics)
     }
 }
 
@@ -388,7 +388,7 @@ pub struct WorldUi {
     /// Parameters of the timeline's curve effects (Effects menu).
     pub(crate) effects: EffectParams,
     /// The Add menus' state: the Tab menu, History, favorites and usage (`add_items`).
-    add_menu: egui_tab_menu::TabMenu<WorldKind>,
+    add_menu: soluwell_chrome::tab_menu::TabMenu<WorldKind>,
     pub attribute_label_width: f32,
     /// Authored outline/canvas split; narrow panels only clamp its drawn width.
     pub timeline_outline_width: f32,
@@ -431,7 +431,7 @@ pub struct WorldUi {
     custom_name: String,
     custom_value: f64,
     picker: Option<(NodeId, egui_file_dialog::FileDialog)>,
-    environment_file: egui_file_field::FileFieldState,
+    environment_file: soluwell_controls::file_field::FileFieldState,
     pub file_dialogs: crate::file_dialogs::History,
     cache: AttributeCache,
     drag_order: Option<std::sync::Arc<Vec<NodeId>>>,
@@ -448,7 +448,7 @@ impl Default for WorldUi {
             looping: true,
             hide_shy: true,
             effects: EffectParams::default(),
-            add_menu: egui_tab_menu::TabMenu::new("world_add_menu"),
+            add_menu: soluwell_chrome::tab_menu::TabMenu::new("world_add_menu"),
             attribute_label_width: 180.0,
             timeline_outline_width: 340.0,
             timeline_width: 0.0,
@@ -481,7 +481,7 @@ impl Default for WorldUi {
             custom_name: String::new(),
             custom_value: 0.0,
             picker: None,
-            environment_file: egui_file_field::FileFieldState::default(),
+            environment_file: soluwell_controls::file_field::FileFieldState::default(),
             file_dialogs: Default::default(),
             cache: AttributeCache::default(),
             drag_order: None,
@@ -890,10 +890,10 @@ impl WorldUi {
         if !ctx.input(|i| i.pointer.any_down()) {
             self.panel_gesture = None;
         }
-        egui_attr_grid::edit_gesture(ctx).or(self.panel_gesture)
+        soluwell_panels::attr_grid::edit_gesture(ctx).or(self.panel_gesture)
     }
     fn value_command(&mut self, ui: &egui::Ui, e: &mut WorldEditor, c: WorldCommand) {
-        let gesture = egui_attr_grid::edit_gesture(ui.ctx()).or_else(|| {
+        let gesture = soluwell_panels::attr_grid::edit_gesture(ui.ctx()).or_else(|| {
             if ui.input(|input| input.pointer.primary_released()) {
                 e.active_edit()
             } else {
@@ -998,7 +998,7 @@ impl WorldUi {
         let model = &cache.model;
         let cfg = &cache.config;
         let actions = ui
-            .push_id("world_outliner", |ui| egui_outliner::show(ui, model, cfg))
+            .push_id("world_outliner", |ui| soluwell_panels::outliner::show(ui, model, cfg))
             .inner;
         for a in actions {
             match a {
@@ -1547,7 +1547,7 @@ impl WorldUi {
                                     start,
                                     duration: end - start,
                                     color: take_color,
-                                    label: format!("{} {name}", egui_phosphor::regular::FILM_STRIP),
+                                    label: format!("{} {name}", soluwell_config::phosphor::regular::FILM_STRIP),
                                     id: Some(take_wid(n.id)),
                                 });
                                 clips.push(
@@ -1878,12 +1878,12 @@ impl WorldUi {
                 (
                     "/shy",
                     n.shy,
-                    egui_phosphor::regular::GHOST,
-                    egui_phosphor::regular::GHOST,
+                    soluwell_config::phosphor::regular::GHOST,
+                    soluwell_config::phosphor::regular::GHOST,
                     "Shy: hidden while the timeline's Shy switch is on",
                 ),
             ] {
-                if egui_widgets_config::icon_toggle(
+                if soluwell_config::icon_toggle(
                     ui,
                     next(),
                     if state { on } else { off },
@@ -2066,7 +2066,7 @@ impl WorldUi {
             };
             let frame = self.playhead as f64;
             if let Some(intent) = anim_state(attr, frame).and_then(|anim| {
-                egui_attr_grid::animation_controls(
+                soluwell_panels::attr_grid::animation_controls(
                     ui,
                     &grid_config(self.attribute_metrics),
                     cells.prefix,
@@ -2121,7 +2121,7 @@ impl WorldUi {
                 });
                 if cell_ui(ui, left, "color", |ui| {
                     ui.spacing_mut().interact_size = Vec2::splat(self.attribute_metrics.icon_side);
-                    egui_colorpicker::color_button(ui, &mut rgba).changed()
+                    soluwell_controls::colorpicker::color_button(ui, &mut rgba).changed()
                 })
                 .inner
                 {
@@ -2140,7 +2140,7 @@ impl WorldUi {
             }
             if attr.component.is_none() && lane.value.is_array() {
                 let open = self.components_open(id, path, attrs);
-                if egui_attr_grid::channel_caret(ui, &config, cells.actions, open) {
+                if soluwell_panels::attr_grid::channel_caret(ui, &config, cells.actions, open) {
                     self.channels.entry(id).or_default().set(path, !open);
                 }
             }
@@ -2470,7 +2470,7 @@ impl WorldUi {
             ui.checkbox(&mut self.auto_key, "Auto Key")
                 .on_hover_text("Key camera navigation only when Auto Key is enabled; otherwise preserve existing animation keys.");
             ui.checkbox(&mut self.snap, "Snap");
-            ui.toggle_value(&mut self.hide_shy, format!("{} Shy", egui_phosphor::regular::GHOST))
+            ui.toggle_value(&mut self.hide_shy, format!("{} Shy", soluwell_config::phosphor::regular::GHOST))
                 .on_hover_text("Hide shy nodes (render settings and profiles start shy); the Outliner shows every node");
             if ui.small_button("Fit").on_hover_text("Fit working range · F").clicked() {
                 self.fit_timeline(self.timeline_width, e);
@@ -2618,7 +2618,7 @@ impl WorldUi {
                         }
                     });
             });
-            if egui_widgets_config::icon_toggle(ui, button, ph::PALETTE, false, true)
+            if soluwell_config::icon_toggle(ui, button, ph::PALETTE, false, true)
                 .on_hover_text("Open material library")
                 .clicked()
             {
@@ -2632,7 +2632,7 @@ impl WorldUi {
             let Value::String(path) = value else {
                 return false;
             };
-            let response = egui_file_field::FileField::new(path, &mut self.environment_file)
+            let response = soluwell_controls::file_field::FileField::new(path, &mut self.environment_file)
                 .hint("HDR / EXR environment")
                 .tooltip("Browse HDR / EXR environment")
                 .show(ui);
@@ -2840,7 +2840,7 @@ impl WorldUi {
                 self.prepare_section(section, attrs, group, revision, frame);
             }
         }
-        let box_width = egui_attr_grid::value_box_width(
+        let box_width = soluwell_panels::attr_grid::value_box_width(
             ui,
             cache
                 .sections
@@ -2865,11 +2865,11 @@ impl WorldUi {
                         .get(&id)
                         .is_some_and(|sections| sections.contains(group));
                     let section = cache.sections.entry((id, group)).or_default();
-                    let response = egui_titlebar::CollapsingSection::new((wid(id), group), group)
+                    let response = soluwell_chrome::titlebar::CollapsingSection::new((wid(id), group), group)
                         .open(open)
                         .tint(section_color(group), 0.16)
                         .show(ui, |ui| {
-                            let config = egui_attr_grid::AttrGridConfig {
+                            let config = soluwell_panels::attr_grid::AttrGridConfig {
                                 value_box_width: Some(box_width),
                                 ..grid_config(self.attribute_metrics)
                             };
@@ -3115,9 +3115,9 @@ impl AttrGridHooks for WorldGridHooks<'_> {
         &mut self,
         ui: &mut egui::Ui,
         field: &mut AttrField,
-        _mixed: egui_attr_grid::Parts,
+        _mixed: soluwell_panels::attr_grid::Parts,
         _layout: &ValueEditorLayout,
-        _extra: &egui_attr_grid::EditorCtx,
+        _extra: &soluwell_panels::attr_grid::EditorCtx,
     ) -> Option<bool> {
         record_grid_rect(&field.key, ui.max_rect());
         let index = self.index(field)?;
@@ -3260,7 +3260,7 @@ fn property_rects(
     row: Rect,
     label_width: f32,
     metrics: AttrMetrics,
-) -> egui_widgets_config::attr_layout::AttrRowRects {
+) -> soluwell_config::attr_layout::AttrRowRects {
     grid_config(metrics).row_rects(row, label_width)
 }
 fn transport_icon(
@@ -3273,14 +3273,14 @@ fn transport_icon(
         Vec2::new(metrics.icon_side, metrics.row_height()),
         Sense::hover(),
     );
-    egui_widgets_config::icon_toggle(ui, rect, glyph, active, true)
+    soluwell_config::icon_toggle(ui, rect, glyph, active, true)
 }
 fn component_label(index: usize) -> &'static str {
     ["X", "Y", "Z", "W"].get(index).copied().unwrap_or("")
 }
 /// The keys around `frame` on whole frames (half a frame of tolerance, egui-attr-grid `key_nav`).
-fn key_nav(attr: &WorldAttribute, frame: f64) -> egui_attr_grid::KeyNav {
-    egui_attr_grid::key_nav(attr.frames.iter().copied(), frame, 1.0)
+fn key_nav(attr: &WorldAttribute, frame: f64) -> soluwell_panels::attr_grid::KeyNav {
+    soluwell_panels::attr_grid::key_nav(attr.frames.iter().copied(), frame, 1.0)
 }
 /// An attribute's animation for the shared controls (egui-attr-grid): animated = it has keys,
 /// keyed = one of them exactly at `frame` (what Unkey removes), prev / next = a key to jump to.
@@ -3669,7 +3669,7 @@ mod tests {
                 item.children.iter().map(count).sum()
             }
         }
-        let menu = egui_tab_menu::TabMenu::<WorldKind>::new("t");
+        let menu = soluwell_chrome::tab_menu::TabMenu::<WorldKind>::new("t");
         assert_eq!(count(&add_context_item(&menu)), items.len());
     }
 

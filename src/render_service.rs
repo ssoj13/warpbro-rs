@@ -2045,7 +2045,7 @@ mod tests {
         let mut buf = vec![0; reader.output_buffer_size().unwrap()];
         reader.next_frame(&mut buf).unwrap();
         let green = u16::from_be_bytes([buf[2], buf[3]]);
-        let expected = (egui_display::pq(203.0) * 65535.0 + 0.5) as u16;
+        let expected = (soluwell_viewport::display::pq(203.0) * 65535.0 + 0.5) as u16;
         assert!(
             green.abs_diff(expected) <= 1,
             "{green} vs PQ(203) {expected}"
@@ -2125,17 +2125,17 @@ mod tests {
         );
 
         let codes = |nits: [f32; 3]| {
-            nits.map(|v| (egui_display::pq(v.clamp(0.0, 10_000.0)) * 65535.0 + 0.5) as u16)
+            nits.map(|v| (soluwell_viewport::display::pq(v.clamp(0.0, 10_000.0)) * 65535.0 + 0.5) as u16)
         };
         let written: Vec<u16> = buf[..6]
             .chunks(2)
             .map(|c| u16::from_be_bytes([c[0], c[1]]))
             .collect();
-        let exact = codes(egui_display::rec2020_nits(
+        let exact = codes(soluwell_viewport::display::rec2020_nits(
             [light[0][0], light[0][1], light[0][2]],
             100.0,
         ));
-        let clipped = codes(egui_display::rec2020_nits(
+        let clipped = codes(soluwell_viewport::display::rec2020_nits(
             light[0][..3]
                 .iter()
                 .map(|v| v.max(0.0))
@@ -2156,7 +2156,7 @@ mod tests {
         );
         // The highlight lands at the view's peak, not at SDR white.
         let highlight = u16::from_be_bytes([buf[10], buf[11]]);
-        let peak_code = (egui_display::pq(peak_nits) * 65535.0 + 0.5) as u16;
+        let peak_code = (soluwell_viewport::display::pq(peak_nits) * 65535.0 + 0.5) as u16;
         assert!(
             highlight.abs_diff(peak_code) <= 70,
             "{highlight} vs PQ({peak_nits}) {peak_code}"

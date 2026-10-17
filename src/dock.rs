@@ -1,9 +1,9 @@
 //! One dock workspace for every tool panel, plus viewport-local chrome.
 //!
-//! The workspace is an `egui_dock_layout::Layout`: plain data the dock draws and reports
+//! The workspace is an `soluwell_chrome::dock_layout::Layout`: plain data the dock draws and reports
 //! actions for; every change goes through `Layout::apply_with_permissions` (atomic, validated).
 use super::{App, Tab};
-use egui_dock_layout::{
+use soluwell_chrome::dock_layout::{
     Action, DockArea, DockContent, DockError, DockLayoutBar, DockStyle, Layout, LayoutStore,
     Location, Node, Permissions, Placement, SplitAxis, SplitSize,
 };
@@ -216,11 +216,11 @@ pub(super) struct LayoutCache {
     pub serializations: usize,
 }
 impl LayoutCache {
-    pub fn refresh(&mut self, layout: &Layout<Panel>) -> Result<(), egui_dock_layout::Error> {
+    pub fn refresh(&mut self, layout: &Layout<Panel>) -> Result<(), soluwell_chrome::dock_layout::Error> {
         if self.blob.is_some() && self.layout.as_ref() == Some(layout) {
             return Ok(());
         }
-        let blob = egui_dock_layout::to_blob(layout)?;
+        let blob = soluwell_chrome::dock_layout::to_blob(layout)?;
         #[cfg(test)]
         {
             self.serializations += 1;
@@ -252,7 +252,7 @@ impl Default for Layouts {
 
 /// A stored layout blob, read and checked ([`valid_layout`]).
 pub(super) fn restore_layout(blob: &str) -> Result<Layout<Panel>, String> {
-    let layout = egui_dock_layout::from_blob(blob).map_err(|e| e.to_string())?;
+    let layout = soluwell_chrome::dock_layout::from_blob(blob).map_err(|e| e.to_string())?;
     if valid_layout(&layout) {
         Ok(layout)
     } else {
@@ -298,7 +298,7 @@ impl App {
                     )
                     .clicked()
                 {
-                    let saved = egui_dock_layout::to_blob(&self.dock)
+                    let saved = soluwell_chrome::dock_layout::to_blob(&self.dock)
                         .map_err(|e| e.to_string())
                         .and_then(|blob| {
                             self.layouts
@@ -386,10 +386,10 @@ impl App {
         &mut self,
         ui: &mut egui::Ui,
         rect: egui::Rect,
-    ) -> egui_viewport_toolbar::ToolbarResponse {
+    ) -> soluwell_viewport::toolbar::ToolbarResponse {
         let mut state = self.toolbar;
-        let response = egui_viewport_toolbar::ViewportToolbar {
-            edge: egui_viewport_toolbar::ToolbarEdge::Top,
+        let response = soluwell_viewport::toolbar::ViewportToolbar {
+            edge: soluwell_viewport::toolbar::ToolbarEdge::Top,
             margin: 0.0,
             height: (self.fonts.body + 12.0).max(34.0),
             ..Default::default()
@@ -420,7 +420,7 @@ impl App {
                 }
                 ui.separator();
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    use egui_widgets_config::icons as ph;
+                    use soluwell_config::icons as ph;
                     for tool in super::ViewTool::ALL {
                         let (icon, tip) = tool.label();
                         if ui
@@ -448,7 +448,7 @@ impl App {
                     let active = self.viewport_render.clone();
                     if let Some(effective) = active.as_ref().map(|selection| &selection.effective) {
                         let mut exposure = effective.render.exposure_stops;
-                        egui_viewport_toolbar::exposure_control(
+                        soluwell_viewport::toolbar::exposure_control(
                             ui,
                             &mut exposure,
                             &mut self.exposure_hold,
@@ -547,7 +547,7 @@ impl super::App {
     /// pick toggle per node kind and the extras switch. It holds nothing itself: each toggle
     /// edits the ViewportSettings node's attribute, one undo step, as the Attribute Editor does.
     fn visibility_menu(&mut self, ui: &mut egui::Ui) {
-        use egui_widgets_config::icons as ph;
+        use soluwell_config::icons as ph;
         let frame = f64::from(self.world_ui.playhead);
         let (id, policy) = match self
             .world
@@ -632,7 +632,7 @@ impl Default for Fonts {
 }
 impl App {
     pub(super) fn fonts_ui(&mut self, ui: &mut egui::Ui) {
-        egui_prefs2::section_header(ui, "Fonts & UI scale");
+        soluwell_panels::prefs::section_header(ui, "Fonts & UI scale");
         let definitions = egui::FontDefinitions::default();
         egui::ComboBox::from_id_salt("ui-font")
             .selected_text(&self.fonts.face)
@@ -684,7 +684,7 @@ impl App {
                 .or_default()
                 .insert(0, self.fonts.face.clone());
         }
-        egui_widgets_config::add_icon_font(&mut definitions);
+        soluwell_config::add_icon_font(&mut definitions);
         ctx.set_fonts(definitions);
         ctx.set_zoom_factor(self.fonts.zoom);
         ctx.all_styles_mut(|style| {
@@ -737,7 +737,7 @@ mod tests {
     fn floating(
         layout: &Layout<Panel>,
         panel: Panel,
-    ) -> Option<&egui_dock_layout::Floating<Panel>> {
+    ) -> Option<&soluwell_chrome::dock_layout::Floating<Panel>> {
         layout.floating.iter().find(|g| g.panels.contains(&panel))
     }
 
@@ -789,8 +789,8 @@ mod tests {
                 .count(),
             1
         );
-        let blob = egui_dock_layout::to_blob(&layout).unwrap();
-        let restored = egui_dock_layout::from_blob::<Panel>(&blob).unwrap();
+        let blob = soluwell_chrome::dock_layout::to_blob(&layout).unwrap();
+        let restored = soluwell_chrome::dock_layout::from_blob::<Panel>(&blob).unwrap();
         assert!(valid_layout(&restored));
         assert_eq!(restored.panels().len(), 9);
     }
@@ -800,7 +800,7 @@ mod tests {
     fn panels_open_beside_the_focus_or_float() {
         let mut layout = default_layout();
         open_panel(&mut layout, Panel::Bookmarks, Some(Panel::Timeline), area()).unwrap();
-        let blob = egui_dock_layout::to_blob(&layout).unwrap();
+        let blob = soluwell_chrome::dock_layout::to_blob(&layout).unwrap();
         assert!(blob.contains(r#"["Timeline","Bookmarks"]"#), "{blob}");
         open_panel(&mut layout, Panel::MaterialLibrary, None, area()).unwrap();
         let group = floating(&layout, Panel::MaterialLibrary).unwrap();
@@ -820,8 +820,8 @@ mod tests {
                 rect: [100.0, 120.0, 700.0, 500.0],
             })
             .unwrap();
-        let blob = egui_dock_layout::to_blob(&layout).unwrap();
-        let restored = egui_dock_layout::from_blob::<Panel>(&blob).unwrap();
+        let blob = soluwell_chrome::dock_layout::to_blob(&layout).unwrap();
+        let restored = soluwell_chrome::dock_layout::from_blob::<Panel>(&blob).unwrap();
         assert_eq!(
             floating(&restored, Panel::Settings).unwrap().rect,
             [100.0, 120.0, 700.0, 500.0]
@@ -830,7 +830,7 @@ mod tests {
 
     #[test]
     fn named_layout_preserves_floating_export_and_default_workspaces() {
-        let default_blob = egui_dock_layout::to_blob(&Layout {
+        let default_blob = soluwell_chrome::dock_layout::to_blob(&Layout {
             root: Some(tabs(&[
                 Panel::Viewport,
                 Panel::Timeline,
@@ -858,7 +858,7 @@ mod tests {
         let mut store = LayoutStore::new();
         store.save("Default", default_blob).unwrap();
         store
-            .save("Render", egui_dock_layout::to_blob(&layout).unwrap())
+            .save("Render", soluwell_chrome::dock_layout::to_blob(&layout).unwrap())
             .unwrap();
         store.rename("Render", "Export workspace").unwrap();
         let json = serde_json::to_string(&store).unwrap();

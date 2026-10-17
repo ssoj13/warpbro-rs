@@ -1,7 +1,7 @@
 //! Canvas transfer shared with exr-view and Playa.
 #[cfg(test)]
-pub use egui_display::transfer::eotf;
-pub use egui_display::transfer::oetf;
+pub use soluwell_viewport::display::transfer::eotf;
+pub use soluwell_viewport::display::transfer::oetf;
 #[allow(dead_code)]
 pub fn dial(v: f32, gamma: f32) -> f32 {
     v.abs().powf(1.0 / gamma.max(1e-3)).copysign(v)

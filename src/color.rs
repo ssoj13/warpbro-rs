@@ -275,8 +275,8 @@ mod tests {
         let _gpu_test = crate::test_gpu::lock();
         assert!(oetf(10.0) > 1.0);
         assert!(oetf(-0.01) < 0.0);
-        assert!((egui_display::pq(100.0) - 0.5080784).abs() < 1e-5);
-        assert!((egui_display::pq(1000.0) - 0.7518271).abs() < 1e-5);
+        assert!((soluwell_viewport::display::pq(100.0) - 0.5080784).abs() < 1e-5);
+        assert!((soluwell_viewport::display::pq(1000.0) - 0.7518271).abs() < 1e-5);
     }
     #[test]
     fn working_matrices_round_trip_and_keep_white() {

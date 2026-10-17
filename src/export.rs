@@ -1570,7 +1570,7 @@ mod tests {
             );
             if (png, video) == (PngEncoding::Hdr10, PngVideo::Hevc) {
                 let content = levels.and_then(|l| l.content).unwrap();
-                let brightest = egui_display::rec2020_nits([4.0, 1.0, 0.5], 100.0)
+                let brightest = soluwell_viewport::display::rec2020_nits([4.0, 1.0, 0.5], 100.0)
                     .into_iter()
                     .fold(0.0f32, f32::max);
                 assert!(
@@ -1637,7 +1637,7 @@ mod tests {
         );
         let levels = HdrLevels {
             peak_nits: 500.0,
-            content: Some(egui_display::screenshot::ContentLight {
+            content: Some(soluwell_viewport::display::screenshot::ContentLight {
                 max_cll: 480.2,
                 max_fall: 61.5,
             }),
@@ -1726,7 +1726,7 @@ mod tests {
             );
             let content = levels.content.unwrap();
             let max = |rgb: [f32; 3]| {
-                egui_display::rec2020_nits(rgb, 100.0)
+                soluwell_viewport::display::rec2020_nits(rgb, 100.0)
                     .into_iter()
                     .fold(0.0f32, f32::max)
             };

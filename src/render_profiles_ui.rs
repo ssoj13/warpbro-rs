@@ -3,7 +3,7 @@ use crate::render_profiles::{
     CatalogRole, ProfileTarget, RenderMethod, ViewportMode, ViewportRender,
 };
 use crate::world::{NodeId, WorldCommand, WorldEditor, WorldKind, WorldNodeInfo};
-use egui_widgets_config::icons as ph;
+use soluwell_config::icons as ph;
 use serde_json::json;
 
 #[derive(Default)]

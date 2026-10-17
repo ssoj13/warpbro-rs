@@ -2,9 +2,9 @@
 //! window's physical resolution, from the frame the window just presented.
 //!
 //! **Capture.** The window composites everything into egui-display's float canvas
-//! (`egui_display::CANVAS_FORMAT`, extended sRGB, 1.0 = SDR reference white) and encodes that canvas
+//! (`soluwell_viewport::display::CANVAS_FORMAT`, extended sRGB, 1.0 = SDR reference white) and encodes that canvas
 //! for its surface in the present pass. A shot re-runs the same pass over the same canvas right
-//! after the frame was presented (`egui_display::PresentPass::capture`), into an offscreen texture
+//! after the frame was presented (`soluwell_viewport::display::PresentPass::capture`), into an offscreen texture
 //! instead of the swapchain, and reads it back on the file worker (`io_service`), never on the
 //! window's thread.
 //!
@@ -29,8 +29,8 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use egui_display::screenshot::{Capture, Pixels};
-use egui_display::{Output, Target};
+use soluwell_viewport::display::screenshot::{Capture, Pixels};
+use soluwell_viewport::display::{Output, Target};
 
 use crate::color::DisplayLight;
 use crate::render_service::{PngEncoding, hdr_scale, write_display_exr, write_png};
@@ -114,7 +114,7 @@ impl WindowShot {
         match self.kind {
             ShotKind::Linear { .. } => Target {
                 hdr: true,
-                white: egui_display::SCRGB_NITS,
+                white: soluwell_viewport::display::SCRGB_NITS,
                 peak: shown.peak,
             },
             ShotKind::Displayed { .. } => shown,
@@ -126,7 +126,7 @@ impl WindowShot {
 #[derive(Debug)]
 pub enum ShotError {
     /// The capture could not be submitted or read back.
-    Capture(egui_display::CaptureError),
+    Capture(soluwell_viewport::display::CaptureError),
     /// The read-back pixels are not what the request captures for.
     Pixels(String),
     /// The output folder could not be created.
@@ -160,8 +160,8 @@ impl fmt::Display for ShotError {
 
 impl std::error::Error for ShotError {}
 
-impl From<egui_display::CaptureError> for ShotError {
-    fn from(e: egui_display::CaptureError) -> Self {
+impl From<soluwell_viewport::display::CaptureError> for ShotError {
+    fn from(e: soluwell_viewport::display::CaptureError) -> Self {
         Self::Capture(e)
     }
 }
@@ -171,12 +171,12 @@ impl From<egui_display::CaptureError> for ShotError {
 /// white (whose values are not the bare decoded canvas), any other pixel type, or a sample count
 /// that does not match the size is an error, never a rescaled, padded or guessed image.
 pub fn linear_light(capture: &Capture) -> Result<Vec<[f32; 4]>, ShotError> {
-    if capture.output != Output::Scrgb || capture.white_nits != egui_display::SCRGB_NITS {
+    if capture.output != Output::Scrgb || capture.white_nits != soluwell_viewport::display::SCRGB_NITS {
         return Err(ShotError::Pixels(format!(
             "{:?} capture at {} nits white is not the linear canvas (scRGB at {} nits)",
             capture.output,
             capture.white_nits,
-            egui_display::SCRGB_NITS
+            soluwell_viewport::display::SCRGB_NITS
         )));
     }
     float_pixels(capture)
@@ -314,7 +314,7 @@ pub fn write_displayed(capture: &Capture, path: &Path) -> Result<PathBuf, ShotEr
             capture.height as usize,
             &light,
             &crate::color::DISPLAY_PRIMS,
-            Some(egui_display::SCRGB_NITS),
+            Some(soluwell_viewport::display::SCRGB_NITS),
             true,
         )
         .map_err(|message| write_err(&path, message))?;
@@ -395,13 +395,13 @@ mod tests {
             (10_000.0, 1.0),
         ];
         for (nits, code) in known {
-            let signal = egui_display::pq(nits);
+            let signal = soluwell_viewport::display::pq(nits);
             // f32 evaluation; 1e-5 is below one 16-bit PNG code (1.5e-5).
             assert!(
                 (signal - code).abs() < 1e-5,
                 "pq({nits}) = {signal}, want {code}"
             );
-            let back = egui_display::pq_nits(signal);
+            let back = soluwell_viewport::display::pq_nits(signal);
             assert!(
                 (back - nits).abs() <= nits * 1e-3,
                 "pq_nits(pq({nits})) = {back}"
@@ -441,7 +441,7 @@ mod tests {
         assert!(find(b"mDCV").is_some() && find(b"cLLI").is_some());
         assert!(find(b"sRGB").is_none(), "a PQ PNG is not tagged sRGB");
         let px = png16(&png);
-        let nits = |i: usize| egui_display::pq_nits(f32::from(px[i]) / 65535.0);
+        let nits = |i: usize| soluwell_viewport::display::pq_nits(f32::from(px[i]) / 65535.0);
         assert!((nits(0) - white).abs() < 0.5, "white at {} nits", nits(0));
         assert!(
             (nits(4) - 1000.0).abs() < 2.0,
@@ -484,7 +484,7 @@ mod tests {
             output: Output::Scrgb,
             width: 2,
             height: 1,
-            white_nits: egui_display::SCRGB_NITS,
+            white_nits: soluwell_viewport::display::SCRGB_NITS,
             peak_nits: 1000.0,
             pixels,
         };
@@ -531,7 +531,7 @@ mod tests {
         assert_eq!(back.pixels, vec![[0.5, 2.0, -0.25], [0.0, 12.0, 1.0]]);
         assert_eq!(
             crate::exr_io::read_attr::<f32>(&exr, "whiteLuminance"),
-            Some(egui_display::SCRGB_NITS)
+            Some(soluwell_viewport::display::SCRGB_NITS)
         );
 
         let sdr = Capture {
