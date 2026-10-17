@@ -38,15 +38,6 @@ enum NameOperation {
         id: NodeId,
         target: ProfileTarget,
     },
-    CreateQuality {
-        source: Option<NodeId>,
-        role: CatalogRole,
-        target: Option<NodeId>,
-    },
-    InstantiateQuality {
-        id: NodeId,
-        target: Option<NodeId>,
-    },
     CreateOutput {
         source: Option<NodeId>,
         role: CatalogRole,
@@ -100,23 +91,6 @@ fn name_command(dialog: &NameDialog) -> Result<WorldCommand, String> {
             name: name.into(),
             target: Some(target),
         },
-        NameOperation::CreateQuality {
-            source,
-            role,
-            target,
-        } => WorldCommand::CreateQualityProfile {
-            name: name.into(),
-            role,
-            source,
-            target,
-        },
-        NameOperation::InstantiateQuality { id, target } => {
-            WorldCommand::InstantiateQualityTemplate {
-                id,
-                name: name.into(),
-                target,
-            }
-        }
         NameOperation::CreateOutput {
             source,
             role,
@@ -156,19 +130,14 @@ fn dialogs(ui: &egui::Ui, world: &mut WorldEditor) -> Actions {
     let mut cancelled = false;
     egui::Window::new(match dialog.operation {
         NameOperation::Rename(_) => "Rename settings",
-        NameOperation::Instantiate { .. }
-        | NameOperation::InstantiateQuality { .. }
-        | NameOperation::InstantiateOutput { .. } => "Apply independent copy",
+        NameOperation::Instantiate { .. } | NameOperation::InstantiateOutput { .. } => {
+            "Apply independent copy"
+        }
         NameOperation::Create {
             role: CatalogRole::Template,
             ..
         } => "Save render template",
         NameOperation::Create { .. } => "New render profile",
-        NameOperation::CreateQuality {
-            role: CatalogRole::Template,
-            ..
-        } => "Save quality template",
-        NameOperation::CreateQuality { .. } => "New quality profile",
         NameOperation::CreateOutput {
             role: CatalogRole::Template,
             ..
@@ -567,27 +536,6 @@ fn render_catalog_target(ui: &mut egui::Ui, world: &WorldEditor) -> ProfileTarge
     ui.data_mut(|data| data.insert_temp(id, target));
     target
 }
-fn quality_catalog_target(ui: &mut egui::Ui, world: &WorldEditor) -> Result<NodeId, String> {
-    let output = world.document.output_render_profile()?;
-    let nodes = world.document.render_profiles(Some(CatalogRole::Profile));
-    let id = egui::Id::new(("quality_catalog_target", world.document.graph.id));
-    let mut target = ui
-        .data(|data| data.get_temp::<NodeId>(id))
-        .filter(|id| nodes.iter().any(|node| node.id == *id))
-        .unwrap_or(output);
-    ui.horizontal_wrapped(|ui| {
-        ui.label("Recall quality to");
-        egui::ComboBox::from_id_salt("quality_catalog_target")
-            .selected_text(profile_name(&nodes, target))
-            .show_ui(ui, |ui| {
-                for node in &nodes {
-                    ui.selectable_value(&mut target, node.id, &node.name);
-                }
-            });
-    });
-    ui.data_mut(|data| data.insert_temp(id, target));
-    Ok(target)
-}
 fn recall_render(
     ui: &egui::Ui,
     world: &mut WorldEditor,
@@ -612,38 +560,6 @@ fn recall_render(
             }
             Err(error) => actions.error = Some(error),
         },
-        Err(error) => actions.error = Some(error),
-    }
-}
-fn recall_quality(
-    ui: &egui::Ui,
-    world: &mut WorldEditor,
-    node: &WorldNodeInfo,
-    target: NodeId,
-    frame: f64,
-    actions: &mut Actions,
-) {
-    match world.document.catalog_role(node.id) {
-        Ok(Some(CatalogRole::Template)) => request_name(
-            ui,
-            world,
-            NameOperation::InstantiateQuality {
-                id: node.id,
-                target: Some(target),
-            },
-            node.name.clone(),
-        ),
-        Ok(_) => {
-            actions.execute(
-                world,
-                WorldCommand::SetAttribute {
-                    id: target,
-                    path: "/render/quality_id".into(),
-                    value: json!(node.id),
-                    frame,
-                },
-            );
-        }
         Err(error) => actions.error = Some(error),
     }
 }
@@ -678,11 +594,6 @@ fn copy_operation(
 ) -> Option<NameOperation> {
     Some(match kind {
         WorldKind::RenderSettings => NameOperation::Create {
-            source,
-            role,
-            target: None,
-        },
-        WorldKind::QualitySettings => NameOperation::CreateQuality {
             source,
             role,
             target: None,
@@ -763,9 +674,7 @@ pub(crate) fn settings(
     let mut actions = binding_controls(ui, world, true, frame);
     ui.separator();
     ui.label("Render profiles and templates");
-    ui.weak(
-        "Profiles are shared live. Applying a template creates an independent render/quality pair.",
-    );
+    ui.weak("Profiles are shared live. Applying a template creates an independent render profile.");
     catalog_new_buttons(ui, world, WorldKind::RenderSettings, "", "Render settings");
     let render_target = render_catalog_target(ui, world);
     actions.merge(catalog_buttons(
@@ -775,26 +684,6 @@ pub(crate) fn settings(
         "Recall to the selected target; right-click to edit or save settings",
         &mut |ui, world, node, actions| {
             recall_render(ui, world, node, render_target, frame, actions)
-        },
-    ));
-    ui.separator();
-    ui.label("Quality profiles and templates");
-    catalog_new_buttons(
-        ui,
-        world,
-        WorldKind::QualitySettings,
-        "quality ",
-        "Quality settings",
-    );
-    let quality_target = quality_catalog_target(ui, world);
-    actions.merge(catalog_buttons(
-        ui,
-        world,
-        WorldKind::QualitySettings,
-        "Recall quality to the selected render profile; right-click to edit or save settings",
-        &mut |ui, world, node, actions| match &quality_target {
-            Ok(target) => recall_quality(ui, world, node, *target, frame, actions),
-            Err(error) => actions.error = Some(error.clone()),
         },
     ));
     ui.separator();
@@ -869,26 +758,6 @@ fn settings_menu(
             )
         })
         .collect(),
-        WorldKind::QualitySettings => std::iter::once((
-            "Create independent quality profile…".to_owned(),
-            NameOperation::InstantiateQuality { id, target: None },
-        ))
-        .chain(
-            world
-                .document
-                .render_profiles(Some(CatalogRole::Profile))
-                .into_iter()
-                .map(|render| {
-                    (
-                        format!("Apply independent copy to {}", render.name),
-                        NameOperation::InstantiateQuality {
-                            id,
-                            target: Some(render.id),
-                        },
-                    )
-                }),
-        )
-        .collect(),
         WorldKind::OutputSettings => vec![
             (
                 "Create independent output profile…".to_owned(),
@@ -935,12 +804,6 @@ pub(crate) fn node_actions(
                 ui.selectable_value(&mut role, Some(CatalogRole::Profile), "Profile");
                 ui.selectable_value(&mut role, Some(CatalogRole::Template), "Template");
             });
-        if kind == WorldKind::RenderSettings
-            && let Ok(quality) = world.document.render_quality(id)
-            && ui.button("Edit quality").clicked()
-        {
-            actions.edit = Some(quality);
-        }
         if kind != WorldKind::ViewportSettings {
             let name = world
                 .document
@@ -1042,7 +905,7 @@ mod tests {
         assert_eq!(world.document, original);
     }
     #[test]
-    fn settings_new_profile_button_creates_pair_in_one_undo() {
+    fn settings_new_profile_button_creates_profile_in_one_undo() {
         let mut world = WorldEditor::new(crate::world::WorldDocument::from_scene(
             &crate::scene::Scene::preset(crate::params::FAMILY_BULB),
         ));
@@ -1064,8 +927,6 @@ mod tests {
         draw(pointer(save, false), &mut world);
         let id = world.selection.unwrap();
         assert!(!original.nodes().iter().any(|node| node.id == id));
-        let quality = world.document.render_quality(id).unwrap();
-        assert!(!original.nodes().iter().any(|node| node.id == quality));
         assert!(world.undo());
         assert_eq!(world.document, original);
     }
@@ -1105,7 +966,7 @@ mod tests {
         assert_eq!(world.document, original);
     }
     #[test]
-    fn named_template_button_applies_independent_pair_with_one_undo() {
+    fn named_template_button_applies_independent_profile_with_one_undo() {
         let mut world = WorldEditor::new(crate::world::WorldDocument::from_scene(
             &crate::scene::Scene::preset(crate::params::FAMILY_BULB),
         ));
@@ -1118,7 +979,6 @@ mod tests {
             })
             .unwrap();
         let template = world.selection.unwrap();
-        let template_quality = world.document.render_quality(template).unwrap();
         let original = world.document.clone();
         let ctx = egui::Context::default();
         let mut world_ui = crate::world_ui::WorldUi::default();
@@ -1140,10 +1000,6 @@ mod tests {
         draw(pointer(save, false), &mut world);
         let instance = world.document.output_render_profile().unwrap();
         assert_ne!(instance, template);
-        assert_ne!(
-            world.document.render_quality(instance).unwrap(),
-            template_quality
-        );
         assert_eq!(
             world.document.catalog_role(instance).unwrap(),
             Some(CatalogRole::Profile)

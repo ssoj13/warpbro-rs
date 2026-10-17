@@ -93,7 +93,6 @@ pub enum WorldKind {
     Group,
     Material,
     RenderSettings,
-    QualitySettings,
     ViewportSettings,
     /// Export encode recipe (`export::OutputSettings`): format, codec, colour, size.
     OutputSettings,
@@ -288,17 +287,6 @@ pub enum WorldCommand {
         role: crate::render_profiles::CatalogRole,
         source: Option<NodeId>,
         target: Option<crate::render_profiles::ProfileTarget>,
-    },
-    CreateQualityProfile {
-        name: String,
-        role: crate::render_profiles::CatalogRole,
-        source: Option<NodeId>,
-        target: Option<NodeId>,
-    },
-    InstantiateQualityTemplate {
-        id: NodeId,
-        name: String,
-        target: Option<NodeId>,
     },
     InstantiateRenderTemplate {
         id: NodeId,
@@ -773,7 +761,6 @@ impl WorldEditor {
             let mut attrs: Attrs =
                 serde_json::from_value(data["host"].clone()).map_err(|e| e.to_string())?;
             for path in [
-                "/render/quality_id",
                 "/viewport/moving_id",
                 "/viewport/still_id",
                 "/viewport/manual_id",
@@ -1129,33 +1116,6 @@ impl WorldEditor {
                     source.unwrap_or(self.document.output_render_profile()?),
                     name,
                     role,
-                    target,
-                )?;
-            }
-            WorldCommand::CreateQualityProfile {
-                name,
-                role,
-                source,
-                target,
-            } => {
-                let source = match source {
-                    Some(source) => source,
-                    None => self
-                        .document
-                        .render_quality(self.document.output_render_profile()?)?,
-                };
-                self.create_quality_profile(source, name, role, target)?;
-            }
-            WorldCommand::InstantiateQualityTemplate { id, name, target } => {
-                if self.document.catalog_role(id)?
-                    != Some(crate::render_profiles::CatalogRole::Template)
-                {
-                    return Err("The selected node is not a quality template".into());
-                }
-                self.create_quality_profile(
-                    id,
-                    name,
-                    crate::render_profiles::CatalogRole::Profile,
                     target,
                 )?;
             }
@@ -1641,8 +1601,8 @@ impl WorldEditor {
         }
         if before.get("render") != after.get("render") {
             let render = self.document.output_render_profile()?;
-            let quality = self.document.render_quality(render)?;
-            for (path, target) in self.document.render_edit_paths(render, quality, frame)? {
+            let viewport = self.document.viewport_settings_id()?;
+            for (path, target) in self.document.render_edit_paths(render, viewport, frame)? {
                 let scene_path = path.replacen("/quality/", "/render/", 1);
                 if let (Some(a), Some(b)) =
                     (before.pointer(&scene_path), after.pointer(&scene_path))
@@ -2171,10 +2131,7 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
             "Leaves part of every fractal out, 0 (all of it) to 1 (none): a 3D grid of cells is removed at random, so the march has less to trace."
         }
         "/render/method" => {
-            "Fast evaluates opaque materials with the existing simplified material model; transmission keeps Standard Surface. Full preserves each authored material model. Quality remains controlled by the linked QualitySettings."
-        }
-        "/render/quality_id" => {
-            "The QualitySettings node shared by this render profile. Editing that node affects every profile that references its UUID; templates must be instantiated before use."
+            "Fast evaluates opaque materials with the existing simplified material model; transmission keeps Standard Surface. Full preserves each authored material model. Quality remains controlled by the profile's Quality section."
         }
         "/viewport/extras" => {
             "Draw the extras over the image: mask shapes, group locators, the other cameras and the lights."
@@ -2625,9 +2582,8 @@ fn branches(kind: WorldKind) -> &'static [&'static str] {
         WorldKind::Environment => &["environment", "lighting"],
         WorldKind::Material => &["material"],
         WorldKind::Group => &[],
-        WorldKind::RenderSettings => &["render"],
-        WorldKind::QualitySettings => &["quality"],
-        WorldKind::ViewportSettings => &["viewport"],
+        WorldKind::RenderSettings => &["render", "quality"],
+        WorldKind::ViewportSettings => &["viewport", "render"],
         WorldKind::OutputSettings => &["output"],
         WorldKind::Mask => &["mask"],
     }
@@ -2726,7 +2682,7 @@ fn set_pointer(root: &mut Value, path: &str, value: Value, create: bool) -> Resu
 }
 
 impl WorldEditor {
-    /// Copy one standalone settings node (Quality or Output) under a new UUID, name and role,
+    /// Copy one standalone settings node (Render or Output) under a new UUID, name and role,
     /// and select it. `assigned`: the copy is about to be bound, so it cannot be a template.
     fn clone_settings(
         &mut self,
@@ -2767,35 +2723,6 @@ impl WorldEditor {
         }
         Ok(())
     }
-    fn create_quality_profile(
-        &mut self,
-        source: NodeId,
-        name: String,
-        role: crate::render_profiles::CatalogRole,
-        target: Option<NodeId>,
-    ) -> Result<(), String> {
-        let quality = self.clone_settings(
-            WorldKind::QualitySettings,
-            source,
-            name,
-            role,
-            target.is_some(),
-        )?;
-        if let Some(render) = target {
-            self.document
-                .require_live_settings(render, WorldKind::RenderSettings)?;
-            self.document.assert_unlocked(render)?;
-            self.document.set_attribute(
-                render,
-                "/render/quality_id",
-                json!(quality),
-                f64::from(self.document.first),
-                false,
-                self.new_key,
-            )?;
-        }
-        Ok(())
-    }
     fn create_render_profile(
         &mut self,
         source: NodeId,
@@ -2803,42 +2730,13 @@ impl WorldEditor {
         role: crate::render_profiles::CatalogRole,
         target: Option<crate::render_profiles::ProfileTarget>,
     ) -> Result<(), String> {
-        if name.trim().is_empty() {
-            return Err("Profile name cannot be empty".into());
-        }
-        if role == crate::render_profiles::CatalogRole::Template && target.is_some() {
-            return Err("Instantiate a template before assigning it".into());
-        }
-        self.document
-            .require_settings(source, WorldKind::RenderSettings)?;
-        let quality = self.document.render_quality(source)?;
-        let mut nodes = HashMap::from([
-            (source.to_string(), self.document.node(source)?.clone()),
-            (quality.to_string(), self.document.node(quality)?.clone()),
-        ]);
-        // A settings subgraph never includes unrelated scene children or parents.
-        for data in nodes.values_mut() {
-            data["parent"] = Value::Null;
-            data["children"] = json!([]);
-        }
-        let roots = self.insert_fragment(nodes)?;
-        let render = roots
-            .iter()
-            .copied()
-            .find(|id| {
-                self.document
-                    .info(*id)
-                    .is_ok_and(|n| n.kind == WorldKind::RenderSettings)
-            })
-            .ok_or("Cloned render node missing")?;
-        let quality = self.document.render_quality(render)?;
-        self.document.node_mut(render)?["name"] = json!(name.trim());
-        self.document.node_mut(quality)?["name"] = json!(format!("{} Quality", name.trim()));
-        for id in [render, quality] {
-            self.document.node_mut(id)?["metadata"]["catalog_role"] = json!(role);
-        }
-        self.selection = Some(render);
-        self.selected = vec![render];
+        let render = self.clone_settings(
+            WorldKind::RenderSettings,
+            source,
+            name,
+            role,
+            target.is_some(),
+        )?;
         if let Some(target) = target {
             if let Some(path) = target.viewport_path() {
                 let viewport = self.document.viewport_settings_id()?;
@@ -2963,12 +2861,6 @@ impl WorldDocument {
             .and_then(NodeId::parse)
             .ok_or_else(|| format!("Settings reference {path} must be a UUID"))
     }
-    pub fn render_quality(&self, render: NodeId) -> Result<NodeId, String> {
-        self.require_settings(render, WorldKind::RenderSettings)?;
-        let id = self.static_settings_reference(render, "/render/quality_id")?;
-        self.require_settings(id, WorldKind::QualitySettings)?;
-        Ok(id)
-    }
     fn settings_choices(&self, consumer: NodeId, path: &str) -> Option<Vec<Value>> {
         let kind = crate::render_profiles::reference_kind(path)?;
         let template = self.catalog_role(consumer).ok().flatten()
@@ -2987,23 +2879,13 @@ impl WorldDocument {
         )
     }
     fn settings_template(&self, kind: WorldKind, scene: &Scene) -> Result<Value, String> {
-        use crate::render_profiles::{quality_values, render_values, viewport_values};
+        use crate::render_profiles::{look_values, quality_values, render_values, viewport_values};
         let render = serde_json::to_value(scene.render).map_err(|e| e.to_string())?;
         match kind {
-            WorldKind::QualitySettings => Ok(json!({"quality":quality_values(&render)})),
-            WorldKind::RenderSettings => {
-                let quality = self
-                    .nodes()
-                    .into_iter()
-                    .find(|node| {
-                        node.kind == WorldKind::QualitySettings
-                            && self.catalog_role(node.id).ok().flatten()
-                                == Some(crate::render_profiles::CatalogRole::Profile)
-                    })
-                    .map(|node| node.id)
-                    .ok_or("Create QualitySettings before RenderSettings")?;
-                Ok(json!({"render":render_values(&render, quality)}))
-            }
+            WorldKind::RenderSettings => Ok(json!({
+                "render": render_values(&render),
+                "quality": quality_values(&render),
+            })),
             WorldKind::ViewportSettings => {
                 let profiles =
                     self.render_profiles(Some(crate::render_profiles::CatalogRole::Profile));
@@ -3011,7 +2893,10 @@ impl WorldDocument {
                     .first()
                     .ok_or("Create a RenderSettings profile before ViewportSettings")?
                     .id;
-                Ok(json!({"viewport":viewport_values(still, still)}))
+                Ok(json!({
+                    "viewport": viewport_values(still, still),
+                    "render": look_values(&render),
+                }))
             }
             WorldKind::OutputSettings => Ok(json!({
                 "output": serde_json::to_value(crate::export::OutputSettings::default())
@@ -3022,50 +2907,19 @@ impl WorldDocument {
     }
     fn seed_settings(&mut self, scene: &Scene) -> Result<(), String> {
         use crate::render_profiles::RenderMethod;
-        let output_quality =
-            self.insert(WorldKind::QualitySettings, "Output Quality", scene, None)?;
-        let output = self.insert(WorldKind::RenderSettings, "Output", scene, None)?;
+        let still = self.insert(WorldKind::RenderSettings, "Still", scene, None)?;
         self.graph
             .bus_slots
-            .insert("output_render".into(), json!(output));
-        let still_quality =
-            self.insert(WorldKind::QualitySettings, "Still Quality", scene, None)?;
-        let still = self.insert(WorldKind::RenderSettings, "Still", scene, None)?;
-        self.set_attribute(
-            still,
-            "/render/quality_id",
-            json!(still_quality),
-            0.0,
-            false,
-            Tan::Constant,
-        )?;
-        let moving_quality =
-            self.insert(WorldKind::QualitySettings, "Moving Quality", scene, None)?;
+            .insert("output_render".into(), json!(still));
         let moving = self.insert(WorldKind::RenderSettings, "Moving", scene, None)?;
-        self.set_attribute(
-            moving,
-            "/render/quality_id",
-            json!(moving_quality),
-            0.0,
-            false,
-            Tan::Constant,
-        )?;
-        self.set_attribute(
-            output,
-            "/render/quality_id",
-            json!(output_quality),
-            0.0,
-            false,
-            Tan::Constant,
-        )?;
-        for (id, path, value) in [
-            (moving, "/render/method", json!(RenderMethod::Fast)),
-            (moving_quality, "/quality/adaptive/enabled", json!(false)),
-            (moving_quality, "/quality/samples", json!(8)),
-            (moving_quality, "/quality/resolution_scale", json!(1.0)),
-            (moving_quality, "/quality/max_bounces", json!(2)),
+        for (path, value) in [
+            ("/render/method", json!(RenderMethod::Fast)),
+            ("/quality/adaptive/enabled", json!(false)),
+            ("/quality/samples", json!(8)),
+            ("/quality/resolution_scale", json!(1.0)),
+            ("/quality/max_bounces", json!(2)),
         ] {
-            self.set_attribute(id, path, value, 0.0, false, Tan::Constant)?;
+            self.set_attribute(moving, path, value, 0.0, false, Tan::Constant)?;
         }
         let viewport = self.insert(WorldKind::ViewportSettings, "Viewport", scene, None)?;
         self.set_attribute(
@@ -3107,16 +2961,18 @@ impl WorldDocument {
         frame: f64,
     ) -> Result<crate::render_profiles::EffectiveRender, String> {
         use crate::render_profiles::{
-            EffectiveRender, PROFILE_RENDER_FIELDS, QUALITY_RENDER_FIELDS, RenderMethod,
+            EffectiveRender, LOOK_RENDER_FIELDS, PROFILE_RENDER_FIELDS, QUALITY_RENDER_FIELDS,
+            RenderMethod,
         };
         if !frame.is_finite() {
             return Err("Invalid render profile time".into());
         }
-        let quality = self.render_quality(profile)?;
+        self.require_settings(profile, WorldKind::RenderSettings)?;
         let profile_node = self.node(profile)?;
         let profile_attrs = self.attrs(profile)?;
-        let quality_node = self.node(quality)?;
-        let quality_attrs = self.attrs(quality)?;
+        let viewport = self.viewport_settings_id()?;
+        let viewport_node = self.node(viewport)?;
+        let viewport_attrs = self.attrs(viewport)?;
         let method: RenderMethod = serde_json::from_value(self.attribute_value_with(
             profile,
             profile_node,
@@ -3133,7 +2989,7 @@ impl WorldDocument {
             json!(Scene::preset(crate::params::FAMILY_BULB).render.iterations),
         );
         let evaluated_quality = json!({
-            "quality": self.settings_values_with(quality, quality_node, &quality_attrs, "quality", frame)?
+            "quality": self.settings_values_with(profile, profile_node, &profile_attrs, "quality", frame)?
         });
         for key in QUALITY_RENDER_FIELDS {
             let mut value = evaluated_quality["quality"][*key].clone();
@@ -3162,12 +3018,17 @@ impl WorldDocument {
         for key in PROFILE_RENDER_FIELDS {
             values.insert((*key).into(), evaluated["render"][*key].clone());
         }
+        let evaluated_look =
+            self.settings_values_with(viewport, viewport_node, &viewport_attrs, "render", frame)?;
+        for key in LOOK_RENDER_FIELDS {
+            values.insert((*key).into(), evaluated_look[*key].clone());
+        }
         let render: crate::scene::Render = serde_json::from_value(Value::Object(values))
             .map_err(|e| format!("Invalid effective RenderSettings: {e}"))?;
         let samples_value = self.attribute_value_with(
-            quality,
-            quality_node,
-            &quality_attrs,
+            profile,
+            profile_node,
+            &profile_attrs,
             "/quality/samples",
             frame,
         )?;
@@ -3178,9 +3039,9 @@ impl WorldDocument {
             .round() as u32;
         let resolution_scale =
             self.attribute_value_with(
-                quality,
-                quality_node,
-                &quality_attrs,
+                profile,
+                profile_node,
+                &profile_attrs,
                 "/quality/resolution_scale",
                 frame,
             )?
@@ -3241,7 +3102,6 @@ impl WorldDocument {
         };
         Ok(EffectiveRender {
             profile,
-            quality,
             method,
             render,
             samples,
@@ -3375,10 +3235,6 @@ impl WorldDocument {
             let role = self.catalog_role(node.id)?.ok_or("Settings role missing")?;
             match node.kind {
                 WorldKind::RenderSettings => {
-                    let quality = self.render_quality(node.id)?;
-                    if role == crate::render_profiles::CatalogRole::Profile {
-                        self.require_live_settings(quality, WorldKind::QualitySettings)?;
-                    }
                     self.effective_render(node.id, frame)?;
                 }
                 WorldKind::ViewportSettings => {
@@ -3392,6 +3248,15 @@ impl WorldDocument {
                             return Err(format!("Invalid viewport {key}"));
                         }
                     }
+                    let look = self.settings_values(node.id, "render", frame)?;
+                    for key in ["exposure_stops", "saturation"] {
+                        if !look[key].as_f64().is_some_and(f64::is_finite) {
+                            return Err(format!("Invalid viewport look {key}"));
+                        }
+                    }
+                    if !look["reinhard"].is_boolean() {
+                        return Err("Invalid viewport look reinhard".into());
+                    }
                     for path in [
                         "/viewport/moving_id",
                         "/viewport/still_id",
@@ -3404,19 +3269,6 @@ impl WorldDocument {
                             self.require_settings(id, WorldKind::RenderSettings)?;
                         }
                     }
-                }
-                WorldKind::QualitySettings => {
-                    let values = self.settings_values(node.id, "quality", frame)?;
-                    for key in crate::render_profiles::QUALITY_RENDER_FIELDS
-                        .iter()
-                        .chain(["samples", "resolution_scale"].iter())
-                    {
-                        if values[*key].is_null() {
-                            return Err(format!("Missing quality field {key}"));
-                        }
-                    }
-                    serde_json::from_value::<crate::scene::Adaptive>(values["adaptive"].clone())
-                        .map_err(|e| e.to_string())?;
                 }
                 WorldKind::OutputSettings => {
                     self.output_settings_of(node.id)?;
@@ -3464,18 +3316,17 @@ impl WorldDocument {
     fn render_edit_paths(
         &self,
         render: NodeId,
-        quality: NodeId,
+        viewport: NodeId,
         frame: f64,
     ) -> Result<Vec<(String, NodeId)>, String> {
         let mut paths = Vec::new();
-        for id in [render, quality] {
+        for id in [render, viewport] {
             paths.extend(
                 self.attributes(id, frame)?
                     .into_iter()
                     .filter(|a| {
                         a.component.is_none()
                             && (a.path.starts_with("/render/") || a.path.starts_with("/quality/"))
-                            && a.path != "/render/quality_id"
                             && a.path != "/render/method"
                             && a.path != "/quality/samples"
                             && a.path != "/quality/resolution_scale"
@@ -5764,15 +5615,15 @@ impl WorldDocument {
             }
             self.seed_settings(&seed_scene)?;
             if let Some(samples) = legacy_samples {
-                let quality_ids: Vec<NodeId> = self
+                let render_ids: Vec<NodeId> = self
                     .nodes()
                     .into_iter()
-                    .filter(|n| n.kind == WorldKind::QualitySettings && n.name != "Moving Quality")
+                    .filter(|n| n.kind == WorldKind::RenderSettings && n.name != "Moving")
                     .map(|n| n.id)
                     .collect();
-                for qid in quality_ids {
+                for rid in render_ids {
                     let _ = self.set_attribute(
-                        qid,
+                        rid,
                         "/quality/samples",
                         json!(samples),
                         0.0,
@@ -5780,6 +5631,131 @@ impl WorldDocument {
                         Tan::Constant,
                     );
                 }
+            }
+        }
+
+        // 2.5. Fold legacy `QualitySettings` nodes into `RenderSettings` and migrate look fields
+        // (`exposure_stops`, `saturation`, `reinhard`) from `output_render` onto `ViewportSettings`.
+        let quality_nodes: HashMap<String, Value> = self
+            .graph
+            .nodes
+            .iter()
+            .filter(|(_, n)| n["type"].as_str() == Some("QualitySettings"))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if !quality_nodes.is_empty() {
+            for k in quality_nodes.keys() {
+                self.graph.nodes.remove(k);
+            }
+            if let Some(order) = self
+                .graph
+                .bus_slots
+                .get_mut("layer_order")
+                .and_then(Value::as_array_mut)
+            {
+                order.retain(|v| v.as_str().is_none_or(|s| !quality_nodes.contains_key(s)));
+            }
+        }
+        let render_keys: Vec<String> = self
+            .graph
+            .nodes
+            .iter()
+            .filter(|(_, n)| n["type"].as_str() == Some("RenderSettings"))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in &render_keys {
+            let Some(id) = NodeId::parse(key) else {
+                continue;
+            };
+            let Ok(mut r_attrs) = self.attrs(id) else {
+                continue;
+            };
+            let qid_str = r_attrs
+                .get("/render/quality_id")
+                .cloned()
+                .map(attr_json)
+                .and_then(|v| v.as_str().map(str::to_owned))
+                .or_else(|| {
+                    self.graph.nodes[key]["gpu"]
+                        .pointer("/render/quality_id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                });
+            if let Some(qid) = qid_str
+                && let Some(qnode) = quality_nodes.get(&qid)
+            {
+                if let Some(q_gpu) = qnode["gpu"].get("quality").cloned() {
+                    self.graph.nodes.get_mut(key).expect("render node")["gpu"]["quality"] = q_gpu;
+                }
+                if let Some(q_disc) = qnode["discrete"].as_object()
+                    && let Some(r_disc) =
+                        self.graph.nodes.get_mut(key).expect("render node")["discrete"]
+                            .as_object_mut()
+                {
+                    for (dk, dv) in q_disc {
+                        if dk.starts_with("/quality/") {
+                            r_disc.insert(dk.clone(), dv.clone());
+                        }
+                    }
+                }
+                if let Ok(q_attrs) = serde_json::from_value::<Attrs>(qnode["host"].clone()) {
+                    for (path, val) in q_attrs.iter() {
+                        if path.starts_with("/quality/") {
+                            r_attrs.set(path, val.clone());
+                            if let Some(anim) = q_attrs.anim(path).cloned() {
+                                r_attrs.set_anim(path, Some(anim));
+                            }
+                            if let Some(conn) = q_attrs.conn(path).cloned() {
+                                r_attrs.set_conn(path, Some(conn));
+                            }
+                        }
+                    }
+                    self.store_attrs(id, &r_attrs)?;
+                }
+            }
+        }
+        if let Some(vp_key) = self
+            .graph
+            .bus_slots
+            .get("viewport_settings")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            && let Some(vp_id) = NodeId::parse(&vp_key)
+            && let Ok(mut vp_attrs) = self.attrs(vp_id)
+            && !vp_attrs.contains("/render/exposure_stops")
+            && let Some(out_key) = self
+                .graph
+                .bus_slots
+                .get("output_render")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+            && let Some(out_node) = self.graph.nodes.get(&out_key).cloned()
+        {
+            if let Some(vp_node) = self.graph.nodes.get_mut(&vp_key) {
+                let mut look_gpu = serde_json::Map::new();
+                for field in crate::render_profiles::LOOK_RENDER_FIELDS {
+                    if let Some(v) = out_node["gpu"]["render"].get(*field).cloned() {
+                        look_gpu.insert((*field).into(), v);
+                    }
+                }
+                if !look_gpu.is_empty() {
+                    vp_node["gpu"]["render"] = Value::Object(look_gpu);
+                }
+            }
+            if let Ok(out_attrs) = serde_json::from_value::<Attrs>(out_node["host"].clone()) {
+                for field in crate::render_profiles::LOOK_RENDER_FIELDS {
+                    let path = format!("/render/{field}");
+                    if let Some(val) = out_attrs.get(&path).cloned() {
+                        vp_attrs.set(&path, val);
+                        if let Some(anim) = out_attrs.anim(&path).cloned() {
+                            vp_attrs.set_anim(&path, Some(anim));
+                        }
+                        if let Some(conn) = out_attrs.conn(&path).cloned() {
+                            vp_attrs.set_conn(&path, Some(conn));
+                        }
+                    }
+                }
+                self.store_attrs(vp_id, &vp_attrs)?;
             }
         }
 
@@ -5811,7 +5787,6 @@ impl WorldDocument {
             let gpu_schema = if crate::render_profiles::setting_kind(kind) {
                 let mut schema = self.settings_template(kind, &default_scene)?;
                 for ref_path in [
-                    "/render/quality_id",
                     "/viewport/moving_id",
                     "/viewport/still_id",
                     "/viewport/manual_id",
@@ -6172,10 +6147,9 @@ fn attribute_order(path: &str) -> u16 {
         "/quality/hit_epsilon" => 32,
         "/quality/glass_probes" => 33,
 
-        // Render: display/method/quality link & denoise first, then look/color, then direct lighting
+        // Render: display/method & denoise first, then thinning, then direct lighting
         "/render/display" => 10,
         "/render/method" => 11,
-        "/render/quality_id" => 12,
         "/render/denoise/enabled" => 20,
         "/render/denoise/quality" => 21,
         "/render/denoise/mode" => 22,

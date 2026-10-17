@@ -2987,13 +2987,9 @@ impl App {
             .as_ref()
             .map_err(Clone::clone)
             .and_then(crate::render_profiles::EffectiveRender::export_quality);
-        let quality_id = match &effective {
-            Ok(effective) => Some(effective.quality),
-            Err(error) => {
-                self.status = error.clone();
-                None
-            }
-        };
+        if let Err(error) = &effective {
+            self.status = error.clone();
+        }
         // An unreadable recipe still shows the form (its check fails, a running export keeps
         // its progress and Cancel); only the authoring step needs the recipe.
         let recipe = self
@@ -3026,20 +3022,6 @@ impl App {
             &self.scene.colour,
             |ui, world| {
                 actions = crate::render_profiles_ui::output_binding_rows(ui, world, frame);
-                if let Some(id) = quality_id {
-                    ui.label("Quality");
-                    if ui
-                        .button(format!(
-                            "{} Edit Output quality",
-                            egui_phosphor::regular::GEAR
-                        ))
-                        .on_hover_text("Edit the Output quality profile in the Attribute Editor")
-                        .clicked()
-                    {
-                        actions.edit = Some(id);
-                    }
-                    ui.end_row();
-                }
             },
             |world| {
                 world.finish_edit();
@@ -5075,18 +5057,23 @@ mod tests {
         use serde_json::json;
         let mut app = App::new();
         let policy = app.world.document.viewport_policy(0.0).unwrap();
-        let moving_q = app.world.document.render_quality(policy.moving_id).unwrap();
-        let still_q = app.world.document.render_quality(policy.still_id).unwrap();
+        app.world
+            .execute(WorldCommand::CreateRenderProfile {
+                name: "Output".into(),
+                role: crate::render_profiles::CatalogRole::Profile,
+                source: Some(policy.still_id),
+                target: Some(crate::render_profiles::ProfileTarget::Output),
+            })
+            .unwrap();
         let output = app.world.document.output_render_profile().unwrap();
-        let output_q = app.world.document.render_quality(output).unwrap();
         for (id, path, value) in [
-            (moving_q, "/quality/samples", json!(19)),
-            (moving_q, "/quality/max_bounces", json!(1)),
-            (moving_q, "/quality/resolution_scale", json!(0.25)),
-            (still_q, "/quality/samples", json!(41)),
-            (still_q, "/quality/max_bounces", json!(6)),
-            (still_q, "/quality/resolution_scale", json!(0.75)),
-            (output_q, "/quality/samples", json!(997)),
+            (policy.moving_id, "/quality/samples", json!(19)),
+            (policy.moving_id, "/quality/max_bounces", json!(1)),
+            (policy.moving_id, "/quality/resolution_scale", json!(0.25)),
+            (policy.still_id, "/quality/samples", json!(41)),
+            (policy.still_id, "/quality/max_bounces", json!(6)),
+            (policy.still_id, "/quality/resolution_scale", json!(0.75)),
+            (output, "/quality/samples", json!(997)),
         ] {
             app.world
                 .execute(WorldCommand::SetAttribute {
@@ -5276,10 +5263,9 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = App::new();
         let still = app.world.document.viewport_policy(0.0).unwrap().still_id;
-        let quality = app.world.document.render_quality(still).unwrap();
         app.world
             .execute(crate::world::WorldCommand::SetAttribute {
-                id: quality,
+                id: still,
                 path: "/quality/samples".into(),
                 value: serde_json::json!(8),
                 frame: 0.0,
@@ -5335,7 +5321,7 @@ mod tests {
         let key = app.preview_key;
         app.world
             .execute(crate::world::WorldCommand::SetAttribute {
-                id: quality,
+                id: still,
                 path: "/quality/samples".into(),
                 value: serde_json::json!(16),
                 frame: 0.0,
@@ -6509,7 +6495,7 @@ mod tests {
         // A Still profile that renders fast, at a resolution scale below 1: the scale once made
         // the cached preview's size key disagree with the viewport and cancel playback at once.
         let policy = app.world.document.viewport_policy(0.0).unwrap();
-        let still = app.world.document.render_quality(policy.still_id).unwrap();
+        let still = policy.still_id;
         for (path, value) in [
             ("/quality/samples", serde_json::json!(1)),
             ("/quality/resolution_scale", serde_json::json!(0.75)),
@@ -6620,7 +6606,7 @@ mod tests {
         let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
         let policy = app.world.document.viewport_policy(0.0).unwrap();
-        let still = app.world.document.render_quality(policy.still_id).unwrap();
+        let still = policy.still_id;
         app.world
             .execute(crate::world::WorldCommand::SetAttribute {
                 id: still,

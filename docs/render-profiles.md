@@ -1,6 +1,6 @@
-# Render/quality profiles: канонические узлы и viewport
+# Render profiles: канонические узлы и viewport
 
-Как устроены настройки рендера: узлы RenderSettings, QualitySettings, ViewportSettings и
+Как устроены настройки рендера: узлы RenderSettings, ViewportSettings и
 OutputSettings, их каталог (Profile / Template), маршрутизация viewport и экспорт.
 Открытые этапы (внешний каталог, OutputSettings resize/crop и очередь, WorldDirect,
 перенос в Playa и SquareBob) ведутся в [PLAN](../PLAN.md).
@@ -13,83 +13,74 @@ OutputSettings, их каталог (Profile / Template), маршрутизац
 
 | Вид узла | Собственные параметры | Связи |
 | --- | --- | --- |
-| `RenderSettings` | Метод `Fast / Full`, режим отображения `PathTraced / Direct / Bounds` (`/render/display`), `/render/direct/*` (AO, тени, блики, отражения окружения, Fresnel), `/render/thinning`, exposure, saturation, Reinhard, OIDN denoise | `/render/quality_id → QualitySettings` |
-| `QualitySettings` | Samples, resolution scale, max steps, hit epsilon, step factor, max bounces, glass probes, adaptive sampling | Без обратной ссылки |
-| `ViewportSettings` | `Auto / Locked`, target FPS, settle delay, batch budget, pause, freeze, видимость и выбираемость по видам объектов (`/viewport/show|select/<kind>`), `/viewport/extras` | Moving, Still, Manual → RenderSettings |
+| `RenderSettings` | **Sampling:** samples, resolution scale, adaptive sampling и его параметры.<br>**Denoise:** OIDN denoise.<br>**Limits:** max bounces, max steps, hit epsilon, step factor, glass probes.<br>**Render:** метод `Fast / Full`, режим отображения `PathTraced / Direct / Bounds` (`/render/display`), `/render/thinning`.<br>**Direct:** `/render/direct/*` (AO, тени, блики, отражения окружения, Fresnel). | Без ссылок |
+| `ViewportSettings` | **Color (Look SSOT):** exposure (`/render/exposure_stops`), saturation (`/render/saturation`), Reinhard (`/render/reinhard`).<br>**Viewport:** `Auto / Locked`, target FPS, settle delay, batch budget, pause, freeze, видимость и выбираемость по видам объектов (`/viewport/show\|select/<kind>`), `/viewport/extras`. | Moving, Still, Manual → RenderSettings |
 | `OutputSettings` | Формат (EXR / PNG / Video), encoder, ширина и высота, QP / CRF, denoise at completion, PNG encoding, HDR peak, видео из PNG, override OCIO display / view | Без ссылок |
 
 Слоты графа `viewport_settings`, `output_render` и `output_settings` определяют текущий
-viewport, независимо назначенный выходной RenderSettings и рецепт файла экспорта. Камера, геометрия, свет и
+viewport (включая единый художественный look: экспозицию, насыщенность и Reinhard), независимо назначенный выходной RenderSettings и рецепт файла экспорта. Камера, геометрия, свет и
 материал остаются в своих узлах. Преобразование OCIO и физический режим дисплея
 остаются в существующих настройках Display / Color.
 
-Численные render/quality-параметры остаются анимируемыми и оцениваются на текущем
-кадре. Ссылка `/render/quality_id` и все поля `/viewport/*` статичны: загрузка
+Численные render/quality-параметры и look-атрибуты (`/render/exposure_stops`, `/render/saturation`, `/render/reinhard`) остаются анимируемыми и оцениваются на текущем
+кадре. Все поля `/viewport/*` и `/output/*` статичны: загрузка
 и команды отклоняют сохранённые animation/connections для этих полей. Назначения
 Moving/Still/Manual и политика viewport не анимируются по времени.
 Renderer получает временный `EffectiveRender` и снимок сцены; они производны
 от графа и не являются второй сохраняемой конфигурацией. Старый Group
-«World Settings» больше не дублирует сохраняемые render-параметры.
+«World Settings» больше не дублирует сохраняемые render-параметры, а бывшие отдельные узлы `QualitySettings` автоматически вливаются в `RenderSettings` при открытии старых сцен.
 
-У свежего документа есть отдельные пары Moving, Still и Output. Moving начинает
-с Fast, 8 samples, полного разрешения (1.0), двух bounce и отключённого адаптивного сэмплинга. Still и Output получают
-свои QualitySettings; Manual первоначально ссылается на Still. Начальная политика
-viewport: Auto, 30 FPS, settle delay 180 мс, batch budget 8 мс. Это редактируемые
+У свежего документа есть два преднастроенных профиля `RenderSettings`: **Moving** и **Still**.
+- **Moving** начинает с `Fast`, 8 samples, полного разрешения (1.0), двух bounce и отключённого адаптивного сэмплинга.
+- **Still** начинает с `Full`, 32 samples, полного разрешения (1.0), шести bounce и включённого адаптивного сэмплинга. По умолчанию слоты `Still`, `Manual` и `Output` указывают на профиль **Still**, поэтому один профиль задаёт финальное качество, но при желании `Output` или `Manual` можно переназначить на отдельный профиль.
+Начальная политика viewport: Auto, 30 FPS, settle delay 180 мс, batch budget 8 мс. Это редактируемые
 узлы, а не жёсткие ограничения preview.
 
 UUID, вид узла, роль и значения проверяются. Live-потребитель принимает профиль;
 шаблон сначала нужно применить как независимый экземпляр. Ссылка на отсутствующий
 UUID или неподходящий вид узла, недопустимый диапазон и удаление используемых
 настроек дают ошибку. Проверяется и постоянная часть документа, и сохранённые
-значения ссылок. Типизированная схема связей не допускает обратной связи
-QualitySettings → RenderSettings. Нет автоматической миграции, aliases или
-восстановления отсутствующих полей старого формата.
+значения ссылок. При чтении старых файлов отдельные узлы `QualitySettings` автоматически сливаются со своими `RenderSettings`, а look-поля мигрируют в `ViewportSettings`.
 
 ## Создание и именованные кнопки
 
 Откройте **Settings → Render & Viewport**. Панель показывает назначение Moving, Still, Manual
-и Output, затем каталоги render- и quality-настроек. Параметры редактируются
+и Output, затем каталог render-настроек. Параметры редактируются
 существующим **Attribute Editor**: те же диапазоны, enums, UUID choices,
 reset и анимация. Кнопка шестерёнки рядом с назначением открывает нужный узел.
+Внутри `RenderSettings` секция **Quality** идёт первой и упорядочена по частоте использования (**Sampling** → **Denoise** → **Limits**), за ней следует секция **Render** (**Render** → **Direct**). Внутри `ViewportSettings` секция **Color** (exposure, saturation, Reinhard) расположена над секцией **Viewport**.
 
-- **New profile… / New template…** создают render/quality-пару с новым именем
+- **New profile… / New template…** создают узел `RenderSettings` с новым именем
   и UUID. Начальные параметры копируются из текущего Output, а не из отдельного
   глобального набора defaults.
-- **New quality profile… / New quality template…** создают самостоятельный
-  QualitySettings, начиная с текущего Output Quality.
 - Для render-кнопок **Recall to** выбирает Moving, Still, Manual или Output.
   ЛКМ на профиле назначает его UUID этой цели. ЛКМ на шаблоне предлагает имя
-  и создаёт независимую render/quality-пару.
-- Для quality-кнопок **Recall quality to** выбирает RenderSettings.
-  ЛКМ на quality-профиле меняет его quality-ссылку; шаблон создаёт отдельный
-  QualitySettings и назначает новый UUID.
+  и создаёт независимый профиль `RenderSettings`.
 - ПКМ по именованной кнопке открывает **Edit in Attribute Editor**, **Rename…**,
   **Save as profile…**, **Save as template…**. Save as копирует текущие параметры
   в новую именованную запись. Меню шаблона также позволяет выбрать цель
   применения независимой копии.
-- В Attribute Editor render-узла есть **Edit quality** и **Catalog actions**.
+- В Attribute Editor render-узла доступен блок **Catalog actions**.
   Роль Profile / Template редактируется как metadata того же settings-узла.
 
 Назначенный профиль — общая live-ссылка внутри документа. Изменение его
-RenderSettings или QualitySettings видно всем потребителям этой ссылки.
-**Independent copy…** копирует render и его quality, переназначая внутреннюю
-ссылку на новый UUID. Применение шаблона делает такую же независимую копию:
+`RenderSettings` видно всем потребителям этой ссылки (например, `Still`, `Manual` и `Output`, если они указывают на один узел).
+**Independent copy…** копирует профиль в новый UUID и переназначает выбранный слот на него. Применение шаблона делает такую же независимую копию:
 последующее редактирование шаблона не меняет уже созданный экземпляр.
 
-Создание, копирование и назначение одной render/quality-пары проходят через одну
-команду WorldEditor и один шаг Undo. Quality-копия с назначением тоже является
-одной операцией. Undo/Redo восстанавливает UUID, значения и назначения вместе.
+Создание, копирование и назначение профиля проходят через одну
+команду WorldEditor и один шаг Undo. Undo/Redo восстанавливает UUID, значения и назначения вместе.
 Повседневные изменения Attribute Editor используют существующий undo-контракт.
 
 Каталог находится в текущем WorldDocument и сохраняется вместе с ним. В этой
 реализации нет скрытой синхронизации между файлами или отдельного глобального
-словаря render/quality-параметров. **File → Templates** по-прежнему работает с
+словаря render-параметров. **File → Templates** по-прежнему работает с
 целыми сценами; это другой каталог.
 
 ## Viewport и переключение при движении
 
 Toolbar viewport использует те же ссылки, что Settings → Render & Viewport. В нём доступны
-**Auto / Locked**, меню профилей, pause и freeze. Через меню профилей можно
+**Auto / Locked**, меню профилей, pause и freeze. Ползунок экспозиции в тулбаре напрямую меняет `/render/exposure_stops` на `ViewportSettings`, поэтому экспозиция едина для Moving, Still и Output. Через меню профилей можно
 назначить Moving, Still и Manual, открыть профиль в Attribute Editor, создать
 новый или независимую копию и применить шаблон.
 
@@ -107,7 +98,7 @@ Toolbar не пересчитывает выбор: кнопка меню про
 смена позы камеры включает Moving, после settle delay — Still, а в Locked — Manual.
 
 Runtime выбирает ветвь без перезаписи authored-ссылок и без новых Undo-записей.
-Samples и resolution scale берутся из выбранного QualitySettings. Размер
+Samples и resolution scale берутся из выбранного `RenderSettings`. Размер
 viewport масштабируется до отправки запроса worker; worker не добавляет
 скрытое половинное разрешение, лимит samples или bounce.
 
@@ -133,7 +124,7 @@ Target samples и параметры планирования не подмен�
 
 Cache preview фиксирует явный render-profile UUID в PreviewRequest: Still в Auto
 или Manual в Locked, независимо от текущего Moving-запроса. Его samples и
-resolution scale вычисляются из выбранного QualitySettings для зафиксированного
+resolution scale вычисляются из выбранного `RenderSettings` для зафиксированного
 задания. Worker оценивает каждый кадр через snapshot_with_render_profile,
 сохраняя выбранный профиль при воспроизведении кэша.
 
@@ -147,7 +138,7 @@ resolution scale вычисляются из выбранного QualitySetting
 непрозрачный объект. Authored-материалы документа остаются неизменными.
 
 **Full** сохраняет authored-модели материалов. Samples, глубина и точность
-в обоих методах определяются связанным QualitySettings. Fast — явный выбор
+в обоих методах определяются тем же профилем `RenderSettings`. Fast — явный выбор
 приближения материалов, а не название отдельного world-raymarch renderer.
 
 Поле `/render/display` выбирает режим отображения профиля:
@@ -159,7 +150,7 @@ resolution scale вычисляются из выбранного QualitySetting
 
 ## Output и Render / Encode
 
-Output назначается отдельно от Moving, Still и Manual. Движение мыши,
+Слот `Output` в свежем документе по умолчанию ссылается на профиль `Still`, но может быть переназначен на любой профиль `RenderSettings` отдельно от Moving, Still и Manual. Движение мыши,
 Auto / Locked, pause и freeze viewport не меняют выбранный выходной профиль.
 
 Панель **Render / Encode** начинается с двух привязок: **Output** (RenderSettings)
@@ -177,15 +168,15 @@ animation/connections отклоняются (`render_profiles::static_path`). �
 HEVC, лимит 64 Мпикс) и запрет `Display::Bounds` на профиле `Output`
 (`EffectiveRender::export_quality`) проверяются при старте экспорта и показываются формой,
 чтобы правка могла пройти через промежуточное состояние. Каталог Output
-(**Settings → Output file profiles and templates**) работает как render/quality:
+(**Settings → Output file profiles and templates**) работает как каталог render-профилей:
 ЛКМ назначает профиль или создаёт независимую копию шаблона, ПКМ — Edit,
 Rename, Save as profile / template.
 
 При запуске экспорта WorldDocument фиксируется; рецепт читается из зафиксированного
 документа (`ExportController::start`), а не из формы. Samples и resolution scale
-вычисляются по Output Quality на первом кадре задания и фиксируются для задания;
+вычисляются по профилю Output на первом кадре задания и фиксируются для задания;
 заданный в панели размер масштабируется один раз. Остальные параметры сцены,
-включая render/quality-атрибуты, оцениваются из зафиксированного документа
+включая атрибуты профиля Output и look-атрибуты `ViewportSettings`, оцениваются из зафиксированного документа
 на времени каждого кадра. Изменение текущего документа после запуска
 не меняет задание. Анимированные samples и resolution scale пока не задают
 покадровый sample target или размер экспортируемого изображения.

@@ -187,11 +187,10 @@ fn add_items() -> Vec<egui_tab_menu::MenuItem<WorldKind>> {
         item(WorldKind::DirectionalLight, "Lighting", "sun directional"),
         item(WorldKind::Environment, "Lighting", "hdri sky dome"),
         item(WorldKind::Material, "Shading", "surface shader"),
-        item(WorldKind::RenderSettings, "Settings", "render profile"),
         item(
-            WorldKind::QualitySettings,
+            WorldKind::RenderSettings,
             "Settings",
-            "samples quality profile",
+            "render quality samples profile",
         ),
         item(WorldKind::ViewportSettings, "Settings", "viewport display"),
         item(WorldKind::OutputSettings, "Settings", "output file export"),
@@ -521,7 +520,6 @@ fn kind_label(k: WorldKind) -> &'static str {
         WorldKind::Group => "Group",
         WorldKind::Material => "Material",
         WorldKind::RenderSettings => "Render Settings",
-        WorldKind::QualitySettings => "Quality Settings",
         WorldKind::ViewportSettings => "Viewport Settings",
         WorldKind::OutputSettings => "Output Settings",
         WorldKind::Mask => "Mask",
@@ -535,7 +533,7 @@ fn kind_icon(k: WorldKind) -> &'static str {
         WorldKind::Environment => ph::ENVIRONMENT,
         WorldKind::Group => ph::FOLDER,
         WorldKind::Material => ph::PALETTE,
-        WorldKind::RenderSettings | WorldKind::QualitySettings => ph::GEAR,
+        WorldKind::RenderSettings => ph::GEAR,
         WorldKind::ViewportSettings => ph::MONITOR,
         WorldKind::OutputSettings => ph::FILE,
         WorldKind::Mask => ph::CUT,
@@ -550,7 +548,6 @@ fn kind_color(k: WorldKind) -> Color32 {
         WorldKind::Group => Color32::from_rgb(142, 149, 163),
         WorldKind::Material => Color32::from_rgb(190, 132, 155),
         WorldKind::RenderSettings => Color32::from_rgb(196, 96, 96),
-        WorldKind::QualitySettings => Color32::from_rgb(145, 175, 105),
         WorldKind::ViewportSettings => Color32::from_rgb(100, 180, 210),
         WorldKind::OutputSettings => Color32::from_rgb(210, 160, 90),
         WorldKind::Mask => Color32::from_rgb(176, 120, 200),
@@ -568,7 +565,7 @@ pub(crate) fn section_color(group: &str) -> Color32 {
         "Material" => kind_color(WorldKind::Material),
         "Transform" => Color32::from_rgb(214, 140, 80),
         "Render" => kind_color(WorldKind::RenderSettings),
-        "Quality" => kind_color(WorldKind::QualitySettings),
+        "Quality" => Color32::from_rgb(145, 175, 105),
         "Viewport" => kind_color(WorldKind::ViewportSettings),
         "Output" => kind_color(WorldKind::OutputSettings),
         "Mask" | "Array" => kind_color(WorldKind::Mask),
@@ -577,8 +574,10 @@ pub(crate) fn section_color(group: &str) -> Color32 {
     }
 }
 fn category(path: &str) -> &'static str {
-    if path == "/render/iterations" {
-        return "Fractal";
+    match path {
+        "/render/iterations" => return "Fractal",
+        "/render/exposure_stops" | "/render/saturation" | "/render/reinhard" => return "Color",
+        _ => {}
     }
     match path.split('/').nth(1).unwrap_or("") {
         "transform" => "Transform",
@@ -2826,40 +2825,20 @@ impl WorldUi {
                 }
             });
         }
-        let linked_quality = (node.kind == WorldKind::RenderSettings)
-            .then(|| e.document.render_quality(id).ok())
-            .flatten();
-        let mut quality_targets = Vec::new();
-        if let Some(qid) = linked_quality {
-            for &t in &targets {
-                if let Ok(tq) = e.document.render_quality(t)
-                    && !quality_targets.contains(&tq)
-                {
-                    quality_targets.push(tq);
-                }
-            }
-            if quality_targets.is_empty() {
-                quality_targets.push(qid);
-            }
-        }
+        let attrs = cache
+            .attributes
+            .get(&id)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         let revision = cache.revision;
         let frame = cache.frame;
         for group in ATTRIBUTE_GROUPS {
-            let section_id = match (group, linked_quality) {
-                ("Quality", Some(qid)) => qid,
-                _ => id,
-            };
-            let section_attrs = cache
-                .attributes
-                .get(&section_id)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            if section_attrs
+            if attrs
                 .iter()
                 .any(|a| a.component.is_none() && category(&a.path) == group)
             {
-                let section = cache.sections.entry((section_id, group)).or_default();
-                self.prepare_section(section, section_attrs, group, revision, frame);
+                let section = cache.sections.entry((id, group)).or_default();
+                self.prepare_section(section, attrs, group, revision, frame);
             }
         }
         let box_width = egui_attr_grid::value_box_width(
@@ -2867,7 +2846,7 @@ impl WorldUi {
             cache
                 .sections
                 .iter()
-                .filter(|((node, _), _)| *node == id || Some(*node) == linked_quality)
+                .filter(|((node, _), _)| *node == id)
                 .flat_map(|(_, section)| section.fields.iter()),
             self.attribute_metrics.numeric_width,
         );
@@ -2876,16 +2855,7 @@ impl WorldUi {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for group in ATTRIBUTE_GROUPS {
-                    let (section_id, section_targets) = match (group, linked_quality) {
-                        ("Quality", Some(qid)) => (qid, quality_targets.as_slice()),
-                        _ => (id, targets.as_slice()),
-                    };
-                    let section_attrs = cache
-                        .attributes
-                        .get(&section_id)
-                        .map(Vec::as_slice)
-                        .unwrap_or_default();
-                    if !section_attrs
+                    if !attrs
                         .iter()
                         .any(|a| a.component.is_none() && category(&a.path) == group)
                     {
@@ -2895,7 +2865,7 @@ impl WorldUi {
                         .section_closed
                         .get(&id)
                         .is_some_and(|sections| sections.contains(group));
-                    let section = cache.sections.entry((section_id, group)).or_default();
+                    let section = cache.sections.entry((id, group)).or_default();
                     let response = egui_titlebar::CollapsingSection::new((wid(id), group), group)
                         .open(open)
                         .tint(section_color(group), 0.16)
@@ -2910,10 +2880,10 @@ impl WorldUi {
                             let mut value_commands = Vec::new();
                             let mut hooks = WorldGridHooks {
                                 ui_state: self,
-                                id: section_id,
-                                targets: section_targets,
+                                id,
+                                targets: &targets,
                                 frame: f64::from_bits(frame),
-                                attrs: section_attrs,
+                                attrs,
                                 indices: &section.indices,
                                 labels: &section.labels,
                                 values: &mut section.values,
@@ -2934,7 +2904,7 @@ impl WorldUi {
                             // untouched axes keep each layer's own values.
                             for edit in changes.into_iter().filter(|edit| !edit.parts.is_empty()) {
                                 let path = edit.key;
-                                if let Some(attr) = section_attrs.iter().find(|a| a.path == path) {
+                                if let Some(attr) = attrs.iter().find(|a| a.path == path) {
                                     let value = grid_json(edit.value, &attr.value);
                                     let eligible = value_gesture_eligible(attr, &value);
                                     let out = if eligible {
@@ -2949,9 +2919,9 @@ impl WorldUi {
                                             && !edit.parts.is_all()
                                             && (0..arr.len()).any(|i| !edit.parts.has(i))
                                     });
-                                    for &target in section_targets {
+                                    for &target in &targets {
                                         if let Some(arr) = partial_components
-                                            && target != section_id
+                                            && target != id
                                         {
                                             for (i, comp_val) in arr.iter().enumerate() {
                                                 if edit.parts.has(i) {
@@ -3274,6 +3244,7 @@ fn grid_json(value: GridValue, template: &Value) -> Value {
 const ATTRIBUTE_GROUPS: [&str; 14] = [
     "Quality",
     "Render",
+    "Color",
     "Viewport",
     "Output",
     "Fractal",
@@ -3283,7 +3254,6 @@ const ATTRIBUTE_GROUPS: [&str; 14] = [
     "Environment",
     "Mask",
     "Array",
-    "Color",
     "Transform",
     "Custom",
 ];
@@ -5664,17 +5634,17 @@ mod tests {
         let id = e.selection.unwrap();
         state.expanded.insert(id);
         state.groups.insert((id, "@Transform".into()));
-        let render_node = e.document.output_render_profile().unwrap();
-        state.groups.insert((render_node, "@Render".into()));
-        let render_lanes = state.lanes(
-            render_node,
-            &e.document.attributes(render_node, 0.0).unwrap(),
+        let viewport_node = e.document.viewport_settings_id().unwrap();
+        state.groups.insert((viewport_node, "@Color".into()));
+        let viewport_lanes = state.lanes(
+            viewport_node,
+            &e.document.attributes(viewport_node, 0.0).unwrap(),
         );
         assert!(
-            render_lanes
+            viewport_lanes
                 .iter()
                 .any(|lane| lane.path.as_deref() == Some("/render/exposure_stops")),
-            "Canonical render exposure must remain projected after grouping"
+            "Canonical viewport exposure must remain projected after grouping"
         );
         let _ = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
@@ -5948,11 +5918,10 @@ mod tests {
     fn attributes_and_sections_follow_workflow_order_with_inline_quality_in_render_settings() {
         let mut e = editor();
         let render_id = e.document.output_render_profile().unwrap();
-        let quality_id = e.document.render_quality(render_id).unwrap();
 
         let quality_paths: Vec<String> = e
             .document
-            .attributes(quality_id, 0.0)
+            .attributes(render_id, 0.0)
             .unwrap()
             .into_iter()
             .filter(|a| a.component.is_none() && a.path.starts_with("/quality/"))
@@ -5971,7 +5940,7 @@ mod tests {
         );
         assert!(
             !e.document
-                .attributes(quality_id, 0.0)
+                .attributes(render_id, 0.0)
                 .unwrap()
                 .iter()
                 .any(|a| a.path.starts_with("/transform/")),
@@ -5987,15 +5956,32 @@ mod tests {
             .map(|a| a.path)
             .collect();
         assert_eq!(
-            &render_paths[..7],
+            &render_paths[..6],
             &[
                 "/render/display",
                 "/render/method",
-                "/render/quality_id",
                 "/render/denoise/enabled",
                 "/render/denoise/quality",
                 "/render/denoise/mode",
                 "/render/denoise/interval",
+            ]
+        );
+
+        let viewport_id = e.document.viewport_settings_id().unwrap();
+        let color_paths: Vec<String> = e
+            .document
+            .attributes(viewport_id, 0.0)
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.component.is_none() && category(&a.path) == "Color")
+            .map(|a| a.path)
+            .collect();
+        assert_eq!(
+            color_paths,
+            vec![
+                "/render/exposure_stops",
+                "/render/saturation",
+                "/render/reinhard",
             ]
         );
 
@@ -6025,8 +6011,8 @@ mod tests {
                 .show(root, |ui| state.attribute_editor(ui, &mut e, render_id));
         });
         assert!(
-            state.cache.sections.contains_key(&(quality_id, "Quality")),
-            "RenderSettings inspector must inline its linked Quality section"
+            state.cache.sections.contains_key(&(render_id, "Quality")),
+            "RenderSettings inspector must include its Quality section"
         );
         assert!(state.cache.sections.contains_key(&(render_id, "Render")));
     }

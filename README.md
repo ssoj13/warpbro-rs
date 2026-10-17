@@ -287,30 +287,28 @@ device from offscreen OCIO processing, so surface reconfiguration does not wait 
 worker's queue. The GUI still performs drawing and GPU presentation; the configured FPS is a
 target, not a guarantee under GPU or system load.
 
-### Render and quality profiles
+### Render profiles
 
-**Settings → Render & Viewport** contains named render and quality buttons. Choose **Recall to**
+**Settings → Render & Viewport** contains named render profile and template buttons. Choose **Recall to**
 (Moving, Still, Manual or Output), then left-click a render profile to assign its live UUID.
-For quality buttons, **Recall quality to** chooses the render node whose quality reference
-will change. Right-click a named button to edit it in the existing Attribute Editor, rename
+Right-click a named button to edit it in the existing Attribute Editor, rename
 it, or **Save as profile… / Save as template…**.
 
-Profiles and templates are the same `RenderSettings` / `QualitySettings` nodes with different
-catalog metadata. New profiles and Save as create new nodes. Applying a render template
-creates an independent render/quality pair with new UUIDs and one Undo step; changing the
-template later does not change that pair. The catalog is saved in the World document.
+Profiles and templates are the same `RenderSettings` nodes with different
+catalog metadata. Each `RenderSettings` node owns both quality parameters (**Sampling**, **Denoise**, **Limits** in its first **Quality** section) and shading/display controls (**Render**, **Direct** in its second **Render** section). Fresh documents seed two render profiles — **Moving** and **Still** (with **Still**, **Manual** and **Output** initially sharing the **Still** node). Applying a render template
+creates an independent `RenderSettings` node with a new UUID and one Undo step; changing the
+template later does not change that node. Legacy scenes with separate `QualitySettings` nodes are migrated automatically on load. The catalog is saved in the World document.
 **File → Templates** remains the separate whole-scene catalog.
 
 The viewport toolbar selects **Auto / Locked** and exposes **Profiles**, pause and freeze.
 Auto uses Moving during scene/camera activity and playback, then Still after the node's settle
 delay; Locked always uses Manual. Both toolbar and Settings edit the same
-`ViewportSettings` references. Its Attribute Editor controls target FPS, settle delay and
-batch budget. The quality UUID reference and every viewport-policy field are static;
-commands and loading reject animation/connections on them. Numeric render/quality values
-remain animatable and evaluate at frame time. Output has its own independent render profile.
+`ViewportSettings` references. `ViewportSettings` also serves as the single source of truth for look parameters (**Color**: exposure, saturation, Reinhard) above its **Viewport** policy controls (target FPS, settle delay, batch budget, object filters). Every viewport-policy field is static;
+commands and loading reject animation/connections on them, while numeric render, quality and look values
+remain animatable and evaluate at frame time. Output has its own render profile slot (initially bound to **Still**).
 The progressive viewport shares accumulation across profiles with identical effective tracing inputs and image extent.
 Freeze keeps the displayed image and ignores late frames. Cache preview fixes Still in Auto
-or Manual in Locked; Moving does not change the cached job's profile or quality.
+or Manual in Locked; Moving does not change the cached job's profile.
 
 **Fast** uses the existing World path tracer with approximate opaque-material shading,
 preserving transmitting material models. **Full** keeps authored material models.
@@ -319,7 +317,7 @@ first hit's direct light only, no bounces) or **Bounds** (each fractal's cube dr
 image, nothing traced), and **Thinning** (0..1) leaves that share of every fractal out through
 a random 3D grid of removed cells. Set them on the Moving / Still profiles; Output renders the
 scene as authored.
-The selected quality node owns samples, resolution scale, tracing limits and adaptive sampling.
+Each `RenderSettings` profile directly owns samples, resolution scale, OIDN denoise, tracing limits and adaptive sampling.
 Fresh Moving settings start at Fast, 8 samples, full resolution (1.0), two bounces and adaptive
 sampling off; these are editable profile values. No real-time WorldDirect or guaranteed navigation FPS is claimed.
 
@@ -394,7 +392,7 @@ CUDA_HOME=/usr/local/cuda CUDA_OXIDE_LLC=/usr/bin/llc-22 cargo oxide test -- --r
 Open **Render → Render / Encode…** or **Window → Render / Encode**. This dockable panel
 uses Playa's shared encoder schema. Pick the format tab, a file **Name**, resolution
 and the inclusive frame range (**Current frame** renders the frame under the playhead).
-The panel shows the sample count from **Output Quality**; edit that node in the Attribute Editor.
+The panel shows the sample count from the **Output** render profile; edit that node in the Attribute Editor.
 A one-frame range writes `name.<suffix>`; a longer range writes
 `name.000001.<suffix>`, ... (the number before the whole suffix: `name.000001.pq.png`).
 
@@ -423,10 +421,10 @@ display. The panel shows the choice under **Output transform** and lets you over
   gamma 1.96, so there it looks lighter and flatter; judge SDR video in Resolve, mpv or on a TV.
   The display transform is baked in. Width and height must be even. HDR video is unavailable.
 
-The World document is frozen at export start. Output Quality supplies the job's sample
+The World document is frozen at export start. The Output render profile supplies the job's sample
 target and resolution scale, evaluated at its first frame; these two values remain fixed for
-the job. Other scene and render/quality attributes evaluate from the frozen document at each
-frame's time, including transforms, lights, visibility and discrete keys. Edit Output Quality
+the job. Other scene, render/quality and look attributes evaluate from the frozen document at each
+frame's time, including transforms, lights, visibility and discrete keys. Edit the Output render profile
 in the Attribute Editor; viewport activity and profile routing do not change the export.
 When OIDN is enabled, the scene-linear EXR output contains the final denoised radiance;
 exposure and OCIO remain excluded.

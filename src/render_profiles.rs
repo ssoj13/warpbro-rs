@@ -98,7 +98,6 @@ impl ProfileTarget {
 #[derive(Clone, Debug, PartialEq)]
 pub struct EffectiveRender {
     pub profile: NodeId,
-    pub quality: NodeId,
     pub method: RenderMethod,
     pub render: Render,
     pub samples: u32,
@@ -274,8 +273,8 @@ pub(crate) const QUALITY_RENDER_FIELDS: &[&str] = &[
     "glass_probes",
     "adaptive",
 ];
-pub(crate) const PROFILE_RENDER_FIELDS: &[&str] =
-    &["exposure_stops", "saturation", "reinhard", "denoise"];
+pub(crate) const PROFILE_RENDER_FIELDS: &[&str] = &["denoise"];
+pub(crate) const LOOK_RENDER_FIELDS: &[&str] = &["exposure_stops", "saturation", "reinhard"];
 pub(crate) fn quality_values(render: &Value) -> Value {
     let mut quality = serde_json::Map::new();
     for key in QUALITY_RENDER_FIELDS {
@@ -285,7 +284,7 @@ pub(crate) fn quality_values(render: &Value) -> Value {
     quality.insert("resolution_scale".into(), json!(1.0));
     Value::Object(quality)
 }
-pub(crate) fn render_values(render: &Value, quality: NodeId) -> Value {
+pub(crate) fn render_values(render: &Value) -> Value {
     let mut values = serde_json::Map::new();
     for key in PROFILE_RENDER_FIELDS {
         values.insert((*key).into(), render[*key].clone());
@@ -294,7 +293,13 @@ pub(crate) fn render_values(render: &Value, quality: NodeId) -> Value {
     values.insert("display".into(), json!(Display::PathTraced));
     values.insert("direct".into(), json!(DirectShading::default()));
     values.insert("thinning".into(), json!(0.0));
-    values.insert("quality_id".into(), json!(quality));
+    Value::Object(values)
+}
+pub(crate) fn look_values(render: &Value) -> Value {
+    let mut values = serde_json::Map::new();
+    for key in LOOK_RENDER_FIELDS {
+        values.insert((*key).into(), render[*key].clone());
+    }
     Value::Object(values)
 }
 pub(crate) fn viewport_values(moving: NodeId, still: NodeId) -> Value {
@@ -331,7 +336,6 @@ pub(crate) fn output_edits(
 pub(crate) fn reference_kind(path: &str) -> Option<crate::world::WorldKind> {
     use crate::world::WorldKind;
     match path {
-        "/render/quality_id" => Some(WorldKind::QualitySettings),
         "/viewport/moving_id" | "/viewport/still_id" | "/viewport/manual_id" => {
             Some(WorldKind::RenderSettings)
         }
@@ -352,7 +356,6 @@ pub(crate) fn setting_kind(kind: crate::world::WorldKind) -> bool {
     matches!(
         kind,
         crate::world::WorldKind::RenderSettings
-            | crate::world::WorldKind::QualitySettings
             | crate::world::WorldKind::ViewportSettings
             | crate::world::WorldKind::OutputSettings
     )

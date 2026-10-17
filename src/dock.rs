@@ -455,7 +455,9 @@ impl App {
                             -10.0..=10.0,
                             None,
                         );
-                        if exposure != effective.render.exposure_stops {
+                        if exposure != effective.render.exposure_stops
+                            && let Ok(viewport_id) = self.world.document.viewport_settings_id()
+                        {
                             let gesture = ui
                                 .input(|input| input.pointer.primary_down())
                                 .then(|| {
@@ -468,7 +470,7 @@ impl App {
                                 .or_else(|| self.world.active_edit());
                             if let Err(error) = self.world.execute_edit(
                                 crate::world::WorldCommand::SetAttribute {
-                                    id: effective.profile,
+                                    id: viewport_id,
                                     path: "/render/exposure_stops".into(),
                                     value: serde_json::json!(exposure),
                                     frame,

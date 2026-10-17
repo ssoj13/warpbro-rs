@@ -1620,7 +1620,7 @@ fn julia_mix_and_orbit_controls_are_keyable_clamped_numbers() {
 fn render_schema_filters_fractal_controls_but_keeps_world_settings_keys() {
     let scene = Scene::preset(0);
     let mut editor = WorldEditor::new(WorldDocument::from_scene(&scene));
-    let settings = editor.document.output_render_profile().unwrap();
+    let settings = editor.document.viewport_settings_id().unwrap();
     for (frame, value) in [(0.0, 0.0), (12.0, 2.5)] {
         editor
             .execute(WorldCommand::Key {
@@ -2252,6 +2252,7 @@ fn render_profiles_route_auto_locked_and_output_without_mutating_document() {
     use crate::render_profiles::{ProfileTarget, RenderMethod, ViewportMode};
     let mut e = editor();
     let saved = e.document.clone();
+    assert_eq!(e.document.render_profiles(None).len(), 2);
     let output = e.document.output_render_profile().unwrap();
     let policy = e.document.viewport_policy(0.0).unwrap();
     let moving = e.document.viewport_render(0.0, true).unwrap();
@@ -2275,7 +2276,7 @@ fn render_profiles_route_auto_locked_and_output_without_mutating_document() {
     assert_eq!(still.profile, policy.still_id);
     assert_eq!(still.method, RenderMethod::Full);
     assert_ne!(output, policy.moving_id);
-    assert_ne!(output, policy.still_id);
+    assert_eq!(output, policy.still_id);
     assert_eq!(
         e.document, saved,
         "routing is transient and authors no data"
@@ -2314,7 +2315,7 @@ fn render_profiles_route_auto_locked_and_output_without_mutating_document() {
 }
 
 #[test]
-fn render_template_instantiation_remaps_pair_and_undoes_assignment_atomically() {
+fn render_template_instantiation_clones_profile_and_undoes_assignment_atomically() {
     use crate::render_profiles::{CatalogRole, ProfileTarget};
     let mut e = editor();
     e.execute(WorldCommand::CreateRenderProfile {
@@ -2325,18 +2326,11 @@ fn render_template_instantiation_remaps_pair_and_undoes_assignment_atomically() 
     })
     .unwrap();
     let template = e.selection.unwrap();
-    let template_quality = e.document.render_quality(template).unwrap();
     assert_eq!(
-        e.document.catalog_role(template_quality).unwrap(),
+        e.document.catalog_role(template).unwrap(),
         Some(CatalogRole::Template)
     );
-    set(
-        &mut e,
-        template_quality,
-        "/quality/samples",
-        json!(123),
-        0.0,
-    );
+    set(&mut e, template, "/quality/samples", json!(123), 0.0);
     let before = e.document.clone();
     let count = before.nodes().len();
     e.execute(WorldCommand::InstantiateRenderTemplate {
@@ -2346,10 +2340,8 @@ fn render_template_instantiation_remaps_pair_and_undoes_assignment_atomically() 
     })
     .unwrap();
     let instance = e.selection.unwrap();
-    let quality = e.document.render_quality(instance).unwrap();
     assert_ne!(instance, template);
-    assert_ne!(quality, template_quality);
-    assert_eq!(e.document.nodes().len(), count + 2);
+    assert_eq!(e.document.nodes().len(), count + 1);
     assert_eq!(e.document.viewport_policy(0.0).unwrap().still_id, instance);
     assert_eq!(
         e.document.effective_render(instance, 0.0).unwrap().samples,
@@ -2360,13 +2352,7 @@ fn render_template_instantiation_remaps_pair_and_undoes_assignment_atomically() 
     assert_eq!(e.document, before);
     assert!(e.redo());
     assert_eq!(e.document, applied);
-    set(
-        &mut e,
-        template_quality,
-        "/quality/samples",
-        json!(777),
-        0.0,
-    );
+    set(&mut e, template, "/quality/samples", json!(777), 0.0);
     assert_eq!(
         e.document.effective_render(instance, 0.0).unwrap().samples,
         123
@@ -2378,12 +2364,29 @@ fn render_template_instantiation_remaps_pair_and_undoes_assignment_atomically() 
 }
 
 #[test]
-fn live_render_profile_edits_reach_all_uuid_consumers_and_roundtrip() {
+fn live_render_profile_edits_and_viewport_look_ssot_reach_all_consumers_and_roundtrip() {
     use crate::render_profiles::ProfileTarget;
     let mut e = editor();
     let policy = e.document.viewport_policy(0.0).unwrap();
     let viewport = e.document.viewport_settings_id().unwrap();
     let output = e.document.output_render_profile().unwrap();
+    // Exposure / saturation / tonemap on ViewportSettings apply to Moving, Still, and Output alike.
+    set(&mut e, viewport, "/render/exposure_stops", json!(1.75), 0.0);
+    for moving in [true, false] {
+        assert_eq!(
+            e.document
+                .viewport_render(0.0, moving)
+                .unwrap()
+                .effective
+                .render
+                .exposure_stops,
+            1.75
+        );
+    }
+    assert_eq!(
+        e.document.snapshot(0.0).unwrap().render.exposure_stops,
+        1.75
+    );
     set(
         &mut e,
         viewport,
@@ -2393,8 +2396,13 @@ fn live_render_profile_edits_reach_all_uuid_consumers_and_roundtrip() {
     );
     e.execute(WorldCommand::SetOutputRender(policy.moving_id))
         .unwrap();
-    let quality = e.document.render_quality(policy.moving_id).unwrap();
-    set(&mut e, quality, "/quality/max_bounces", json!(5), 0.0);
+    set(
+        &mut e,
+        policy.moving_id,
+        "/quality/max_bounces",
+        json!(5),
+        0.0,
+    );
     for moving in [true, false] {
         assert_eq!(
             e.document
@@ -2411,7 +2419,6 @@ fn live_render_profile_edits_reach_all_uuid_consumers_and_roundtrip() {
     let restored: WorldDocument = serde_json::from_str(&encoded).unwrap();
     restored.validate_render_profiles(0.0).unwrap();
     assert_eq!(restored, e.document);
-    assert_eq!(restored.render_quality(policy.moving_id).unwrap(), quality);
     assert_ne!(output, restored.output_render_profile().unwrap());
 }
 
@@ -2477,63 +2484,93 @@ fn profile_reference_validation_rejects_missing_wrong_template_and_animated_refs
 #[test]
 fn assigned_profiles_guard_delete_and_explicit_reassignment_allows_atomic_delete() {
     let mut e = editor();
-    let output = e.document.output_render_profile().unwrap();
-    let quality = e.document.render_quality(output).unwrap();
-    let still = e.document.viewport_policy(0.0).unwrap().still_id;
+    let viewport = e.document.viewport_settings_id().unwrap();
+    let policy = e.document.viewport_policy(0.0).unwrap();
+    let still = policy.still_id;
+    let moving = policy.moving_id;
     let before = e.document.clone();
-    assert!(e.execute(WorldCommand::Delete(output)).is_err());
-    assert!(e.execute(WorldCommand::Delete(quality)).is_err());
+    assert!(e.execute(WorldCommand::Delete(still)).is_err());
+    assert!(e.execute(WorldCommand::Delete(moving)).is_err());
     assert_eq!(e.document, before);
     e.execute(WorldCommand::Batch(vec![
-        WorldCommand::SetOutputRender(still),
-        WorldCommand::Delete(output),
-        WorldCommand::Delete(quality),
+        WorldCommand::SetOutputRender(moving),
+        WorldCommand::SetAttribute {
+            id: viewport,
+            path: "/viewport/still_id".into(),
+            value: json!(moving),
+            frame: 0.0,
+        },
+        WorldCommand::SetAttribute {
+            id: viewport,
+            path: "/viewport/manual_id".into(),
+            value: json!(moving),
+            frame: 0.0,
+        },
+        WorldCommand::Delete(still),
     ]))
     .unwrap();
-    assert!(!e.document.graph.nodes.contains_key(&output.to_string()));
-    assert!(!e.document.graph.nodes.contains_key(&quality.to_string()));
+    assert!(!e.document.graph.nodes.contains_key(&still.to_string()));
     assert!(e.undo());
     assert_eq!(e.document, before);
 }
 
 #[test]
-fn standalone_quality_templates_are_independent_atomic_instances() {
-    use crate::render_profiles::CatalogRole;
-    let mut e = editor();
-    let output = e.document.output_render_profile().unwrap();
-    e.execute(WorldCommand::CreateQualityProfile {
-        name: "Draft quality".into(),
-        role: CatalogRole::Template,
-        source: None,
-        target: None,
-    })
-    .unwrap();
-    let template = e.selection.unwrap();
-    set(&mut e, template, "/quality/samples", json!(31), 0.0);
-    let before = e.document.clone();
-    e.execute(WorldCommand::InstantiateQualityTemplate {
-        id: template,
-        name: "Delivery quality".into(),
-        target: Some(output),
-    })
-    .unwrap();
-    let quality = e.selection.unwrap();
-    assert_ne!(quality, template);
-    assert_eq!(e.document.render_quality(output).unwrap(), quality);
-    assert_eq!(
-        e.document.effective_render(output, 0.0).unwrap().samples,
-        31
+fn legacy_quality_settings_nodes_and_profile_look_fields_migrate_into_unified_profiles() {
+    let doc = WorldDocument::from_scene(&Scene::preset(0));
+    let mut raw = serde_json::to_value(&doc).unwrap();
+    let out_id = doc.output_render_profile().unwrap();
+    let vp_id = doc.viewport_settings_id().unwrap();
+    let q_id = NodeId::new();
+    let q_str = q_id.to_string();
+    let out_str = out_id.to_string();
+    let vp_str = vp_id.to_string();
+
+    // Synthesize a legacy QualitySettings node and link it from output_render via /render/quality_id.
+    let mut q_node = raw["graph"]["nodes"][&out_str].clone();
+    q_node["type"] = json!("QualitySettings");
+    q_node["name"] = json!("Legacy Quality");
+    q_node["gpu"] = json!({"quality": q_node["gpu"]["quality"].clone()});
+    q_node["gpu"]["quality"]["samples"] = json!(144);
+    q_node["host"]["map"]["/quality/samples"] = json!({"value": {"Int64": 144}});
+
+    let out_node = &mut raw["graph"]["nodes"][&out_str];
+    out_node["gpu"].as_object_mut().unwrap().remove("quality");
+    out_node["gpu"]["render"]["quality_id"] = json!(q_str);
+    out_node["gpu"]["render"]["exposure_stops"] = json!(2.25);
+    let out_map = out_node["host"]["map"].as_object_mut().unwrap();
+    out_map.retain(|k, _| !k.starts_with("/quality/"));
+    out_map.insert(
+        "/render/quality_id".into(),
+        json!({"value": {"Str": q_str}}),
     );
-    let applied = e.document.clone();
-    assert!(e.undo());
-    assert_eq!(e.document, before);
-    assert!(e.redo());
-    assert_eq!(e.document, applied);
-    set(&mut e, template, "/quality/samples", json!(59), 0.0);
-    assert_eq!(
-        e.document.effective_render(output, 0.0).unwrap().samples,
-        31
+    out_map.insert(
+        "/render/exposure_stops".into(),
+        json!({"value": {"Float": 2.25}}),
     );
+
+    let vp_node = &mut raw["graph"]["nodes"][&vp_str];
+    vp_node["gpu"].as_object_mut().unwrap().remove("render");
+    vp_node["host"]["map"]
+        .as_object_mut()
+        .unwrap()
+        .retain(|k, _| !k.starts_with("/render/"));
+
+    raw["graph"]["nodes"]
+        .as_object_mut()
+        .unwrap()
+        .insert(q_id.to_string(), q_node);
+    raw["graph"]["bus_slots"]["layer_order"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!(q_id.to_string()));
+
+    let text = serde_json::to_string(&raw).unwrap();
+    let decoded = crate::io_service::decode_scene(&text).unwrap();
+    let hydrated = decoded.document.expect("document");
+    hydrated.validate_render_profiles(0.0).unwrap();
+    assert!(!hydrated.graph.nodes.contains_key(&q_id.to_string()));
+    assert_eq!(hydrated.effective_render(out_id, 0.0).unwrap().samples, 144);
+    assert_eq!(hydrated.snapshot(0.0).unwrap().render.exposure_stops, 2.25);
 }
 
 #[test]
@@ -2598,7 +2635,7 @@ fn profile_fast_materials_are_evaluated_only_and_preserve_transmission_and_geome
 fn canonical_settings_validation_rejects_missing_fields_and_invalid_unused_templates() {
     use crate::render_profiles::CatalogRole;
     let mut e = editor();
-    e.execute(WorldCommand::CreateQualityProfile {
+    e.execute(WorldCommand::CreateRenderProfile {
         name: "Unused".into(),
         role: CatalogRole::Template,
         source: None,
@@ -2627,49 +2664,49 @@ fn canonical_settings_validation_rejects_missing_fields_and_invalid_unused_templ
 #[test]
 fn persisted_settings_references_reject_animation_and_connections_instead_of_sampling_first() {
     let e = editor();
-    let render = e.document.output_render_profile().unwrap();
-    let first_quality = e.document.render_quality(render).unwrap();
-    let still = e.document.viewport_policy(0.0).unwrap().still_id;
-    let later_quality = e.document.render_quality(still).unwrap();
-    assert_ne!(first_quality, later_quality);
+    let viewport = e.document.viewport_settings_id().unwrap();
+    let policy = e.document.viewport_policy(0.0).unwrap();
+    let first_profile = policy.moving_id;
+    let later_profile = policy.still_id;
+    assert_ne!(first_profile, later_profile);
     let mut animated = e.document.clone();
-    let path = "/render/quality_id";
-    let mut attrs = animated.attrs(render).unwrap();
+    let path = "/viewport/moving_id";
+    let mut attrs = animated.attrs(viewport).unwrap();
     // Discrete animation channels evaluate numeric dictionary indices, not UUID strings.
     attrs.set(path, AttrValue::Float(0.0));
     let mut animation = Animation::with_arity(1);
     animation.channels[0].upsert_key(Keyframe::with_tan(0.0, 0.0, Tan::Constant));
     animation.channels[0].upsert_key(Keyframe::with_tan(10.0, 1.0, Tan::Constant));
     attrs.set_anim(path, Some(animation));
-    animated.store_attrs(render, &attrs).unwrap();
-    animated.node_mut(render).unwrap()["discrete"][path] = json!([first_quality, later_quality]);
+    animated.store_attrs(viewport, &attrs).unwrap();
+    animated.node_mut(viewport).unwrap()["discrete"][path] = json!([first_profile, later_profile]);
     assert_eq!(
-        animated.attribute_value(render, path, 0.0).unwrap(),
-        json!(first_quality)
+        animated.attribute_value(viewport, path, 0.0).unwrap(),
+        json!(first_profile)
     );
     assert_eq!(
-        animated.attribute_value(render, path, 20.0).unwrap(),
-        json!(later_quality)
+        animated.attribute_value(viewport, path, 20.0).unwrap(),
+        json!(later_profile)
     );
     let restored: WorldDocument =
         serde_json::from_str(&serde_json::to_string(&animated).unwrap()).unwrap();
-    assert!(restored.render_quality(render).is_err());
-    assert!(restored.effective_render(render, 20.0).is_err());
+    assert!(restored.viewport_policy(0.0).is_err());
+    assert!(restored.viewport_render(20.0, true).is_err());
     assert!(restored.snapshot(0.0).is_err());
     let mut connected = e.document;
-    let mut attrs = connected.attrs(render).unwrap();
+    let mut attrs = connected.attrs(viewport).unwrap();
     attrs.set_conn(
         path,
         Some(playa_engine::entities::attrs::AttrConnection {
-            source_layer: still.0,
-            source_key: path.into(),
+            source_layer: viewport.0,
+            source_key: "/viewport/still_id".into(),
         }),
     );
-    connected.store_attrs(render, &attrs).unwrap();
+    connected.store_attrs(viewport, &attrs).unwrap();
     let restored: WorldDocument =
         serde_json::from_str(&serde_json::to_string(&connected).unwrap()).unwrap();
     assert!(restored.snapshot(0.0).is_err());
-    assert!(restored.render_quality(render).is_err());
+    assert!(restored.viewport_policy(0.0).is_err());
 }
 
 #[test]
@@ -2964,10 +3001,9 @@ fn check_template(text: &str) -> Result<serde_json::Map<String, Value>, String> 
                 WorldKind::Mask => serde_json::from_value::<crate::scene::Mask>(typed("mask"))
                     .map(drop)
                     .map_err(|e| e.to_string()),
-                WorldKind::Group
-                | WorldKind::QualitySettings
-                | WorldKind::ViewportSettings
-                | WorldKind::OutputSettings => Ok(()),
+                WorldKind::Group | WorldKind::ViewportSettings | WorldKind::OutputSettings => {
+                    Ok(())
+                }
             };
             checked.map_err(|e| format!("{:?} {} at {frame}: {e}", node.kind, node.name))?;
         }
@@ -3532,35 +3568,35 @@ fn the_suns_disc_setting_reaches_the_camera_sun_parameter() {
 #[test]
 fn display_modes_thin_trace_direct_or_show_bounds_on_their_profile_only() {
     let mut e = editor();
-    let still = e.document.viewport_policy(0.0).unwrap().still_id;
+    let moving = e.document.viewport_policy(0.0).unwrap().moving_id;
     let output = e.document.output_render_profile().unwrap();
     let shown = |e: &WorldEditor, profile| {
         e.document
             .snapshot_with_render_profile(profile, 0.0, View::Viewport)
             .unwrap()
     };
-    let full = shown(&e, still);
+    let full = shown(&e, moving);
     assert!(!full.objects.is_empty() && full.bounds.is_empty());
     assert!(full.objects.iter().all(|o| o.masks.is_empty()));
-    set(&mut e, still, "/render/thinning", json!(0.5), 0.0);
-    let thinned = shown(&e, still);
+    set(&mut e, moving, "/render/thinning", json!(0.5), 0.0);
+    let thinned = shown(&e, moving);
     for object in &thinned.objects {
         let cells = object.masks.last().unwrap();
         assert_eq!(cells.mask.shape, crate::scene::MaskShape::Cells);
         assert_eq!(cells.mask.density, 0.5);
     }
-    set(&mut e, still, "/render/display", json!("Direct"), 0.0);
-    let direct = shown(&e, still);
+    set(&mut e, moving, "/render/display", json!("Direct"), 0.0);
+    let direct = shown(&e, moving);
     assert!(direct.direct.is_some() && !direct.render.adaptive.enabled);
     // Direct is final after one sample per stratum of its grid.
-    let samples = e.document.effective_render(still, 0.0).unwrap().samples;
+    let samples = e.document.effective_render(moving, 0.0).unwrap().samples;
     let grid = (samples as f64).sqrt() as u32;
     assert_eq!(grid * grid, samples, "a square: {samples}");
     assert_eq!(crate::render_profiles::DirectShading::grid(1000), 16);
     assert_eq!(crate::render_profiles::DirectShading::grid(100), 10);
     assert_eq!(crate::render_profiles::DirectShading::grid(3), 1);
-    set(&mut e, still, "/render/display", json!("Bounds"), 0.0);
-    let boxes = shown(&e, still);
+    set(&mut e, moving, "/render/display", json!("Bounds"), 0.0);
+    let boxes = shown(&e, moving);
     assert!(boxes.objects.is_empty());
     assert_eq!(boxes.bounds.len(), full.objects.len());
     // The Output profile renders the scene as authored.
@@ -3568,10 +3604,10 @@ fn display_modes_thin_trace_direct_or_show_bounds_on_their_profile_only() {
     assert_eq!(out.objects.len(), full.objects.len());
     assert!(out.bounds.is_empty() && out.objects.iter().all(|o| o.masks.is_empty()));
     // The thinning is a share: the document holds it to 0..1.
-    set(&mut e, still, "/render/thinning", json!(1.5), 0.0);
+    set(&mut e, moving, "/render/thinning", json!(1.5), 0.0);
     assert_eq!(
         e.document
-            .attribute_value(still, "/render/thinning", 0.0)
+            .attribute_value(moving, "/render/thinning", 0.0)
             .unwrap(),
         json!(1.0)
     );

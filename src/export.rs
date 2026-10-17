@@ -2217,10 +2217,9 @@ mod tests {
                 .unwrap();
         }
         let output = editor.document.output_render_profile().unwrap();
-        let quality = editor.document.render_quality(output).unwrap();
         editor
             .execute(crate::world::WorldCommand::SetAttribute {
-                id: quality,
+                id: output,
                 path: "/quality/samples".into(),
                 value: serde_json::json!(2),
                 frame: 0.0,
@@ -2308,14 +2307,11 @@ mod tests {
         scene.render.denoise.enabled = false;
         let mut editor =
             crate::world::WorldEditor::new(crate::world::WorldDocument::from_scene(&scene));
-        // The job's sample target comes from the Output quality, as in the application.
-        let quality = editor
-            .document
-            .render_quality(editor.document.output_render_profile().unwrap())
-            .unwrap();
+        // The job's sample target comes from the Output render profile, as in the application.
+        let output = editor.document.output_render_profile().unwrap();
         editor
             .execute(crate::world::WorldCommand::SetAttribute {
-                id: quality,
+                id: output,
                 path: "/quality/samples".into(),
                 value: serde_json::json!(1),
                 frame: 0.0,
