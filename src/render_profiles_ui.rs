@@ -3,8 +3,8 @@ use crate::render_profiles::{
     CatalogRole, ProfileTarget, RenderMethod, ViewportMode, ViewportRender,
 };
 use crate::world::{NodeId, WorldCommand, WorldEditor, WorldKind, WorldNodeInfo};
-use soluwell_config::icons as ph;
 use serde_json::json;
+use soluwell_config::icons as ph;
 
 #[derive(Default)]
 pub(crate) struct Actions {

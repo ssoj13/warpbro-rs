@@ -10,8 +10,10 @@ use egui::{self, Color32, ColorImage, RichText, Sense, TextureHandle, TextureOpt
 use crate::render_service::{Command, Frame, RenderEvent, RenderService, ViewportRequest};
 use crate::scene::*;
 use crate::world::WorldDocument;
-use soluwell_panels::attr_grid::{AttrField, AttrGridHooks, AttrGridState, AttrValue, render_grid_with_config};
 use soluwell_config::AttrMetrics;
+use soluwell_panels::attr_grid::{
+    AttrField, AttrGridHooks, AttrGridState, AttrValue, render_grid_with_config,
+};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -292,8 +294,11 @@ pub(crate) struct Monitor {
 }
 impl Monitor {
     pub(crate) fn read(ctx: &egui::Context) -> Self {
-        let state =
-            ctx.data(|d| d.get_temp::<soluwell_viewport::display::DisplayState>(soluwell_viewport::display::state_id()));
+        let state = ctx.data(|d| {
+            d.get_temp::<soluwell_viewport::display::DisplayState>(
+                soluwell_viewport::display::state_id(),
+            )
+        });
         Self {
             hdr: state.as_ref().is_some_and(|s| s.output.is_hdr()),
             white_nits: state.as_ref().map_or(100.0, |s| s.target.white),
@@ -722,7 +727,9 @@ impl App {
             load_revision: 0,
 
             showing_preview: false,
-            hdr_view: std::sync::Arc::new(std::sync::Mutex::new(soluwell_viewport::hdr_view::HdrView::new())),
+            hdr_view: std::sync::Arc::new(std::sync::Mutex::new(
+                soluwell_viewport::hdr_view::HdrView::new(),
+            )),
             display: Default::default(),
             colour: crate::ocio::State::new(scene.colour.clone()),
             prefs: Default::default(),
@@ -734,7 +741,9 @@ impl App {
             navigated: false,
             takes_view: Default::default(),
             tool: ViewTool::Select,
-            gizmo: soluwell_viewport::gizmo::Gizmo::new(soluwell_viewport::gizmo::GizmoConfig::default()),
+            gizmo: soluwell_viewport::gizmo::Gizmo::new(
+                soluwell_viewport::gizmo::GizmoConfig::default(),
+            ),
             gizmo_gesture: None,
             drag_recorder: crate::takes::DragRecorder::with_min_secs(
                 crate::takes::DEFAULT_MIN_SECS,
@@ -917,8 +926,11 @@ impl App {
     /// Settings layout and category bodies adapted directly from exr-view::ui_settings.
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
-        let state =
-            ctx.data(|d| d.get_temp::<soluwell_viewport::display::DisplayState>(soluwell_viewport::display::state_id()));
+        let state = ctx.data(|d| {
+            d.get_temp::<soluwell_viewport::display::DisplayState>(
+                soluwell_viewport::display::state_id(),
+            )
+        });
         // Colour chooses the rendering/export target; SDR presentation has its own preview.
         self.colour.set_hdr(true);
         self.colour
@@ -937,254 +949,271 @@ impl App {
             reset: true,
             ..Default::default()
         };
-        let reset = soluwell_panels::prefs::draw(ui, "settings", &mut prefs, &categories, &opts, |ui, idx| {
-            category = idx;
-            match SettingsPage::ALL
-                .get(idx)
-                .copied()
-                .unwrap_or(SettingsPage::Display)
-            {
-                SettingsPage::Display => {
-                    soluwell_viewport::display::settings_ui(
-                        ui,
-                        "settings.display",
-                        &mut self.display,
-                        state.as_ref(),
-                    );
-                    if state
-                        .as_ref()
-                        .is_some_and(|s| !s.available.iter().any(|o| o.is_hdr()))
-                    {
-                        ui.label("This window surface offers SDR only. PQ/HDR targets in Color still render and export HDR; the screen uses an SDR preview.");
+        let reset = soluwell_panels::prefs::draw(
+            ui,
+            "settings",
+            &mut prefs,
+            &categories,
+            &opts,
+            |ui, idx| {
+                category = idx;
+                match SettingsPage::ALL
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(SettingsPage::Display)
+                {
+                    SettingsPage::Display => {
+                        soluwell_viewport::display::settings_ui(
+                            ui,
+                            "settings.display",
+                            &mut self.display,
+                            state.as_ref(),
+                        );
+                        if state
+                            .as_ref()
+                            .is_some_and(|s| !s.available.iter().any(|o| o.is_hdr()))
+                        {
+                            ui.label("This window surface offers SDR only. PQ/HDR targets in Color still render and export HDR; the screen uses an SDR preview.");
+                        }
+                        ui.add(
+                            egui::DragValue::new(&mut self.gui_fps)
+                                .range(15..=240)
+                                .suffix(" GUI FPS"),
+                        );
+                        ui.add_space(8.0);
+                        if ui.button("Colour management & monitor presets…").clicked() {
+                            destination = Some(SettingsPage::Color);
+                        }
                     }
-                    ui.add(
-                        egui::DragValue::new(&mut self.gui_fps)
-                            .range(15..=240)
-                            .suffix(" GUI FPS"),
-                    );
-                    ui.add_space(8.0);
-                    if ui.button("Colour management & monitor presets…").clicked() {
-                        destination = Some(SettingsPage::Color);
+                    SettingsPage::Color => {
+                        soluwell_panels::prefs::section_header(ui, "Colour management");
+                        if let Some(state) = &state {
+                            ui.label(format!("Window output: {}.", state.output.label()));
+                        }
+                        ui.label("Monitor presets choose rendering and export. PQ/HDR remains available on SDR screens using an SDR preview. HDR 1000 nits is the rendering peak; SDR reference white controls UI brightness.");
+                        if ui.button("Display output & reference white…").clicked() {
+                            destination = Some(SettingsPage::Display);
+                        }
+                        ui.add_space(8.0);
+                        changed = self
+                            .colour
+                            .ui(ui, &mut browse, self.controls.swap_slot_buttons);
                     }
-                }
-                SettingsPage::Color => {
-                    soluwell_panels::prefs::section_header(ui, "Colour management");
-                    if let Some(state) = &state {
-                        ui.label(format!("Window output: {}.", state.output.label()));
+                    SettingsPage::Render => {
+                        let actions = crate::render_profiles_ui::settings(
+                            ui,
+                            &mut self.world,
+                            &mut self.world_ui,
+                        );
+                        self.profile_ui_actions(actions);
                     }
-                    ui.label("Monitor presets choose rendering and export. PQ/HDR remains available on SDR screens using an SDR preview. HDR 1000 nits is the rendering peak; SDR reference white controls UI brightness.");
-                    if ui.button("Display output & reference white…").clicked() {
-                        destination = Some(SettingsPage::Display);
-                    }
-                    ui.add_space(8.0);
-                    changed = self
-                        .colour
-                        .ui(ui, &mut browse, self.controls.swap_slot_buttons);
-                }
-                SettingsPage::Render => {
-                    let actions = crate::render_profiles_ui::settings(
-                        ui,
-                        &mut self.world,
-                        &mut self.world_ui,
-                    );
-                    self.profile_ui_actions(actions);
-                }
-                SettingsPage::Fonts => self.fonts_ui(ui),
-                SettingsPage::Animation => {
-                    soluwell_panels::prefs::section_header(ui, "Keys");
-                    ui.horizontal(|ui| {
+                    SettingsPage::Fonts => self.fonts_ui(ui),
+                    SettingsPage::Animation => {
+                        soluwell_panels::prefs::section_header(ui, "Keys");
+                        ui.horizontal(|ui| {
                             ui.label("New key type")
                                 .on_hover_text("Interpolation of every key created by Key, Auto Key and edits of animated values.");
                             for tan in [curves::Tan::Linear, curves::Tan::Smooth] {
                                 ui.selectable_value(&mut self.world_ui.new_key, tan, tan.label());
                             }
                         });
-                }
-                SettingsPage::Controls => {
-                    soluwell_panels::prefs::section_header(ui, "Camera controls");
-                    let am = self.world_ui.attribute_metrics;
-                    let c = &mut self.controls;
-                    let d = Controls::default();
-                    prefs_grid(
-                        ui,
-                        am,
-                        &mut self.prefs_grids[0],
-                        vec![
-                            f_row(
-                                "Mouse sensitivity",
-                                c.look_sensitivity,
-                                0.1..=5.0,
-                                d.look_sensitivity,
-                            ),
-                            f_row("Flight speed ×", c.fly_speed, 0.02..=50.0, d.fly_speed),
-                            f_row(
-                                "Translate decay, s",
-                                c.translate_decay,
-                                0.02..=5.0,
-                                d.translate_decay,
-                            ),
-                            f_row(
-                                "Rotate decay, s",
-                                c.rotate_decay,
-                                0.02..=5.0,
-                                d.rotate_decay,
-                            ),
-                            b_row("Smooth look", c.inertial_look, d.inertial_look),
-                            f_row(
-                                "Look smoothing, s",
-                                c.look_smoothing,
-                                0.0..=0.5,
-                                d.look_smoothing,
-                            ),
-                            f_row(
-                                "Horizon flip, °",
-                                c.flip_degrees,
-                                20.0..=85.0,
-                                d.flip_degrees,
-                            ),
-                            f_row(
-                                "Shift fast ×",
-                                c.fast_multiplier,
-                                1.0..=20.0,
-                                d.fast_multiplier,
-                            ),
-                            f_row(
-                                "Alt slow ×",
-                                c.slow_multiplier,
-                                0.01..=1.0,
-                                d.slow_multiplier,
-                            ),
-                        ],
-                        |label, v| match (label, v) {
-                            ("Mouse sensitivity", AttrValue::Float(v)) => c.look_sensitivity = v,
-                            ("Flight speed ×", AttrValue::Float(v)) => c.fly_speed = v,
-                            ("Translate decay, s", AttrValue::Float(v)) => c.translate_decay = v,
-                            ("Rotate decay, s", AttrValue::Float(v)) => c.rotate_decay = v,
-                            ("Smooth look", AttrValue::Bool(v)) => c.inertial_look = v,
-                            ("Look smoothing, s", AttrValue::Float(v)) => c.look_smoothing = v,
-                            ("Horizon flip, °", AttrValue::Float(v)) => c.flip_degrees = v,
-                            ("Shift fast ×", AttrValue::Float(v)) => c.fast_multiplier = v,
-                            ("Alt slow ×", AttrValue::Float(v)) => c.slow_multiplier = v,
-                            _ => {}
-                        },
-                    );
-                    soluwell_panels::prefs::section_header(ui, "Camera alignment (hold Ctrl)");
-                    prefs_grid(
-                        ui,
-                        am,
-                        &mut self.prefs_grids[4],
-                        vec![f_row(
-                            "Ease time, s",
-                            c.align_seconds,
-                            0.0..=5.0,
-                            d.align_seconds,
-                        )],
-                        |label, v| {
-                            if let ("Ease time, s", AttrValue::Float(v)) = (label, v) {
-                                c.align_seconds = v;
-                            }
-                        },
-                    );
-                    soluwell_panels::prefs::section_header(ui, "Manipulator");
-                    let d = Controls::default();
-                    prefs_grid(
-                        ui,
-                        am,
-                        &mut self.prefs_grids[3],
-                        vec![
-                            f_row(
-                                "Size, pt",
-                                c.gizmo_size,
-                                GIZMO_SIZE_MIN..=GIZMO_SIZE_MAX,
-                                d.gizmo_size,
-                            ),
-                            f_row("Line width, pt", c.gizmo_stroke, 0.5..=10.0, d.gizmo_stroke),
-                        ],
-                        |label, v| match (label, v) {
-                            ("Size, pt", AttrValue::Float(v)) => c.gizmo_size = v,
-                            ("Line width, pt", AttrValue::Float(v)) => c.gizmo_stroke = v,
-                            _ => {}
-                        },
-                    );
-                    soluwell_panels::prefs::section_header(ui, "Slot buttons");
-                    prefs_grid(
-                        ui,
-                        am,
-                        &mut self.prefs_grids[1],
-                        vec![b_row(
-                            "Swap copy/paste mouse buttons",
-                            c.swap_slot_buttons,
-                            false,
-                        )],
-                        |_, v| {
-                            if let AttrValue::Bool(v) = v {
-                                c.swap_slot_buttons = v
-                            }
-                        },
-                    );
-                    ui.label(format!(
-                        "CamClip and colour presets · {}",
-                        crate::hotkeys::slot_hint(self.controls.swap_slot_buttons, "copy", "paste")
-                    ));
-                    soluwell_panels::prefs::section_header(ui, "Attribute controls");
-                    let defaults = AttrMetrics::default();
-                    let metrics = &mut self.world_ui.attribute_metrics;
-                    let m = *metrics;
-                    prefs_grid(
-                        ui,
-                        am,
-                        &mut self.prefs_grids[2],
-                        vec![
-                            f_row(
-                                "Field height",
-                                m.field_height,
-                                AttrMetrics::FIELD_HEIGHT_RANGE,
-                                defaults.field_height,
-                            ),
-                            f_row(
-                                "Numeric field width",
-                                m.numeric_width,
-                                AttrMetrics::NUMERIC_WIDTH_RANGE,
-                                defaults.numeric_width,
-                            ),
-                            f_row(
-                                "Icon size",
-                                m.icon_side,
-                                AttrMetrics::ICON_SIDE_RANGE,
-                                defaults.icon_side,
-                            ),
-                            f_row(
-                                "Row spacing",
-                                m.row_gap,
-                                AttrMetrics::ROW_GAP_RANGE,
-                                defaults.row_gap,
-                            ),
-                            f_row(
-                                "Component spacing",
-                                m.component_gap,
-                                AttrMetrics::COMPONENT_GAP_RANGE,
-                                defaults.component_gap,
-                            ),
-                        ],
-                        |label, v| {
-                            let AttrValue::Float(v) = v else { return };
-                            match label {
-                                "Field height" => metrics.field_height = v,
-                                "Numeric field width" => metrics.numeric_width = v,
-                                "Icon size" => metrics.icon_side = v,
-                                "Row spacing" => metrics.row_gap = v,
-                                "Component spacing" => metrics.component_gap = v,
+                    }
+                    SettingsPage::Controls => {
+                        soluwell_panels::prefs::section_header(ui, "Camera controls");
+                        let am = self.world_ui.attribute_metrics;
+                        let c = &mut self.controls;
+                        let d = Controls::default();
+                        prefs_grid(
+                            ui,
+                            am,
+                            &mut self.prefs_grids[0],
+                            vec![
+                                f_row(
+                                    "Mouse sensitivity",
+                                    c.look_sensitivity,
+                                    0.1..=5.0,
+                                    d.look_sensitivity,
+                                ),
+                                f_row("Flight speed ×", c.fly_speed, 0.02..=50.0, d.fly_speed),
+                                f_row(
+                                    "Translate decay, s",
+                                    c.translate_decay,
+                                    0.02..=5.0,
+                                    d.translate_decay,
+                                ),
+                                f_row(
+                                    "Rotate decay, s",
+                                    c.rotate_decay,
+                                    0.02..=5.0,
+                                    d.rotate_decay,
+                                ),
+                                b_row("Smooth look", c.inertial_look, d.inertial_look),
+                                f_row(
+                                    "Look smoothing, s",
+                                    c.look_smoothing,
+                                    0.0..=0.5,
+                                    d.look_smoothing,
+                                ),
+                                f_row(
+                                    "Horizon flip, °",
+                                    c.flip_degrees,
+                                    20.0..=85.0,
+                                    d.flip_degrees,
+                                ),
+                                f_row(
+                                    "Shift fast ×",
+                                    c.fast_multiplier,
+                                    1.0..=20.0,
+                                    d.fast_multiplier,
+                                ),
+                                f_row(
+                                    "Alt slow ×",
+                                    c.slow_multiplier,
+                                    0.01..=1.0,
+                                    d.slow_multiplier,
+                                ),
+                            ],
+                            |label, v| match (label, v) {
+                                ("Mouse sensitivity", AttrValue::Float(v)) => {
+                                    c.look_sensitivity = v
+                                }
+                                ("Flight speed ×", AttrValue::Float(v)) => c.fly_speed = v,
+                                ("Translate decay, s", AttrValue::Float(v)) => {
+                                    c.translate_decay = v
+                                }
+                                ("Rotate decay, s", AttrValue::Float(v)) => c.rotate_decay = v,
+                                ("Smooth look", AttrValue::Bool(v)) => c.inertial_look = v,
+                                ("Look smoothing, s", AttrValue::Float(v)) => c.look_smoothing = v,
+                                ("Horizon flip, °", AttrValue::Float(v)) => c.flip_degrees = v,
+                                ("Shift fast ×", AttrValue::Float(v)) => c.fast_multiplier = v,
+                                ("Alt slow ×", AttrValue::Float(v)) => c.slow_multiplier = v,
                                 _ => {}
-                            }
-                        },
-                    );
-                    *metrics = metrics.normalized();
-                    ui.label("Attribute Editor, Timeline and Render Settings share these sizes.");
-                    ui.label("RMB: fly · wheel: forward / back · L: horizon/free flight");
-                    ui.label("H: restore camera · F: frame bounds (without RMB)");
+                            },
+                        );
+                        soluwell_panels::prefs::section_header(ui, "Camera alignment (hold Ctrl)");
+                        prefs_grid(
+                            ui,
+                            am,
+                            &mut self.prefs_grids[4],
+                            vec![f_row(
+                                "Ease time, s",
+                                c.align_seconds,
+                                0.0..=5.0,
+                                d.align_seconds,
+                            )],
+                            |label, v| {
+                                if let ("Ease time, s", AttrValue::Float(v)) = (label, v) {
+                                    c.align_seconds = v;
+                                }
+                            },
+                        );
+                        soluwell_panels::prefs::section_header(ui, "Manipulator");
+                        let d = Controls::default();
+                        prefs_grid(
+                            ui,
+                            am,
+                            &mut self.prefs_grids[3],
+                            vec![
+                                f_row(
+                                    "Size, pt",
+                                    c.gizmo_size,
+                                    GIZMO_SIZE_MIN..=GIZMO_SIZE_MAX,
+                                    d.gizmo_size,
+                                ),
+                                f_row("Line width, pt", c.gizmo_stroke, 0.5..=10.0, d.gizmo_stroke),
+                            ],
+                            |label, v| match (label, v) {
+                                ("Size, pt", AttrValue::Float(v)) => c.gizmo_size = v,
+                                ("Line width, pt", AttrValue::Float(v)) => c.gizmo_stroke = v,
+                                _ => {}
+                            },
+                        );
+                        soluwell_panels::prefs::section_header(ui, "Slot buttons");
+                        prefs_grid(
+                            ui,
+                            am,
+                            &mut self.prefs_grids[1],
+                            vec![b_row(
+                                "Swap copy/paste mouse buttons",
+                                c.swap_slot_buttons,
+                                false,
+                            )],
+                            |_, v| {
+                                if let AttrValue::Bool(v) = v {
+                                    c.swap_slot_buttons = v
+                                }
+                            },
+                        );
+                        ui.label(format!(
+                            "CamClip and colour presets · {}",
+                            crate::hotkeys::slot_hint(
+                                self.controls.swap_slot_buttons,
+                                "copy",
+                                "paste"
+                            )
+                        ));
+                        soluwell_panels::prefs::section_header(ui, "Attribute controls");
+                        let defaults = AttrMetrics::default();
+                        let metrics = &mut self.world_ui.attribute_metrics;
+                        let m = *metrics;
+                        prefs_grid(
+                            ui,
+                            am,
+                            &mut self.prefs_grids[2],
+                            vec![
+                                f_row(
+                                    "Field height",
+                                    m.field_height,
+                                    AttrMetrics::FIELD_HEIGHT_RANGE,
+                                    defaults.field_height,
+                                ),
+                                f_row(
+                                    "Numeric field width",
+                                    m.numeric_width,
+                                    AttrMetrics::NUMERIC_WIDTH_RANGE,
+                                    defaults.numeric_width,
+                                ),
+                                f_row(
+                                    "Icon size",
+                                    m.icon_side,
+                                    AttrMetrics::ICON_SIDE_RANGE,
+                                    defaults.icon_side,
+                                ),
+                                f_row(
+                                    "Row spacing",
+                                    m.row_gap,
+                                    AttrMetrics::ROW_GAP_RANGE,
+                                    defaults.row_gap,
+                                ),
+                                f_row(
+                                    "Component spacing",
+                                    m.component_gap,
+                                    AttrMetrics::COMPONENT_GAP_RANGE,
+                                    defaults.component_gap,
+                                ),
+                            ],
+                            |label, v| {
+                                let AttrValue::Float(v) = v else { return };
+                                match label {
+                                    "Field height" => metrics.field_height = v,
+                                    "Numeric field width" => metrics.numeric_width = v,
+                                    "Icon size" => metrics.icon_side = v,
+                                    "Row spacing" => metrics.row_gap = v,
+                                    "Component spacing" => metrics.component_gap = v,
+                                    _ => {}
+                                }
+                            },
+                        );
+                        *metrics = metrics.normalized();
+                        ui.label(
+                            "Attribute Editor, Timeline and Render Settings share these sizes.",
+                        );
+                        ui.label("RMB: fly · wheel: forward / back · L: horizon/free flight");
+                        ui.label("H: restore camera · F: frame bounds (without RMB)");
+                    }
                 }
-            }
-        });
+            },
+        );
         self.prefs = prefs;
         if reset {
             if category == 0 {
@@ -1300,7 +1329,9 @@ impl App {
     }
 
     fn manipulate(&mut self, ui: &egui::Ui, rect: egui::Rect) {
-        use soluwell_viewport::gizmo::{GizmoConfig, GizmoOrientation, GizmoSpace, GizmoTool, Transform};
+        use soluwell_viewport::gizmo::{
+            GizmoConfig, GizmoOrientation, GizmoSpace, GizmoTool, Transform,
+        };
         let tool = match self.tool {
             ViewTool::Select => None,
             ViewTool::Move => Some(GizmoTool::Move),
@@ -2604,7 +2635,10 @@ impl App {
         &mut self,
         ctx: &egui::Context,
         shot: crate::window_shot::WindowShot,
-        capture: Result<soluwell_viewport::display::PendingCapture, soluwell_viewport::display::CaptureError>,
+        capture: Result<
+            soluwell_viewport::display::PendingCapture,
+            soluwell_viewport::display::CaptureError,
+        >,
         device: &wgpu::Device,
     ) {
         use crate::window_shot::ShotError;
@@ -4056,9 +4090,15 @@ impl App {
                 let mut view = self.hdr_view.lock().unwrap();
                 view.set_output_format(soluwell_viewport::display::CANVAS_FORMAT);
                 let (format, bytes) = if output_hdr {
-                    (soluwell_viewport::hdr_view::HdrFormat::Rgba32F, t.hdr_bytes.clone())
+                    (
+                        soluwell_viewport::hdr_view::HdrFormat::Rgba32F,
+                        t.hdr_bytes.clone(),
+                    )
                 } else {
-                    (soluwell_viewport::hdr_view::HdrFormat::Rgba8, t.sdr_bytes.clone())
+                    (
+                        soluwell_viewport::hdr_view::HdrFormat::Rgba8,
+                        t.sdr_bytes.clone(),
+                    )
                 };
                 // Straight: the blend the view always drew these frames with.
                 let staged = view.stage_frame(
@@ -4181,8 +4221,11 @@ fn viewport_pixels(size: egui::Vec2, ppp: f32) -> (usize, usize) {
 impl App {
     /// Identify cached render content without serializing the document on repaint.
     fn preview_identity(&self, ctx: &egui::Context) -> PreviewKey {
-        let state =
-            ctx.data(|d| d.get_temp::<soluwell_viewport::display::DisplayState>(soluwell_viewport::display::state_id()));
+        let state = ctx.data(|d| {
+            d.get_temp::<soluwell_viewport::display::DisplayState>(
+                soluwell_viewport::display::state_id(),
+            )
+        });
         let effective = self
             .world
             .document

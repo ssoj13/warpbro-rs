@@ -171,7 +171,9 @@ impl From<soluwell_viewport::display::CaptureError> for ShotError {
 /// white (whose values are not the bare decoded canvas), any other pixel type, or a sample count
 /// that does not match the size is an error, never a rescaled, padded or guessed image.
 pub fn linear_light(capture: &Capture) -> Result<Vec<[f32; 4]>, ShotError> {
-    if capture.output != Output::Scrgb || capture.white_nits != soluwell_viewport::display::SCRGB_NITS {
+    if capture.output != Output::Scrgb
+        || capture.white_nits != soluwell_viewport::display::SCRGB_NITS
+    {
         return Err(ShotError::Pixels(format!(
             "{:?} capture at {} nits white is not the linear canvas (scRGB at {} nits)",
             capture.output,

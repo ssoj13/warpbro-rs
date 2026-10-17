@@ -2,17 +2,21 @@
 use crate::world::{NodeId, WorldAttribute, WorldCommand, WorldEditor, WorldKind, WorldNodeInfo};
 use curves::Tan;
 use egui::{Color32, Pos2, Rect, Sense, Vec2};
+use serde_json::{Value, json};
+use soluwell_config::AttrMetrics;
+use soluwell_config::attr_layout::{ValueEditorLayout, cell_ui, square_icon};
+use soluwell_config::icons as ph;
 use soluwell_panels::attr_grid::{AnimIntent, AnimState, ChannelExpansion};
-use soluwell_panels::attr_grid::{AttrField, AttrGridHooks, AttrValue as GridValue, render_grid_with_config};
-use soluwell_panels::outliner::{ContextItem, OutlinerAction, OutlinerConfig, OutlinerModel, TreeNode};
+use soluwell_panels::attr_grid::{
+    AttrField, AttrGridHooks, AttrValue as GridValue, render_grid_with_config,
+};
+use soluwell_panels::outliner::{
+    ContextItem, OutlinerAction, OutlinerConfig, OutlinerModel, TreeNode,
+};
 use soluwell_timeline::track_timeline::{
     Band, Clip, KeyPos, Keyframe, Marker, PropLane, TimelineAction, TimelineConfig, TimelineModel,
     TimelineView, Track, TrackTimeline, WorkArea,
 };
-use soluwell_config::AttrMetrics;
-use soluwell_config::attr_layout::{ValueEditorLayout, cell_ui, square_icon};
-use soluwell_config::icons as ph;
-use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
@@ -998,7 +1002,9 @@ impl WorldUi {
         let model = &cache.model;
         let cfg = &cache.config;
         let actions = ui
-            .push_id("world_outliner", |ui| soluwell_panels::outliner::show(ui, model, cfg))
+            .push_id("world_outliner", |ui| {
+                soluwell_panels::outliner::show(ui, model, cfg)
+            })
             .inner;
         for a in actions {
             match a {
@@ -1547,7 +1553,10 @@ impl WorldUi {
                                     start,
                                     duration: end - start,
                                     color: take_color,
-                                    label: format!("{} {name}", soluwell_config::phosphor::regular::FILM_STRIP),
+                                    label: format!(
+                                        "{} {name}",
+                                        soluwell_config::phosphor::regular::FILM_STRIP
+                                    ),
                                     id: Some(take_wid(n.id)),
                                 });
                                 clips.push(
@@ -2632,10 +2641,11 @@ impl WorldUi {
             let Value::String(path) = value else {
                 return false;
             };
-            let response = soluwell_controls::file_field::FileField::new(path, &mut self.environment_file)
-                .hint("HDR / EXR environment")
-                .tooltip("Browse HDR / EXR environment")
-                .show(ui);
+            let response =
+                soluwell_controls::file_field::FileField::new(path, &mut self.environment_file)
+                    .hint("HDR / EXR environment")
+                    .tooltip("Browse HDR / EXR environment")
+                    .show(ui);
             if response.browse_clicked() {
                 let start = std::path::Path::new(path).parent();
                 let mut picker = egui_file_dialog::FileDialog::new().add_file_filter(
@@ -2865,94 +2875,97 @@ impl WorldUi {
                         .get(&id)
                         .is_some_and(|sections| sections.contains(group));
                     let section = cache.sections.entry((id, group)).or_default();
-                    let response = soluwell_chrome::titlebar::CollapsingSection::new((wid(id), group), group)
-                        .open(open)
-                        .tint(section_color(group), 0.16)
-                        .show(ui, |ui| {
-                            let config = soluwell_panels::attr_grid::AttrGridConfig {
-                                value_box_width: Some(box_width),
-                                ..grid_config(self.attribute_metrics)
-                            };
-                            section.state.table.widths.resize(1, 0.0);
-                            section.state.table.widths[0] = self.attribute_label_width;
-                            let mut commands = Vec::new();
-                            let mut value_commands = Vec::new();
-                            let mut hooks = WorldGridHooks {
-                                ui_state: self,
-                                id,
-                                targets: &targets,
-                                frame: f64::from_bits(frame),
-                                attrs,
-                                indices: &section.indices,
-                                labels: &section.labels,
-                                values: &mut section.values,
-                                materials: &cache.nodes,
-                                commands: &mut commands,
-                                value_commands: &mut value_commands,
-                            };
-                            let changes = render_grid_with_config(
-                                ui,
-                                &mut section.fields,
-                                &mut section.state,
-                                &HashSet::new(),
-                                &config,
-                                &mut hooks,
-                            );
-                            // Store each edit's value across all same-kind targets. For vector edits,
-                            // write only the touched components (`edit.parts`) on additional targets so
-                            // untouched axes keep each layer's own values.
-                            for edit in changes.into_iter().filter(|edit| !edit.parts.is_empty()) {
-                                let path = edit.key;
-                                if let Some(attr) = attrs.iter().find(|a| a.path == path) {
-                                    let value = grid_json(edit.value, &attr.value);
-                                    let eligible = value_gesture_eligible(attr, &value);
-                                    let out = if eligible {
-                                        &mut value_commands
-                                    } else {
-                                        &mut commands
-                                    };
-                                    let frame = f64::from_bits(frame);
-                                    let partial_components = value.as_array().filter(|arr| {
-                                        attr.component.is_none()
-                                            && !attr.color
-                                            && !edit.parts.is_all()
-                                            && (0..arr.len()).any(|i| !edit.parts.has(i))
-                                    });
-                                    for &target in &targets {
-                                        if let Some(arr) = partial_components
-                                            && target != id
-                                        {
-                                            for (i, comp_val) in arr.iter().enumerate() {
-                                                if edit.parts.has(i) {
-                                                    out.push(WorldCommand::SetAttribute {
-                                                        id: target,
-                                                        path: format!("{path}/{i}"),
-                                                        value: comp_val.clone(),
-                                                        frame,
-                                                    });
-                                                }
-                                            }
+                    let response =
+                        soluwell_chrome::titlebar::CollapsingSection::new((wid(id), group), group)
+                            .open(open)
+                            .tint(section_color(group), 0.16)
+                            .show(ui, |ui| {
+                                let config = soluwell_panels::attr_grid::AttrGridConfig {
+                                    value_box_width: Some(box_width),
+                                    ..grid_config(self.attribute_metrics)
+                                };
+                                section.state.table.widths.resize(1, 0.0);
+                                section.state.table.widths[0] = self.attribute_label_width;
+                                let mut commands = Vec::new();
+                                let mut value_commands = Vec::new();
+                                let mut hooks = WorldGridHooks {
+                                    ui_state: self,
+                                    id,
+                                    targets: &targets,
+                                    frame: f64::from_bits(frame),
+                                    attrs,
+                                    indices: &section.indices,
+                                    labels: &section.labels,
+                                    values: &mut section.values,
+                                    materials: &cache.nodes,
+                                    commands: &mut commands,
+                                    value_commands: &mut value_commands,
+                                };
+                                let changes = render_grid_with_config(
+                                    ui,
+                                    &mut section.fields,
+                                    &mut section.state,
+                                    &HashSet::new(),
+                                    &config,
+                                    &mut hooks,
+                                );
+                                // Store each edit's value across all same-kind targets. For vector edits,
+                                // write only the touched components (`edit.parts`) on additional targets so
+                                // untouched axes keep each layer's own values.
+                                for edit in
+                                    changes.into_iter().filter(|edit| !edit.parts.is_empty())
+                                {
+                                    let path = edit.key;
+                                    if let Some(attr) = attrs.iter().find(|a| a.path == path) {
+                                        let value = grid_json(edit.value, &attr.value);
+                                        let eligible = value_gesture_eligible(attr, &value);
+                                        let out = if eligible {
+                                            &mut value_commands
                                         } else {
-                                            out.push(WorldCommand::SetAttribute {
-                                                id: target,
-                                                path: path.clone(),
-                                                value: value.clone(),
-                                                frame,
-                                            });
+                                            &mut commands
+                                        };
+                                        let frame = f64::from_bits(frame);
+                                        let partial_components = value.as_array().filter(|arr| {
+                                            attr.component.is_none()
+                                                && !attr.color
+                                                && !edit.parts.is_all()
+                                                && (0..arr.len()).any(|i| !edit.parts.has(i))
+                                        });
+                                        for &target in &targets {
+                                            if let Some(arr) = partial_components
+                                                && target != id
+                                            {
+                                                for (i, comp_val) in arr.iter().enumerate() {
+                                                    if edit.parts.has(i) {
+                                                        out.push(WorldCommand::SetAttribute {
+                                                            id: target,
+                                                            path: format!("{path}/{i}"),
+                                                            value: comp_val.clone(),
+                                                            frame,
+                                                        });
+                                                    }
+                                                }
+                                            } else {
+                                                out.push(WorldCommand::SetAttribute {
+                                                    id: target,
+                                                    path: path.clone(),
+                                                    value: value.clone(),
+                                                    frame,
+                                                });
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            if let Some(width) = section.state.table.widths.first() {
-                                self.attribute_label_width = *width;
-                            }
-                            if !value_commands.is_empty() {
-                                self.value_command(ui, e, WorldCommand::Batch(value_commands));
-                            }
-                            if !commands.is_empty() {
-                                self.command(e, WorldCommand::Batch(commands));
-                            }
-                        });
+                                if let Some(width) = section.state.table.widths.first() {
+                                    self.attribute_label_width = *width;
+                                }
+                                if !value_commands.is_empty() {
+                                    self.value_command(ui, e, WorldCommand::Batch(value_commands));
+                                }
+                                if !commands.is_empty() {
+                                    self.command(e, WorldCommand::Batch(commands));
+                                }
+                            });
                     if response.header.open != open {
                         let closed = self.section_closed.entry(id).or_default();
                         if response.header.open {

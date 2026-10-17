@@ -2125,7 +2125,9 @@ mod tests {
         );
 
         let codes = |nits: [f32; 3]| {
-            nits.map(|v| (soluwell_viewport::display::pq(v.clamp(0.0, 10_000.0)) * 65535.0 + 0.5) as u16)
+            nits.map(|v| {
+                (soluwell_viewport::display::pq(v.clamp(0.0, 10_000.0)) * 65535.0 + 0.5) as u16
+            })
         };
         let written: Vec<u16> = buf[..6]
             .chunks(2)

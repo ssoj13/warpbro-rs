@@ -97,8 +97,11 @@ impl Native {
             window.theme(),
             Some(device.limits().max_texture_dimension_2d as usize),
         );
-        let renderer =
-            egui_wgpu::Renderer::new(&device, soluwell_viewport::display::CANVAS_FORMAT, Default::default());
+        let renderer = egui_wgpu::Renderer::new(
+            &device,
+            soluwell_viewport::display::CANVAS_FORMAT,
+            Default::default(),
+        );
         let present = PresentPass::new(&device, format, Output::Sdr8);
         Ok(Self {
             window,
@@ -415,8 +418,11 @@ mod tests {
         });
         assert_eq!(full.pixels_per_point, 1.0);
 
-        let mut renderer =
-            egui_wgpu::Renderer::new(&device, soluwell_viewport::display::CANVAS_FORMAT, Default::default());
+        let mut renderer = egui_wgpu::Renderer::new(
+            &device,
+            soluwell_viewport::display::CANVAS_FORMAT,
+            Default::default(),
+        );
         let mut present = PresentPass::new(&device, wgpu::TextureFormat::Rgba8Unorm, Output::Sdr8);
         for (id, deltas) in &full.textures_delta.set {
             for delta in deltas {
@@ -489,7 +495,8 @@ mod tests {
             assert!((c - grey).abs() < 0.005, "grey block {c}, want {grey}");
         }
         // The clear colour, decoded on the CPU: f16 canvas storage bounds the error.
-        let hdr = clear.map(|c| soluwell_viewport::display::transfer::eotf(half::f16::from_f32(c).to_f32()));
+        let hdr = clear
+            .map(|c| soluwell_viewport::display::transfer::eotf(half::f16::from_f32(c).to_f32()));
         let got = image.pixels[at(4, 60)];
         assert!(
             hdr[0] > 20.0 && hdr[1] < 0.0,
@@ -525,8 +532,9 @@ mod tests {
             grey * white
         );
         // The HDR clear colour: PQ of its BT.2020 nits (negative ones black), not clipped at white.
-        let want = soluwell_viewport::display::rec2020_nits(hdr, white)
-            .map(|n| (soluwell_viewport::display::pq(n.clamp(0.0, 10_000.0)) * 65535.0).round() as u16);
+        let want = soluwell_viewport::display::rec2020_nits(hdr, white).map(|n| {
+            (soluwell_viewport::display::pq(n.clamp(0.0, 10_000.0)) * 65535.0).round() as u16
+        });
         let got: Vec<u16> = (0..3).map(|c| sample(4 * at(4, 60) + c)).collect();
         // SDR white (203 nits) is code 38055; red sits near 3200 nits.
         assert!(

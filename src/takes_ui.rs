@@ -8,8 +8,8 @@ use super::App;
 use crate::camera_recorder::Timing;
 use crate::takes::{Take, TakeFilters, TakeKind};
 use crate::world::NodeId;
-use soluwell_config::phosphor::regular as ph;
 use soluwell_config::icons;
+use soluwell_config::phosphor::regular as ph;
 use std::collections::BTreeSet;
 
 /// Panel state, not saved with the scene.

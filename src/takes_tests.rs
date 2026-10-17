@@ -381,7 +381,10 @@ fn recorder_and_drag_recorder_respect_custom_min_secs_threshold() {
     for _ in 0..30 {
         finished = finished.or(tick(&mut r, cam(yaw), cam(yaw), false).finished);
     }
-    assert!(finished.is_none(), "0.5 s camera take dropped when min_secs = 1.0");
+    assert!(
+        finished.is_none(),
+        "0.5 s camera take dropped when min_secs = 1.0"
+    );
 
     r.min_secs = 0.4;
     for _ in 0..30 {
@@ -392,7 +395,10 @@ fn recorder_and_drag_recorder_respect_custom_min_secs_threshold() {
     for _ in 0..30 {
         finished = finished.or(tick(&mut r, cam(yaw), cam(yaw), false).finished);
     }
-    assert!(finished.is_some(), "0.5 s camera take kept when min_secs = 0.4");
+    assert!(
+        finished.is_some(),
+        "0.5 s camera take kept when min_secs = 0.4"
+    );
 
     // DragRecorder: 0.5 s drag is dropped when min_secs = 1.0 s, kept when min_secs = 0.4 s.
     let mut d = DragRecorder {
@@ -403,12 +409,18 @@ fn recorder_and_drag_recorder_respect_custom_min_secs_threshold() {
     for i in 0..=30 {
         d.sample(1.0 / 60.0, 0.0, &[(a, trs(0.0, i as f32))]);
     }
-    assert!(d.finish().is_empty(), "0.5 s drag take dropped when min_secs = 1.0");
+    assert!(
+        d.finish().is_empty(),
+        "0.5 s drag take dropped when min_secs = 1.0"
+    );
 
     d.min_secs = 0.4;
     for i in 0..=30 {
         d.sample(1.0 / 60.0, 0.0, &[(a, trs(0.0, i as f32))]);
     }
-    assert_eq!(d.finish().len(), 1, "0.5 s drag take kept when min_secs = 0.4");
+    assert_eq!(
+        d.finish().len(),
+        1,
+        "0.5 s drag take kept when min_secs = 0.4"
+    );
 }
-

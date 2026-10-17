@@ -216,7 +216,10 @@ pub(super) struct LayoutCache {
     pub serializations: usize,
 }
 impl LayoutCache {
-    pub fn refresh(&mut self, layout: &Layout<Panel>) -> Result<(), soluwell_chrome::dock_layout::Error> {
+    pub fn refresh(
+        &mut self,
+        layout: &Layout<Panel>,
+    ) -> Result<(), soluwell_chrome::dock_layout::Error> {
         if self.blob.is_some() && self.layout.as_ref() == Some(layout) {
             return Ok(());
         }
@@ -858,7 +861,10 @@ mod tests {
         let mut store = LayoutStore::new();
         store.save("Default", default_blob).unwrap();
         store
-            .save("Render", soluwell_chrome::dock_layout::to_blob(&layout).unwrap())
+            .save(
+                "Render",
+                soluwell_chrome::dock_layout::to_blob(&layout).unwrap(),
+            )
             .unwrap();
         store.rename("Render", "Export workspace").unwrap();
         let json = serde_json::to_string(&store).unwrap();
