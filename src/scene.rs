@@ -667,6 +667,9 @@ pub struct Render {
     pub denoise: crate::denoise::Settings,
 
     pub adaptive: Adaptive,
+
+    #[serde(default)]
+    pub backend: crate::render_profiles::Backend,
 }
 
 /// Adaptive sampling (V-Ray noise threshold / Redshift adaptive error): 8x4 pixel tiles stop
@@ -1029,6 +1032,7 @@ impl Scene {
                 reinhard: false,
                 denoise: crate::denoise::Settings::default(),
                 adaptive: Adaptive::default(),
+                backend: crate::render_profiles::Backend::default(),
             },
         }
     }

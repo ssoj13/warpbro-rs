@@ -1650,6 +1650,7 @@ fn attribute_choices(path: &str) -> Vec<Value> {
             .collect()
     }
     match path {
+        "/render/backend" => return variants(crate::render_profiles::Backend::ALL),
         "/output/format" => return variants(crate::export::ExportFormat::ALL),
         "/output/encoder" => return variants(crate::export::VideoEncoder::ALL),
         "/output/png" => return variants(video_io::export::PngEncoding::ALL),
@@ -2132,6 +2133,9 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
         }
         "/render/method" => {
             "Fast evaluates opaque materials with the existing simplified material model; transmission keeps Standard Surface. Full preserves each authored material model. Quality remains controlled by the profile's Quality section."
+        }
+        "/render/backend" => {
+            "Compute backend: Auto uses CUDA when an NVIDIA driver is present and falls back to WGPU; CUDA and WGPU require that backend without fallback."
         }
         "/viewport/extras" => {
             "Draw the extras over the image: mask shapes, group locators, the other cameras and the lights."
@@ -6204,9 +6208,10 @@ fn attribute_order(path: &str) -> u16 {
         "/quality/hit_epsilon" => 32,
         "/quality/glass_probes" => 33,
 
-        // Render: display/method & denoise first, then thinning, then direct lighting
+        // Render: display/method/backend & denoise first, then thinning, then direct lighting
         "/render/display" => 10,
         "/render/method" => 11,
+        "/render/backend" => 12,
         "/render/denoise/enabled" => 20,
         "/render/denoise/quality" => 21,
         "/render/denoise/mode" => 22,

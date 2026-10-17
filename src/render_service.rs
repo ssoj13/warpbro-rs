@@ -760,6 +760,7 @@ fn trace_key(request: &ViewportRequest) -> Vec<f32> {
         key[index] = 0.0;
     }
     key.extend(crate::render::scene_trace_data(&request.scene));
+    key.push(request.scene.render.backend as u8 as f32);
     key
 }
 struct Viewport {

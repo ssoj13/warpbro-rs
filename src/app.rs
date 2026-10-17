@@ -3757,12 +3757,31 @@ impl App {
         });
     }
 
+    fn status_gpu_label(&self) -> String {
+        let backend = self
+            .viewport_render
+            .as_ref()
+            .map(|s| s.effective.render.backend)
+            .unwrap_or(self.scene.render.backend);
+        match backend {
+            crate::render_profiles::Backend::Wgpu => format!("WGPU · {}", self.gpu_name),
+            crate::render_profiles::Backend::Cuda | crate::render_profiles::Backend::Auto => {
+                if self.gpu_name.starts_with("Initializing") {
+                    self.gpu_name.clone()
+                } else {
+                    format!("CUDA · {}", self.gpu_name)
+                }
+            }
+        }
+    }
+
     fn resizable_status_bar(&mut self, ui: &mut egui::Ui) {
         // Fixed section identity/count: transient frame and OIDN states never
         // move widths onto another indicator. Rendering uses only mailbox data.
         const WIDTHS: [f32; 10] = [
             200.0, 95.0, 95.0, 220.0, 130.0, 100.0, 170.0, 80.0, 150.0, 0.0,
         ];
+        let gpu_label = self.status_gpu_label();
         let frame = self.frame.as_deref();
         let preview = self.showing_preview;
         let target_spp = self.target_spp;
@@ -3774,8 +3793,8 @@ impl App {
                 ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
                 match index {
                     0 => {
-                        ui.label(RichText::new(&self.gpu_name).weak())
-                            .on_hover_text(&self.gpu_name);
+                        ui.label(RichText::new(&gpu_label).weak())
+                            .on_hover_text(&gpu_label);
                     }
                     1 => {
                         ui.label(if self.scene.camera.free_flight {
@@ -3839,9 +3858,10 @@ impl App {
     }
 
     fn fixed_status_bar(&mut self, ui: &mut egui::Ui) {
+        let gpu_label = self.status_gpu_label();
         ui.horizontal(|ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-            ui.label(RichText::new(&self.gpu_name).weak());
+            ui.label(RichText::new(&gpu_label).weak());
             ui.label(if self.scene.camera.free_flight {
                 "Free flight · `"
             } else {

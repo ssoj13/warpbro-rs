@@ -3350,6 +3350,12 @@ fn numeric_value(template: &Value, n: f64) -> Value {
     }
 }
 fn choice_label(path: &str, value: &Value) -> String {
+    if path == "/render/backend"
+        && let Ok(backend) =
+            serde_json::from_value::<crate::render_profiles::Backend>(value.clone())
+    {
+        return backend.label().to_owned();
+    }
     if path == "/formula" {
         return serde_json::from_value::<crate::scene::Formula>(value.clone())
             .map(|formula| formula.name().to_owned())

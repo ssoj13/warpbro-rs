@@ -83,6 +83,7 @@ image = { version = "0.25", default-features = false, features = ["hdr"] }
 [dev-dependencies]
 # Half-float pixels of synthetic window captures (`window_shot` tests; egui-display's `Pixels::RgbaF16`).
 half = "2.7"
+naga = { version = "30", default-features = false, features = ["wgsl-in"] }
 av-codec = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main", default-features = false }
 av-codec-core = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
 av-format-mov = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }

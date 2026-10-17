@@ -13,445 +13,9 @@ use crate::scene::MaterialModel;
 use crate::scene::Scene;
 use fractal_kernels::kernels;
 
-const BLOCK: u32 = 128;
-/// Threads of the `tally` reduction (a multiple of `BLOCK`): the out-of-steps readback is this
-/// many `[f64; 2]` partial sums, 64 KiB at any resolution.
-const TALLY_THREADS: usize = 4096;
+pub use crate::render_prep::PreparationStats;
+pub(crate) use crate::render_prep::*;
 
-/// Slots that only the tonemap reads: changing them re-tonemaps without restarting the samples.
-const TONEMAP_ONLY: [usize; 3] = [P_EXPOSURE, P_SATURATION, P_TONEMAP];
-/// Slots that change every launch.
-const PER_LAUNCH: [usize; 3] = [P_SAMPLE_BEGIN, P_SPP, P_SEED];
-/// Adaptive-sampling slots: they choose which tiles keep sampling, never the accumulated values,
-/// so changing them must not restart the render (the `adapt` kernel re-decides every step).
-const SCHEDULE_ONLY: [usize; 2] = [P_ADAPT_THRESHOLD, P_ADAPT_MIN];
-
-/// Worker-local counters; uploads count only completed host-to-device copies.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct PreparationStats {
-    pub builds: u64,
-    pub hits: u64,
-    pub environment_decodes: u64,
-    pub lut_uploads: u64,
-    pub object_uploads: u64,
-    pub light_uploads: u64,
-    pub upload_bytes: u64,
-}
-
-/// Typed runtime inputs. Authoring documents, animation curves and display settings
-/// are not packed by CUDA and never require a preparation-cache rebuild.
-struct PreparationInputs {
-    world_render: bool,
-    camera_reference: Option<f32>,
-    object_world: Option<[[f32; 4]; 4]>,
-    formula: crate::scene::Formula,
-    julia: [f32; 3],
-    julia_mix: f32,
-    orbit_offset: [f32; 3],
-    inversion_strength: f32,
-    inversion_center: [f32; 3],
-    inversion_radius: f32,
-    object: crate::scene::ObjectTransform,
-    camera: crate::scene::Camera,
-    lighting: crate::scene::Lighting,
-    material: crate::scene::Material,
-    palette: PaletteScheme,
-    coloring: crate::scene::Coloring,
-    trap_point: [f32; 3],
-    trap_axis: u32,
-    trap_scale: f32,
-    render: crate::scene::Render,
-    direct: Option<crate::render_profiles::DirectRender>,
-    environment: crate::environment::Environment,
-    objects: Vec<PreparationInputs>,
-    masks: Vec<crate::scene::MaskInstance>,
-    lights: Vec<crate::scene::Lighting>,
-}
-fn preparation_render(scene: &Scene, root: bool) -> crate::scene::Render {
-    let mut render = scene.render;
-    render.denoise = Default::default();
-    if root {
-        render.exposure_stops = 0.0;
-        render.saturation = 0.0;
-        render.reinhard = false;
-    }
-    render
-}
-fn same_material(a: &crate::scene::Material, b: &crate::scene::Material) -> bool {
-    // The pattern has no `..`: a new material field does not compile until it is compared here
-    // or named next to `preset` (a UI label) as not reaching the upload.
-    macro_rules! equal {
-        ($($field:ident),+ $(,)?) => {{
-            let crate::scene::Material { $($field: _,)+ preset: _ } = a;
-            true $(&& a.$field == b.$field)+
-        }};
-    }
-    equal!(
-        model,
-        color_source,
-        base_color,
-        facing,
-        base,
-        base_tint,
-        diffuse_roughness,
-        metalness,
-        specular,
-        specular_color,
-        specular_roughness,
-        specular_ior,
-        specular_anisotropy,
-        specular_rotation,
-        transmission,
-        transmission_color,
-        transmission_extra_roughness,
-        transmission_depth,
-        sheen,
-        sheen_color,
-        sheen_roughness,
-        coat,
-        coat_color,
-        coat_roughness,
-        coat_ior,
-        coat_affect_color,
-        coat_affect_roughness,
-        thin_film_thickness,
-        thin_film_ior,
-        emission,
-        emission_color
-    )
-}
-impl PreparationInputs {
-    // Both functions destructure `Scene` without `..`: a new scene field does not compile until
-    // it is either part of the key or listed as not reaching the GPU upload, so the cache can
-    // never silently reuse an upload that is missing it.
-    fn new(scene: &Scene, root: bool) -> Self {
-        let Scene {
-            world_render,
-            camera_reference,
-            objects,
-            lights,
-            object_world,
-            masks,
-            formula,
-            julia,
-            julia_mix,
-            orbit_offset,
-            inversion_strength,
-            inversion_center,
-            inversion_radius,
-            object,
-            camera,
-            lighting,
-            material,
-            palette,
-            coloring,
-            trap_point,
-            trap_axis,
-            trap_scale,
-            render: _,
-            direct,
-            environment,
-            // Authoring and display state: never packed into the upload (`mask` reaches it
-            // resolved, as `masks`; `bounds` are drawn by the viewport, never traced; `node`
-            // only maps a pick back to its node).
-            mask: _,
-            bounds: _,
-            node: _,
-            document: _,
-            animation: _,
-            name: _,
-            colour: _,
-        } = scene;
-        Self {
-            world_render: *world_render,
-            camera_reference: *camera_reference,
-            object_world: *object_world,
-            formula: *formula,
-            julia: *julia,
-            julia_mix: *julia_mix,
-            orbit_offset: *orbit_offset,
-            inversion_strength: *inversion_strength,
-            inversion_center: *inversion_center,
-            inversion_radius: *inversion_radius,
-            object: *object,
-            camera: *camera,
-            lighting: *lighting,
-            material: material.clone(),
-            palette: *palette,
-            coloring: *coloring,
-            trap_point: *trap_point,
-            trap_axis: *trap_axis,
-            trap_scale: *trap_scale,
-            render: preparation_render(scene, root),
-            direct: *direct,
-            environment: environment.clone(),
-            objects: objects
-                .iter()
-                .map(|object| Self::new(object, false))
-                .collect(),
-            masks: masks.clone(),
-            lights: lights.clone(),
-        }
-    }
-    fn matches(&self, scene: &Scene, root: bool) -> bool {
-        let Scene {
-            world_render,
-            camera_reference,
-            objects,
-            lights,
-            object_world,
-            masks,
-            formula,
-            julia,
-            julia_mix,
-            orbit_offset,
-            inversion_strength,
-            inversion_center,
-            inversion_radius,
-            object,
-            camera,
-            lighting,
-            material,
-            palette,
-            coloring,
-            trap_point,
-            trap_axis,
-            trap_scale,
-            render: _,
-            direct,
-            environment,
-            mask: _,
-            bounds: _,
-            node: _,
-            document: _,
-            animation: _,
-            name: _,
-            colour: _,
-        } = scene;
-        self.world_render == *world_render
-            && self.camera_reference == *camera_reference
-            && self.object_world == *object_world
-            && self.formula == *formula
-            && self.julia == *julia
-            && self.julia_mix == *julia_mix
-            && self.orbit_offset == *orbit_offset
-            && self.inversion_strength == *inversion_strength
-            && self.inversion_center == *inversion_center
-            && self.inversion_radius == *inversion_radius
-            && self.object == *object
-            && self.camera == *camera
-            && self.lighting == *lighting
-            && same_material(&self.material, material)
-            && self.palette == *palette
-            && self.coloring == *coloring
-            && self.trap_point == *trap_point
-            && self.trap_axis == *trap_axis
-            && self.trap_scale == *trap_scale
-            && self.render == preparation_render(scene, root)
-            && self.direct == *direct
-            && self.environment == *environment
-            && self.lights == *lights
-            && self.masks == *masks
-            && self.objects.len() == objects.len()
-            && self
-                .objects
-                .iter()
-                .zip(objects)
-                .all(|(input, object)| input.matches(object, false))
-    }
-}
-/// Material specialization belongs to the evaluated world, not the root scene's snapshot
-/// material. Cache it with the packed upload so launches do not rescan authoring nodes.
-/// Only homogeneous Fast worlds use specialized kernels; Full and mixed worlds retain
-/// the universal dispatcher because material specialization did not establish a speed gain.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WorldMaterial {
-    Fast,
-    Full,
-    Mixed,
-}
-impl WorldMaterial {
-    fn from_upload(upload: &WorldUpload) -> Self {
-        let mut objects = upload.objects.as_chunks::<OBJECT_STRIDE>().0.iter();
-        let Some(first) = objects.next() else {
-            return Self::Mixed;
-        };
-        let full = first[P_MATERIAL_MODEL] != 0.0;
-        if objects.any(|object| (object[P_MATERIAL_MODEL] != 0.0) != full) {
-            Self::Mixed
-        } else if full {
-            Self::Full
-        } else {
-            Self::Fast
-        }
-    }
-}
-struct PreparedScene {
-    upload: WorldUpload,
-    world_material: WorldMaterial,
-    /// Inline the known DE only for one actual Fast Mandelbulb object.
-    single_fast_bulb: bool,
-    trace: Vec<f32>,
-    palettes: Vec<PaletteScheme>,
-    environment: Option<(String, u64)>,
-}
-impl PreparedScene {
-    fn new(scene: &Scene, width: u32, height: u32) -> Result<Self, String> {
-        let upload = WorldUpload::new(scene, width, height)?;
-        let world_material = WorldMaterial::from_upload(&upload);
-        let single_fast_bulb = world_material == WorldMaterial::Fast
-            && upload.objects.len() == OBJECT_STRIDE
-            && upload.objects[P_FAMILY] as u32 == FAMILY_BULB;
-        Ok(Self {
-            upload,
-            world_material,
-            single_fast_bulb,
-            trace: scene_trace_data(scene),
-            palettes: std::iter::once(scene.palette)
-                .chain(
-                    scene
-                        .objects
-                        .iter()
-                        .filter(|_| scene.world_render)
-                        .map(|object| object.palette),
-                )
-                .collect(),
-            environment: scene.environment.key(),
-        })
-    }
-    fn params(&self, scene: &Scene, bounces_cap: Option<u32>) -> [f32; P_COUNT] {
-        let mut params: [f32; P_COUNT] = self
-            .upload
-            .params
-            .as_slice()
-            .try_into()
-            .expect("parameter block size");
-        params[P_EXPOSURE] = 2f32.powf(scene.render.exposure_stops);
-        params[P_SATURATION] = scene.render.saturation;
-        params[P_TONEMAP] = scene.render.reinhard as u32 as f32;
-        if let Some(cap) = bounces_cap {
-            params[P_MAX_BOUNCES] = params[P_MAX_BOUNCES].min(cap as f32);
-        }
-        params
-    }
-}
-struct PreparationEntry {
-    inputs: PreparationInputs,
-    width: u32,
-    height: u32,
-    result: Result<Arc<PreparedScene>, String>,
-}
-#[derive(Default)]
-struct PreparationCache {
-    entries: [Option<PreparationEntry>; 4],
-    next: usize,
-    builds: u64,
-    hits: u64,
-}
-impl PreparationCache {
-    fn get(
-        &mut self,
-        scene: &Scene,
-        width: u32,
-        height: u32,
-    ) -> Result<Arc<PreparedScene>, String> {
-        if let Some(entry) = self.entries.iter().flatten().find(|entry| {
-            entry.width == width && entry.height == height && entry.inputs.matches(scene, true)
-        }) {
-            self.hits += 1;
-            return entry.result.clone();
-        }
-        self.builds += 1;
-        let result = PreparedScene::new(scene, width, height).map(Arc::new);
-        self.entries[self.next] = Some(PreparationEntry {
-            inputs: PreparationInputs::new(scene, true),
-            width,
-            height,
-            result: result.clone(),
-        });
-        self.next = (self.next + 1) % self.entries.len();
-        result
-    }
-}
-
-/// This state belongs to the shared Gpu, never to an individual progressive target.
-/// Failed uploads invalidate identity because a copy may have partially changed device data.
-struct Resident<K> {
-    key: Option<K>,
-}
-impl<K> Default for Resident<K> {
-    fn default() -> Self {
-        Self { key: None }
-    }
-}
-impl<K: PartialEq> Resident<K> {
-    fn update(
-        &mut self,
-        key: K,
-        upload: impl FnOnce() -> Result<(), String>,
-    ) -> Result<bool, String> {
-        if self.key.as_ref() == Some(&key) {
-            return Ok(false);
-        }
-        if let Err(error) = upload() {
-            self.key = None;
-            return Err(error);
-        }
-        self.key = Some(key);
-        Ok(true)
-    }
-}
-struct LutResidentKey(Arc<PreparedScene>);
-impl PartialEq for LutResidentKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.palettes == other.0.palettes && self.0.environment == other.0.environment
-    }
-}
-struct ObjectResidentKey(Arc<PreparedScene>);
-impl PartialEq for ObjectResidentKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.upload.objects == other.0.upload.objects
-    }
-}
-struct LightResidentKey(Arc<PreparedScene>);
-impl PartialEq for LightResidentKey {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.upload.lights == other.0.upload.lights
-    }
-}
-#[derive(Default)]
-struct DenoiseScratch {
-    tiled: Vec<[f32; 4]>,
-    color: Vec<[f32; 4]>,
-    albedo: Vec<[f32; 4]>,
-    normal: Vec<[f32; 4]>,
-}
-fn untile_into(
-    tiled: &[[f32; 4]],
-    width: usize,
-    height: usize,
-    normalize: bool,
-    output: &mut Vec<[f32; 4]>,
-) {
-    output.resize(width * height, [0.0; 4]);
-    let tiles_per_row = width.div_ceil(8);
-    for y in 0..height {
-        for x in 0..width {
-            let tile = (y / 4) * tiles_per_row + x / 8;
-            let pixel = tiled[tile * 32 + (y % 4) * 8 + x % 8];
-            output[y * width + x] = if normalize {
-                let inv = if pixel[3] > 0.0 {
-                    pixel[3].recip()
-                } else {
-                    0.0
-                };
-                [pixel[0] * inv, pixel[1] * inv, pixel[2] * inv, 1.0]
-            } else {
-                pixel
-            };
-        }
-    }
-}
 fn read_tiled_into(
     stream: &Arc<CudaStream>,
     buffer: &DeviceBuffer<[f32; 4]>,
@@ -468,44 +32,188 @@ fn read_tiled_into(
     untile_into(tiled, width, height, normalize, output);
 }
 
-#[derive(Clone, PartialEq)]
-struct DisplayKey {
-    exposure: f32,
-    saturation: f32,
-    reinhard: bool,
-    colour_revision: u64,
-    colour: crate::ocio::Sel,
-}
-impl DisplayKey {
-    fn matches(&self, scene: &Scene, colour_revision: u64) -> bool {
-        self.exposure == scene.render.exposure_stops
-            && self.saturation == scene.render.saturation
-            && self.reinhard == scene.render.reinhard
-            && self.colour_revision == colour_revision
-            && self.colour == scene.colour
-    }
-    fn new(scene: &Scene, colour_revision: u64) -> Self {
-        Self {
-            exposure: scene.render.exposure_stops,
-            saturation: scene.render.saturation,
-            reinhard: scene.render.reinhard,
-            colour_revision,
-            colour: scene.colour.clone(),
-        }
-    }
-}
-
-pub struct Gpu {
+struct CudaEngine {
     _ctx: Arc<CudaContext>,
     stream: Arc<CudaStream>,
     module: kernels::LoadedModule,
     lut: DeviceBuffer<[f32; 4]>,
     objects: DeviceBuffer<f32>,
     lights: DeviceBuffer<f32>,
-    preparation: PreparationCache,
     lut_resident: Resident<LutResidentKey>,
     object_resident: Resident<ObjectResidentKey>,
     light_resident: Resident<LightResidentKey>,
+    name: String,
+}
+
+impl CudaEngine {
+    fn new() -> Result<Self, String> {
+        let started = std::time::Instant::now();
+        log::info!("CUDA startup: creating context");
+        let ctx = CudaContext::new(0).map_err(|e| format!("CUDA context: {e:?}"))?;
+        log::info!("CUDA startup: context ready in {:?}", started.elapsed());
+        let stream = ctx.default_stream();
+        let module_started = std::time::Instant::now();
+        log::info!("CUDA startup: loading embedded kernels");
+        // SAFETY: this package owns the embedded device bundle for `kernels`.
+        let module = unsafe { kernels::load(&ctx) }.map_err(|e| format!("load module: {e:?}"))?;
+        // Validate the host/device constant-memory contract before reporting Ready.
+        // A stripped/mismatched artifact must surface as a startup error, not kill
+        // the shared worker when its first viewport or thumbnail request arrives.
+        module
+            .set_params_blocking(&[0.0; P_COUNT])
+            .map_err(|e| format!("CUDA parameter block: {e:?}"))?;
+        log::info!(
+            "CUDA startup: kernels ready in {:?}",
+            module_started.elapsed()
+        );
+        let name = ctx.device_name().unwrap_or_else(|_| "CUDA GPU".into());
+        let lut =
+            DeviceBuffer::zeroed(&stream, PALETTE_SAMPLES + 1).map_err(|e| format!("{e:?}"))?;
+        Ok(Self {
+            _ctx: ctx,
+            stream: stream.clone(),
+            module,
+            lut,
+            objects: DeviceBuffer::zeroed(&stream, 1).map_err(|e| format!("objects: {e:?}"))?,
+            lights: DeviceBuffer::zeroed(&stream, 1).map_err(|e| format!("lights: {e:?}"))?,
+            lut_resident: Default::default(),
+            object_resident: Default::default(),
+            light_resident: Default::default(),
+            name,
+        })
+    }
+
+    fn create_target(&self, width: usize, height: usize) -> CudaTarget {
+        let padded = width.div_ceil(8) * height.div_ceil(4) * 32;
+        let mut active = DeviceBuffer::zeroed(&self.stream, padded / 32).expect("tile flags");
+        active
+            .copy_from_host(&self.stream, &vec![1u32; padded / 32])
+            .expect("activate tiles");
+        CudaTarget {
+            accum: DeviceBuffer::zeroed(&self.stream, padded).expect("accumulator"),
+            albedo: DeviceBuffer::zeroed(&self.stream, padded).expect("albedo guides"),
+            normal: DeviceBuffer::zeroed(&self.stream, padded).expect("normal guides"),
+            stats: DeviceBuffer::zeroed(&self.stream, padded).expect("sample statistics"),
+            tally: DeviceBuffer::zeroed(&self.stream, TALLY_THREADS).expect("tally sums"),
+            active,
+            out: DeviceBuffer::zeroed(&self.stream, width * height).expect("output"),
+            padded,
+        }
+    }
+
+    fn clear_target(&self, ct: &mut CudaTarget) {
+        ct.accum
+            .zero_async(&self.stream)
+            .expect("clear accumulator");
+        ct.albedo
+            .zero_async(&self.stream)
+            .expect("clear albedo guides");
+        ct.normal
+            .zero_async(&self.stream)
+            .expect("clear normal guides");
+        ct.stats
+            .zero_async(&self.stream)
+            .expect("clear sample statistics");
+    }
+
+    fn upload_prepared(
+        &mut self,
+        prepared: &Arc<PreparedScene>,
+        env: Option<&crate::environment::Map>,
+        world: bool,
+        table: &mut Vec<[f32; 4]>,
+        stats: &mut PreparationStats,
+    ) -> Result<(), String> {
+        let stream = &self.stream;
+        let lut = &mut self.lut;
+        let changed = self
+            .lut_resident
+            .update(LutResidentKey(prepared.clone()), || {
+                table.clear();
+                for palette in &prepared.palettes {
+                    table.extend(build_lut(*palette));
+                }
+                if let Some(env) = env {
+                    table.extend(env.map.gpu_entries());
+                }
+                if lut.len() != table.len() {
+                    *lut = DeviceBuffer::zeroed(stream, table.len())
+                        .map_err(|e| format!("environment allocation: {e:?}"))?;
+                }
+                lut.copy_from_host(stream, table)
+                    .map_err(|e| format!("palette / environment upload: {e:?}"))
+            })?;
+        if changed {
+            stats.lut_uploads += 1;
+            stats.upload_bytes += (table.len() * std::mem::size_of::<[f32; 4]>()) as u64;
+        }
+        if world {
+            let objects = &mut self.objects;
+            let data = &prepared.upload.objects;
+            let changed =
+                self.object_resident
+                    .update(ObjectResidentKey(prepared.clone()), || {
+                        if objects.len() != data.len().max(1) {
+                            *objects = DeviceBuffer::zeroed(stream, data.len().max(1))
+                                .map_err(|e| format!("world object allocation: {e:?}"))?;
+                        }
+                        if !data.is_empty() {
+                            objects
+                                .copy_from_host(stream, data)
+                                .map_err(|e| format!("world objects upload: {e:?}"))?;
+                        }
+                        Ok(())
+                    })?;
+            if changed && !data.is_empty() {
+                stats.object_uploads += 1;
+                stats.upload_bytes += (data.len() * std::mem::size_of::<f32>()) as u64;
+            }
+            let lights = &mut self.lights;
+            let data = &prepared.upload.lights;
+            let changed = self
+                .light_resident
+                .update(LightResidentKey(prepared.clone()), || {
+                    if lights.len() != data.len().max(1) {
+                        *lights = DeviceBuffer::zeroed(stream, data.len().max(1))
+                            .map_err(|e| format!("world light allocation: {e:?}"))?;
+                    }
+                    if !data.is_empty() {
+                        lights
+                            .copy_from_host(stream, data)
+                            .map_err(|e| format!("world lights upload: {e:?}"))?;
+                    }
+                    Ok(())
+                })?;
+            if changed && !data.is_empty() {
+                stats.light_uploads += 1;
+                stats.upload_bytes += (data.len() * std::mem::size_of::<f32>()) as u64;
+            }
+        }
+        Ok(())
+    }
+}
+
+struct CudaTarget {
+    accum: DeviceBuffer<[f32; 4]>,
+    albedo: DeviceBuffer<[f32; 4]>,
+    normal: DeviceBuffer<[f32; 4]>,
+    /// Per pixel: [sum of squared sample luminance (adaptive sampling variance), samples with
+    /// an unresolved march, the camera-ray start the kernels cache (fractal-kernels
+    /// `cone_start`), 0]. Zeroed with every accumulation reset, which the start cache relies on.
+    stats: DeviceBuffer<[f32; 4]>,
+    /// [out-of-steps samples, samples] partial sums (the `tally` kernel).
+    tally: DeviceBuffer<[f64; 2]>,
+    /// Per 8x4 tile: 1 = keep sampling, 0 = converged (written by the `adapt` kernel).
+    active: DeviceBuffer<u32>,
+    out: DeviceBuffer<[f32; 4]>,
+    padded: usize,
+}
+
+pub struct Gpu {
+    cuda: Result<CudaEngine, String>,
+    wgpu: Option<Result<crate::render_wgpu::WgpuEngine, String>>,
+    cuda_unavailable: Option<String>,
+    preparation: PreparationCache,
     lut_staging: Vec<[f32; 4]>,
     denoise_scratch: DenoiseScratch,
     stats: PreparationStats,
@@ -524,22 +232,14 @@ pub struct Gpu {
 pub struct Target {
     pub width: usize,
     pub height: usize,
-    accum: DeviceBuffer<[f32; 4]>,
-    albedo: DeviceBuffer<[f32; 4]>,
-    normal: DeviceBuffer<[f32; 4]>,
-    /// Per pixel: [sum of squared sample luminance (adaptive sampling variance), samples with
-    /// an unresolved march, the camera-ray start the kernels cache (fractal-kernels
-    /// `cone_start`), 0]. Zeroed with every accumulation reset, which the start cache relies on.
-    stats: DeviceBuffer<[f32; 4]>,
-    /// [out-of-steps samples, samples] partial sums (the `tally` kernel) and its host copy.
-    tally: DeviceBuffer<[f64; 2]>,
+    cuda: Option<CudaTarget>,
+    wgpu: Option<crate::render_wgpu::WgpuTarget>,
+    /// Host copy of [out-of-steps samples, samples] partial sums (`tally` kernel).
     tally_host: Vec<[f64; 2]>,
     /// Share of the accumulated samples with an unresolved march (camera, bounce or shadow ray
     /// out of steps, `gpu::Outcome`): a visible share means holes or missing light - raise the
     /// step budget.
     pub unresolved: f32,
-    /// Per 8x4 tile: 1 = keep sampling, 0 = converged (written by the `adapt` kernel).
-    active: DeviceBuffer<u32>,
     active_host: Vec<u32>,
     /// Tiles still sampling / all tiles, after the last adaptive decision.
     pub active_tiles: (usize, usize),
@@ -549,7 +249,8 @@ pub struct Target {
     denoise_selected: bool,
     /// The viewport shows the raw samples; denoising still runs, so switching back is instant.
     pub raw_view: bool,
-    out: DeviceBuffer<[f32; 4]>,
+    pub active_backend: crate::render_profiles::Backend,
+    requested_backend: Option<crate::render_profiles::Backend>,
     /// SDR monitor codes (R in the low byte), row major, after the last `step`.
     pub pixels: Vec<u32>,
     /// Linear display Rec.709 (HDR: 1 = 100 nits); never quantized.
@@ -580,33 +281,82 @@ impl Target {
 }
 
 impl Gpu {
+    /// Resolve `requested` (`Auto`, `Cuda`, `Wgpu`) to a concrete engine (`Cuda` or `Wgpu`).
+    /// Never falls back silently when an explicit backend (`Cuda` or `Wgpu`) is requested.
+    pub fn resolve_backend(
+        &mut self,
+        requested: crate::render_profiles::Backend,
+    ) -> Result<crate::render_profiles::Backend, String> {
+        use crate::render_profiles::Backend;
+        let cuda_err = self
+            .cuda_unavailable
+            .as_ref()
+            .or_else(|| self.cuda.as_ref().err());
+        match requested {
+            Backend::Cuda => {
+                if let Some(err) = cuda_err {
+                    Err(err.clone())
+                } else {
+                    Ok(Backend::Cuda)
+                }
+            }
+            Backend::Wgpu => match self
+                .wgpu
+                .get_or_insert_with(crate::render_wgpu::WgpuEngine::new)
+            {
+                Ok(_) => Ok(Backend::Wgpu),
+                Err(err) => Err(err.clone()),
+            },
+            Backend::Auto => {
+                if cuda_err.is_none() {
+                    Ok(Backend::Cuda)
+                } else {
+                    match self
+                        .wgpu
+                        .get_or_insert_with(crate::render_wgpu::WgpuEngine::new)
+                    {
+                        Ok(_) => Ok(Backend::Wgpu),
+                        Err(err) => Err(err.clone()),
+                    }
+                }
+            }
+        }
+    }
+
     /// Every tile samples again (new accumulation, or adaptive sampling switched off).
     fn activate_all(&self, target: &mut Target) {
         target.active_host.fill(1);
-        target
-            .active
-            .copy_from_host(&self.stream, &target.active_host)
-            .expect("activate tiles");
+        if target.active_backend == crate::render_profiles::Backend::Wgpu {
+            if let (Some(Ok(wgpu)), Some(wt)) = (&self.wgpu, &target.wgpu) {
+                wgpu.upload_active(wt, &target.active_host);
+            }
+        } else if let (Ok(cuda), Some(ct)) = (&self.cuda, &mut target.cuda) {
+            ct.active
+                .copy_from_host(&cuda.stream, &target.active_host)
+                .expect("activate tiles");
+        }
         target.active_tiles = (target.active_host.len(), target.active_host.len());
         target.converged = false;
     }
 
     /// The share of accumulated samples that ran out of march steps ([`Target::unresolved`]).
     fn tally(&self, target: &mut Target) {
+        if target.active_backend == crate::render_profiles::Backend::Wgpu {
+            if let (Some(Ok(wgpu)), Some(wt)) = (&self.wgpu, &target.wgpu) {
+                target.unresolved = wgpu.tally(wt);
+            }
+            return;
+        }
+        let (Ok(cuda), Some(ct)) = (&self.cuda, &mut target.cuda) else {
+            return;
+        };
         let cfg = LaunchConfig1D::new(TALLY_THREADS as u32 / BLOCK, BLOCK, 0);
-        let prepared = self.module.prepare_tally(cfg).expect("prepare tally");
-        self.module
-            .tally(
-                &self.stream,
-                &prepared,
-                &target.accum,
-                &target.stats,
-                &mut target.tally,
-            )
+        let prepared = cuda.module.prepare_tally(cfg).expect("prepare tally");
+        cuda.module
+            .tally(&cuda.stream, &prepared, &ct.accum, &ct.stats, &mut ct.tally)
             .expect("tally");
-        target
-            .tally
-            .copy_to_host(&self.stream, &mut target.tally_host)
+        ct.tally
+            .copy_to_host(&cuda.stream, &mut target.tally_host)
             .expect("tally readback");
         let (unresolved, samples) = target
             .tally_host
@@ -632,21 +382,31 @@ impl Gpu {
         if target.samples < adaptive.min() {
             return;
         }
+        if target.active_backend == crate::render_profiles::Backend::Wgpu {
+            if let (Some(Ok(wgpu)), Some(wt)) = (&self.wgpu, &target.wgpu) {
+                let (active, converged) = wgpu.adapt(wt, &mut target.active_host);
+                target.active_tiles = (active, target.active_host.len());
+                target.converged = converged;
+            }
+            return;
+        }
+        let (Ok(cuda), Some(ct)) = (&self.cuda, &mut target.cuda) else {
+            return;
+        };
         let tiles = target.active_host.len() as u32;
         let cfg = LaunchConfig1D::new(tiles.div_ceil(BLOCK), BLOCK, 0);
-        let prepared = self.module.prepare_adapt(cfg).expect("prepare adapt");
-        self.module
+        let prepared = cuda.module.prepare_adapt(cfg).expect("prepare adapt");
+        cuda.module
             .adapt(
-                &self.stream,
+                &cuda.stream,
                 &prepared,
-                &target.accum,
-                &target.stats,
-                &mut target.active,
+                &ct.accum,
+                &ct.stats,
+                &mut ct.active,
             )
             .expect("adapt");
-        target
-            .active
-            .copy_to_host(&self.stream, &mut target.active_host)
+        ct.active
+            .copy_to_host(&cuda.stream, &mut target.active_host)
             .expect("tile flags readback");
         let active = target.active_host.iter().filter(|&&a| a != 0).count();
         target.active_tiles = (active, target.active_host.len());
@@ -657,40 +417,26 @@ impl Gpu {
         self.colour = crate::color::ColorPipeline::new();
         self.colour_revision = self.colour_revision.wrapping_add(1);
     }
+
     pub fn new() -> Result<Self, String> {
-        let started = std::time::Instant::now();
-        log::info!("CUDA startup: creating context");
-        let ctx = CudaContext::new(0).map_err(|e| format!("CUDA context: {e:?}"))?;
-        log::info!("CUDA startup: context ready in {:?}", started.elapsed());
-        let stream = ctx.default_stream();
-        let module_started = std::time::Instant::now();
-        log::info!("CUDA startup: loading embedded kernels");
-        // SAFETY: this package owns the embedded device bundle for `kernels`.
-        let module = unsafe { kernels::load(&ctx) }.map_err(|e| format!("load module: {e:?}"))?;
-        // Validate the host/device constant-memory contract before reporting Ready.
-        // A stripped/mismatched artifact must surface as a startup error, not kill
-        // the shared worker when its first viewport or thumbnail request arrives.
-        module
-            .set_params_blocking(&[0.0; P_COUNT])
-            .map_err(|e| format!("CUDA parameter block: {e:?}"))?;
-        log::info!(
-            "CUDA startup: kernels ready in {:?}",
-            module_started.elapsed()
-        );
-        let name = ctx.device_name().unwrap_or_else(|_| "CUDA GPU".into());
-        let lut =
-            DeviceBuffer::zeroed(&stream, PALETTE_SAMPLES + 1).map_err(|e| format!("{e:?}"))?;
+        let cuda = CudaEngine::new();
+        let cuda_unavailable = cuda.as_ref().err().cloned();
+        let (name, wgpu) = match &cuda {
+            Ok(c) => (c.name.clone(), None),
+            Err(cuda_err) => {
+                log::warn!("CUDA unavailable ({cuda_err}); initializing WGPU compute backend");
+                let wgpu = crate::render_wgpu::WgpuEngine::new().map_err(|wgpu_err| {
+                    format!("{cuda_err}; WGPU fallback also failed: {wgpu_err}")
+                })?;
+                let name = wgpu.name().to_owned();
+                (name, Some(Ok(wgpu)))
+            }
+        };
         Ok(Self {
-            _ctx: ctx,
-            stream: stream.clone(),
-            module,
-            lut,
-            objects: DeviceBuffer::zeroed(&stream, 1).map_err(|e| format!("objects: {e:?}"))?,
-            lights: DeviceBuffer::zeroed(&stream, 1).map_err(|e| format!("lights: {e:?}"))?,
+            cuda,
+            wgpu,
+            cuda_unavailable,
             preparation: Default::default(),
-            lut_resident: Default::default(),
-            object_resident: Default::default(),
-            light_resident: Default::default(),
             lut_staging: Vec::new(),
             denoise_scratch: Default::default(),
             stats: Default::default(),
@@ -706,31 +452,26 @@ impl Gpu {
 
     pub fn target(&self, width: usize, height: usize) -> Target {
         let padded = width.div_ceil(8) * height.div_ceil(4) * 32;
+        let active_backend = if self.cuda.is_ok() && self.cuda_unavailable.is_none() {
+            crate::render_profiles::Backend::Cuda
+        } else {
+            crate::render_profiles::Backend::Wgpu
+        };
         Target {
             width,
             height,
-            accum: DeviceBuffer::zeroed(&self.stream, padded).expect("accumulator"),
-            albedo: DeviceBuffer::zeroed(&self.stream, padded).expect("albedo guides"),
-            normal: DeviceBuffer::zeroed(&self.stream, padded).expect("normal guides"),
-            stats: DeviceBuffer::zeroed(&self.stream, padded).expect("sample statistics"),
-            tally: DeviceBuffer::zeroed(&self.stream, TALLY_THREADS).expect("tally sums"),
+            cuda: None,
+            wgpu: None,
             tally_host: vec![[0.0; 2]; TALLY_THREADS],
             unresolved: 0.0,
-            active: {
-                let mut active =
-                    DeviceBuffer::zeroed(&self.stream, padded / 32).expect("tile flags");
-                active
-                    .copy_from_host(&self.stream, &vec![1u32; padded / 32])
-                    .expect("activate tiles");
-                active
-            },
             active_host: vec![1; padded / 32],
             active_tiles: (padded / 32, padded / 32),
             converged: false,
             denoise: Default::default(),
             denoise_selected: false,
             raw_view: false,
-            out: DeviceBuffer::zeroed(&self.stream, width * height).expect("output"),
+            active_backend,
+            requested_backend: None,
             pixels: vec![0; width * height],
             light: vec![[0.0; 4]; width * height],
             raw: vec![[0.0; 4]; width * height],
@@ -760,15 +501,30 @@ impl Gpu {
     pub fn raw_scene_linear(&self, target: &Target) -> Vec<[f32; 4]> {
         let mut tiled = Vec::new();
         let mut radiance = Vec::new();
-        read_tiled_into(
-            &self.stream,
-            &target.accum,
-            target.width,
-            target.height,
-            true,
-            &mut tiled,
-            &mut radiance,
-        );
+        if target.active_backend == crate::render_profiles::Backend::Wgpu {
+            if let (Some(Ok(wgpu)), Some(wt)) = (&self.wgpu, &target.wgpu) {
+                wgpu.read_tiled_into(
+                    wt,
+                    &wt.accum,
+                    (target.width, target.height),
+                    true,
+                    &mut tiled,
+                    &mut radiance,
+                );
+            }
+            return radiance;
+        }
+        if let (Ok(cuda), Some(ct)) = (&self.cuda, &target.cuda) {
+            read_tiled_into(
+                &cuda.stream,
+                &ct.accum,
+                target.width,
+                target.height,
+                true,
+                &mut tiled,
+                &mut radiance,
+            );
+        }
         radiance
     }
 
@@ -780,6 +536,13 @@ impl Gpu {
         scene: &Scene,
         bounces_cap: Option<u32>,
     ) -> bool {
+        let resolved_backend = match self.resolve_backend(scene.render.backend) {
+            Ok(backend) => backend,
+            Err(error) => {
+                target.colour_error = Some(error);
+                return false;
+            }
+        };
         let prepared = match self
             .preparation
             .get(scene, target.width as u32, target.height as u32)
@@ -791,7 +554,7 @@ impl Gpu {
             }
         };
         let params = prepared.params(scene, bounces_cap);
-        self.reset_target_for_params(target, scene, &prepared, &params)
+        self.reset_target_for_params(target, scene, &prepared, &params, resolved_backend)
     }
 
     fn reset_target_for_params(
@@ -800,6 +563,7 @@ impl Gpu {
         scene: &Scene,
         prepared: &PreparedScene,
         params: &[f32; P_COUNT],
+        resolved_backend: crate::render_profiles::Backend,
     ) -> bool {
         let mut key = *params;
         for i in TONEMAP_ONLY
@@ -814,25 +578,40 @@ impl Gpu {
             && target.key[P_COUNT..] == prepared.trace
             && target.palette == Some(scene.palette)
             && target.environment == prepared.environment
+            && target.requested_backend == Some(scene.render.backend)
+            && target.active_backend == resolved_backend
         {
             return false;
         }
-        target
-            .accum
-            .zero_async(&self.stream)
-            .expect("clear accumulator");
-        target
-            .albedo
-            .zero_async(&self.stream)
-            .expect("clear albedo guides");
-        target
-            .normal
-            .zero_async(&self.stream)
-            .expect("clear normal guides");
-        target
-            .stats
-            .zero_async(&self.stream)
-            .expect("clear sample statistics");
+        target.requested_backend = Some(scene.render.backend);
+        target.active_backend = resolved_backend;
+        let padded = target.width.div_ceil(8) * target.height.div_ceil(4) * 32;
+        if resolved_backend == crate::render_profiles::Backend::Wgpu {
+            if let Some(Ok(wgpu)) = &self.wgpu {
+                let needs_alloc = target
+                    .wgpu
+                    .as_ref()
+                    .map(|wt| wt.padded != padded)
+                    .unwrap_or(true);
+                if needs_alloc {
+                    target.wgpu = Some(wgpu.create_target(target.width, target.height));
+                }
+                if let Some(wt) = &target.wgpu {
+                    wgpu.clear_target(wt);
+                }
+            }
+        } else if let Ok(cuda) = &self.cuda {
+            let needs_alloc = target
+                .cuda
+                .as_ref()
+                .map(|ct| ct.padded != padded)
+                .unwrap_or(true);
+            if needs_alloc {
+                target.cuda = Some(cuda.create_target(target.width, target.height));
+            } else if let Some(ct) = &mut target.cuda {
+                cuda.clear_target(ct);
+            }
+        }
         target.unresolved = 0.0;
         self.activate_all(target);
         target.denoise.reset();
@@ -875,112 +654,59 @@ impl Gpu {
         if !scene.world_render || scene.objects.is_empty() {
             return Ok(None);
         }
+        let resolved_backend = self.resolve_backend(scene.render.backend)?;
         let prepared = self.preparation.get(scene, width as u32, height as u32)?;
         let env = self.environment_for(prepared.environment.as_ref())?;
-        self.upload_prepared(&prepared, env.as_deref(), true)?;
         let p = prepared.params(scene, None);
-        self.module
-            .set_params(&self.stream, &p)
+        if resolved_backend == crate::render_profiles::Backend::Wgpu {
+            let stats = &mut self.stats;
+            let wgpu = self
+                .wgpu
+                .as_mut()
+                .and_then(|r| r.as_mut().ok())
+                .ok_or_else(|| "WGPU backend unavailable".to_string())?;
+            wgpu.upload_prepared(&prepared, env.as_deref(), true, stats)?;
+            wgpu.set_params(&p);
+            return wgpu.pick(ndc);
+        }
+        let cuda = self
+            .cuda
+            .as_mut()
+            .map_err(|e| format!("CUDA backend unavailable: {e}"))?;
+        cuda.upload_prepared(
+            &prepared,
+            env.as_deref(),
+            true,
+            &mut self.lut_staging,
+            &mut self.stats,
+        )?;
+        cuda.module
+            .set_params(&cuda.stream, &p)
             .map_err(|e| format!("CUDA parameter upload: {e:?}"))?;
-        let mut query = DeviceBuffer::zeroed(&self.stream, 1).map_err(|e| format!("{e:?}"))?;
+        let mut query = DeviceBuffer::zeroed(&cuda.stream, 1).map_err(|e| format!("{e:?}"))?;
         query
-            .copy_from_host(&self.stream, &[[ndc[0], ndc[1], 0.0, 0.0]])
+            .copy_from_host(&cuda.stream, &[[ndc[0], ndc[1], 0.0, 0.0]])
             .map_err(|e| format!("pick upload: {e:?}"))?;
-        let mut out = DeviceBuffer::zeroed(&self.stream, 1).map_err(|e| format!("{e:?}"))?;
-        let launch = self
+        let mut out = DeviceBuffer::zeroed(&cuda.stream, 1).map_err(|e| format!("{e:?}"))?;
+        let launch = cuda
             .module
             .prepare_pick(LaunchConfig1D::new(1, 32, 0))
             .map_err(|e| format!("pick: {e:?}"))?;
-        self.module
+        cuda.module
             .pick(
-                &self.stream,
+                &cuda.stream,
                 &launch,
-                &self.objects,
-                &self.lights,
+                &cuda.objects,
+                &cuda.lights,
                 &query,
                 &mut out,
             )
             .map_err(|e| format!("pick: {e:?}"))?;
         let mut hit = [[0.0f32; 4]];
-        out.copy_to_host(&self.stream, &mut hit)
+        out.copy_to_host(&cuda.stream, &mut hit)
             .map_err(|e| format!("pick readback: {e:?}"))?;
         let [object, _, depth, _] = hit[0];
         Ok((object >= 1.0).then(|| (object as usize - 1, depth)))
-    }
-
-    fn upload_prepared(
-        &mut self,
-        prepared: &Arc<PreparedScene>,
-        env: Option<&crate::environment::Map>,
-        world: bool,
-    ) -> Result<(), String> {
-        let stream = &self.stream;
-        let table = &mut self.lut_staging;
-        let lut = &mut self.lut;
-        let changed = self
-            .lut_resident
-            .update(LutResidentKey(prepared.clone()), || {
-                table.clear();
-                for palette in &prepared.palettes {
-                    table.extend(build_lut(*palette));
-                }
-                if let Some(env) = env {
-                    table.extend(env.map.gpu_entries());
-                }
-                if lut.len() != table.len() {
-                    *lut = DeviceBuffer::zeroed(stream, table.len())
-                        .map_err(|e| format!("environment allocation: {e:?}"))?;
-                }
-                lut.copy_from_host(stream, table)
-                    .map_err(|e| format!("palette / environment upload: {e:?}"))
-            })?;
-        if changed {
-            self.stats.lut_uploads += 1;
-            self.stats.upload_bytes += (table.len() * std::mem::size_of::<[f32; 4]>()) as u64;
-        }
-        if world {
-            let objects = &mut self.objects;
-            let data = &prepared.upload.objects;
-            let changed =
-                self.object_resident
-                    .update(ObjectResidentKey(prepared.clone()), || {
-                        if objects.len() != data.len().max(1) {
-                            *objects = DeviceBuffer::zeroed(stream, data.len().max(1))
-                                .map_err(|e| format!("world object allocation: {e:?}"))?;
-                        }
-                        if !data.is_empty() {
-                            objects
-                                .copy_from_host(stream, data)
-                                .map_err(|e| format!("world objects upload: {e:?}"))?;
-                        }
-                        Ok(())
-                    })?;
-            if changed && !data.is_empty() {
-                self.stats.object_uploads += 1;
-                self.stats.upload_bytes += (data.len() * std::mem::size_of::<f32>()) as u64;
-            }
-            let lights = &mut self.lights;
-            let data = &prepared.upload.lights;
-            let changed = self
-                .light_resident
-                .update(LightResidentKey(prepared.clone()), || {
-                    if lights.len() != data.len().max(1) {
-                        *lights = DeviceBuffer::zeroed(stream, data.len().max(1))
-                            .map_err(|e| format!("world light allocation: {e:?}"))?;
-                    }
-                    if !data.is_empty() {
-                        lights
-                            .copy_from_host(stream, data)
-                            .map_err(|e| format!("world lights upload: {e:?}"))?;
-                    }
-                    Ok(())
-                })?;
-            if changed && !data.is_empty() {
-                self.stats.light_uploads += 1;
-                self.stats.upload_bytes += (data.len() * std::mem::size_of::<f32>()) as u64;
-            }
-        }
-        Ok(())
     }
 
     pub fn preparation_stats(&self) -> PreparationStats {
@@ -1036,6 +762,13 @@ impl Gpu {
         final_pass: bool,
         display: impl FnOnce(&Target) -> bool,
     ) {
+        let resolved_backend = match self.resolve_backend(scene.render.backend) {
+            Ok(backend) => backend,
+            Err(error) => {
+                target.colour_error = Some(error);
+                return;
+            }
+        };
         let prepared = match self
             .preparation
             .get(scene, target.width as u32, target.height as u32)
@@ -1047,7 +780,7 @@ impl Gpu {
             }
         };
         let mut p = prepared.params(scene, bounces_cap);
-        self.reset_target_for_params(target, scene, &prepared, &p);
+        self.reset_target_for_params(target, scene, &prepared, &p, resolved_backend);
         let env = match self.environment_for(prepared.environment.as_ref()) {
             Ok(env) => env,
             Err(error) => {
@@ -1055,10 +788,6 @@ impl Gpu {
                 return;
             }
         };
-        if let Err(error) = self.upload_prepared(&prepared, env.as_deref(), scene.world_render) {
-            target.colour_error = Some(error);
-            return;
-        }
         // The environment block's slots, through the one packer ofx-rs uses too. The sun's
         // radiance is the packed light's, so the sun/map balance follows what the kernels light.
         let sun = std::array::from_fn(|c| p[P_LIGHT_COLOR + c] * p[P_LIGHT_INTENSITY]);
@@ -1072,90 +801,139 @@ impl Gpu {
         p[P_SAMPLE_BEGIN] = target.samples as f32;
         p[P_SPP] = spp as f32;
         p[P_SEED] = seed as f32;
-        if let Err(error) = self.module.set_params(&self.stream, &p) {
-            target.colour_error = Some(format!("CUDA parameter upload: {error:?}"));
-            return;
+
+        if resolved_backend == crate::render_profiles::Backend::Wgpu {
+            let upload_res = {
+                let stats = &mut self.stats;
+                let wgpu = self
+                    .wgpu
+                    .as_mut()
+                    .and_then(|r| r.as_mut().ok())
+                    .expect("resolved WGPU backend");
+                let res =
+                    wgpu.upload_prepared(&prepared, env.as_deref(), scene.world_render, stats);
+                if res.is_ok() {
+                    wgpu.set_params(&p);
+                }
+                res
+            };
+            if let Err(error) = upload_res {
+                target.colour_error = Some(error);
+                return;
+            }
+        } else {
+            let cuda = self.cuda.as_mut().expect("resolved CUDA backend");
+            if let Err(error) = cuda.upload_prepared(
+                &prepared,
+                env.as_deref(),
+                scene.world_render,
+                &mut self.lut_staging,
+                &mut self.stats,
+            ) {
+                target.colour_error = Some(error);
+                return;
+            }
+            if let Err(error) = cuda.module.set_params(&cuda.stream, &p) {
+                target.colour_error = Some(format!("CUDA parameter upload: {error:?}"));
+                return;
+            }
         }
 
         let t0 = Instant::now();
         if spp > 0 {
-            let padded = target.accum.len() as u32;
-            let cfg = LaunchConfig1D::new(padded.div_ceil(BLOCK), BLOCK, 0);
             let full = p[P_MATERIAL_MODEL] != 0.0;
-            let (m, s, lut, acc) = (&self.module, &self.stream, &self.lut, &mut target.accum);
-            macro_rules! launch {
-                ($prep:ident, $run:ident) => {{
-                    let prepared = m.$prep(cfg).expect(stringify!($prep));
-                    m.$run(
-                        s,
-                        &prepared,
-                        lut,
-                        &self.objects,
-                        &self.lights,
-                        acc,
-                        &mut target.albedo,
-                        &mut target.normal,
-                        &target.active,
-                        &mut target.stats,
-                    )
-                    .expect(stringify!($run));
-                }};
-            }
-            if scene.direct.is_some() {
-                if scene.world_render {
-                    launch!(prepare_world_direct, world_direct)
-                } else {
-                    match scene.formula.code() {
-                        FAMILY_BULB => launch!(prepare_direct_bulb, direct_bulb),
-                        FAMILY_BOX => launch!(prepare_direct_box, direct_box),
-                        FAMILY_QUAT => launch!(prepare_direct_quat, direct_quat),
-                        FAMILY_KIFS => launch!(prepare_direct_kifs, direct_kifs),
-                        FAMILY_KLEINIAN => launch!(prepare_direct_kleinian, direct_kleinian),
-                        FAMILY_PSEUDO_KLEINIAN => {
-                            launch!(prepare_direct_pseudo_kleinian, direct_pseudo_kleinian)
-                        }
-                        FAMILY_APOLLONIAN => launch!(prepare_direct_apollonian, direct_apollonian),
-                        _ => launch!(prepare_direct_hybrid, direct_hybrid),
-                    }
-                }
-            } else if scene.world_render {
+            if resolved_backend == crate::render_profiles::Backend::Wgpu {
                 #[cfg(test)]
-                let world_material = if self.force_mixed_world {
-                    WorldMaterial::Mixed
-                } else {
-                    prepared.world_material
-                };
+                let force_mixed = self.force_mixed_world;
                 #[cfg(not(test))]
-                let world_material = prepared.world_material;
-                match world_material {
-                    WorldMaterial::Fast if prepared.single_fast_bulb => {
-                        launch!(prepare_world_fast_bulb, world_fast_bulb)
-                    }
-                    WorldMaterial::Fast => launch!(prepare_world_fast, world_fast),
-                    WorldMaterial::Full | WorldMaterial::Mixed => launch!(prepare_world, world),
+                let force_mixed = false;
+                if let (Some(Ok(wgpu)), Some(wt)) = (&self.wgpu, &target.wgpu) {
+                    wgpu.launch_trace(wt, scene, &prepared, full, force_mixed);
                 }
-            } else {
-                match (full, scene.formula.code()) {
-                    (false, FAMILY_BULB) => launch!(prepare_fast_bulb, fast_bulb),
-                    (false, FAMILY_BOX) => launch!(prepare_fast_box, fast_box),
-                    (false, FAMILY_QUAT) => launch!(prepare_fast_quat, fast_quat),
-                    (false, FAMILY_KIFS) => launch!(prepare_fast_kifs, fast_kifs),
-                    (false, FAMILY_KLEINIAN) => launch!(prepare_fast_kleinian, fast_kleinian),
-                    (false, FAMILY_PSEUDO_KLEINIAN) => {
-                        launch!(prepare_fast_pseudo_kleinian, fast_pseudo_kleinian)
+            } else if let (Ok(cuda), Some(ct)) = (&self.cuda, &mut target.cuda) {
+                let padded = ct.accum.len() as u32;
+                let cfg = LaunchConfig1D::new(padded.div_ceil(BLOCK), BLOCK, 0);
+                let (m, s, lut, acc) = (&cuda.module, &cuda.stream, &cuda.lut, &mut ct.accum);
+                macro_rules! launch {
+                    ($prep:ident, $run:ident) => {{
+                        let prepared = m.$prep(cfg).expect(stringify!($prep));
+                        m.$run(
+                            s,
+                            &prepared,
+                            lut,
+                            &cuda.objects,
+                            &cuda.lights,
+                            acc,
+                            &mut ct.albedo,
+                            &mut ct.normal,
+                            &ct.active,
+                            &mut ct.stats,
+                        )
+                        .expect(stringify!($run));
+                    }};
+                }
+                if scene.direct.is_some() {
+                    if scene.world_render {
+                        launch!(prepare_world_direct, world_direct)
+                    } else {
+                        match scene.formula.code() {
+                            FAMILY_BULB => launch!(prepare_direct_bulb, direct_bulb),
+                            FAMILY_BOX => launch!(prepare_direct_box, direct_box),
+                            FAMILY_QUAT => launch!(prepare_direct_quat, direct_quat),
+                            FAMILY_KIFS => launch!(prepare_direct_kifs, direct_kifs),
+                            FAMILY_KLEINIAN => launch!(prepare_direct_kleinian, direct_kleinian),
+                            FAMILY_PSEUDO_KLEINIAN => {
+                                launch!(prepare_direct_pseudo_kleinian, direct_pseudo_kleinian)
+                            }
+                            FAMILY_APOLLONIAN => {
+                                launch!(prepare_direct_apollonian, direct_apollonian)
+                            }
+                            _ => launch!(prepare_direct_hybrid, direct_hybrid),
+                        }
                     }
-                    (false, FAMILY_APOLLONIAN) => launch!(prepare_fast_apollonian, fast_apollonian),
-                    (false, _) => launch!(prepare_fast_hybrid, fast_hybrid),
-                    (true, FAMILY_BULB) => launch!(prepare_full_bulb, full_bulb),
-                    (true, FAMILY_BOX) => launch!(prepare_full_box, full_box),
-                    (true, FAMILY_QUAT) => launch!(prepare_full_quat, full_quat),
-                    (true, FAMILY_KIFS) => launch!(prepare_full_kifs, full_kifs),
-                    (true, FAMILY_KLEINIAN) => launch!(prepare_full_kleinian, full_kleinian),
-                    (true, FAMILY_PSEUDO_KLEINIAN) => {
-                        launch!(prepare_full_pseudo_kleinian, full_pseudo_kleinian)
+                } else if scene.world_render {
+                    #[cfg(test)]
+                    let world_material = if self.force_mixed_world {
+                        WorldMaterial::Mixed
+                    } else {
+                        prepared.world_material
+                    };
+                    #[cfg(not(test))]
+                    let world_material = prepared.world_material;
+                    match world_material {
+                        WorldMaterial::Fast if prepared.single_fast_bulb => {
+                            launch!(prepare_world_fast_bulb, world_fast_bulb)
+                        }
+                        WorldMaterial::Fast => launch!(prepare_world_fast, world_fast),
+                        WorldMaterial::Full | WorldMaterial::Mixed => launch!(prepare_world, world),
                     }
-                    (true, FAMILY_APOLLONIAN) => launch!(prepare_full_apollonian, full_apollonian),
-                    (true, _) => launch!(prepare_full_hybrid, full_hybrid),
+                } else {
+                    match (full, scene.formula.code()) {
+                        (false, FAMILY_BULB) => launch!(prepare_fast_bulb, fast_bulb),
+                        (false, FAMILY_BOX) => launch!(prepare_fast_box, fast_box),
+                        (false, FAMILY_QUAT) => launch!(prepare_fast_quat, fast_quat),
+                        (false, FAMILY_KIFS) => launch!(prepare_fast_kifs, fast_kifs),
+                        (false, FAMILY_KLEINIAN) => launch!(prepare_fast_kleinian, fast_kleinian),
+                        (false, FAMILY_PSEUDO_KLEINIAN) => {
+                            launch!(prepare_fast_pseudo_kleinian, fast_pseudo_kleinian)
+                        }
+                        (false, FAMILY_APOLLONIAN) => {
+                            launch!(prepare_fast_apollonian, fast_apollonian)
+                        }
+                        (false, _) => launch!(prepare_fast_hybrid, fast_hybrid),
+                        (true, FAMILY_BULB) => launch!(prepare_full_bulb, full_bulb),
+                        (true, FAMILY_BOX) => launch!(prepare_full_box, full_box),
+                        (true, FAMILY_QUAT) => launch!(prepare_full_quat, full_quat),
+                        (true, FAMILY_KIFS) => launch!(prepare_full_kifs, full_kifs),
+                        (true, FAMILY_KLEINIAN) => launch!(prepare_full_kleinian, full_kleinian),
+                        (true, FAMILY_PSEUDO_KLEINIAN) => {
+                            launch!(prepare_full_pseudo_kleinian, full_pseudo_kleinian)
+                        }
+                        (true, FAMILY_APOLLONIAN) => {
+                            launch!(prepare_full_apollonian, full_apollonian)
+                        }
+                        (true, _) => launch!(prepare_full_hybrid, full_hybrid),
+                    }
                 }
             }
             target.samples += spp;
@@ -1200,16 +978,19 @@ impl Gpu {
                     1.0,
                 ];
             }
-        } else {
+        } else if resolved_backend == crate::render_profiles::Backend::Wgpu {
+            if let (Some(Ok(wgpu)), Some(wt)) = (&self.wgpu, &target.wgpu) {
+                wgpu.tonemap(wt, target.width, target.height, &mut target.raw);
+            }
+        } else if let (Ok(cuda), Some(ct)) = (&self.cuda, &mut target.cuda) {
             let n = (target.width * target.height) as u32;
             let cfg = LaunchConfig1D::new(n.div_ceil(BLOCK), BLOCK, 0);
-            let prepared = self.module.prepare_tonemap(cfg).expect("prepare tonemap");
-            self.module
-                .tonemap(&self.stream, &prepared, &target.accum, &mut target.out)
+            let prepared = cuda.module.prepare_tonemap(cfg).expect("prepare tonemap");
+            cuda.module
+                .tonemap(&cuda.stream, &prepared, &ct.accum, &mut ct.out)
                 .expect("tonemap");
-            target
-                .out
-                .copy_to_host(&self.stream, &mut target.raw)
+            ct.out
+                .copy_to_host(&cuda.stream, &mut target.raw)
                 .expect("readback");
         }
         match self.colour.apply(
@@ -1240,19 +1021,54 @@ impl Gpu {
     }
 
     #[cfg(test)]
-    fn guide_sums(&self, target: &Target, buffer: &DeviceBuffer<[f32; 4]>) -> Vec<[f32; 4]> {
+    fn read_guide_sums(
+        &self,
+        target: &Target,
+        cuda_buf: impl FnOnce(&CudaTarget) -> &DeviceBuffer<[f32; 4]>,
+        wgpu_buf: impl FnOnce(&crate::render_wgpu::WgpuTarget) -> &wgpu::Buffer,
+    ) -> Vec<[f32; 4]> {
         let mut tiled = Vec::new();
         let mut guides = Vec::new();
-        read_tiled_into(
-            &self.stream,
-            buffer,
-            target.width,
-            target.height,
-            false,
-            &mut tiled,
-            &mut guides,
-        );
+        if target.active_backend == crate::render_profiles::Backend::Wgpu {
+            if let (Some(Ok(wgpu)), Some(wt)) = (&self.wgpu, &target.wgpu) {
+                wgpu.read_tiled_into(
+                    wt,
+                    wgpu_buf(wt),
+                    (target.width, target.height),
+                    false,
+                    &mut tiled,
+                    &mut guides,
+                );
+            }
+            return guides;
+        }
+        if let (Ok(cuda), Some(ct)) = (&self.cuda, &target.cuda) {
+            read_tiled_into(
+                &cuda.stream,
+                cuda_buf(ct),
+                target.width,
+                target.height,
+                false,
+                &mut tiled,
+                &mut guides,
+            );
+        }
         guides
+    }
+
+    #[cfg(test)]
+    fn accum_sums(&self, target: &Target) -> Vec<[f32; 4]> {
+        self.read_guide_sums(target, |ct| &ct.accum, |wt| &wt.accum)
+    }
+
+    #[cfg(test)]
+    fn albedo_sums(&self, target: &Target) -> Vec<[f32; 4]> {
+        self.read_guide_sums(target, |ct| &ct.albedo, |wt| &wt.albedo)
+    }
+
+    #[cfg(test)]
+    fn normal_sums(&self, target: &Target) -> Vec<[f32; 4]> {
+        self.read_guide_sums(target, |ct| &ct.normal, |wt| &wt.normal)
     }
 
     fn process_denoise(&mut self, target: &mut Target, scene: &Scene, final_pass: bool) -> bool {
@@ -1261,43 +1077,75 @@ impl Gpu {
         let due = target.denoise.due(settings, target.samples, final_pass);
         if due {
             let scratch = &mut self.denoise_scratch;
-            read_tiled_into(
-                &self.stream,
-                &target.accum,
-                target.width,
-                target.height,
-                true,
-                &mut scratch.tiled,
-                &mut scratch.color,
-            );
-            let albedo = if settings.mode != crate::denoise::Mode::Color {
+            if target.active_backend == crate::render_profiles::Backend::Wgpu {
+                if let (Some(Ok(wgpu)), Some(wt)) = (&self.wgpu, &target.wgpu) {
+                    let dims = (target.width, target.height);
+                    wgpu.read_tiled_into(
+                        wt,
+                        &wt.accum,
+                        dims,
+                        true,
+                        &mut scratch.tiled,
+                        &mut scratch.color,
+                    );
+                    if settings.mode != crate::denoise::Mode::Color {
+                        wgpu.read_tiled_into(
+                            wt,
+                            &wt.albedo,
+                            dims,
+                            false,
+                            &mut scratch.tiled,
+                            &mut scratch.albedo,
+                        );
+                    }
+                    if settings.mode == crate::denoise::Mode::ColorAlbedoNormal {
+                        wgpu.read_tiled_into(
+                            wt,
+                            &wt.normal,
+                            dims,
+                            false,
+                            &mut scratch.tiled,
+                            &mut scratch.normal,
+                        );
+                    }
+                }
+            } else if let (Ok(cuda), Some(ct)) = (&self.cuda, &target.cuda) {
                 read_tiled_into(
-                    &self.stream,
-                    &target.albedo,
+                    &cuda.stream,
+                    &ct.accum,
                     target.width,
                     target.height,
-                    false,
+                    true,
                     &mut scratch.tiled,
-                    &mut scratch.albedo,
+                    &mut scratch.color,
                 );
-                Some(scratch.albedo.as_slice())
-            } else {
-                None
-            };
-            let normal = if settings.mode == crate::denoise::Mode::ColorAlbedoNormal {
-                read_tiled_into(
-                    &self.stream,
-                    &target.normal,
-                    target.width,
-                    target.height,
-                    false,
-                    &mut scratch.tiled,
-                    &mut scratch.normal,
-                );
-                Some(scratch.normal.as_slice())
-            } else {
-                None
-            };
+                if settings.mode != crate::denoise::Mode::Color {
+                    read_tiled_into(
+                        &cuda.stream,
+                        &ct.albedo,
+                        target.width,
+                        target.height,
+                        false,
+                        &mut scratch.tiled,
+                        &mut scratch.albedo,
+                    );
+                }
+                if settings.mode == crate::denoise::Mode::ColorAlbedoNormal {
+                    read_tiled_into(
+                        &cuda.stream,
+                        &ct.normal,
+                        target.width,
+                        target.height,
+                        false,
+                        &mut scratch.tiled,
+                        &mut scratch.normal,
+                    );
+                }
+            }
+            let albedo =
+                (settings.mode != crate::denoise::Mode::Color).then_some(scratch.albedo.as_slice());
+            let normal = (settings.mode == crate::denoise::Mode::ColorAlbedoNormal)
+                .then_some(scratch.normal.as_slice());
             let processor = self
                 .denoiser
                 .get_or_insert_with(crate::denoise::Processor::new);
@@ -1320,320 +1168,6 @@ impl Gpu {
         target.denoise_selected =
             settings.enabled && target.denoise.output.is_some() && !target.raw_view;
         due || previous != target.denoise_selected
-    }
-}
-
-/// Render-relevant runtime data only; hierarchy names and UUIDs never enter this signature.
-pub(crate) fn scene_trace_data(scene: &Scene) -> Vec<f32> {
-    let mut values = vec![
-        scene.world_render as u8 as f32,
-        scene.objects.len() as f32,
-        scene.lights.len() as f32,
-    ];
-    if !scene.world_render {
-        return values;
-    }
-    for object in &scene.objects {
-        let p = object.pack(1, 1);
-        values.extend_from_slice(&p[P_FAMILY..P_LIGHT_DIR]);
-        values.extend_from_slice(&p[P_BASE..P_EXPOSURE]);
-        values.extend_from_slice(&p[P_TRANSMISSION..P_COUNT]);
-        values.push(p[P_MATERIAL_MODEL]);
-        if let Some(matrix) = object.object_world {
-            values.push(1.0);
-            values.extend(matrix.into_iter().flatten());
-        } else {
-            values.push(0.0);
-        }
-        values.push(object.palette as u8 as f32);
-        for m in &object.masks {
-            values.extend(mask_row(m).unwrap_or([f32::NAN; MASK_STRIDE]));
-        }
-    }
-    for light in &scene.lights {
-        let mut packed = Scene::preset(FAMILY_BULB);
-        packed.lighting = *light;
-        let p = packed.pack(1, 1);
-        values.extend_from_slice(&p[P_LIGHT_DIR..P_SKY_INTENSITY]);
-    }
-    values
-}
-
-struct WorldUpload {
-    params: Vec<f32>,
-    objects: Vec<f32>,
-    lights: Vec<f32>,
-}
-
-fn object_matrix(object: &Scene) -> glam::Mat4 {
-    object
-        .object_world
-        .map(|columns| glam::Mat4::from_cols_array_2d(&columns))
-        .unwrap_or_else(|| {
-            // Legacy ObjectTransform uses the same XYZ Euler convention as Scene::pack.
-            let p = object.pack(1, 1);
-            let s = p[P_OBJ_SCALE];
-            glam::Mat4::from_cols(
-                glam::Vec4::new(
-                    p[P_OBJ_AXES] * s,
-                    p[P_OBJ_AXES + 1] * s,
-                    p[P_OBJ_AXES + 2] * s,
-                    0.0,
-                ),
-                glam::Vec4::new(
-                    p[P_OBJ_AXES + 3] * s,
-                    p[P_OBJ_AXES + 4] * s,
-                    p[P_OBJ_AXES + 5] * s,
-                    0.0,
-                ),
-                glam::Vec4::new(
-                    p[P_OBJ_AXES + 6] * s,
-                    p[P_OBJ_AXES + 7] * s,
-                    p[P_OBJ_AXES + 8] * s,
-                    0.0,
-                ),
-                glam::Vec4::from((glam::Vec3::from_array(object.object.offset), 1.0)),
-            )
-        })
-}
-
-fn inverse_object(object: &Scene, index: usize) -> Result<glam::Mat4, String> {
-    let matrix = object_matrix(object);
-    let columns = matrix.to_cols_array_2d();
-    if !matrix.is_finite()
-        || columns[0][3] != 0.0
-        || columns[1][3] != 0.0
-        || columns[2][3] != 0.0
-        || columns[3][3] != 1.0
-        || matrix.determinant() == 0.0
-    {
-        return Err(format!(
-            "World object {index} has a nonfinite, nonaffine or singular transform"
-        ));
-    }
-    let inverse = matrix.inverse();
-    if !inverse.is_finite() {
-        return Err(format!(
-            "World object {index} transform has no finite inverse"
-        ));
-    }
-    Ok(inverse)
-}
-
-/// A mask's kernel row (`fractal_core::params` `M_*`): its world-to-mask inverse affine, the
-/// conservative distance scale (as for objects), shape, invert, size, density and seed.
-fn mask_row(m: &crate::scene::MaskInstance) -> Result<[f32; MASK_STRIDE], String> {
-    use crate::scene::MaskShape;
-    let matrix = glam::Mat4::from_cols_array_2d(&m.world);
-    let inverse = matrix.inverse();
-    if !inverse.is_finite() || matrix.determinant().abs() <= f32::MIN_POSITIVE {
-        return Err("a mask transform has no finite inverse".into());
-    }
-    let mask = m.mask;
-    if mask.size.iter().any(|v| !(v.is_finite() && *v > 0.0))
-        || !(0.0..=1.0).contains(&mask.density)
-    {
-        return Err("a mask needs a positive size and a density in 0..1".into());
-    }
-    let cols = inverse.to_cols_array_2d();
-    let mut row = [0.0f32; MASK_STRIDE];
-    for r in 0..3 {
-        for (c, column) in cols.iter().enumerate() {
-            row[M_INVERSE + r * 4 + c] = column[r];
-        }
-    }
-    // ||A^-1||2 <= sqrt(||A^-1||1 ||A^-1||inf): a lower bound of the stretch, as for objects.
-    let norm1 = (0..3)
-        .map(|c| (0..3).map(|r| cols[c][r].abs()).sum::<f32>())
-        .fold(0.0f32, f32::max);
-    let norm_inf = (0..3)
-        .map(|r| (0..3).map(|c| cols[c][r].abs()).sum::<f32>())
-        .fold(0.0f32, f32::max);
-    row[M_SCALE] = 1.0 / (norm1.sqrt() * norm_inf.sqrt());
-    row[M_SHAPE] = match mask.shape {
-        MaskShape::Sphere => MASK_SPHERE,
-        MaskShape::Box => MASK_BOX,
-        MaskShape::Cells => MASK_CELLS,
-    } as f32;
-    row[M_INVERT] = f32::from(u8::from(mask.invert));
-    row[M_SIZE..M_SIZE + 3].copy_from_slice(&mask.size);
-    row[M_DENSITY] = mask.density;
-    row[M_SEED] = mask.seed as f32;
-    if mask.shape == MaskShape::Cells {
-        row[M_ARRAY] = 0.0;
-    } else {
-        use fractal_core::params::{ARRAY_LINEAR, ARRAY_RADIAL};
-        row[M_ARRAY] = match mask.array.kind {
-            crate::scene::ArrayKind::Linear => ARRAY_LINEAR,
-            crate::scene::ArrayKind::Radial => ARRAY_RADIAL,
-        } as f32;
-        row[M_ARRAY_COUNT] = fractal_core::mask_array::count(mask.array.count) as f32;
-        row[M_ARRAY_OFFSET..M_ARRAY_OFFSET + 3].copy_from_slice(&mask.array.offset);
-        row[M_ARRAY_RADIUS] = mask.array.radius;
-        row[M_ARRAY_AXIS] = mask.array.axis.code() as f32;
-        // 0 stays exactly 0: the kernel reads it as a full circle.
-        row[M_ARRAY_SWEEP] = mask.array.sweep_degrees.to_radians();
-        row[M_ARRAY_ALIGN] = f32::from(u8::from(mask.array.align));
-    }
-    if !row.iter().all(|v| v.is_finite()) || row[M_SCALE] <= 0.0 {
-        return Err("a mask transform is unusable".into());
-    }
-    Ok(row)
-}
-
-#[cfg(test)]
-fn packed_array(mask: crate::scene::Mask) -> [f32; MASK_STRIDE] {
-    mask_row(&crate::scene::MaskInstance {
-        mask,
-        world: glam::Mat4::IDENTITY.to_cols_array_2d(),
-    })
-    .unwrap()
-}
-
-#[test]
-fn a_radial_mask_packs_its_ring_and_cells_pack_no_array() {
-    use crate::scene::{ArrayAxis, ArrayKind, Mask, MaskArray, MaskShape};
-    let row = packed_array(Mask {
-        array: MaskArray {
-            kind: ArrayKind::Radial,
-            count: 4,
-            radius: 2.0,
-            axis: ArrayAxis::Y,
-            sweep_degrees: 180.0,
-            ..MaskArray::default()
-        },
-        ..Mask::default()
-    });
-    assert_eq!(row[M_ARRAY], ARRAY_RADIAL as f32);
-    assert_eq!(row[M_ARRAY_COUNT], 4.0);
-    assert_eq!(row[M_ARRAY_RADIUS], 2.0);
-    assert_eq!(row[M_ARRAY_AXIS], 1.0);
-    assert!((row[M_ARRAY_SWEEP] - std::f32::consts::PI).abs() < 1e-5);
-    assert_eq!(row[M_ARRAY_ALIGN], 1.0);
-    let cells = packed_array(Mask {
-        shape: MaskShape::Cells,
-        array: MaskArray {
-            count: 8,
-            ..MaskArray::default()
-        },
-        ..Mask::default()
-    });
-    assert_eq!(cells[M_ARRAY], 0.0);
-}
-
-#[cfg(test)]
-pub(crate) fn validate_world(scene: &Scene) -> Result<(), String> {
-    if scene.world_render {
-        WorldUpload::new(scene, 1, 1)?;
-    }
-    Ok(())
-}
-
-impl WorldUpload {
-    fn new(scene: &Scene, width: u32, height: u32) -> Result<Self, String> {
-        scene.camera.validate_lens()?;
-        let mut params = scene.pack(width, height);
-        let mut objects = Vec::new();
-        let mut lights = Vec::new();
-        if scene.world_render {
-            params[P_WORLD] = WORLD_ABI_VERSION as f32;
-            params[P_OBJECT_COUNT] = scene.objects.len() as f32;
-            params[P_LIGHT_COUNT] = scene.lights.len() as f32;
-            let mut extent = 0.0f32;
-            for (index, object) in scene.objects.iter().enumerate() {
-                let inverse = inverse_object(object, index)?;
-                let matrix = object_matrix(object);
-                let mut local = object.clone();
-                local.object.offset = [0.0; 3];
-                local.object.rotation_degrees = [0.0; 3];
-                local.object.scale = 1.0;
-                let p = local.pack(width, height);
-                let local_radius = p[P_CLIP_RADIUS];
-                objects.extend_from_slice(&p);
-                let cols = inverse.to_cols_array_2d();
-                for row in 0..3 {
-                    for column in &cols {
-                        objects.push(column[row]);
-                    }
-                }
-                // ||A^-1||2 <= sqrt(||A^-1||1 ||A^-1||inf), so this is a
-                // conservative lower bound on sigma_min(A), including parent shear.
-                let norm1 = (0..3)
-                    .map(|c| (0..3).map(|r| cols[c][r].abs()).sum::<f32>())
-                    .fold(0.0f32, f32::max);
-                let norm_inf = (0..3)
-                    .map(|r| (0..3).map(|c| cols[c][r].abs()).sum::<f32>())
-                    .fold(0.0f32, f32::max);
-                let scale = 1.0 / (norm1.sqrt() * norm_inf.sqrt());
-                if !scale.is_finite() || scale <= 0.0 {
-                    return Err(format!(
-                        "World object {index} has an unusable distance scale"
-                    ));
-                }
-                objects.push(scale);
-                objects.push(local_radius);
-                let tangent = matrix.transform_vector3(glam::Vec3::Y).normalize();
-                if !tangent.is_finite() {
-                    return Err(format!(
-                        "World object {index} has an unusable material tangent"
-                    ));
-                }
-                objects.extend(tangent.to_array());
-                if object.masks.len() > MAX_MASKS {
-                    return Err(format!(
-                        "World object {index} has {} masks; at most {MAX_MASKS} reach one object",
-                        object.masks.len()
-                    ));
-                }
-                objects.push(object.masks.len() as f32);
-                for slot in 0..MAX_MASKS {
-                    match object.masks.get(slot) {
-                        Some(m) => objects
-                            .extend(mask_row(m).map_err(|e| format!("World object {index}: {e}"))?),
-                        None => objects.extend([0.0; MASK_STRIDE]),
-                    }
-                }
-                let cols = matrix.to_cols_array_2d();
-                let upper = (0..3)
-                    .map(|c| (0..3).map(|r| cols[c][r] * cols[c][r]).sum::<f32>())
-                    .sum::<f32>()
-                    .sqrt();
-                let center = matrix.transform_point3(glam::Vec3::ZERO);
-                extent = extent.max(center.length() + local_radius * upper);
-            }
-            if !extent.is_finite() {
-                return Err("World geometry bounds exceed finite render range".into());
-            }
-            params[P_CLIP_CENTER..P_CLIP_CENTER + 3].fill(0.0);
-            params[P_CLIP_RADIUS] = extent;
-            let camera = glam::Vec3::from_slice(&params[P_CAM_ORIGIN..P_CAM_ORIGIN + 3]);
-            params[P_MAX_DISTANCE] = params[P_MAX_DISTANCE].max(camera.length() + 2.0 * extent);
-            for light in &scene.lights {
-                let mut packed = Scene::preset(FAMILY_BULB);
-                packed.lighting = *light;
-                let mut p = packed.pack(1, 1);
-                // The world kernels have no delta light: a zero angle keeps a minimal cone.
-                let (omc, pdf) = crate::scene::sun_cone(
-                    (light.sun_angle * 0.5)
-                        .to_radians()
-                        .clamp(1e-4, std::f32::consts::PI),
-                );
-                p[P_SUN_ONE_MINUS_COS] = omc;
-                p[P_SUN_CONE_PDF] = pdf;
-                if p[P_LIGHT_DIR..P_SKY_INTENSITY]
-                    .iter()
-                    .any(|v| !v.is_finite())
-                {
-                    return Err("World directional light has nonfinite parameters".into());
-                }
-                lights.extend_from_slice(&p[P_LIGHT_DIR..P_SKY_INTENSITY]);
-            }
-        }
-        Ok(Self {
-            params,
-            objects,
-            lights,
-        })
     }
 }
 
@@ -1710,7 +1244,11 @@ mod tests {
     fn frame_guides(gpu: &mut Gpu, scene: &Scene) -> [Vec<[f32; 4]>; 3] {
         let mut target = gpu.target(96, 64);
         gpu.step(&mut target, scene, 1, 19, None, false);
-        [&target.accum, &target.albedo, &target.normal].map(|b| gpu.guide_sums(&target, b))
+        [
+            gpu.accum_sums(&target),
+            gpu.albedo_sums(&target),
+            gpu.normal_sums(&target),
+        ]
     }
 
     /// How far two normal guides are apart: the share of pixels hit in one and missed in the
@@ -1778,8 +1316,8 @@ mod tests {
                 };
                 let mut target = gpu.target(96, 64);
                 gpu.step(&mut target, &s, 2, 19, None, false);
-                let albedo = gpu.guide_sums(&target, &target.albedo);
-                let normal = gpu.guide_sums(&target, &target.normal);
+                let albedo = gpu.albedo_sums(&target);
+                let normal = gpu.normal_sums(&target);
                 let name = format!("{} (world {world})", scene.name);
                 if world && matches!(scene.formula, crate::scene::Formula::Hybrid(_)) {
                     for (k, n) in normal.iter().flatten().enumerate() {
@@ -2455,7 +1993,7 @@ mod tests {
                     raw[center]
                 );
                 assert!(
-                    gpu.guide_sums(&target, &target.normal)[center][..3]
+                    gpu.normal_sums(&target)[center][..3]
                         .iter()
                         .any(|v| v.abs() > 0.1),
                     "fixture must actually intersect the solid"
@@ -2694,20 +2232,20 @@ mod tests {
                     approximate,
                     &format!("radiance for {model:?}, objects={object_count}"),
                 ));
-                let specialized_albedo = gpu.guide_sums(&specialized, &specialized.albedo);
+                let specialized_albedo = gpu.albedo_sums(&specialized);
                 assert!(specialized_albedo.iter().any(|p| p[0] > 0.0 && p[0] > p[2]));
                 if object_count == 2 {
                     assert!(specialized_albedo.iter().any(|p| p[2] > 0.0 && p[2] > p[0]));
                 }
                 errors.extend(compare_guides(
                     &specialized_albedo,
-                    &gpu.guide_sums(&reference, &reference.albedo),
+                    &gpu.albedo_sums(&reference),
                     approximate,
                     &format!("albedo for {model:?}, objects={object_count}"),
                 ));
                 errors.extend(compare_guides(
-                    &gpu.guide_sums(&specialized, &specialized.normal),
-                    &gpu.guide_sums(&reference, &reference.normal),
+                    &gpu.normal_sums(&specialized),
+                    &gpu.normal_sums(&reference),
                     approximate,
                     &format!("normals for {model:?}, objects={object_count}"),
                 ));
@@ -3063,7 +2601,16 @@ mod tests {
             .push(world_object(FAMILY_BULB, [0.0; 3], [1.0; 3], [0.4; 3]));
         let mut target = gpu.target(9, 5);
         gpu.step(&mut target, &scene, 1, 1, None, false);
-        let resident = gpu.lut_resident.key.as_ref().unwrap().0.clone();
+        let resident = gpu
+            .cuda
+            .as_ref()
+            .unwrap()
+            .lut_resident
+            .key
+            .as_ref()
+            .unwrap()
+            .0
+            .clone();
         let before = gpu.preparation_stats();
         scene.environment.enabled = true;
         scene.environment.path = std::env::temp_dir()
@@ -3077,7 +2624,14 @@ mod tests {
         assert!(target.colour_error.is_some());
         assert!(Arc::ptr_eq(
             &resident,
-            &gpu.lut_resident.key.as_ref().unwrap().0
+            &gpu.cuda
+                .as_ref()
+                .unwrap()
+                .lut_resident
+                .key
+                .as_ref()
+                .unwrap()
+                .0
         ));
         let failed = gpu.preparation_stats();
         assert_eq!(failed.environment_decodes, before.environment_decodes + 1);
@@ -3134,11 +2688,7 @@ mod tests {
             target.samples
         );
         assert_eq!(target.active_tiles.0, 0);
-        let counts: Vec<f32> = gpu
-            .guide_sums(&target, &target.accum)
-            .iter()
-            .map(|p| p[3])
-            .collect();
+        let counts: Vec<f32> = gpu.accum_sums(&target).iter().map(|p| p[3]).collect();
         let (low, high) = counts
             .iter()
             .fold((f32::MAX, 0.0f32), |(l, h), &c| (l.min(c), h.max(c)));
@@ -3231,8 +2781,8 @@ mod tests {
         let mut target = gpu.target(384, 384);
         gpu.step(&mut target, &scene, 1, 19, None, false);
         (
-            gpu.guide_sums(&target, &target.albedo),
-            gpu.guide_sums(&target, &target.normal),
+            gpu.albedo_sums(&target),
+            gpu.normal_sums(&target),
             target.unresolved,
         )
     }
@@ -3296,7 +2846,7 @@ mod tests {
         let mut gpu = Gpu::new().unwrap();
         let mut target = gpu.target(384, 384);
         gpu.step(&mut target, &scene, 1, 19, None, false);
-        let normals = gpu.guide_sums(&target, &target.normal);
+        let normals = gpu.normal_sums(&target);
         for (x, y, expected) in references {
             let actual = glam::Vec3::from_slice(&normals[y * 384 + x]);
             let expected = glam::Vec3::from_array(expected);
@@ -3351,7 +2901,7 @@ mod tests {
             let (w, h) = (128usize, 128usize);
             let mut target = gpu.target(w, h);
             gpu.step(&mut target, &scene, 1, 19, None, false);
-            let normals = gpu.guide_sums(&target, &target.normal);
+            let normals = gpu.normal_sums(&target);
             let p = scene.pack(w as u32, h as u32);
             let v = |i| glam::Vec3::from_slice(&p[i..i + 3]);
             let (forward, right, up) = (v(P_CAM_FORWARD), v(P_CAM_RIGHT), v(P_CAM_UP));
@@ -3423,8 +2973,8 @@ mod tests {
                 }
                 let mut target = gpu.target(33, 25);
                 gpu.step(&mut target, &scene, 4, 19, None, false);
-                let albedo = gpu.guide_sums(&target, &target.albedo);
-                let normal = gpu.guide_sums(&target, &target.normal);
+                let albedo = gpu.albedo_sums(&target);
+                let normal = gpu.normal_sums(&target);
                 assert!(albedo.iter().all(|p| p[3] == 4.0));
                 assert!(normal.iter().all(|p| p[3] == 4.0));
                 // Misses: no normal, and the albedo of what the camera ray shows, clamped to
@@ -3472,20 +3022,16 @@ mod tests {
                 scene.camera.yaw_degrees += 0.1;
                 gpu.step(&mut target, &scene, 1, 19, None, false);
                 assert_eq!(target.samples, 1);
-                assert!(
-                    gpu.guide_sums(&target, &target.albedo)
-                        .iter()
-                        .all(|p| p[3] == 1.0)
-                );
+                assert!(gpu.albedo_sums(&target).iter().all(|p| p[3] == 1.0));
                 if world {
                     scene.objects.clear();
                     gpu.step(&mut target, &scene, 1, 19, None, false);
                     // Every ray misses: the albedo is the sky it shows, clamped; no normal.
-                    assert!(gpu.guide_sums(&target, &target.albedo).iter().all(|p| {
+                    assert!(gpu.albedo_sums(&target).iter().all(|p| {
                         p[3] == 1.0 && p[..3].iter().all(|v| (0.0..=1.0).contains(v))
                     }));
                     assert!(
-                        gpu.guide_sums(&target, &target.normal)
+                        gpu.normal_sums(&target)
                             .iter()
                             .all(|p| *p == [0.0, 0.0, 0.0, 1.0])
                     );
@@ -4267,5 +3813,131 @@ mod tests {
         let mut json = serde_json::to_value(&scene).unwrap();
         json["colour"]["input"] = "Linear Rec.709 (sRGB)".into();
         assert!(serde_json::from_value::<Scene>(json).is_err());
+    }
+
+    #[test]
+    fn cuda_backend_resolution_respects_explicit_cuda_and_wgpu_without_silent_fallback() {
+        use crate::render_profiles::Backend;
+        let _gpu_test = crate::test_gpu::lock();
+        let mut gpu = Gpu::new().unwrap();
+        assert_eq!(gpu.resolve_backend(Backend::Auto).unwrap(), Backend::Cuda);
+        assert_eq!(gpu.resolve_backend(Backend::Cuda).unwrap(), Backend::Cuda);
+        assert_eq!(gpu.resolve_backend(Backend::Wgpu).unwrap(), Backend::Wgpu);
+
+        // When CUDA is marked unavailable, explicit Backend::Cuda must fail rather than fall back to WGPU.
+        gpu.cuda_unavailable = Some("CUDA driver missing".into());
+        assert_eq!(
+            gpu.resolve_backend(Backend::Cuda).unwrap_err(),
+            "CUDA driver missing"
+        );
+        // Meanwhile Backend::Auto falls back to WGPU.
+        assert_eq!(gpu.resolve_backend(Backend::Auto).unwrap(), Backend::Wgpu);
+        gpu.cuda_unavailable = None;
+
+        // When WGPU is marked unavailable, explicit Backend::Wgpu must fail rather than fall back to CUDA.
+        let saved_wgpu = gpu.wgpu.take();
+        gpu.wgpu = Some(Err("WGPU adapter unavailable".into()));
+        assert_eq!(
+            gpu.resolve_backend(Backend::Wgpu).unwrap_err(),
+            "WGPU adapter unavailable"
+        );
+        assert_eq!(gpu.resolve_backend(Backend::Auto).unwrap(), Backend::Cuda);
+        gpu.wgpu = saved_wgpu;
+    }
+
+    #[test]
+    fn cuda_wgpu_renders_mandelbulb_world_and_picks_object() {
+        use crate::render_profiles::Backend;
+        let _gpu_test = crate::test_gpu::lock();
+        let mut gpu = Gpu::new().unwrap();
+        let mut scene = dark_world();
+        scene.render.backend = Backend::Wgpu;
+        scene.lighting.sky_intensity = 2.0;
+        scene.lighting.background = true;
+        scene.lights.push(scene.lighting);
+        scene.objects.push(world_object(
+            FAMILY_BULB,
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 1.0],
+            [0.85, 0.25, 0.15],
+        ));
+
+        let hit = gpu.pick(&scene, 64, 64, [0.0, 0.0]).unwrap();
+        assert!(hit.is_some(), "WGPU pick must hit centered Mandelbulb");
+        assert_eq!(hit.unwrap().0, 0);
+
+        let mut target = gpu.target(32, 24);
+        gpu.step(&mut target, &scene, 4, 7, None, false);
+        assert!(target.colour_error.is_none(), "{:?}", target.colour_error);
+        assert_eq!(target.active_backend, Backend::Wgpu);
+        assert_eq!(target.samples, 4);
+        let radiance = gpu.raw_scene_linear(&target);
+        assert_eq!(radiance.len(), 32 * 24);
+        assert!(
+            radiance.iter().any(|p| p[0] > 0.05 && p[0].is_finite()),
+            "WGPU must accumulate non-black finite scene radiance"
+        );
+        assert!(
+            target.pixels.iter().any(|&px| (px & 0x00ff_ffff) != 0),
+            "WGPU tonemap + OCIO must produce visible pixels"
+        );
+    }
+
+    #[test]
+    fn wgsl_compute_shader_validates_all_entry_points() {
+        let src = crate::render_wgpu::shader_source();
+        let module = naga::front::wgsl::parse_str(&src)
+            .unwrap_or_else(|e| panic!("WGSL parse error:\n{}", e.emit_to_string(&src)));
+        let mut validator = naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::empty(),
+        );
+        validator
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("WGSL validation error:\n{}", e.emit_to_string(&src)));
+
+        let expected = [
+            "world",
+            "world_fast",
+            "world_fast_bulb",
+            "world_direct",
+            "fast_bulb",
+            "fast_box",
+            "fast_quat",
+            "fast_kifs",
+            "fast_kleinian",
+            "fast_pseudo_kleinian",
+            "fast_apollonian",
+            "fast_hybrid",
+            "full_bulb",
+            "full_box",
+            "full_quat",
+            "full_kifs",
+            "full_kleinian",
+            "full_pseudo_kleinian",
+            "full_apollonian",
+            "full_hybrid",
+            "direct_bulb",
+            "direct_box",
+            "direct_quat",
+            "direct_kifs",
+            "direct_kleinian",
+            "direct_pseudo_kleinian",
+            "direct_apollonian",
+            "direct_hybrid",
+            "tally",
+            "adapt",
+            "tonemap",
+            "pick",
+        ];
+        for name in expected {
+            assert!(
+                module
+                    .entry_points
+                    .iter()
+                    .any(|ep| ep.name == name && ep.stage == naga::ShaderStage::Compute),
+                "missing compute entry point {name}"
+            );
+        }
     }
 }

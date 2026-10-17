@@ -23,6 +23,10 @@ egui-widgets-rs. Topic docs (how things work) live in docs/; this file only trac
   checked-in or operator files once with a throwaway script (and a backup).
 - References: D:\Projects\vfx.ref.
 
+## State (2026-10-17)
+
+- **Unified `wgpu` / `cuda` compute backend (`BUG1.md`)**: `RenderSettings` and `Scene::render` carry `Backend { Auto, Cuda, Wgpu }` (`/render/backend`), shown in the Attribute Editor, profile summary, and status bar (`CUDA · <gpu>` / `WGPU · <gpu>`). Scene preparation is isolated in `src/render_prep.rs`; `src/render_wgpu.rs` + `src/render_wgpu.wgsl` run all 28 compute entry points (`world`, `world_fast`, `world_fast_bulb`, `world_direct`, `fast_<family>`, `full_<family>`, `direct_<family>`, `tally`, `adapt`, `tonemap`, `pick`) on `gpu_info::shared_device()` inside `OutOfMemory` + `Validation` error scopes. `Gpu::resolve_backend` prefers CUDA under `Auto` and refuses silent fallback when `Cuda` or `Wgpu` is explicitly selected.
+
 ## State (2026-10-16)
 
 - **Direct display (`world_direct`)**: fractal-rs `74147e2` adds `world_direct` with per-object

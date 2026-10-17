@@ -14,6 +14,25 @@ pub enum RenderMethod {
     Fast,
     Full,
 }
+/// Compute backend for fractal rendering: `Auto` uses CUDA when available and falls back to WGPU;
+/// `Cuda` and `Wgpu` require that specific backend without silent fallback.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Backend {
+    #[default]
+    Auto,
+    Cuda,
+    Wgpu,
+}
+impl Backend {
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Cuda, Self::Wgpu];
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "Auto",
+            Self::Cuda => "CUDA",
+            Self::Wgpu => "WGPU",
+        }
+    }
+}
 /// What a render profile shows of the fractals: their path-traced light, Direct shading (one
 /// deterministic pass: key lights with soft shadows, occlusion, the sky's harmonics; no path
 /// tracing), or their bounds alone (drawn by the viewport, nothing traced).
@@ -273,7 +292,7 @@ pub(crate) const QUALITY_RENDER_FIELDS: &[&str] = &[
     "glass_probes",
     "adaptive",
 ];
-pub(crate) const PROFILE_RENDER_FIELDS: &[&str] = &["denoise"];
+pub(crate) const PROFILE_RENDER_FIELDS: &[&str] = &["backend", "denoise"];
 pub(crate) const LOOK_RENDER_FIELDS: &[&str] = &["exposure_stops", "saturation", "reinhard"];
 pub(crate) fn quality_values(render: &Value) -> Value {
     let mut quality = serde_json::Map::new();
@@ -350,7 +369,7 @@ pub(crate) fn static_branch(path: &str) -> bool {
 /// Settings attributes that must stay static: typed references and the policy branches.
 /// Commands, loading and the Attribute Editor all ask this one predicate.
 pub(crate) fn static_path(path: &str) -> bool {
-    reference_kind(path).is_some() || static_branch(path)
+    reference_kind(path).is_some() || static_branch(path) || path == "/render/backend"
 }
 pub(crate) fn setting_kind(kind: crate::world::WorldKind) -> bool {
     matches!(

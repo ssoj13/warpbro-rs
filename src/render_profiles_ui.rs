@@ -416,13 +416,14 @@ fn binding_controls(
 fn active_summary(nodes: &[WorldNodeInfo], active: &ViewportRender) -> String {
     let effective = &active.effective;
     format!(
-        "{}: {} · {} · {} spp · {:.0}% resolution",
+        "{}: {} · {} · {} · {} spp · {:.0}% resolution",
         target_name(active.target),
         profile_name(nodes, effective.profile),
         match effective.method {
             RenderMethod::Fast => "Fast",
             RenderMethod::Full => "Full",
         },
+        effective.render.backend.label(),
         effective.samples,
         effective.resolution_scale * 100.0
     )

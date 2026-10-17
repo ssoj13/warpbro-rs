@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.0 — 2026-10-17
+
+- **Unified `wgpu` / `cuda` compute backend architecture (`BUG1.md`):**
+  - Added `Backend { Auto, Cuda, Wgpu }` to `RenderSettings` (`/render/backend`) and `Scene::render`, exposed in the Attribute Editor (`Render` section), Render Settings profile summary, and viewport status bar (`CUDA · <device>` / `WGPU · <device>`).
+  - Extracted backend-agnostic scene preparation, parameter packing, LUT/object/light residency tracking, and tiled readback into `src/render_prep.rs`.
+  - Implemented `WgpuEngine` and `WgpuTarget` in `src/render_wgpu.rs` and `src/render_wgpu.wgsl` on `gpu_info::shared_device()` with `OutOfMemory` and `Validation` error scopes, matching the 8×4 tile layout (`accum`, `albedo`, `normal`, `stats`, `active`) and full kernel entry point set (`world`, `world_fast`, `world_fast_bulb`, `world_direct`, `fast_<family>`, `full_<family>`, `direct_<family>`, `tally`, `adapt`, `tonemap`, `pick`).
+  - Enforced strict no-silent-fallback backend resolution (`Gpu::resolve_backend`): `Backend::Auto` prefers CUDA when available and falls back to WGPU; explicit `Backend::Cuda` or `Backend::Wgpu` returns a diagnostic error if the requested backend fails.
+
 ## 0.1.0 — 2026-10-16
 
 - **Direct display (`world_direct`):** `/render/display = Direct` now dispatches fractal-rs `world_direct` (and specialized `direct_<family>` on single-object scenes) instead of path tracing with 0 bounces: every world object is shaded with its own material and all directional lights plus SH sky irradiance and HDRI mips in one deterministic pass over a square stratum grid up to 16×16 (`DirectShading::MAX_GRID`, largest square $\le$ `Samples`), with adaptive sampling off and Direct-only profile controls under `/render/direct/*` (`ao_strength`, `ao_samples`, `shadows`, `shadow_softness`, `specular`, `spec_roughness`, `env_reflections`, `fresnel`).

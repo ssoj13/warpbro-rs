@@ -1,0 +1,801 @@
+//! Backend-independent scene preparation, world parameter packing, residency tracking, and tile untiling.
+
+use std::sync::Arc;
+
+use crate::palette::PaletteScheme;
+use crate::params::*;
+use crate::scene::Scene;
+
+pub const BLOCK: u32 = 128;
+/// Threads of the `tally` reduction (a multiple of `BLOCK`): the out-of-steps readback is this
+/// many `[f64; 2]` (or `[u32; 2]` in WGSL) partial sums.
+pub const TALLY_THREADS: usize = 4096;
+
+/// Slots that only the tonemap reads: changing them re-tonemaps without restarting the samples.
+pub const TONEMAP_ONLY: [usize; 3] = [P_EXPOSURE, P_SATURATION, P_TONEMAP];
+/// Slots that change every launch.
+pub const PER_LAUNCH: [usize; 3] = [P_SAMPLE_BEGIN, P_SPP, P_SEED];
+/// Adaptive-sampling slots: they choose which tiles keep sampling, never the accumulated values,
+/// so changing them must not restart the render (the `adapt` kernel re-decides every step).
+pub const SCHEDULE_ONLY: [usize; 2] = [P_ADAPT_THRESHOLD, P_ADAPT_MIN];
+
+/// Worker-local counters; uploads count only completed host-to-device copies.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PreparationStats {
+    pub builds: u64,
+    pub hits: u64,
+    pub environment_decodes: u64,
+    pub lut_uploads: u64,
+    pub object_uploads: u64,
+    pub light_uploads: u64,
+    pub upload_bytes: u64,
+}
+
+/// Typed runtime inputs. Authoring documents, animation curves and display settings
+/// are not packed by the GPU and never require a preparation-cache rebuild.
+pub(crate) struct PreparationInputs {
+    world_render: bool,
+    camera_reference: Option<f32>,
+    object_world: Option<[[f32; 4]; 4]>,
+    formula: crate::scene::Formula,
+    julia: [f32; 3],
+    julia_mix: f32,
+    orbit_offset: [f32; 3],
+    inversion_strength: f32,
+    inversion_center: [f32; 3],
+    inversion_radius: f32,
+    object: crate::scene::ObjectTransform,
+    camera: crate::scene::Camera,
+    lighting: crate::scene::Lighting,
+    material: crate::scene::Material,
+    palette: PaletteScheme,
+    coloring: crate::scene::Coloring,
+    trap_point: [f32; 3],
+    trap_axis: u32,
+    trap_scale: f32,
+    render: crate::scene::Render,
+    direct: Option<crate::render_profiles::DirectRender>,
+    environment: crate::environment::Environment,
+    objects: Vec<PreparationInputs>,
+    masks: Vec<crate::scene::MaskInstance>,
+    lights: Vec<crate::scene::Lighting>,
+}
+
+pub(crate) fn preparation_render(scene: &Scene, root: bool) -> crate::scene::Render {
+    let mut render = scene.render;
+    render.denoise = Default::default();
+    render.backend = crate::render_profiles::Backend::Auto;
+    if root {
+        render.exposure_stops = 0.0;
+        render.saturation = 0.0;
+        render.reinhard = false;
+    }
+    render
+}
+
+fn same_material(a: &crate::scene::Material, b: &crate::scene::Material) -> bool {
+    // The pattern has no `..`: a new material field does not compile until it is compared here
+    // or named next to `preset` (a UI label) as not reaching the upload.
+    macro_rules! equal {
+        ($($field:ident),+ $(,)?) => {{
+            let crate::scene::Material { $($field: _,)+ preset: _ } = a;
+            true $(&& a.$field == b.$field)+
+        }};
+    }
+    equal!(
+        model,
+        color_source,
+        base_color,
+        facing,
+        base,
+        base_tint,
+        diffuse_roughness,
+        metalness,
+        specular,
+        specular_color,
+        specular_roughness,
+        specular_ior,
+        specular_anisotropy,
+        specular_rotation,
+        transmission,
+        transmission_color,
+        transmission_extra_roughness,
+        transmission_depth,
+        sheen,
+        sheen_color,
+        sheen_roughness,
+        coat,
+        coat_color,
+        coat_roughness,
+        coat_ior,
+        coat_affect_color,
+        coat_affect_roughness,
+        thin_film_thickness,
+        thin_film_ior,
+        emission,
+        emission_color
+    )
+}
+
+impl PreparationInputs {
+    // Both functions destructure `Scene` without `..`: a new scene field does not compile until
+    // it is either part of the key or listed as not reaching the GPU upload, so the cache can
+    // never silently reuse an upload that is missing it.
+    pub(crate) fn new(scene: &Scene, root: bool) -> Self {
+        let Scene {
+            world_render,
+            camera_reference,
+            objects,
+            lights,
+            object_world,
+            masks,
+            formula,
+            julia,
+            julia_mix,
+            orbit_offset,
+            inversion_strength,
+            inversion_center,
+            inversion_radius,
+            object,
+            camera,
+            lighting,
+            material,
+            palette,
+            coloring,
+            trap_point,
+            trap_axis,
+            trap_scale,
+            render: _,
+            direct,
+            environment,
+            // Authoring and display state: never packed into the upload (`mask` reaches it
+            // resolved, as `masks`; `bounds` are drawn by the viewport, never traced; `node`
+            // only maps a pick back to its node).
+            mask: _,
+            bounds: _,
+            node: _,
+            document: _,
+            animation: _,
+            name: _,
+            colour: _,
+        } = scene;
+        Self {
+            world_render: *world_render,
+            camera_reference: *camera_reference,
+            object_world: *object_world,
+            formula: *formula,
+            julia: *julia,
+            julia_mix: *julia_mix,
+            orbit_offset: *orbit_offset,
+            inversion_strength: *inversion_strength,
+            inversion_center: *inversion_center,
+            inversion_radius: *inversion_radius,
+            object: *object,
+            camera: *camera,
+            lighting: *lighting,
+            material: material.clone(),
+            palette: *palette,
+            coloring: *coloring,
+            trap_point: *trap_point,
+            trap_axis: *trap_axis,
+            trap_scale: *trap_scale,
+            render: preparation_render(scene, root),
+            direct: *direct,
+            environment: environment.clone(),
+            objects: objects
+                .iter()
+                .map(|object| Self::new(object, false))
+                .collect(),
+            masks: masks.clone(),
+            lights: lights.clone(),
+        }
+    }
+
+    pub(crate) fn matches(&self, scene: &Scene, root: bool) -> bool {
+        let Scene {
+            world_render,
+            camera_reference,
+            objects,
+            lights,
+            object_world,
+            masks,
+            formula,
+            julia,
+            julia_mix,
+            orbit_offset,
+            inversion_strength,
+            inversion_center,
+            inversion_radius,
+            object,
+            camera,
+            lighting,
+            material,
+            palette,
+            coloring,
+            trap_point,
+            trap_axis,
+            trap_scale,
+            render: _,
+            direct,
+            environment,
+            mask: _,
+            bounds: _,
+            node: _,
+            document: _,
+            animation: _,
+            name: _,
+            colour: _,
+        } = scene;
+        self.world_render == *world_render
+            && self.camera_reference == *camera_reference
+            && self.object_world == *object_world
+            && self.formula == *formula
+            && self.julia == *julia
+            && self.julia_mix == *julia_mix
+            && self.orbit_offset == *orbit_offset
+            && self.inversion_strength == *inversion_strength
+            && self.inversion_center == *inversion_center
+            && self.inversion_radius == *inversion_radius
+            && self.object == *object
+            && self.camera == *camera
+            && self.lighting == *lighting
+            && same_material(&self.material, material)
+            && self.palette == *palette
+            && self.coloring == *coloring
+            && self.trap_point == *trap_point
+            && self.trap_axis == *trap_axis
+            && self.trap_scale == *trap_scale
+            && self.render == preparation_render(scene, root)
+            && self.direct == *direct
+            && self.environment == *environment
+            && self.lights == *lights
+            && self.masks == *masks
+            && self.objects.len() == objects.len()
+            && self
+                .objects
+                .iter()
+                .zip(objects)
+                .all(|(input, object)| input.matches(object, false))
+    }
+}
+
+/// Material specialization belongs to the evaluated world, not the root scene's snapshot
+/// material. Cache it with the packed upload so launches do not rescan authoring nodes.
+/// Only homogeneous Fast worlds use specialized kernels; Full and mixed worlds retain
+/// the universal dispatcher because material specialization did not establish a speed gain.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorldMaterial {
+    Fast,
+    Full,
+    Mixed,
+}
+impl WorldMaterial {
+    pub(crate) fn from_upload(upload: &WorldUpload) -> Self {
+        let mut objects = upload.objects.as_chunks::<OBJECT_STRIDE>().0.iter();
+        let Some(first) = objects.next() else {
+            return Self::Mixed;
+        };
+        let full = first[P_MATERIAL_MODEL] != 0.0;
+        if objects.any(|object| (object[P_MATERIAL_MODEL] != 0.0) != full) {
+            Self::Mixed
+        } else if full {
+            Self::Full
+        } else {
+            Self::Fast
+        }
+    }
+}
+
+pub(crate) struct PreparedScene {
+    pub(crate) upload: WorldUpload,
+    pub(crate) world_material: WorldMaterial,
+    /// Inline the known DE only for one actual Fast Mandelbulb object.
+    pub(crate) single_fast_bulb: bool,
+    pub(crate) trace: Vec<f32>,
+    pub(crate) palettes: Vec<PaletteScheme>,
+    pub(crate) environment: Option<(String, u64)>,
+}
+impl PreparedScene {
+    pub(crate) fn new(scene: &Scene, width: u32, height: u32) -> Result<Self, String> {
+        let upload = WorldUpload::new(scene, width, height)?;
+        let world_material = WorldMaterial::from_upload(&upload);
+        let single_fast_bulb = world_material == WorldMaterial::Fast
+            && upload.objects.len() == OBJECT_STRIDE
+            && upload.objects[P_FAMILY] as u32 == FAMILY_BULB;
+        Ok(Self {
+            upload,
+            world_material,
+            single_fast_bulb,
+            trace: scene_trace_data(scene),
+            palettes: std::iter::once(scene.palette)
+                .chain(
+                    scene
+                        .objects
+                        .iter()
+                        .filter(|_| scene.world_render)
+                        .map(|object| object.palette),
+                )
+                .collect(),
+            environment: scene.environment.key(),
+        })
+    }
+
+    pub(crate) fn params(&self, scene: &Scene, bounces_cap: Option<u32>) -> [f32; P_COUNT] {
+        let mut params: [f32; P_COUNT] = self
+            .upload
+            .params
+            .as_slice()
+            .try_into()
+            .expect("parameter block size");
+        params[P_EXPOSURE] = 2f32.powf(scene.render.exposure_stops);
+        params[P_SATURATION] = scene.render.saturation;
+        params[P_TONEMAP] = scene.render.reinhard as u32 as f32;
+        if let Some(cap) = bounces_cap {
+            params[P_MAX_BOUNCES] = params[P_MAX_BOUNCES].min(cap as f32);
+        }
+        params
+    }
+}
+
+pub(crate) struct PreparationEntry {
+    pub(crate) inputs: PreparationInputs,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) result: Result<Arc<PreparedScene>, String>,
+}
+
+#[derive(Default)]
+pub(crate) struct PreparationCache {
+    pub(crate) entries: [Option<PreparationEntry>; 4],
+    next: usize,
+    pub(crate) builds: u64,
+    pub(crate) hits: u64,
+}
+impl PreparationCache {
+    pub(crate) fn get(
+        &mut self,
+        scene: &Scene,
+        width: u32,
+        height: u32,
+    ) -> Result<Arc<PreparedScene>, String> {
+        if let Some(entry) = self.entries.iter().flatten().find(|entry| {
+            entry.width == width && entry.height == height && entry.inputs.matches(scene, true)
+        }) {
+            self.hits += 1;
+            return entry.result.clone();
+        }
+        self.builds += 1;
+        let result = PreparedScene::new(scene, width, height).map(Arc::new);
+        self.entries[self.next] = Some(PreparationEntry {
+            inputs: PreparationInputs::new(scene, true),
+            width,
+            height,
+            result: result.clone(),
+        });
+        self.next = (self.next + 1) % self.entries.len();
+        result
+    }
+}
+
+/// This state belongs to the shared Gpu, never to an individual progressive target.
+/// Failed uploads invalidate identity because a copy may have partially changed device data.
+pub(crate) struct Resident<K> {
+    pub(crate) key: Option<K>,
+}
+impl<K> Default for Resident<K> {
+    fn default() -> Self {
+        Self { key: None }
+    }
+}
+impl<K: PartialEq> Resident<K> {
+    pub(crate) fn update(
+        &mut self,
+        key: K,
+        upload: impl FnOnce() -> Result<(), String>,
+    ) -> Result<bool, String> {
+        if self.key.as_ref() == Some(&key) {
+            return Ok(false);
+        }
+        if let Err(error) = upload() {
+            self.key = None;
+            return Err(error);
+        }
+        self.key = Some(key);
+        Ok(true)
+    }
+}
+
+pub(crate) struct LutResidentKey(pub(crate) Arc<PreparedScene>);
+impl PartialEq for LutResidentKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.palettes == other.0.palettes && self.0.environment == other.0.environment
+    }
+}
+pub(crate) struct ObjectResidentKey(pub(crate) Arc<PreparedScene>);
+impl PartialEq for ObjectResidentKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.upload.objects == other.0.upload.objects
+    }
+}
+pub(crate) struct LightResidentKey(pub(crate) Arc<PreparedScene>);
+impl PartialEq for LightResidentKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.upload.lights == other.0.upload.lights
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct DenoiseScratch {
+    pub(crate) tiled: Vec<[f32; 4]>,
+    pub(crate) color: Vec<[f32; 4]>,
+    pub(crate) albedo: Vec<[f32; 4]>,
+    pub(crate) normal: Vec<[f32; 4]>,
+}
+
+pub(crate) fn untile_into(
+    tiled: &[[f32; 4]],
+    width: usize,
+    height: usize,
+    normalize: bool,
+    output: &mut Vec<[f32; 4]>,
+) {
+    output.resize(width * height, [0.0; 4]);
+    let tiles_per_row = width.div_ceil(8);
+    for y in 0..height {
+        for x in 0..width {
+            let tile = (y / 4) * tiles_per_row + x / 8;
+            let pixel = tiled[tile * 32 + (y % 4) * 8 + x % 8];
+            output[y * width + x] = if normalize {
+                let inv = if pixel[3] > 0.0 {
+                    pixel[3].recip()
+                } else {
+                    0.0
+                };
+                [pixel[0] * inv, pixel[1] * inv, pixel[2] * inv, 1.0]
+            } else {
+                pixel
+            };
+        }
+    }
+}
+
+#[derive(Clone, PartialEq)]
+pub(crate) struct DisplayKey {
+    exposure: f32,
+    saturation: f32,
+    reinhard: bool,
+    colour_revision: u64,
+    colour: crate::ocio::Sel,
+}
+impl DisplayKey {
+    pub(crate) fn matches(&self, scene: &Scene, colour_revision: u64) -> bool {
+        self.exposure == scene.render.exposure_stops
+            && self.saturation == scene.render.saturation
+            && self.reinhard == scene.render.reinhard
+            && self.colour_revision == colour_revision
+            && self.colour == scene.colour
+    }
+    pub(crate) fn new(scene: &Scene, colour_revision: u64) -> Self {
+        Self {
+            exposure: scene.render.exposure_stops,
+            saturation: scene.render.saturation,
+            reinhard: scene.render.reinhard,
+            colour_revision,
+            colour: scene.colour.clone(),
+        }
+    }
+}
+
+/// Render-relevant runtime data only; hierarchy names and UUIDs never enter this signature.
+pub(crate) fn scene_trace_data(scene: &Scene) -> Vec<f32> {
+    let mut values = vec![
+        scene.world_render as u8 as f32,
+        scene.objects.len() as f32,
+        scene.lights.len() as f32,
+    ];
+    if !scene.world_render {
+        return values;
+    }
+    for object in &scene.objects {
+        let p = object.pack(1, 1);
+        values.extend_from_slice(&p[P_FAMILY..P_LIGHT_DIR]);
+        values.extend_from_slice(&p[P_BASE..P_EXPOSURE]);
+        values.extend_from_slice(&p[P_TRANSMISSION..P_COUNT]);
+        values.push(p[P_MATERIAL_MODEL]);
+        if let Some(matrix) = object.object_world {
+            values.push(1.0);
+            values.extend(matrix.into_iter().flatten());
+        } else {
+            values.push(0.0);
+        }
+        values.push(object.palette as u8 as f32);
+        for m in &object.masks {
+            values.extend(mask_row(m).unwrap_or([f32::NAN; MASK_STRIDE]));
+        }
+    }
+    for light in &scene.lights {
+        let mut packed = Scene::preset(FAMILY_BULB);
+        packed.lighting = *light;
+        let p = packed.pack(1, 1);
+        values.extend_from_slice(&p[P_LIGHT_DIR..P_SKY_INTENSITY]);
+    }
+    values
+}
+
+pub(crate) struct WorldUpload {
+    pub(crate) params: Vec<f32>,
+    pub(crate) objects: Vec<f32>,
+    pub(crate) lights: Vec<f32>,
+}
+
+fn object_matrix(object: &Scene) -> glam::Mat4 {
+    object
+        .object_world
+        .map(|columns| glam::Mat4::from_cols_array_2d(&columns))
+        .unwrap_or_else(|| {
+            // Legacy ObjectTransform uses the same XYZ Euler convention as Scene::pack.
+            let p = object.pack(1, 1);
+            let s = p[P_OBJ_SCALE];
+            glam::Mat4::from_cols(
+                glam::Vec4::new(
+                    p[P_OBJ_AXES] * s,
+                    p[P_OBJ_AXES + 1] * s,
+                    p[P_OBJ_AXES + 2] * s,
+                    0.0,
+                ),
+                glam::Vec4::new(
+                    p[P_OBJ_AXES + 3] * s,
+                    p[P_OBJ_AXES + 4] * s,
+                    p[P_OBJ_AXES + 5] * s,
+                    0.0,
+                ),
+                glam::Vec4::new(
+                    p[P_OBJ_AXES + 6] * s,
+                    p[P_OBJ_AXES + 7] * s,
+                    p[P_OBJ_AXES + 8] * s,
+                    0.0,
+                ),
+                glam::Vec4::from((glam::Vec3::from_array(object.object.offset), 1.0)),
+            )
+        })
+}
+
+fn inverse_object(object: &Scene, index: usize) -> Result<glam::Mat4, String> {
+    let matrix = object_matrix(object);
+    let columns = matrix.to_cols_array_2d();
+    if !matrix.is_finite()
+        || columns[0][3] != 0.0
+        || columns[1][3] != 0.0
+        || columns[2][3] != 0.0
+        || columns[3][3] != 1.0
+        || matrix.determinant() == 0.0
+    {
+        return Err(format!(
+            "World object {index} has a nonfinite, nonaffine or singular transform"
+        ));
+    }
+    let inverse = matrix.inverse();
+    if !inverse.is_finite() {
+        return Err(format!(
+            "World object {index} transform has no finite inverse"
+        ));
+    }
+    Ok(inverse)
+}
+
+/// A mask's kernel row (`fractal_core::params` `M_*`): its world-to-mask inverse affine, the
+/// conservative distance scale (as for objects), shape, invert, size, density and seed.
+pub(crate) fn mask_row(m: &crate::scene::MaskInstance) -> Result<[f32; MASK_STRIDE], String> {
+    use crate::scene::MaskShape;
+    let matrix = glam::Mat4::from_cols_array_2d(&m.world);
+    let inverse = matrix.inverse();
+    if !inverse.is_finite() || matrix.determinant().abs() <= f32::MIN_POSITIVE {
+        return Err("a mask transform has no finite inverse".into());
+    }
+    let mask = m.mask;
+    if mask.size.iter().any(|v| !(v.is_finite() && *v > 0.0))
+        || !(0.0..=1.0).contains(&mask.density)
+    {
+        return Err("a mask needs a positive size and a density in 0..1".into());
+    }
+    let cols = inverse.to_cols_array_2d();
+    let mut row = [0.0f32; MASK_STRIDE];
+    for r in 0..3 {
+        for (c, column) in cols.iter().enumerate() {
+            row[M_INVERSE + r * 4 + c] = column[r];
+        }
+    }
+    // ||A^-1||2 <= sqrt(||A^-1||1 ||A^-1||inf): a lower bound of the stretch, as for objects.
+    let norm1 = (0..3)
+        .map(|c| (0..3).map(|r| cols[c][r].abs()).sum::<f32>())
+        .fold(0.0f32, f32::max);
+    let norm_inf = (0..3)
+        .map(|r| (0..3).map(|c| cols[c][r].abs()).sum::<f32>())
+        .fold(0.0f32, f32::max);
+    row[M_SCALE] = 1.0 / (norm1.sqrt() * norm_inf.sqrt());
+    row[M_SHAPE] = match mask.shape {
+        MaskShape::Sphere => MASK_SPHERE,
+        MaskShape::Box => MASK_BOX,
+        MaskShape::Cells => MASK_CELLS,
+    } as f32;
+    row[M_INVERT] = f32::from(u8::from(mask.invert));
+    row[M_SIZE..M_SIZE + 3].copy_from_slice(&mask.size);
+    row[M_DENSITY] = mask.density;
+    row[M_SEED] = mask.seed as f32;
+    if mask.shape == MaskShape::Cells {
+        row[M_ARRAY] = 0.0;
+    } else {
+        use fractal_core::params::{ARRAY_LINEAR, ARRAY_RADIAL};
+        row[M_ARRAY] = match mask.array.kind {
+            crate::scene::ArrayKind::Linear => ARRAY_LINEAR,
+            crate::scene::ArrayKind::Radial => ARRAY_RADIAL,
+        } as f32;
+        row[M_ARRAY_COUNT] = fractal_core::mask_array::count(mask.array.count) as f32;
+        row[M_ARRAY_OFFSET..M_ARRAY_OFFSET + 3].copy_from_slice(&mask.array.offset);
+        row[M_ARRAY_RADIUS] = mask.array.radius;
+        row[M_ARRAY_AXIS] = mask.array.axis.code() as f32;
+        // 0 stays exactly 0: the kernel reads it as a full circle.
+        row[M_ARRAY_SWEEP] = mask.array.sweep_degrees.to_radians();
+        row[M_ARRAY_ALIGN] = f32::from(u8::from(mask.array.align));
+    }
+    if !row.iter().all(|v| v.is_finite()) || row[M_SCALE] <= 0.0 {
+        return Err("a mask transform is unusable".into());
+    }
+    Ok(row)
+}
+
+#[cfg(test)]
+fn packed_array(mask: crate::scene::Mask) -> [f32; MASK_STRIDE] {
+    mask_row(&crate::scene::MaskInstance {
+        mask,
+        world: glam::Mat4::IDENTITY.to_cols_array_2d(),
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_radial_mask_packs_its_ring_and_cells_pack_no_array() {
+    use crate::scene::{ArrayAxis, ArrayKind, Mask, MaskArray, MaskShape};
+    let row = packed_array(Mask {
+        array: MaskArray {
+            kind: ArrayKind::Radial,
+            count: 4,
+            radius: 2.0,
+            axis: ArrayAxis::Y,
+            sweep_degrees: 180.0,
+            ..MaskArray::default()
+        },
+        ..Mask::default()
+    });
+    assert_eq!(row[M_ARRAY], ARRAY_RADIAL as f32);
+    assert_eq!(row[M_ARRAY_COUNT], 4.0);
+    assert_eq!(row[M_ARRAY_RADIUS], 2.0);
+    assert_eq!(row[M_ARRAY_AXIS], 1.0);
+    assert!((row[M_ARRAY_SWEEP] - std::f32::consts::PI).abs() < 1e-5);
+    assert_eq!(row[M_ARRAY_ALIGN], 1.0);
+    let cells = packed_array(Mask {
+        shape: MaskShape::Cells,
+        array: MaskArray {
+            count: 8,
+            ..MaskArray::default()
+        },
+        ..Mask::default()
+    });
+    assert_eq!(cells[M_ARRAY], 0.0);
+}
+
+#[cfg(test)]
+pub(crate) fn validate_world(scene: &Scene) -> Result<(), String> {
+    if scene.world_render {
+        WorldUpload::new(scene, 1, 1)?;
+    }
+    Ok(())
+}
+
+impl WorldUpload {
+    pub(crate) fn new(scene: &Scene, width: u32, height: u32) -> Result<Self, String> {
+        scene.camera.validate_lens()?;
+        let mut params = scene.pack(width, height);
+        let mut objects = Vec::new();
+        let mut lights = Vec::new();
+        if scene.world_render {
+            params[P_WORLD] = WORLD_ABI_VERSION as f32;
+            params[P_OBJECT_COUNT] = scene.objects.len() as f32;
+            params[P_LIGHT_COUNT] = scene.lights.len() as f32;
+            let mut extent = 0.0f32;
+            for (index, object) in scene.objects.iter().enumerate() {
+                let inverse = inverse_object(object, index)?;
+                let matrix = object_matrix(object);
+                let mut local = object.clone();
+                local.object.offset = [0.0; 3];
+                local.object.rotation_degrees = [0.0; 3];
+                local.object.scale = 1.0;
+                let p = local.pack(width, height);
+                let local_radius = p[P_CLIP_RADIUS];
+                objects.extend_from_slice(&p);
+                let cols = inverse.to_cols_array_2d();
+                for row in 0..3 {
+                    for column in &cols {
+                        objects.push(column[row]);
+                    }
+                }
+                // ||A^-1||2 <= sqrt(||A^-1||1 ||A^-1||inf), so this is a
+                // conservative lower bound on sigma_min(A), including parent shear.
+                let norm1 = (0..3)
+                    .map(|c| (0..3).map(|r| cols[c][r].abs()).sum::<f32>())
+                    .fold(0.0f32, f32::max);
+                let norm_inf = (0..3)
+                    .map(|r| (0..3).map(|c| cols[c][r].abs()).sum::<f32>())
+                    .fold(0.0f32, f32::max);
+                let scale = 1.0 / (norm1.sqrt() * norm_inf.sqrt());
+                if !scale.is_finite() || scale <= 0.0 {
+                    return Err(format!(
+                        "World object {index} has an unusable distance scale"
+                    ));
+                }
+                objects.push(scale);
+                objects.push(local_radius);
+                let tangent = matrix.transform_vector3(glam::Vec3::Y).normalize();
+                if !tangent.is_finite() {
+                    return Err(format!(
+                        "World object {index} has an unusable material tangent"
+                    ));
+                }
+                objects.extend(tangent.to_array());
+                if object.masks.len() > MAX_MASKS {
+                    return Err(format!(
+                        "World object {index} has {} masks; at most {MAX_MASKS} reach one object",
+                        object.masks.len()
+                    ));
+                }
+                objects.push(object.masks.len() as f32);
+                for slot in 0..MAX_MASKS {
+                    match object.masks.get(slot) {
+                        Some(m) => objects
+                            .extend(mask_row(m).map_err(|e| format!("World object {index}: {e}"))?),
+                        None => objects.extend([0.0; MASK_STRIDE]),
+                    }
+                }
+                let cols = matrix.to_cols_array_2d();
+                let upper = (0..3)
+                    .map(|c| (0..3).map(|r| cols[c][r] * cols[c][r]).sum::<f32>())
+                    .sum::<f32>()
+                    .sqrt();
+                let center = matrix.transform_point3(glam::Vec3::ZERO);
+                extent = extent.max(center.length() + local_radius * upper);
+            }
+            if !extent.is_finite() {
+                return Err("World geometry bounds exceed finite render range".into());
+            }
+            params[P_CLIP_CENTER..P_CLIP_CENTER + 3].fill(0.0);
+            params[P_CLIP_RADIUS] = extent;
+            let camera = glam::Vec3::from_slice(&params[P_CAM_ORIGIN..P_CAM_ORIGIN + 3]);
+            params[P_MAX_DISTANCE] = params[P_MAX_DISTANCE].max(camera.length() + 2.0 * extent);
+            for light in &scene.lights {
+                let mut packed = Scene::preset(FAMILY_BULB);
+                packed.lighting = *light;
+                let mut p = packed.pack(1, 1);
+                // The world kernels have no delta light: a zero angle keeps a minimal cone.
+                let (omc, pdf) = crate::scene::sun_cone(
+                    (light.sun_angle * 0.5)
+                        .to_radians()
+                        .clamp(1e-4, std::f32::consts::PI),
+                );
+                p[P_SUN_ONE_MINUS_COS] = omc;
+                p[P_SUN_CONE_PDF] = pdf;
+                if p[P_LIGHT_DIR..P_SKY_INTENSITY]
+                    .iter()
+                    .any(|v| !v.is_finite())
+                {
+                    return Err("World directional light has nonfinite parameters".into());
+                }
+                lights.extend_from_slice(&p[P_LIGHT_DIR..P_SKY_INTENSITY]);
+            }
+        }
+        Ok(Self {
+            params,
+            objects,
+            lights,
+        })
+    }
+}

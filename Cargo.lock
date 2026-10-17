@@ -9565,6 +9565,7 @@ dependencies = [
  "image",
  "imath-rs",
  "log",
+ "naga",
  "playa-coord",
  "playa-engine",
  "playa-events",
