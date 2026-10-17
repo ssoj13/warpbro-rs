@@ -106,7 +106,7 @@ impl Recording {
         take: &Take,
         options: Options,
     ) -> Result<Self, String> {
-        let Poses::Camera(samples) = &take.poses else {
+        let Poses::Camera(samples) = take.effective_poses() else {
             return Err("Not a camera take".into());
         };
         let first = samples.first().ok_or("The take has no samples")?;
@@ -203,7 +203,7 @@ pub fn bake_transform(
     take: &Take,
     options: Options,
 ) -> Result<Prepared, String> {
-    let Poses::Transform(samples) = &take.poses else {
+    let Poses::Transform(samples) = take.effective_poses() else {
         return Err("Not a transform take".into());
     };
     if !options.transform {

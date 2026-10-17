@@ -329,13 +329,16 @@ fn retime<P: Pose>(s: &[Sample<P>], speed: f64) -> Vec<Sample<P>> {
         .collect()
 }
 
-/// `effect` on the samples: each channel ([`Pose::channels`]) a curve of linear keys at the
+/// `effects` on the samples: each channel ([`Pose::channels`]) a curve of linear keys at the
 /// sample times, edited by the same `curves::Effect` the timeline applies to keys (the Euler
 /// filter to the rotation's three channels, [`Pose::ROTATION`]), and read back at those times.
-fn effected<P: Pose>(
+fn apply_effects<P: Pose>(
     s: &[Sample<P>],
-    effect: &curves::Effect<f64>,
+    effects: &[curves::Effect<f64>],
 ) -> Result<Vec<Sample<P>>, String> {
+    if effects.is_empty() {
+        return Ok(s.to_vec());
+    }
     let rows: Vec<Vec<f32>> = s.iter().map(|x| x.pose.channels()).collect();
     let count = rows.first().map_or(0, Vec::len);
     let mut tracks = (0..count)
@@ -359,8 +362,10 @@ fn effected<P: Pose>(
         .apply(&mut rotation)
         .map_err(|e| e.to_string())?;
     tracks.splice(first..first + 3, rotation);
-    if !matches!(effect, curves::Effect::EulerFilter { .. }) {
-        effect.apply(&mut tracks).map_err(|e| e.to_string())?;
+    for effect in effects {
+        if !matches!(effect, curves::Effect::EulerFilter { .. }) {
+            effect.apply(&mut tracks).map_err(|e| e.to_string())?;
+        }
     }
     Ok(s.iter()
         .map(|x| {
@@ -371,6 +376,92 @@ fn effected<P: Pose>(
             }
         })
         .collect())
+}
+
+#[cfg(test)]
+fn effected<P: Pose>(
+    s: &[Sample<P>],
+    effect: &curves::Effect<f64>,
+) -> Result<Vec<Sample<P>>, String> {
+    apply_effects(s, std::slice::from_ref(effect))
+}
+
+fn filtered_samples<P: Pose>(
+    s: &[Sample<P>],
+    filters: &TakeFilters,
+) -> Result<Vec<Sample<P>>, String> {
+    if !filters.any_active() {
+        return Ok(s.to_vec());
+    }
+    let mut effects = Vec::new();
+    if filters.euler {
+        effects.push(curves::Effect::EulerFilter {
+            middle: P::ROTATION.1,
+        });
+    }
+    if filters.smooth {
+        let order = filters.order.clamp(2, 16);
+        let order = order + (order % 2);
+        effects.push(curves::Effect::Smooth {
+            cutoff: filters.cutoff.clamp(0.01, 100.0),
+            order,
+            blend: filters.blend.clamp(0.0, 60.0),
+        });
+    }
+    if filters.simplify {
+        effects.push(curves::Effect::Simplify {
+            tolerance: filters.tolerance.max(0.0),
+            max_keys: (filters.max_keys > 0).then_some(filters.max_keys),
+        });
+    }
+    apply_effects(s, &effects)
+}
+
+/// Non-destructive curve filters and their parameters on a [`Take`].
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TakeFilters {
+    pub euler: bool,
+    pub smooth: bool,
+    pub simplify: bool,
+    /// Simplify: largest allowed error in channel units, and key limit (0 = unlimited).
+    pub tolerance: f64,
+    pub max_keys: usize,
+    /// Smooth: cutoff in Hz, poles (even, 2..=16), blend in seconds.
+    pub cutoff: f64,
+    pub order: u32,
+    pub blend: f64,
+}
+impl Default for TakeFilters {
+    fn default() -> Self {
+        Self {
+            euler: false,
+            smooth: false,
+            simplify: false,
+            tolerance: 0.01,
+            max_keys: 0,
+            cutoff: 3.0,
+            order: 4,
+            blend: 0.0,
+        }
+    }
+}
+impl TakeFilters {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+    pub fn any_active(&self) -> bool {
+        self.euler || self.smooth || self.simplify
+    }
+}
+
+/// Cached filtered poses on a [`Take`], ignored by equality and serialization.
+#[derive(Clone, Debug, Default)]
+pub struct FilteredCache(Option<Poses>);
+impl PartialEq for FilteredCache {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 /// One recorded motion.
@@ -389,8 +480,14 @@ pub struct Take {
     /// The node it was recorded on (shown in the Takes panel; other nodes may play it).
     #[serde(default)]
     pub source: Option<NodeId>,
+    /// Non-destructive curve filters active on this take.
+    #[serde(default, skip_serializing_if = "TakeFilters::is_default")]
+    pub filters: TakeFilters,
     /// Strictly increasing seconds from 0.
     pub poses: Poses,
+    /// Cached filtered poses when `filters.any_active()` is true.
+    #[serde(skip)]
+    pub filtered: FilteredCache,
 }
 
 impl Take {
@@ -407,7 +504,9 @@ impl Take {
             timing: Timing::KeepSpeed,
             pinned: false,
             source,
+            filters: TakeFilters::default(),
             poses: poses.into(),
+            filtered: FilteredCache::default(),
         }
         .checked()
     }
@@ -465,16 +564,46 @@ impl Take {
         on_poses!(&self.poses, s => s.len())
     }
 
+    /// Recompute the cached filtered poses from `self.poses` and `self.filters`.
+    pub fn rebuild_filtered(&mut self) {
+        if !self.filters.any_active() {
+            self.filtered.0 = None;
+            return;
+        }
+        self.filtered.0 = Some(map_poses!(
+            &self.poses,
+            s => filtered_samples(s, &self.filters).unwrap_or_else(|_| s.clone())
+        ));
+    }
+
+    /// The poses this take plays and bakes: the non-destructively filtered poses when any filter
+    /// is active, otherwise the raw recorded poses.
+    pub fn effective_poses(&self) -> &Poses {
+        self.filtered.0.as_ref().unwrap_or(&self.poses)
+    }
+
     /// Reject samples that cannot drive anything: too few, unordered or non-finite.
-    pub fn checked(self) -> Result<Self, String> {
-        let problem = if self.start.is_finite() {
-            on_poses!(&self.poses, s => check(s).err())
-        } else {
+    pub fn checked(mut self) -> Result<Self, String> {
+        let problem = if !self.start.is_finite() {
             Some("start frame is not finite")
+        } else if ![
+            self.filters.tolerance,
+            self.filters.cutoff,
+            self.filters.blend,
+        ]
+        .iter()
+        .all(|v| v.is_finite())
+        {
+            Some("filter parameters must be finite")
+        } else {
+            on_poses!(&self.poses, s => check(s).err())
         };
         match problem {
             Some(what) => Err(format!("Invalid take \"{}\": {what}", self.name)),
-            None => Ok(self),
+            None => {
+                self.rebuild_filtered();
+                Ok(self)
+            }
         }
     }
 
@@ -507,7 +636,7 @@ impl Take {
 
     /// The camera a document at (`first`..`last`, `fps`) shows on `frame`; None for a transform take.
     pub fn camera_at(&self, frame: f64, first: u32, last: u32, fps: f64) -> Option<Camera> {
-        match &self.poses {
+        match self.effective_poses() {
             Poses::Camera(s) => pose_at(s, self.seconds_at(frame, first, last, fps)),
             Poses::Transform(_) => None,
         }
@@ -515,7 +644,7 @@ impl Take {
 
     /// The local transform on `frame`; None for a camera take.
     pub fn trs_at(&self, frame: f64, first: u32, last: u32, fps: f64) -> Option<Trs> {
-        match &self.poses {
+        match self.effective_poses() {
             Poses::Transform(s) => pose_at(s, self.seconds_at(frame, first, last, fps)),
             Poses::Camera(_) => None,
         }
@@ -547,6 +676,7 @@ impl Take {
 
     /// A curve effect (Simplify, Smooth, Euler filter) on the take's motion, as the timeline
     /// applies it to keys ([`effected`]).
+    #[cfg(test)]
     pub fn effected(&self, effect: &curves::Effect<f64>) -> Result<Self, String> {
         Take {
             poses: map_poses!(&self.poses, s => effected(s, effect)?),
@@ -610,6 +740,8 @@ struct Clip {
     name: String,
     start: f64,
     timing: Timing,
+    #[serde(default, skip_serializing_if = "TakeFilters::is_default")]
+    filters: TakeFilters,
     poses: Poses,
 }
 
@@ -621,6 +753,7 @@ impl Clip {
             name: take.name.clone(),
             start: take.start,
             timing: take.timing,
+            filters: take.filters,
             poses: take.poses.clone(),
         }
     }
@@ -635,6 +768,7 @@ impl Clip {
         Take {
             name: self.name,
             timing: self.timing,
+            filters: self.filters,
             ..Take::new(self.start, None, self.poses)?
         }
         .checked()
@@ -669,6 +803,7 @@ impl Takes {
         if take.name.trim().is_empty() {
             take.name = format!("Take {}", take.id);
         }
+        take.rebuild_filtered();
         self.list.push(Arc::new(take));
         self.trim(used);
         self.next
@@ -701,7 +836,9 @@ impl Takes {
         let Some(take) = self.list.iter_mut().find(|t| t.id == id) else {
             return false;
         };
-        apply(Arc::make_mut(take));
+        let take = Arc::make_mut(take);
+        apply(take);
+        take.rebuild_filtered();
         self.trim(used);
         true
     }

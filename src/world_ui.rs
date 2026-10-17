@@ -229,10 +229,9 @@ fn add_context_item(menu: &egui_tab_menu::TabMenu<WorldKind>) -> ContextItem {
 }
 
 /// The curve effects' rows (Simplify, Smooth, Euler filter: label, parameters, Apply) inside a
-/// three-column grid, on one set of parameters: the timeline's Effects menu applies the chosen
-/// effect to selected keys, the Takes panel to the selected take. Times are in seconds (the
-/// editor retimes the effect for keys in frames, `WorldEditor::curve_effect`). `enabled`: something to apply
-/// to. The Euler filter's middle is the target's own (camera or transform), set by who applies it.
+/// three-column grid for the timeline's Effects menu. Times are in seconds (the editor retimes
+/// the effect for keys in frames, `WorldEditor::curve_effect`). `enabled`: something to apply to.
+/// The Euler filter's middle is the target's own (camera or transform), set by who applies it.
 pub(crate) fn effect_rows(
     ui: &mut egui::Ui,
     p: &mut EffectParams,
@@ -320,7 +319,7 @@ pub(crate) fn effect_rows(
     chosen
 }
 
-/// The curve effects' parameters (session state), shared by the timeline and the Takes panel.
+/// The timeline curve effects' parameters (session state).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct EffectParams {
     tolerance: f64,

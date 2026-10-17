@@ -449,7 +449,6 @@ fn step_gizmo_size(size: f32, larger: bool) -> f32 {
 /// shared `cam_controls` flight settings, the one place WarpBro configures the flight rig) and
 /// the mouse mapping of the slot strips.
 #[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
 struct Controls {
     look_sensitivity: f32,
     fly_speed: f32,
@@ -473,9 +472,8 @@ struct Controls {
     /// The viewport manipulator's size in points and its line width.
     gizmo_size: f32,
     gizmo_stroke: f32,
-    /// Flight: holding Ctrl eases the view to the nearest world axis view (true) or plane
-    /// (false), with this time constant in seconds (`cam_controls::SpaceFlight::set_align`).
-    align_axis: bool,
+    /// Holding Ctrl during orbit or flight eases the view to the nearest world coordinate
+    /// plane or axis (within 15° of two planes) with this time constant in seconds.
     align_seconds: f32,
 }
 impl Default for Controls {
@@ -486,14 +484,13 @@ impl Default for Controls {
             translate_decay: 0.96,
             rotate_decay: 1.0,
             inertial_look: true,
-            look_smoothing: 0.23,
+            look_smoothing: 0.08,
             flip_degrees: 48.6,
             fast_multiplier: 4.0,
             slow_multiplier: 0.1,
             swap_slot_buttons: false,
             gizmo_size: 120.0,
             gizmo_stroke: 3.0,
-            align_axis: false,
             align_seconds: 0.5,
         }
     }
@@ -1054,19 +1051,21 @@ impl App {
                             _ => {}
                         },
                     );
-                    egui_prefs2::section_header(ui, "Flight alignment (hold Ctrl)");
+                    egui_prefs2::section_header(ui, "Camera alignment (hold Ctrl)");
                     prefs_grid(
                         ui,
                         am,
                         &mut self.prefs_grids[4],
-                        vec![
-                            b_row("To an axis (else a plane)", c.align_axis, d.align_axis),
-                            f_row("Ease time, s", c.align_seconds, 0.05..=5.0, d.align_seconds),
-                        ],
-                        |label, v| match (label, v) {
-                            ("To an axis (else a plane)", AttrValue::Bool(v)) => c.align_axis = v,
-                            ("Ease time, s", AttrValue::Float(v)) => c.align_seconds = v,
-                            _ => {}
+                        vec![f_row(
+                            "Ease time, s",
+                            c.align_seconds,
+                            0.0..=5.0,
+                            d.align_seconds,
+                        )],
+                        |label, v| {
+                            if let ("Ease time, s", AttrValue::Float(v)) = (label, v) {
+                                c.align_seconds = v;
+                            }
                         },
                     );
                     egui_prefs2::section_header(ui, "Manipulator");
@@ -3126,15 +3125,11 @@ impl App {
                     * (scroll * 0.002 * radius * self.controls.fly_speed * self.fly_speed_scale);
             }
             // Flight modifiers: Shift fast, Alt slow, Ctrl the constraint: held, it eases the
-            // view to the nearest world plane or axis view.
-            fly.set_align(ui.input(|i| i.modifiers.ctrl).then(|| {
-                let mode = if self.controls.align_axis {
-                    cam_controls::OrbitSnapMode::Axis
-                } else {
-                    cam_controls::OrbitSnapMode::Plane
-                };
-                (mode, self.controls.align_seconds)
-            }));
+            // view to the nearest world coordinate plane or axis view (Smart 2-plane/axis rule).
+            fly.set_align(ui.input(|i| i.modifiers.ctrl).then_some((
+                cam_controls::OrbitSnapMode::Smart,
+                self.controls.align_seconds,
+            )));
         } else {
             fly.set_align(None);
             // Released: drop held axes and modifiers; the momentum coasts and damps out.
@@ -3170,14 +3165,15 @@ impl App {
         ui.ctx().request_repaint();
     }
 
-    /// Houdini orbit through the shared rig: LMB tumbles about world up (Shift: snapped to the
-    /// views along the world axes), MMB pans, the wheel zooms toward the target, and released
-    /// drags coast. The camera roll is an overlay the
-    /// turntable leaves alone (as do pan and zoom); pan turns the cursor motion by it so the
-    /// view follows the cursor.
+    /// Houdini orbit through the shared rig: LMB tumbles about world up (Ctrl: smart 2-plane /
+    /// axis lock-on eased by `align_seconds`; Shift: plane; Ctrl + Shift: axis), MMB pans, the
+    /// wheel zooms toward the target, and released drags coast. The camera roll is an overlay the
+    /// turntable leaves alone (except under Ctrl smart alignment, which eases roll to 0°); pan
+    /// turns the cursor motion by it so the view follows the cursor.
     fn orbit_camera(&mut self, ui: &egui::Ui, resp: &egui::Response, over_toolbar: bool) {
         use cam_controls::{CameraIntent, OrbitPose};
         use glam::Vec3;
+        let dt = nav_dt(ui.ctx());
         let radius = self
             .scene
             .camera_reference
@@ -3191,6 +3187,8 @@ impl App {
             .controls
             .navigation(cam.fov_y_degrees.to_radians(), resp.rect.height());
         rig.apply_navigation(nav);
+        rig.align_seconds = self.controls.align_seconds;
+        rig.align_dt = dt;
         rig.pitch_limit = 89.0_f32.to_radians();
         rig.projection.distance_min = 0.05 * radius;
         rig.projection.distance_max = f32::MAX;
@@ -3208,12 +3206,15 @@ impl App {
             // RMB belongs to flight.
             dolly: None,
             wheel: !over_toolbar,
-            // Shift + tumble: nearest world plane; Ctrl + Shift: nearest axis view.
+            // Ctrl + tumble: smart 2-plane / axis lock-on; Shift: plane; Ctrl + Shift: axis.
             shift_snap: true,
             ..cam_controls_egui::OrbitButtons::HOUDINI
         };
         let frame =
             cam_controls_egui::gather_orbit_intents(ui, resp, &nav, &mut self.orbit_drag, buttons);
+        if !frame.intents.is_empty() {
+            self.fly = None;
+        }
         let viewport = cam_viewport::ViewportSize::new(
             resp.rect.width().max(1.0) as u32,
             resp.rect.height().max(1.0) as u32,
@@ -3221,7 +3222,17 @@ impl App {
         // The rig pans in the unrolled view plane: turn screen motion back by the roll.
         let (sin, cos) = cam.roll_degrees.to_radians().sin_cos();
         let unroll = |x: f32, y: f32| (x * cos + y * sin, y * cos - x * sin);
+        let mut smart_align = false;
         for intent in frame.intents {
+            if matches!(
+                intent,
+                CameraIntent::OrbitSnap {
+                    mode: cam_controls::OrbitSnapMode::Smart,
+                    ..
+                }
+            ) {
+                smart_align = true;
+            }
             let intent = match intent {
                 CameraIntent::Pan { dx_px, dy_px } => {
                     let (dx_px, dy_px) = unroll(dx_px, dy_px);
@@ -3238,7 +3249,7 @@ impl App {
         let rig = &mut self.orbit.rig;
         let coasting = rig.has_inertia();
         if coasting {
-            rig.update_dynamics(nav_dt(ui.ctx()));
+            rig.update_dynamics(dt);
         }
         // Write back only real changes: a still drag must not restart the progressive render.
         let pose = rig.pose;
@@ -3248,6 +3259,16 @@ impl App {
             cam.pitch_degrees = pitch.to_degrees();
             cam.target = pose.target.to_array();
             cam.distance = pose.distance / radius;
+            self.navigated = true;
+        }
+        if smart_align && cam.roll_degrees != 0.0 {
+            let tau = self.controls.align_seconds;
+            if tau <= 1e-5 || cam.roll_degrees.abs() < 1e-3 {
+                cam.roll_degrees = 0.0;
+            } else {
+                let t = 1.0 - (-dt / tau).exp();
+                cam.roll_degrees *= 1.0 - t;
+            }
             self.navigated = true;
         }
         self.orbit_written = rig.has_inertia().then_some(*cam);
@@ -3955,7 +3976,7 @@ impl App {
         // A hovered or dragged handle owns the left button (last frame's hover: the gizmo
         // is drawn over the image, after the camera rigs run).
         let gizmo_owns = self.gizmo.is_hovered() || self.gizmo_gesture.is_some();
-        if self.fly.is_none() && !gizmo_owns {
+        if !flight_held(ui, &resp) && !gizmo_owns {
             self.orbit_camera(ui, &resp, toolbar.contains_pointer);
         }
         // Held RMB gives the keyboard to the flight rig (W, Q, E, R are thrust and roll there);
@@ -4047,7 +4068,7 @@ impl App {
         if resp.clicked()
             && !resp.double_clicked()
             && !gizmo_owns
-            && self.fly.is_none()
+            && !flight_held(ui, &resp)
             && !toolbar.contains_pointer
         {
             self.viewport_click(ui, &resp, rect);
@@ -5835,6 +5856,52 @@ mod tests {
             "leaving the top view keeps the heading: {} -> {}",
             top.yaw_degrees,
             app.scene.camera.yaw_degrees
+        );
+
+        // Ctrl + LMB: Smart 2-plane / axis lock-on eases smoothly toward the nearest coordinate
+        // plane or world axis (within 15° of two planes) and levels camera roll to 0°.
+        app.controls.look_sensitivity = 0.5;
+        app.controls.align_seconds = 0.05;
+        app.scene.camera.yaw_degrees = 8.0;
+        app.scene.camera.pitch_degrees = 6.0;
+        app.scene.camera.roll_degrees = 25.0;
+        let ctrl = egui::Modifiers::CTRL;
+        frame(
+            &mut app,
+            vec![
+                egui::Event::ModifiersChanged(ctrl),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: ctrl,
+                },
+            ],
+        );
+        for i in 0..40 {
+            if i < 4 {
+                pos.x += 2.0;
+            }
+            frame(&mut app, vec![egui::Event::PointerMoved(pos)]);
+        }
+        frame(
+            &mut app,
+            vec![
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: ctrl,
+                },
+                egui::Event::ModifiersChanged(egui::Modifiers::NONE),
+            ],
+        );
+        assert!(
+            app.scene.camera.yaw_degrees.abs() < 1e-2
+                && app.scene.camera.pitch_degrees.abs() < 1e-2
+                && app.scene.camera.roll_degrees.abs() < 1e-2,
+            "Ctrl + LMB within 15° of -Z must ease yaw, pitch, and roll to 0: {:?}",
+            app.scene.camera
         );
     }
 

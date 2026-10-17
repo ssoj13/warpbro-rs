@@ -302,3 +302,64 @@ fn the_euler_filter_and_simplify_edit_a_takes_motion_like_keys() {
         .unwrap();
     assert_eq!(simple.len(), take.len());
 }
+
+#[test]
+fn non_destructive_take_filters_toggle_live_and_roundtrip_through_json_and_clips() {
+    let jitter: Vec<Sample<Trs>> = (0..41)
+        .map(|i| Sample {
+            seconds: i as f64,
+            pose: Trs {
+                position: [i as f32 + if i % 2 == 0 { 0.5 } else { -0.5 }, 0.0, 0.0],
+                rotation_degrees: [0.0, 0.0, if i % 2 == 0 { 170.0 } else { -170.0 }],
+                scale: [1.0; 3],
+            },
+        })
+        .collect();
+    let raw = Take::new(0.0, Some(node(1)), jitter).unwrap();
+    let raw_poses = raw.poses.clone();
+    let raw_mid = raw.trs_at(120.0, 0, 239, 24.0).unwrap();
+
+    // Default filters are omitted from serialized JSON.
+    let default_clip = raw.to_clip(24.0).unwrap();
+    assert!(!default_clip.contains("filters"));
+
+    let mut takes = Takes::default();
+    let id = takes.add(raw, &[]);
+
+    // Toggle Smooth + Euler + Simplify on.
+    assert!(takes.edit(id, &[], |t| {
+        t.filters.euler = true;
+        t.filters.smooth = true;
+        t.filters.cutoff = 0.1;
+        t.filters.simplify = true;
+        t.filters.tolerance = 0.05;
+    }));
+    let filtered = takes.get(id).unwrap();
+    assert_eq!(filtered.poses, raw_poses, "raw poses remain untouched");
+    assert_ne!(filtered.effective_poses(), &raw_poses);
+    let filtered_mid = filtered.trs_at(120.0, 0, 239, 24.0).unwrap();
+    assert_ne!(filtered_mid.position[0], raw_mid.position[0]);
+
+    // Roundtrip through Takes JSON and Clip JSON keeps filters and rebuilds cache.
+    let takes_json = serde_json::to_string(&takes).unwrap();
+    assert!(takes_json.contains("filters"));
+    let takes_back: Takes = serde_json::from_str(&takes_json).unwrap();
+    let back_take = takes_back.get(id).unwrap();
+    assert_eq!(back_take.filters, filtered.filters);
+    assert_eq!(back_take.effective_poses(), filtered.effective_poses());
+
+    let clip_json = filtered.to_clip(24.0).unwrap();
+    let clip_back = Take::from_clip(&clip_json).unwrap();
+    assert_eq!(clip_back.filters, filtered.filters);
+    assert_eq!(clip_back.effective_poses(), filtered.effective_poses());
+
+    // Toggling all filters back off restores exact raw recorded poses.
+    assert!(takes.edit(id, &[], |t| {
+        t.filters.euler = false;
+        t.filters.smooth = false;
+        t.filters.simplify = false;
+    }));
+    let restored = takes.get(id).unwrap();
+    assert_eq!(restored.effective_poses(), &raw_poses);
+    assert_eq!(restored.trs_at(120.0, 0, 239, 24.0).unwrap(), raw_mid);
+}

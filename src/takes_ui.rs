@@ -1,12 +1,12 @@
 //! The Takes panel: the document's recorded navigation takes (`crate::takes`) as a managed list.
 //! Filter, multi-select (Ctrl / Shift click), pin, bind as the scene camera, play, rename,
 //! copy / paste / duplicate (the system clipboard, so takes move between scenes), delete, export /
-//! import clip files, takes made from the timeline animation or the current pose, and
-//! non-destructive edits (trim, speed, the timeline's curve effects, split: each makes a new take,
-//! since takes have no undo). Bake to keys keys the bound take onto the camera as one undo step.
+//! import clip files, takes made from the timeline animation or the current pose, non-destructive
+//! per-take curve filters (Smooth, Simplify, Euler filter), and derived takes (trim, speed, split).
+//! Bake to keys keys the bound take onto the camera as one undo step.
 use super::App;
 use crate::camera_recorder::Timing;
-use crate::takes::{Take, TakeKind};
+use crate::takes::{Take, TakeFilters, TakeKind};
 use crate::world::NodeId;
 use egui_phosphor::regular as ph;
 use egui_widgets_config::icons;
@@ -21,8 +21,7 @@ pub(super) struct View {
     anchor: Option<u64>,
     /// The take whose name is being edited.
     rename: Option<(u64, String)>,
-    /// Edit parameters of the selected take: trim in / out (seconds), speed. The curve effects'
-    /// parameters are the timeline's (`WorldUi::effects`).
+    /// Edit parameters of the selected take: trim in / out (seconds), speed.
     trim: (f64, f64),
     speed: f64,
     /// The take `trim` was initialised for: a new selection resets it to the whole take.
@@ -68,17 +67,16 @@ pub(super) enum Action {
     Import,
     FromAnimation,
     FromPose,
-    /// A new take derived from `source` (trim, speed, smooth, split).
+    /// A new take derived from `source` (trim, speed, split).
     Derive(u64, Derive),
     SetStart(u64, f64),
     SetTiming(u64, Timing),
+    SetFilters(u64, TakeFilters),
     Bake(u64),
 }
 pub(super) enum Derive {
     Trim(f64, f64),
     Speed(f64),
-    /// A curve effect (`Take::effected`).
-    Effect(curves::Effect<f64>),
     Split,
 }
 
@@ -270,6 +268,33 @@ impl App {
                         if ui.button(icons::PLAY).on_hover_text("Bind and play from its start").clicked() {
                             actions.push(Action::Play(id));
                         }
+                        if ui
+                            .selectable_label(take.filters.smooth, ph::WAVE_SINE)
+                            .on_hover_text("Smooth: zero-phase Butterworth low-pass filter (non-destructive)")
+                            .clicked()
+                        {
+                            let mut f = take.filters;
+                            f.smooth = !f.smooth;
+                            actions.push(Action::SetFilters(id, f));
+                        }
+                        if ui
+                            .selectable_label(take.filters.simplify, ph::LINE_SEGMENTS)
+                            .on_hover_text("Simplify: reduce curve keys within error tolerance (non-destructive)")
+                            .clicked()
+                        {
+                            let mut f = take.filters;
+                            f.simplify = !f.simplify;
+                            actions.push(Action::SetFilters(id, f));
+                        }
+                        if ui
+                            .selectable_label(take.filters.euler, ph::ARROWS_CLOCKWISE)
+                            .on_hover_text("Euler filter: keep rotation angles continuous across ±180° flips and turns (non-destructive)")
+                            .clicked()
+                        {
+                            let mut f = take.filters;
+                            f.euler = !f.euler;
+                            actions.push(Action::SetFilters(id, f));
+                        }
                         match &mut self.takes_view.rename {
                             Some((editing, name)) if *editing == id => {
                                 let edit = ui.add(egui::TextEdit::singleline(name).desired_width(130.0));
@@ -384,11 +409,83 @@ impl App {
                 }
                 ui.end_row();
 
-                // The timeline's curve effects, on the same parameters: each makes a new take.
-                if let Some(effect) =
-                    crate::world_ui::effect_rows(ui, &mut self.world_ui.effects, true)
-                {
-                    actions.push(Action::Derive(id, Derive::Effect(effect)));
+                let mut f = take.filters;
+                if f.smooth {
+                    ui.label("Smooth");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut f.cutoff)
+                                .range(0.01..=100.0)
+                                .speed(0.05)
+                                .prefix("cutoff ")
+                                .suffix(" Hz"),
+                        )
+                        .on_hover_text(
+                            "Motion faster than this many cycles per second is removed, slower kept",
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut f.order)
+                                .range(2..=16)
+                                .speed(0.1)
+                                .prefix("order "),
+                        )
+                        .on_hover_text("Filter poles: higher cuts sharper at the cutoff");
+                        ui.add(
+                            egui::DragValue::new(&mut f.blend)
+                                .range(0.0..=60.0)
+                                .speed(0.01)
+                                .prefix("blend ")
+                                .suffix(" s"),
+                        )
+                        .on_hover_text("Eases from the original at each end into the filtered motion");
+                    });
+                    f.order += f.order % 2;
+                    if ui
+                        .button("Reset")
+                        .on_hover_text("Reset Smooth parameters to defaults")
+                        .clicked()
+                    {
+                        let d = TakeFilters::default();
+                        f.cutoff = d.cutoff;
+                        f.order = d.order;
+                        f.blend = d.blend;
+                    }
+                    ui.end_row();
+                }
+
+                if f.simplify {
+                    ui.label("Simplify");
+                    ui.horizontal(|ui| {
+                        ui.add(
+                            egui::DragValue::new(&mut f.tolerance)
+                                .range(0.0..=1.0e3)
+                                .speed(0.001)
+                                .prefix("error "),
+                        )
+                        .on_hover_text("Largest allowed change of the curve, in the channel's units");
+                        ui.add(
+                            egui::DragValue::new(&mut f.max_keys)
+                                .range(0..=100_000)
+                                .prefix("max keys "),
+                        )
+                        .on_hover_text(
+                            "0: no limit. Otherwise the smallest error that fits in this many keys",
+                        );
+                    });
+                    if ui
+                        .button("Reset")
+                        .on_hover_text("Reset Simplify parameters to defaults")
+                        .clicked()
+                    {
+                        let d = TakeFilters::default();
+                        f.tolerance = d.tolerance;
+                        f.max_keys = d.max_keys;
+                    }
+                    ui.end_row();
+                }
+
+                if f != take.filters {
+                    actions.push(Action::SetFilters(id, f));
                 }
 
                 ui.label("");
@@ -527,9 +624,6 @@ impl App {
                     Derive::Speed(speed) => take
                         .retimed(speed)
                         .map(|t| vec![named(t, &format!("x{speed}"))]),
-                    Derive::Effect(effect) => take
-                        .effected(&effect)
-                        .map(|t| vec![named(t, &effect.label().to_lowercase())]),
                     Derive::Split => take
                         .split(playhead, fps)
                         .map(|(a, b)| vec![named(a, "A"), named(b, "B")]),
@@ -542,6 +636,10 @@ impl App {
             }
             Action::SetTiming(id, timing) => {
                 self.world.edit_take(id, |t| t.timing = timing);
+                Ok(())
+            }
+            Action::SetFilters(id, filters) => {
+                self.world.edit_take(id, |t| t.filters = filters);
                 Ok(())
             }
             Action::Bake(id) => {
