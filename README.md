@@ -22,7 +22,8 @@ Documentation: [render and quality profiles](docs/render-profiles.md), [workspac
 - **World objects:** Playa UUID nodes for fractals, cameras, directional lights, HDR environments,
   groups, masks and materials, with parent transforms, visibility, layer spans, lock and solo.
   A **Mask** node (sphere, box or cells, optionally inverted) sections the fractals of its
-  parent's subtree, or of the whole scene at the root: a movable bounding sphere or box.
+  parent's subtree, or of the whole scene at the root: a movable bounding sphere or box. Sphere
+  and box masks can repeat as a linear or radial **Array** (up to 32 copies in one kernel union).
   Multiple fractals take part in primary rays, shadows and reflections; multiple directional
   lights and one active HDR/EXR environment illuminate the same world.
 - **Object animation:** an Outliner, Attribute Editor and AE-style Timeline share selection and
@@ -33,10 +34,12 @@ Documentation: [render and quality profiles](docs/render-profiles.md), [workspac
 - **Viewport:** click to select a fractal (one GPU ray) or a camera / light / mask / group wire
   (Shift adds or removes, Ctrl+click focuses the camera there); Q / W / E / R select, move,
   rotate and scale with the transform manipulator. Per render profile the viewport shows path
-  tracing, direct light or the bounds alone; ViewportSettings choose which kinds are shown and
-  which can be picked (Blender's filter), and whether their wires (extras) are drawn.
+  tracing, direct shading (`world_direct`) or the bounds alone (viewport-only; refused on Output);
+  ViewportSettings choose which kinds are shown and which can be picked (Blender's filter), and
+  whether their wires (extras) are drawn.
 - **Creating nodes:** Tab opens a Houdini-style Tab menu at the cursor (type to search: "e p"
-  finds Edit Poly-like names, "dm" DeepMerge-like ones; nested groups, All, Favorites, History);
+  finds Edit Poly-like names, "dm" DeepMerge-like ones; nested groups, All, Favorites, History,
+  with History, Favorites and usage counts saved in `settings.json`);
   the Outliner's + Add and right-click menus and the Timeline's layer menu show the same list
   (`egui-tab-menu`).
 - **Unidirectional path tracing:** sun-cone, sky and HDR next-event estimation, MIS with the

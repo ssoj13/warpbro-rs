@@ -30,6 +30,16 @@ pub struct PreviewAction {
     pub last: u32,
     pub mode: crate::preview::PreviewMode,
 }
+
+/// The Tab-key node creation menu's remembered history, favorites and usage counts
+/// (`egui_tab_menu::TabMenu`), saved in `settings.json`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AddMenuMemory {
+    pub history: Vec<WorldKind>,
+    pub favorites: Vec<WorldKind>,
+    pub usage: Vec<(WorldKind, u32)>,
+}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 struct PropertyFilter(u8);
 impl PropertyFilter {
@@ -788,6 +798,22 @@ impl WorldUi {
         self.playhead = frame;
         self.fraction = 0.0;
     }
+    /// Snapshot the Add menu's history, favorites and usage counts for `settings.json`.
+    pub fn add_menu_memory(&self) -> AddMenuMemory {
+        let mut usage = self.add_menu.usage();
+        usage.sort();
+        AddMenuMemory {
+            history: self.add_menu.history().to_vec(),
+            favorites: self.add_menu.favorites().to_vec(),
+            usage,
+        }
+    }
+    /// Restore the Add menu's history, favorites and usage counts from `settings.json`.
+    pub fn set_add_menu_memory(&mut self, memory: AddMenuMemory) {
+        self.add_menu.set_history(memory.history);
+        self.add_menu.set_favorites(memory.favorites);
+        self.add_menu.set_usage(memory.usage);
+    }
     pub fn reset(&mut self) {
         let attribute_metrics = self.attribute_metrics;
         let attribute_label_width = self.attribute_label_width;
@@ -795,8 +821,11 @@ impl WorldUi {
         let auto_key = self.auto_key;
         let new_key = self.new_key;
         let file_dialogs = std::mem::take(&mut self.file_dialogs);
+        self.add_menu.close();
+        let add_menu = std::mem::take(&mut self.add_menu);
         *self = Self::default();
         self.file_dialogs = file_dialogs;
+        self.add_menu = add_menu;
         self.attribute_metrics = attribute_metrics;
         self.attribute_label_width = attribute_label_width;
         self.timeline_outline_width = timeline_outline_width;

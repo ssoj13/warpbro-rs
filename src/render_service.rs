@@ -75,6 +75,8 @@ pub struct Frame {
     pub denoise_ms: f32,
     pub denoise_error: Option<String>,
     pub samples: u32,
+    /// Tiles still sampling / all tiles, after the last adaptive decision.
+    pub active_tiles: (usize, usize),
     /// Adaptive sampling found every tile converged before `samples` reached the target.
     pub converged: bool,
     pub last_ms: f32,
@@ -164,6 +166,7 @@ impl Frame {
             denoise_ms: target.denoise.last_ms,
             denoise_error: target.denoise.error.clone(),
             samples: target.samples,
+            active_tiles: target.active_tiles,
             converged: target.converged,
             last_ms: target.last_ms,
             last_spp: target.last_spp,
@@ -866,6 +869,7 @@ fn empty_presentation() -> Frame {
         denoise_ms: 0.0,
         denoise_error: None,
         samples: 0,
+        active_tiles: (0, 0),
         converged: false,
         last_ms: 0.0,
         last_spp: 0,
@@ -1968,6 +1972,7 @@ mod tests {
             denoise_ms: 0.0,
             denoise_error: None,
             samples: 1,
+            active_tiles: (0, 0),
             converged: false,
             last_ms: 1.0,
             last_spp: 1,

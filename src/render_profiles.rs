@@ -179,6 +179,18 @@ impl EffectiveRender {
         }
         Ok(())
     }
+
+    /// The `(samples, resolution_scale)` an export takes from the Output profile; refuses
+    /// [`Display::Bounds`], which only the viewport draws.
+    pub fn export_quality(&self) -> Result<(u32, f32), String> {
+        if self.display == Display::Bounds {
+            return Err(
+                "The Output profile shows Bounds: nothing to render; pick Path traced or Direct"
+                    .into(),
+            );
+        }
+        Ok((self.samples, self.resolution_scale))
+    }
 }
 /// The scene node kinds a viewport filters, each with the name of its attributes
 /// (`/viewport/show/<name>`, `/viewport/select/<name>`) and its label.

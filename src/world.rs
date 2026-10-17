@@ -84,7 +84,7 @@ pub enum View {
     Viewport,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum WorldKind {
     Fractal,
     Camera,
@@ -2152,7 +2152,7 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
     }
     Some(match path {
         "/render/display" => {
-            "What this profile shows of the fractals: path traced; Direct, one fast noise-free pass (key lights with soft shadows, ambient occlusion, the sky's soft light; no bounces, done after the largest square number of samples up to Samples, at most 16 x 16 = 256); or their bounds alone (nothing traced, drawn by the viewport only)."
+            "What this profile shows of the fractals: path traced; Direct, one fast noise-free pass (key lights with soft shadows, ambient occlusion, the sky's soft light; no bounces, done after the largest square number of samples up to Samples, at most 16 x 16 = 256); or their bounds alone (nothing traced, drawn by the viewport only; refused on the Output profile)."
         }
         "/render/direct/shadow_strength" => {
             "Direct: how dark a light's shadow gets, 0 (no shadow) to 1 (black)."

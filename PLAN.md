@@ -23,6 +23,24 @@ egui-widgets-rs. Topic docs (how things work) live in docs/; this file only trac
   checked-in or operator files once with a throwaway script (and a backup).
 - References: D:\Projects\vfx.ref.
 
+## State (2026-10-16)
+
+- **Direct display (`world_direct`)**: fractal-rs `74147e2` adds `world_direct` with per-object
+  material shading and all directional lights; WarpBro exposes `DirectShading` (`/render/direct/*`)
+  on every `RenderSettings` node, dispatches `world_direct` / `direct_<family>` on a deterministic
+  square grid up to 16×16 (`DirectShading::MAX_GRID`), and disables adaptive sampling under Direct.
+- **Bounds refused on Output**: `EffectiveRender::export_quality` is the single validator shared by
+  the Render / Encode UI and `ExportController::start`, refusing `Display::Bounds` on the `Output`
+  profile.
+- **Tab menu memory in settings**: `WorldUi` persists `History`, `Favorites`, and sorted `Usage`
+  in `Settings::add_menu` (`settings.json`) and keeps them across `WorldUi::reset`.
+- **Status bar adaptive sampling**: `Frame` and `FrameMetadata` carry `active_tiles: (usize, usize)`,
+  and `sample_status_ui` displays converged tile percentage and tooltip details in both status bar
+  layouts.
+- **Explicit queue-send handling**: `App::browser` only removes a deleted bookmark after
+  `io::Command::Delete` succeeds (`Status::Error` on failure), and `export.rs` handles disconnected
+  command/event channels explicitly according to cancellation state.
+
 ## State (2026-10-13)
 
 - **Animatable formula parameters** (branch `mandelbulb-params`, fractal-rs ABI 5): Julia mix
@@ -43,7 +61,7 @@ egui-widgets-rs. Topic docs (how things work) live in docs/; this file only trac
   `snapshot_with_render_profile(.., View)` says Output or Viewport. Extras in `overlay.rs`.
 - **Display modes** per render profile (`/render/display` PathTraced / Direct / Bounds,
   `/render/thinning` = a Cells mask): `EffectiveRender::show`.
-- **Masks** (Sphere / Box / Cells) are nodes; fractal-rs ABI 4.
+- **Masks** (Sphere / Box / Cells) are nodes; fractal-rs ABI 4 (and Mask Array in ABI 6).
 - Scene identity: templates, presets and bookmarks load as new documents (`Load::New`), Save As
   renews the UUID. File > New / Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S.
 - Own git deps are bumped by editing the lock's rev (a plain `cargo update -p` collapses
@@ -97,8 +115,8 @@ egui-widgets-rs. Topic docs (how things work) live in docs/; this file only trac
    look at the overlays, the take band and the Bounds display on screen; the 1-ULP mismatch of
    `cuda_specialized_world_materials` (pixel 643, predates the masks).
    Open requests: refresh the gallery and every README screenshot with environments and better
-   scenes (the operator may provide scenes / HDRIs); save the Tab menu's History, favorites and
-   usage in settings; check the flight look feel on screen (sensitivity, smoothing defaults).
+   scenes (the operator may provide scenes / HDRIs); check the flight look feel on screen
+   (sensitivity, smoothing defaults).
 
 1. **Register spills under `#[launch_bounds(128)]`.** Now visible as build warnings (ptxas
    reports per architecture; the driver JIT did the same silently): 13 kernels spill, e.g.
@@ -111,8 +129,8 @@ egui-widgets-rs. Topic docs (how things work) live in docs/; this file only trac
 4. **Render settings phases**: OutputSettings resize / crop and a render queue held in the
    document (Playa Output Module parity); Viewer / Output nodes; external catalog of settings
    subgraphs (export / import with explicit membership and UUID remap); quality adaptation
-   within explicit bounds (a profile now fixes samples and resolution scale); WorldDirect
-   (shared world geometry, transforms, HDR light, then frame / input latency numbers).
+   within explicit bounds (a profile now fixes samples and resolution scale); Direct latency
+   numbers.
 5. **Rough glass energy** (render-rs standard-surface-bsdf): no multiple-scattering compensation
    for dielectric transmission (furnace 0.81-0.93 inside at roughness 0.5, not re-verified). Plan:
    furnace grid baseline -> references (Turquin 2019, Cycles multiscatter GGX glass, OpenPBR) ->
@@ -128,11 +146,6 @@ egui-widgets-rs. Topic docs (how things work) live in docs/; this file only trac
    colour GPU tests and pass alone; `vulkan_video()` serializes only within export.rs. Find the
    conflicting GPU use. Related flake: `cuda_export_coordinator_samples_animation_and_writes_each_frame_once`
    ("autonomous export timed out").
-10. Discarded sends outside io_service (io_service now logs through `deliver`): `app.rs`
-    `let _ = self.io.send(Command::Delete(..))` loses the error when the IO queue is full (a real
-    loss: report it); `denoise.rs` result and six `export.rs` writer events (`Written`,
-    `Finished`, `Cancelled`, `Failed`) - classify each as "receiver gone after cancel" (expected)
-    or a lost result, and handle it explicitly.
 11. Six soft slider ranges were picked without measurement (aperture, focus, orbit speed, thin film,
     sun angle, hit epsilon) - operator to check.
 12. **Convergence**, each step measured with `--world-bench` + `tools/convergence.py`: firefly clamp
@@ -140,7 +153,6 @@ egui-widgets-rs. Topic docs (how things work) live in docs/; this file only trac
     loss); Russian roulette from AP1 luminance with a minimum survival probability and start depth
     2-3 (gpu.rs still uses `max3(throughput)` from bounce 1); then profile secondary-ray marching
     before any path guiding / light cache.
-13. Viewport status bar: adaptive sampling progress (active tiles / converged %).
 14. ACEScg golden check: a fixed grey scene under a white sky before (b4fd7a5^) and after must match
     within noise; record the numbers in CHANGELOG.
 15. **Native verification pass** (tests cover logic only): narrow widths and 100/150% scale, layer

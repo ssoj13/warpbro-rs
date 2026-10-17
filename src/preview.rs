@@ -416,6 +416,7 @@ impl PreviewController {
 struct FrameMetadata {
     light_kind: crate::color::DisplayLight,
     samples: u32,
+    active_tiles: (usize, usize),
     converged: bool,
     last_ms: f32,
     last_spp: u32,
@@ -530,6 +531,7 @@ impl PreviewCache {
         let meta = FrameMetadata {
             light_kind: frame.light_kind,
             samples: frame.samples,
+            active_tiles: frame.active_tiles,
             converged: frame.converged,
             last_ms: frame.last_ms,
             last_spp: frame.last_spp,
@@ -636,6 +638,7 @@ impl PreviewCache {
         frame.denoise_ms = meta.denoise_ms;
         frame.denoise_error.clone_from(&meta.denoise_error);
         frame.samples = meta.samples;
+        frame.active_tiles = meta.active_tiles;
         frame.converged = meta.converged;
         frame.last_ms = meta.last_ms;
         frame.last_spp = meta.last_spp;
@@ -689,6 +692,7 @@ mod tests {
             denoise_ms: 0.5,
             denoise_error: None,
             samples: 8,
+            active_tiles: (0, 0),
             converged: false,
             last_ms: 3.0,
             last_spp: 2,

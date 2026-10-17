@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.0 — 2026-10-16
+
+- **Direct display (`world_direct`):** `/render/display = Direct` now dispatches fractal-rs `world_direct` (and specialized `direct_<family>` on single-object scenes) instead of path tracing with 0 bounces: every world object is shaded with its own material and all directional lights plus SH sky irradiance and HDRI mips in one deterministic pass over a square stratum grid up to 16×16 (`DirectShading::MAX_GRID`, largest square $\le$ `Samples`), with adaptive sampling off and Direct-only profile controls under `/render/direct/*` (`ao_strength`, `ao_samples`, `shadows`, `shadow_softness`, `specular`, `spec_roughness`, `env_reflections`, `fresnel`).
+- **Bounds display on Output refused:** `EffectiveRender::export_quality` refuses `Display::Bounds` on the `Output` profile in both the Render / Encode form and `ExportController::start` (`The Output profile shows Bounds: nothing to render; pick Path traced or Direct`), since Bounds clears traced geometry and draws wire cubes only in the viewport.
+- **OutputSettings graph node and Profile / Template catalog:** Render / Encode binds both `Output` (`RenderSettings`) and `Output file` (`OutputSettings`) with Profile / Template catalogs and Undoable `/output/*` edits, backed by `video-io` (`native` / `cli`) and `ffmpeg-rs` (`hvc1` tag preserved).
+- **Tab menu memory in `settings.json`:** `WorldUi` persists the Add menu's `History`, `Favorites`, and per-kind `Usage` counts in `Settings::add_menu`, preserving them across restarts and `File > New` / scene loads.
+- **Adaptive sampling progress in the status bar:** when adaptive sampling is active on a multi-tile frame, the status bar reports converged tile percentage alongside sample counts (`50% tiles`) and shows active / total tiles plus threshold in the hover tooltip.
+- **Queue-send error handling:** bookmark deletion in the browser only removes the entry when `io::Command::Delete` is queued (`Status::Error` on a full queue), and export coordinator / writer channels distinguish expected post-cancel disconnects from unexpected dropped terminal events.
+
 ## 0.1.0 — 2026-10-14
 
 - Panels use the egui-dock-layout engine and export runs through video-io. Layouts saved by the previous dock are not read: the app reports it and starts from the default layout.

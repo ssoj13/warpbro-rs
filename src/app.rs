@@ -312,6 +312,53 @@ impl Monitor {
 /// The colour of every status warning (preview, OIDN failure, out of steps).
 const WARNING: Color32 = Color32::from_rgb(230, 180, 60);
 
+/// The status bar's sample progress and adaptive tile convergence indicator, shared by the
+/// resizable and fixed status bars.
+fn sample_status_ui(
+    ui: &mut egui::Ui,
+    frame: &Frame,
+    target_spp: u32,
+    preview: bool,
+    bar_width: f32,
+) {
+    if preview {
+        ui.colored_label(WARNING, "preview");
+        return;
+    }
+    let (active, total) = frame.active_tiles;
+    let hover = if frame.converged && total > 0 {
+        Some(format!(
+            "Adaptive sampling: all {total} tiles converged at {} / {target_spp} spp.",
+            frame.samples
+        ))
+    } else if total > 0 && active < total {
+        let converged_pct = ((total - active) * 100) / total;
+        Some(format!(
+            "Adaptive sampling: {active} of {total} tiles still sampling ({converged_pct}% converged)."
+        ))
+    } else {
+        None
+    };
+    let label = ui.label(format!("{} / {} spp", frame.samples, target_spp));
+    let fraction = if frame.converged {
+        1.0
+    } else {
+        frame.samples as f32 / target_spp.max(1) as f32
+    };
+    let mut bar = egui::ProgressBar::new(fraction).desired_width(bar_width.max(0.0));
+    if frame.converged {
+        bar = bar.text("converged");
+    } else if total > 0 && active < total {
+        let converged_pct = ((total - active) * 100) / total;
+        bar = bar.text(format!("{converged_pct}% converged"));
+    }
+    let bar_resp = ui.add(bar);
+    if let Some(hover) = &hover {
+        label.on_hover_text(hover);
+        bar_resp.on_hover_text(hover);
+    }
+}
+
 /// The status warning for samples with an unresolved march (`gpu::Outcome`): a nonzero share
 /// means holes or missing light the step budget (Render > March steps) is too small to close.
 fn march_limit_label(ui: &mut egui::Ui, unresolved: f32) {
@@ -521,6 +568,7 @@ struct Settings {
     new_key: curves::Tan,
     timeline_outline_width: f32,
     file_dialogs: crate::file_dialogs::History,
+    add_menu: crate::world_ui::AddMenuMemory,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -546,6 +594,7 @@ impl Default for Settings {
             new_key: curves::Tan::Smooth,
             timeline_outline_width: 340.0,
             file_dialogs: Default::default(),
+            add_menu: Default::default(),
         }
     }
 }
@@ -774,6 +823,7 @@ impl App {
             self.world_ui.auto_key = settings.auto_key;
             self.world_ui.new_key = settings.new_key;
             self.world_ui.file_dialogs = settings.file_dialogs;
+            self.world_ui.set_add_menu_memory(settings.add_menu);
             if settings.timeline_outline_width.is_finite() {
                 self.world_ui.timeline_outline_width = settings.timeline_outline_width.max(80.0);
             }
@@ -1519,6 +1569,7 @@ impl App {
             && saved.auto_key == self.world_ui.auto_key
             && saved.new_key == self.world_ui.new_key
             && saved.file_dialogs == self.world_ui.file_dialogs
+            && saved.add_menu == self.world_ui.add_menu_memory()
             && saved.timeline_outline_width == self.world_ui.timeline_outline_width
             // Every field, so a new setting is saved without being listed here.
             && export == previous
@@ -1559,6 +1610,7 @@ impl App {
             auto_key: self.world_ui.auto_key,
             new_key: self.world_ui.new_key,
             file_dialogs: self.world_ui.file_dialogs.clone(),
+            add_menu: self.world_ui.add_menu_memory(),
             timeline_outline_width: self.world_ui.timeline_outline_width,
         };
         let json = serde_json::to_string_pretty(&settings).map_err(|error| error.to_string())?;
@@ -2926,16 +2978,16 @@ impl App {
     fn export_ui(&mut self, ui: &mut egui::Ui) {
         ui.heading("Render / Encode");
         let frame = f64::from(self.world_ui.playhead);
-        let quality = self.world.document.output_render_profile().and_then(|id| {
+        let effective = self.world.document.output_render_profile().and_then(|id| {
             self.world
                 .document
                 .effective_render(id, f64::from(self.export.settings.job.first))
         });
-        self.export.quality = quality
+        self.export.quality = effective
             .as_ref()
-            .ok()
-            .map(|effective| (effective.samples, effective.resolution_scale));
-        let quality_id = match &quality {
+            .map_err(Clone::clone)
+            .and_then(crate::render_profiles::EffectiveRender::export_quality);
+        let quality_id = match &effective {
             Ok(effective) => Some(effective.quality),
             Err(error) => {
                 self.status = error.clone();
@@ -3576,9 +3628,14 @@ impl App {
             self.load(s, Load::New);
         }
         if let Some(i) = delete {
-            let e = self.bookmarks.remove(i);
-            if let Some(p) = e.path {
-                let _ = self.io.send(crate::io_service::Command::Delete(p));
+            if let Some(p) = self.bookmarks[i].path.clone() {
+                if let Err(error) = self.io.send(crate::io_service::Command::Delete(p)) {
+                    self.status = error;
+                } else {
+                    self.bookmarks.remove(i);
+                }
+            } else {
+                self.bookmarks.remove(i);
             }
         }
     }
@@ -3676,17 +3733,13 @@ impl App {
                     }
                     3 => {
                         if let Some(frame) = frame {
-                            if preview {
-                                ui.colored_label(WARNING, "preview");
-                            } else {
-                                ui.label(format!("{} / {} spp", frame.samples, target_spp));
-                                ui.add(
-                                    egui::ProgressBar::new(
-                                        frame.samples as f32 / target_spp.max(1) as f32,
-                                    )
-                                    .desired_width((ui.available_width() - 4.0).max(0.0)),
-                                );
-                            }
+                            sample_status_ui(
+                                ui,
+                                frame,
+                                target_spp,
+                                preview,
+                                ui.available_width() - 4.0,
+                            );
                         }
                     }
                     4 => {
@@ -3740,15 +3793,7 @@ impl App {
             if let Some(t) = self.current() {
                 ui.label(format!("{}×{}", t.width, t.height));
                 ui.separator();
-                if self.showing_preview {
-                    ui.label(RichText::new("preview").color(WARNING));
-                } else {
-                    ui.label(format!("{} / {} spp", t.samples, self.target_spp));
-                    ui.add(
-                        egui::ProgressBar::new(t.samples as f32 / self.target_spp as f32)
-                            .desired_width(120.0),
-                    );
-                }
+                sample_status_ui(ui, t, self.target_spp, self.showing_preview, 120.0);
                 ui.separator();
                 ui.label(format!("{:.1} Msamples/s", t.msamples_per_s()));
                 ui.separator();
@@ -5249,6 +5294,7 @@ mod tests {
                 denoise_ms: 0.0,
                 denoise_error: None,
                 samples,
+                active_tiles: (0, 0),
                 converged: false,
                 last_ms: 0.0,
                 last_spp: 1,
@@ -6641,5 +6687,116 @@ mod tests {
         app.load(other, Load::Same);
         assert_eq!(app.camera_slots.slots[0], None);
         assert_eq!(app.camera_slots.slots[2], Some(theirs));
+    }
+
+    #[test]
+    fn output_profile_refuses_bounds_display_in_form_and_export_start() {
+        let _gpu_test = crate::test_gpu::lock();
+        let mut app = App::new();
+        let output = app.world.document.output_render_profile().unwrap();
+        app.world
+            .execute(crate::world::WorldCommand::SetAttribute {
+                id: output,
+                path: "/render/display".into(),
+                value: serde_json::json!("Bounds"),
+                frame: 0.0,
+            })
+            .unwrap();
+        let ctx = egui::Context::default();
+        let _ = ctx.run_ui(egui::RawInput::default(), |root| {
+            egui::CentralPanel::default().show(root, |ui| app.export_ui(ui));
+        });
+        let expected =
+            "The Output profile shows Bounds: nothing to render; pick Path traced or Direct";
+        assert_eq!(app.export.quality, Err(expected.to_string()));
+        let frozen = freeze_world_scene(&app.scene, &app.world.document);
+        assert_eq!(
+            app.export.start(&frozen, &app.renderer),
+            Err(expected.to_string())
+        );
+    }
+
+    #[test]
+    fn add_menu_memory_persists_in_settings_and_survives_scene_reset() {
+        let _gpu_test = crate::test_gpu::lock();
+        use crate::world::WorldKind;
+        let mut app = App::new();
+        app.changed_settings_json().unwrap();
+        let memory = crate::world_ui::AddMenuMemory {
+            history: vec![WorldKind::Mask, WorldKind::Fractal],
+            favorites: vec![WorldKind::Camera],
+            usage: vec![(WorldKind::Fractal, 4), (WorldKind::Mask, 2)],
+        };
+        app.world_ui.set_add_menu_memory(memory.clone());
+        let json = app.changed_settings_json().unwrap().unwrap();
+        let saved: Settings = serde_json::from_str(&json).unwrap();
+        assert_eq!(saved.add_menu, memory);
+        for _ in 0..8 {
+            assert!(app.changed_settings_json().unwrap().is_none());
+        }
+        app.new_scene();
+        assert_eq!(
+            app.world_ui.add_menu_memory(),
+            memory,
+            "new scene / WorldUi::reset must preserve the Tab menu memory"
+        );
+    }
+
+    #[test]
+    fn status_bar_reports_adaptive_tile_convergence() {
+        let _gpu_test = crate::test_gpu::lock();
+        let ctx = egui::Context::default();
+        let mut frame = Frame {
+            generation: 1,
+            preview: false,
+            width: 64,
+            height: 64,
+            pixels: vec![0; 64 * 64],
+            light: vec![[0.0; 4]; 64 * 64],
+            radiance: Vec::new(),
+            light_kind: crate::color::DisplayLight::Relative,
+            colour_error: None,
+            denoised_samples: 0,
+            denoise_ms: 0.0,
+            denoise_error: None,
+            samples: 12,
+            active_tiles: (32, 128),
+            converged: false,
+            last_ms: 1.0,
+            last_spp: 1,
+            unresolved: 0.0,
+            sdr_bytes: Arc::new(Vec::new()),
+            hdr_bytes: Arc::new(Vec::new()),
+        };
+        let texts = |frame: &Frame| {
+            let output = ctx.run_ui(egui::RawInput::default(), |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    ui.horizontal(|ui| sample_status_ui(ui, frame, 64, false, 120.0));
+                });
+            });
+            fn collect(shape: &egui::epaint::Shape, out: &mut Vec<String>) {
+                match shape {
+                    egui::epaint::Shape::Text(text) => out.push(text.galley.text().to_owned()),
+                    egui::epaint::Shape::Vec(shapes) => {
+                        for s in shapes {
+                            collect(s, out);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut out = Vec::new();
+            for s in &output.shapes {
+                collect(&s.shape, &mut out);
+            }
+            out
+        };
+        let partial = texts(&frame);
+        assert!(partial.iter().any(|t| t == "12 / 64 spp"), "{partial:?}");
+        assert!(partial.iter().any(|t| t == "75% converged"), "{partial:?}");
+        frame.active_tiles = (0, 128);
+        frame.converged = true;
+        let done = texts(&frame);
+        assert!(done.iter().any(|t| t == "converged"), "{done:?}");
     }
 }

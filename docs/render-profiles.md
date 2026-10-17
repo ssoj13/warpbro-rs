@@ -13,9 +13,9 @@ OutputSettings, их каталог (Profile / Template), маршрутизац
 
 | Вид узла | Собственные параметры | Связи |
 | --- | --- | --- |
-| `RenderSettings` | Метод `Fast / Full`, exposure, saturation, Reinhard, OIDN denoise | `/render/quality_id → QualitySettings` |
+| `RenderSettings` | Метод `Fast / Full`, режим отображения `PathTraced / Direct / Bounds` (`/render/display`), `/render/direct/*` (AO, тени, блики, отражения окружения, Fresnel), `/render/thinning`, exposure, saturation, Reinhard, OIDN denoise | `/render/quality_id → QualitySettings` |
 | `QualitySettings` | Samples, resolution scale, max steps, hit epsilon, step factor, max bounces, glass probes, adaptive sampling | Без обратной ссылки |
-| `ViewportSettings` | `Auto / Locked`, target FPS, settle delay, batch budget, pause, freeze | Moving, Still, Manual → RenderSettings |
+| `ViewportSettings` | `Auto / Locked`, target FPS, settle delay, batch budget, pause, freeze, видимость и выбираемость по видам объектов (`/viewport/show|select/<kind>`), `/viewport/extras` | Moving, Still, Manual → RenderSettings |
 | `OutputSettings` | Формат (EXR / PNG / Video), encoder, ширина и высота, QP / CRF, denoise at completion, PNG encoding, HDR peak, видео из PNG, override OCIO display / view | Без ссылок |
 
 Слоты графа `viewport_settings`, `output_render` и `output_settings` определяют текущий
@@ -137,9 +137,9 @@ resolution scale вычисляются из выбранного QualitySetting
 задания. Worker оценивает каждый кадр через snapshot_with_render_profile,
 сохраняя выбранный профиль при воспроизведении кэша.
 
-## Что означают Fast и Full
+## Что означают Fast, Full и режимы Display
 
-Оба метода используют существующий **World path tracer**.
+Методы **Fast** и **Full** используют **World path tracer**.
 
 **Fast** применяет приближённую модель `MaterialModel::Fast` к непрозрачным
 материалам вычисленного снимка сцены, включая дочерние объекты. Передающие
@@ -150,10 +150,12 @@ resolution scale вычисляются из выбранного QualitySetting
 в обоих методах определяются связанным QualitySettings. Fast — явный выбор
 приближения материалов, а не название отдельного world-raymarch renderer.
 
-Существующий OFX Direct использует контекст одного объекта, корневой материал,
-одно солнце и процедурное небо. Готового WorldDirect с мировыми transforms,
-HDR-окружением и несколькими объектами здесь нет. Он остаётся отдельным
-расширением общего world-контракта; переключатель Fast не объявляет его готовым.
+Поле `/render/display` выбирает режим отображения профиля:
+- **`PathTraced`** — полный трассировщик путей (Fast или Full).
+- **`Direct`** — ядро `world_direct` (или `direct_<family>` для одиночного объекта): один детерминированный проход по квадратной сетке страт до $16\times 16$ (`DirectShading::MAX_GRID`, наибольший квадрат $\le$ `Samples`), собственное затенение каждого объекта мира со всеми направленными источниками света, SH-облучением неба и мипами HDRI, параметры `/render/direct/*` (`ao_strength`, `ao_samples`, `shadows`, `shadow_softness`, `specular`, `spec_roughness`, `env_reflections`, `fresnel`), адаптивный сэмплинг отключён.
+- **`Bounds`** — очищает геометрию трассировщика (`EffectiveRender::show`) и рисует каркасные кубы границ во viewport (`overlay.rs`); в профиле `Output` этот режим запрещён (`EffectiveRender::export_quality`).
+
+Поле `/render/thinning` (`0..1`) разрежает фракталы маской ячеек (`Cells`).
 
 ## Output и Render / Encode
 
@@ -172,7 +174,8 @@ Auto / Locked, pause и freeze viewport не меняют выбранный в�
 Поля OutputSettings статичны, как `/viewport/*`: ключи и сохранённые
 animation/connections отклоняются (`render_profiles::static_path`). Документ
 проверяет тип и диапазон каждого поля; межполевые правила (чётный размер для
-HEVC, лимит 64 Мпикс) проверяются при старте экспорта и показываются формой,
+HEVC, лимит 64 Мпикс) и запрет `Display::Bounds` на профиле `Output`
+(`EffectiveRender::export_quality`) проверяются при старте экспорта и показываются формой,
 чтобы правка могла пройти через промежуточное состояние. Каталог Output
 (**Settings → Output file profiles and templates**) работает как render/quality:
 ЛКМ назначает профиль или создаёт независимую копию шаблона, ПКМ — Edit,

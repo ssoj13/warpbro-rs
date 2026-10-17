@@ -403,8 +403,8 @@ pub struct ExportController {
     /// The resolved settings of the last started export: where its files went.
     pub last: Option<ExportSettings>,
     /// The Output quality (samples, resolution scale) the host evaluated from the document
-    /// for the form's check; None when the Output render profile cannot be evaluated.
-    pub quality: Option<(u32, f32)>,
+    /// for the form's check, or why the Output render profile cannot be exported.
+    pub quality: Result<(u32, f32), String>,
 }
 #[derive(Clone, Default)]
 struct Progress {
@@ -448,7 +448,7 @@ impl Default for ExportController {
             next_id: 100,
             out_root: crate::out_root(),
             last: None,
-            quality: None,
+            quality: Err("The Output render profile cannot be evaluated".into()),
         }
     }
 }
@@ -513,11 +513,13 @@ impl ExportController {
             .as_deref()
             .ok_or("Export needs the frozen world document")?;
         settings.output = document.output_settings()?;
-        let effective = document.effective_render(
-            document.output_render_profile()?,
-            f64::from(settings.job.first),
-        )?;
-        settings.apply_quality(effective.samples, effective.resolution_scale);
+        let (samples, scale) = document
+            .effective_render(
+                document.output_render_profile()?,
+                f64::from(settings.job.first),
+            )?
+            .export_quality()?;
+        settings.apply_quality(samples, scale);
         // Validate against the output root first so a rejected export leaves no empty folder.
         settings.resolve(&self.out_root);
         settings.validate()?;
@@ -657,9 +659,9 @@ impl ExportController {
                     ui.label(format!(".{}", self.settings.suffix()));
                 }); ui.end_row();
                 ui.label("Resolution"); ui.horizontal(|ui| { ui.add(egui::DragValue::new(&mut self.settings.output.width).range(1..=MAX_AXIS)); ui.label("×"); ui.add(egui::DragValue::new(&mut self.settings.output.height).range(1..=MAX_AXIS)); }); ui.end_row();
-                ui.label("Samples / frame"); ui.label(match self.quality {
-                    Some((samples, scale)) => format!("{samples} · Output Quality · {:.0}% resolution", scale * 100.0),
-                    None => "Output Quality unavailable".into(),
+                ui.label("Samples / frame"); ui.label(match &self.quality {
+                    Ok((samples, scale)) => format!("{samples} · Output Quality · {:.0}% resolution", scale * 100.0),
+                    Err(_) => "Output Quality unavailable".into(),
                 }); ui.end_row();
                 ui.label("Denoise"); ui.checkbox(&mut self.settings.output.denoise_at_completion, "Once at completion").on_hover_text("Run OIDN once after all samples of each exported frame; override Output profile denoise cadence."); ui.end_row();
                 ui.label("Frame range"); ui.horizontal(|ui| {
@@ -729,7 +731,7 @@ impl ExportController {
             ui.weak(format!("Written to {}", self.out_root.join("<date_time>").display()));
             ui.weak("Animation is sampled at each frame. The scene and keys are frozen when export starts.");
             // The same quality, scaling and checks a start applies (`start`).
-            let validation = self.quality.ok_or_else(|| "The Output render profile cannot be evaluated".to_string()).and_then(|(samples, scale)| {
+            let validation = self.quality.clone().and_then(|(samples, scale)| {
                 let mut preview = self.settings.clone();
                 preview.apply_quality(samples, scale);
                 preview.resolve(&self.out_root);
@@ -1012,7 +1014,9 @@ fn coordinate_export(
         // Cancel is a graceful end of input: drain complete queued frames and
         // flush delayed encoder packets before publishing the partial movie.
         // This wait runs on the coordinator, never on the GUI thread.
-        let _ = port.try_command(Command::CancelExport);
+        if let Err(error) = port.try_command(Command::CancelExport) {
+            log::warn!("export cancel not sent to renderer: {error}");
+        }
         progress.lock().unwrap_or_else(|e| e.into_inner()).status =
             "Finishing export; saving completed frames…".into();
         writer.frames.take();
@@ -1034,7 +1038,9 @@ fn coordinate_export(
         }
     } else if result.is_err() {
         writer.cancel.store(true, Ordering::Release);
-        let _ = port.try_command(Command::CancelExport);
+        if let Err(error) = port.try_command(Command::CancelExport) {
+            log::warn!("export cancel not sent to renderer: {error}");
+        }
         loop {
             match writer.events.recv_timeout(Duration::from_millis(20)) {
                 Ok(WriteEvent::Cancelled)
@@ -1138,6 +1144,11 @@ impl ExportWriter {
         std::thread::Builder::new()
             .name("frac-export-writer".into())
             .spawn(move || {
+                let send_terminal = |event: WriteEvent| {
+                    if tx.send(event).is_err() && !stop.load(Ordering::Acquire) {
+                        log::warn!("export writer terminal event dropped before cancellation");
+                    }
+                };
                 let result = (|| -> Result<(), String> {
                     let mut hevc = if settings.output.format == ExportFormat::Hevc {
                         Some(HevcSink::new(&settings)?)
@@ -1147,7 +1158,7 @@ impl ExportWriter {
                     let mut levels: Option<HdrLevels> = None;
                     loop {
                         if stop.load(Ordering::Acquire) {
-                            let _ = tx.send(WriteEvent::Cancelled);
+                            send_terminal(WriteEvent::Cancelled);
                             return Ok(());
                         }
                         let (number, frame) = match rx.recv_timeout(Duration::from_millis(30)) {
@@ -1157,7 +1168,7 @@ impl ExportWriter {
                                 if let Some(sink) = hevc {
                                     sink.finish(&stop)?;
                                 }
-                                let _ = tx.send(WriteEvent::Finished(levels));
+                                send_terminal(WriteEvent::Finished(levels));
                                 return Ok(());
                             }
                         };
@@ -1194,22 +1205,29 @@ impl ExportWriter {
                                 }
                             }
                         }
-                        let _ = tx.send(WriteEvent::Written(number));
+                        if tx.send(WriteEvent::Written(number)).is_err() {
+                            if stop.load(Ordering::Acquire) {
+                                return Ok(());
+                            }
+                            return Err(
+                                "Export coordinator closed before frame acknowledgement".into()
+                            );
+                        }
                         if number == settings.job.last {
                             if let Some(sink) = hevc {
                                 sink.finish(&stop)?;
                             }
                             if stop.load(Ordering::Acquire) {
-                                let _ = tx.send(WriteEvent::Cancelled);
+                                send_terminal(WriteEvent::Cancelled);
                             } else {
-                                let _ = tx.send(WriteEvent::Finished(levels));
+                                send_terminal(WriteEvent::Finished(levels));
                             }
                             return Ok(());
                         }
                     }
                 })();
                 if let Err(error) = result {
-                    let _ = tx.send(WriteEvent::Failed(error));
+                    send_terminal(WriteEvent::Failed(error));
                 }
             })
             .map_err(|e| e.to_string())?;
@@ -1399,6 +1417,7 @@ mod tests {
             denoise_ms: 0.0,
             denoise_error: None,
             samples: 4,
+            active_tiles: (0, 0),
             converged: false,
             last_ms: 1.,
             last_spp: 4,

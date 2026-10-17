@@ -42,7 +42,8 @@ Global shortcuts resolve first, then the active panel's bindings. Text and numer
 
 | Scope    | Input                        | Action                                                |
 | -------- | ---------------------------- | ----------------------------------------------------- |
-| Global   | Tab                          | Toggle panels                                         |
+| Global   | `` ` ``                      | Toggle panels (viewport only)                         |
+| Global   | Tab                          | Open the Add node menu at the cursor                  |
 | Global   | Ctrl/Cmd+Z; Ctrl/Cmd+Shift+Z | Undo; redo                                            |
 | Timeline | F                            | Fit layer spans into the visible time range           |
 | Viewport | F                            | Frame the fractal bounds                              |

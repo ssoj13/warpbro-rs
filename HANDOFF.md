@@ -1,4 +1,4 @@
-# HANDOFF (2026-10-13, ~00:00)
+# HANDOFF (2026-10-16)
 
 Direct display (2026-10-16): pushed; `cargo oxide test -- --release --locked -- direct` on the
 published pins: 7 passed, 0 failed (incl. cuda_direct_shades_each_world_object_with_its_material
@@ -8,12 +8,17 @@ render profile (`/render/direct`, Direct-only rows), `Scene::direct`, Direct ker
 render.rs, grid = largest square <= Samples, up to 16 x 16 (`DirectShading::MAX_GRID`),
 adaptive off under Direct. Operator templates converted (`*.json.bak3`). NEXT: run
 `cargo oxide test -- --release --locked -- direct`, then `display_modes`, then the full suite;
-look at a Direct render by eye. - [ ] Bounds on the Output profile (operator: decide later). `EffectiveRender::show` clears
-      the objects and only the viewport draws the cubes, so an export renders the sky alone,
-      silently. Proposed: `ExportController::start` refuses it with "The Output profile shows
-      Bounds: nothing to render; pick Path traced or Direct", and the `/render/display` hint
-      says so; viewport profiles keep Bounds. Alternative (a new feature): draw the bounds
-      into exported frames.
+look at a Direct render by eye.
+- [x] Bounds on the Output profile: `EffectiveRender::export_quality` is the single SSOT helper
+      used by both `ExportController::start` and `ExportController::ui`, refusing `Display::Bounds`
+      with `"The Output profile shows Bounds: nothing to render; pick Path traced or Direct"`, and
+      `/render/display` hint updated.
+- [x] Tab menu (`egui_tab_menu::TabMenu`) `History`, `Favorites` and sorted `Usage` persisted in
+      `Settings::add_menu` (`settings.json`) and preserved across `WorldUi::reset`.
+- [x] Viewport status bar adaptive sampling progress: `Frame::active_tiles` and
+      `FrameMetadata::active_tiles` wired through `sample_status_ui` (`% tiles` + tooltip).
+- [x] Discarded queue sends handled explicitly in `App::browser` (`Command::Delete`) and
+      `export.rs` (`coordinate_export`, `ExportWriter::spawn`).
 Release: v0.1.0 moved to 9f985dc without a backup (operator), tag CI run 38874497522.
 Original analysis: `Display::Direct` was only path tracing with
 `max_bounces = 0` (`EffectiveRender::apply_to`), so it looked and cost the same as PathTraced.
@@ -21,15 +26,15 @@ The operator means fractal-kernels' fast Direct body (feature `direct`, from OFX
 tracing, sky by SH irradiance and HDRI mips, one pass per pixel. It exists only per family for
 one object (`direct_<family>`, `Context { world: false }`); WarpBro renders documents with the
 `world*` kernels. Plan:
-- [ ] fractal-rs: `world_direct` kernel (`trace_pixel` as `world`, `DIRECT = true`); first check
+- [x] fractal-rs: `world_direct` kernel (`trace_pixel` as `world`, `DIRECT = true`); first check
       the Direct body honours `Context { world: true }` (object pick, masks, per-object
       materials / environment).
-- [ ] WarpBro Cargo.toml: enable `fractal-kernels/direct`.
-- [ ] render.rs: Direct picks `world_direct` (or `direct_<family>`); drop the
+- [x] WarpBro Cargo.toml: enable `fractal-kernels/direct`.
+- [x] render.rs: Direct picks `world_direct` (or `direct_<family>`); drop the
       `max_bounces = 0` stand-in so Direct has one meaning; check `fractal_env::pack` fills SH
       and mips. CUDA test: Direct differs from PathTraced, finite, 1 spp; rough timing.
-- [ ] Deterministic 1 spp: stop accumulating as OFX does (viewport and export).
-- [ ] clippy, full suite, commit both repos, lock rev by hand.
+- [x] Deterministic 1 spp: stop accumulating as OFX does (viewport and export).
+- [x] clippy, full suite, commit both repos, lock rev by hand.
 
 Pin bump (2026-10-16): egui-widgets-rs 9d46416, video-io-rs 8fa41ad, ffmpeg-rs 6b2eb09
 (was split 0a7ced9 / e5c7f22), playa 7e3e844. The new playa pulled fresh mains of oiio-rs
