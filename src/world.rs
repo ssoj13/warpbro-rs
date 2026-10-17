@@ -4220,6 +4220,9 @@ impl WorldDocument {
             if path.starts_with("/_navigation/") {
                 continue;
             }
+            if take_kind(kind).is_none() && path.starts_with("/transform/") {
+                continue;
+            }
             if kind == WorldKind::Fractal
                 && path.starts_with("/render/")
                 && path != "/render/iterations"
@@ -4370,7 +4373,15 @@ impl WorldDocument {
                 });
             }
         }
-        out.sort_by(|a, b| a.path.cmp(&b.path));
+        out.sort_by(|a, b| {
+            let base_a = attribute_base_path(&a.path);
+            let base_b = attribute_base_path(&b.path);
+            attribute_order(base_a)
+                .cmp(&attribute_order(base_b))
+                .then_with(|| base_a.cmp(base_b))
+                .then_with(|| a.component.cmp(&b.component))
+                .then_with(|| a.path.cmp(&b.path))
+        });
         Ok(out)
     }
     fn is_discrete(&self, id: NodeId, path: &str) -> Result<bool, String> {
@@ -6137,5 +6148,194 @@ impl WorldDocument {
                 }
             }
         }
+    }
+}
+
+fn attribute_base_path(path: &str) -> &str {
+    match path.rsplit_once('/') {
+        Some((parent, last)) if last.parse::<usize>().is_ok() => parent,
+        _ => path,
+    }
+}
+
+fn attribute_order(path: &str) -> u16 {
+    match path {
+        // Quality: sampling & adaptive first, then ray marching
+        "/quality/samples" => 10,
+        "/quality/resolution_scale" => 11,
+        "/quality/max_bounces" => 12,
+        "/quality/adaptive/enabled" => 20,
+        "/quality/adaptive/min_samples" => 21,
+        "/quality/adaptive/noise_threshold" => 22,
+        "/quality/max_steps" => 30,
+        "/quality/step_factor" => 31,
+        "/quality/hit_epsilon" => 32,
+        "/quality/glass_probes" => 33,
+
+        // Render: display/method/quality link & denoise first, then look/color, then direct lighting
+        "/render/display" => 10,
+        "/render/method" => 11,
+        "/render/quality_id" => 12,
+        "/render/denoise/enabled" => 20,
+        "/render/denoise/quality" => 21,
+        "/render/denoise/mode" => 22,
+        "/render/denoise/interval" => 23,
+        "/render/exposure_stops" => 30,
+        "/render/saturation" => 31,
+        "/render/reinhard" => 32,
+        "/render/thinning" => 40,
+        "/render/direct/shadow_strength" => 50,
+        "/render/direct/shadow_steps" => 51,
+        "/render/direct/ao_strength" => 52,
+        "/render/direct/ao_steps" => 53,
+        "/render/direct/ao_radius" => 54,
+
+        // Viewport: mode & profile references first, then pause/freeze, pacing, overlays
+        "/viewport/mode" => 10,
+        "/viewport/moving_id" => 11,
+        "/viewport/still_id" => 12,
+        "/viewport/manual_id" => 13,
+        "/viewport/paused" => 20,
+        "/viewport/frozen" => 21,
+        "/viewport/target_fps" => 30,
+        "/viewport/settle_delay_ms" => 31,
+        "/viewport/batch_budget_ms" => 32,
+        "/viewport/extras" => 40,
+        p if p.starts_with("/viewport/show/") => 50,
+        p if p.starts_with("/viewport/select/") => 60,
+
+        // Output: format, dimensions & final denoise first, then encoding & color management
+        "/output/format" => 10,
+        "/output/width" => 11,
+        "/output/height" => 12,
+        "/output/denoise_at_completion" => 13,
+        "/output/encoder" => 20,
+        "/output/qp" => 21,
+        "/output/png" => 30,
+        "/output/png_peak_nits" => 31,
+        "/output/png_video" => 32,
+        "/output/output_display" => 40,
+        "/output/output_view" => 41,
+
+        // Fractal: formula & iterations first, then formula parameters, Julia, inversion, coloring
+        "/formula" => 10,
+        "/render/iterations" => 11,
+        "/formula/Hybrid/steps" => 12,
+        p if p.starts_with("/formula/") => 20,
+        "/julia_mix" => 30,
+        "/julia" => 31,
+        "/orbit_offset" => 32,
+        "/inversion_strength" => 40,
+        "/inversion_radius" => 41,
+        "/inversion_center" => 42,
+        "/coloring" => 50,
+        "/palette" => 51,
+        "/trap_scale" => 52,
+        "/trap_point" => 53,
+        "/trap_axis" => 54,
+
+        // Material: assignment/preset/model & base/roughness/metalness first, then transmission, emission, coat, sheen, thin film, facing
+        "/material_id" => 5,
+        "/material/preset" => 6,
+        "/material/model" => 10,
+        "/material/color_source" => 11,
+        "/material/base_color" => 12,
+        "/material/base" => 13,
+        "/material/base_tint" => 14,
+        "/material/metalness" => 15,
+        "/material/specular_roughness" => 16,
+        "/material/specular_ior" => 17,
+        "/material/specular" => 18,
+        "/material/specular_color" => 19,
+        "/material/diffuse_roughness" => 20,
+        "/material/transmission" => 30,
+        "/material/transmission_color" => 31,
+        "/material/transmission_depth" => 32,
+        "/material/transmission_extra_roughness" => 33,
+        "/material/emission" => 40,
+        "/material/emission_color" => 41,
+        "/material/coat" => 50,
+        "/material/coat_color" => 51,
+        "/material/coat_roughness" => 52,
+        "/material/coat_ior" => 53,
+        "/material/coat_affect_color" => 54,
+        "/material/coat_affect_roughness" => 55,
+        "/material/specular_anisotropy" => 60,
+        "/material/specular_rotation" => 61,
+        "/material/sheen" => 70,
+        "/material/sheen_color" => 71,
+        "/material/sheen_roughness" => 72,
+        "/material/thin_film_thickness" => 80,
+        "/material/thin_film_ior" => 81,
+        "/material/facing" => 90,
+        "/material/facing/color" => 91,
+        "/material/facing/roughness" => 92,
+        "/material/facing/metallic" => 93,
+        "/material/facing/exponent" => 94,
+
+        // Camera: framing/pose first, then depth of field, then orbit animation
+        "/camera/fov_y_degrees" => 10,
+        "/camera/distance" => 11,
+        "/camera/target" => 12,
+        "/camera/yaw_degrees" => 13,
+        "/camera/pitch_degrees" => 14,
+        "/camera/roll_degrees" => 15,
+        "/camera/free_flight" => 16,
+        "/camera/f_number" => 20,
+        "/camera/focus_distance" => 21,
+        "/camera/sensor_height" => 22,
+        "/camera/orbit_speed_degrees" => 30,
+        "/camera/orbit_phase_degrees" => 31,
+
+        // Environment & Light: HDRI first, then sun, then sky
+        "/environment/enabled" => 10,
+        "/environment/path" => 11,
+        "/environment/intensity" => 12,
+        "/environment/rotation_degrees" => 13,
+        "/lighting/sun_intensity" => 20,
+        "/lighting/sun_color" => 21,
+        "/lighting/sun_azimuth" => 22,
+        "/lighting/sun_elevation" => 23,
+        "/lighting/sun_angle" => 24,
+        "/lighting/sun_disc" => 25,
+        "/lighting/sky_intensity" => 30,
+        "/lighting/sky_horizon" => 31,
+        "/lighting/sky_zenith" => 32,
+        "/lighting/background" => 33,
+
+        // Mask & Array
+        "/mask/shape" => 10,
+        "/mask/size" => 11,
+        "/mask/invert" => 12,
+        "/mask/density" => 13,
+        "/mask/seed" => 14,
+        "/mask/array/kind" => 20,
+        "/mask/array/count" => 21,
+        "/mask/array/offset" => 22,
+        "/mask/array/radius" => 23,
+        "/mask/array/axis" => 24,
+        "/mask/array/sweep_degrees" => 25,
+        "/mask/array/align" => 26,
+
+        // Transform: TRS + Pivot
+        "/transform/position" => 10,
+        "/transform/rotation_degrees" => 11,
+        "/transform/rotation" => 12,
+        "/transform/scale" => 13,
+        "/transform/pivot" => 14,
+
+        // Custom / Layer metadata: Take clip & warp, then layer flags, then span, then custom attributes
+        TAKE_CLIP => 10,
+        TAKE_OFFSET => 11,
+        TAKE_SPEED => 12,
+        "/visible" => 20,
+        "/solo" => 21,
+        "/locked" => 22,
+        "/shy" => 23,
+        "/start" => 30,
+        "/end" => 31,
+        p if p.starts_with("/custom/") => 40,
+
+        _ => 500,
     }
 }

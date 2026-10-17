@@ -577,6 +577,9 @@ pub(crate) fn section_color(group: &str) -> Color32 {
     }
 }
 fn category(path: &str) -> &'static str {
+    if path == "/render/iterations" {
+        return "Fractal";
+    }
     match path.split('/').nth(1).unwrap_or("") {
         "transform" => "Transform",
         "camera" => "Camera",
@@ -2823,20 +2826,40 @@ impl WorldUi {
                 }
             });
         }
-        let attrs = cache
-            .attributes
-            .get(&id)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
+        let linked_quality = (node.kind == WorldKind::RenderSettings)
+            .then(|| e.document.render_quality(id).ok())
+            .flatten();
+        let mut quality_targets = Vec::new();
+        if let Some(qid) = linked_quality {
+            for &t in &targets {
+                if let Ok(tq) = e.document.render_quality(t)
+                    && !quality_targets.contains(&tq)
+                {
+                    quality_targets.push(tq);
+                }
+            }
+            if quality_targets.is_empty() {
+                quality_targets.push(qid);
+            }
+        }
         let revision = cache.revision;
         let frame = cache.frame;
         for group in ATTRIBUTE_GROUPS {
-            if attrs
+            let section_id = match (group, linked_quality) {
+                ("Quality", Some(qid)) => qid,
+                _ => id,
+            };
+            let section_attrs = cache
+                .attributes
+                .get(&section_id)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            if section_attrs
                 .iter()
                 .any(|a| a.component.is_none() && category(&a.path) == group)
             {
-                let section = cache.sections.entry((id, group)).or_default();
-                self.prepare_section(section, attrs, group, revision, frame);
+                let section = cache.sections.entry((section_id, group)).or_default();
+                self.prepare_section(section, section_attrs, group, revision, frame);
             }
         }
         let box_width = egui_attr_grid::value_box_width(
@@ -2844,7 +2867,7 @@ impl WorldUi {
             cache
                 .sections
                 .iter()
-                .filter(|((node, _), _)| *node == id)
+                .filter(|((node, _), _)| *node == id || Some(*node) == linked_quality)
                 .flat_map(|(_, section)| section.fields.iter()),
             self.attribute_metrics.numeric_width,
         );
@@ -2853,7 +2876,16 @@ impl WorldUi {
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 for group in ATTRIBUTE_GROUPS {
-                    if !attrs
+                    let (section_id, section_targets) = match (group, linked_quality) {
+                        ("Quality", Some(qid)) => (qid, quality_targets.as_slice()),
+                        _ => (id, targets.as_slice()),
+                    };
+                    let section_attrs = cache
+                        .attributes
+                        .get(&section_id)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default();
+                    if !section_attrs
                         .iter()
                         .any(|a| a.component.is_none() && category(&a.path) == group)
                     {
@@ -2863,7 +2895,7 @@ impl WorldUi {
                         .section_closed
                         .get(&id)
                         .is_some_and(|sections| sections.contains(group));
-                    let section = cache.sections.entry((id, group)).or_default();
+                    let section = cache.sections.entry((section_id, group)).or_default();
                     let response = egui_titlebar::CollapsingSection::new((wid(id), group), group)
                         .open(open)
                         .tint(section_color(group), 0.16)
@@ -2878,10 +2910,10 @@ impl WorldUi {
                             let mut value_commands = Vec::new();
                             let mut hooks = WorldGridHooks {
                                 ui_state: self,
-                                id,
-                                targets: &targets,
+                                id: section_id,
+                                targets: section_targets,
                                 frame: f64::from_bits(frame),
-                                attrs,
+                                attrs: section_attrs,
                                 indices: &section.indices,
                                 labels: &section.labels,
                                 values: &mut section.values,
@@ -2902,7 +2934,7 @@ impl WorldUi {
                             // untouched axes keep each layer's own values.
                             for edit in changes.into_iter().filter(|edit| !edit.parts.is_empty()) {
                                 let path = edit.key;
-                                if let Some(attr) = attrs.iter().find(|a| a.path == path) {
+                                if let Some(attr) = section_attrs.iter().find(|a| a.path == path) {
                                     let value = grid_json(edit.value, &attr.value);
                                     let eligible = value_gesture_eligible(attr, &value);
                                     let out = if eligible {
@@ -2917,9 +2949,9 @@ impl WorldUi {
                                             && !edit.parts.is_all()
                                             && (0..arr.len()).any(|i| !edit.parts.has(i))
                                     });
-                                    for &target in &targets {
+                                    for &target in section_targets {
                                         if let Some(arr) = partial_components
-                                            && target != id
+                                            && target != section_id
                                         {
                                             for (i, comp_val) in arr.iter().enumerate() {
                                                 if edit.parts.has(i) {
@@ -3239,19 +3271,20 @@ fn grid_json(value: GridValue, template: &Value) -> Value {
     }
 }
 
-const ATTRIBUTE_GROUPS: [&str; 13] = [
-    "Transform",
-    "Mask",
-    "Array",
+const ATTRIBUTE_GROUPS: [&str; 14] = [
+    "Quality",
+    "Render",
+    "Viewport",
+    "Output",
     "Fractal",
+    "Material",
     "Camera",
     "Light",
     "Environment",
-    "Material",
-    "Render",
-    "Quality",
-    "Viewport",
+    "Mask",
+    "Array",
     "Color",
+    "Transform",
     "Custom",
 ];
 fn property_rects(
@@ -5909,5 +5942,92 @@ mod tests {
                 .unwrap(),
             json!([4.0, 5.0, 6.0])
         );
+    }
+
+    #[test]
+    fn attributes_and_sections_follow_workflow_order_with_inline_quality_in_render_settings() {
+        let mut e = editor();
+        let render_id = e.document.output_render_profile().unwrap();
+        let quality_id = e.document.render_quality(render_id).unwrap();
+
+        let quality_paths: Vec<String> = e
+            .document
+            .attributes(quality_id, 0.0)
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.component.is_none() && a.path.starts_with("/quality/"))
+            .map(|a| a.path)
+            .collect();
+        assert_eq!(
+            &quality_paths[..6],
+            &[
+                "/quality/samples",
+                "/quality/resolution_scale",
+                "/quality/max_bounces",
+                "/quality/adaptive/enabled",
+                "/quality/adaptive/min_samples",
+                "/quality/adaptive/noise_threshold",
+            ]
+        );
+        assert!(
+            !e.document
+                .attributes(quality_id, 0.0)
+                .unwrap()
+                .iter()
+                .any(|a| a.path.starts_with("/transform/")),
+            "Non-spatial settings nodes must not expose /transform/*"
+        );
+
+        let render_paths: Vec<String> = e
+            .document
+            .attributes(render_id, 0.0)
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.component.is_none() && a.path.starts_with("/render/"))
+            .map(|a| a.path)
+            .collect();
+        assert_eq!(
+            &render_paths[..7],
+            &[
+                "/render/display",
+                "/render/method",
+                "/render/quality_id",
+                "/render/denoise/enabled",
+                "/render/denoise/quality",
+                "/render/denoise/mode",
+                "/render/denoise/interval",
+            ]
+        );
+
+        let fractal_id = e.selection.unwrap();
+        let transform_paths: Vec<String> = e
+            .document
+            .attributes(fractal_id, 0.0)
+            .unwrap()
+            .into_iter()
+            .filter(|a| a.component.is_none() && a.path.starts_with("/transform/"))
+            .map(|a| a.path)
+            .collect();
+        assert_eq!(
+            transform_paths,
+            vec![
+                "/transform/position",
+                "/transform/rotation_degrees",
+                "/transform/scale",
+                "/transform/pivot",
+            ]
+        );
+
+        let ctx = egui::Context::default();
+        let mut state = WorldUi::default();
+        let _ = ctx.run_ui(Default::default(), |root| {
+            egui::CentralPanel::default()
+                .show(root, |ui| state.attribute_editor(ui, &mut e, render_id));
+        });
+        assert!(
+            state.cache.sections.contains_key(&(quality_id, "Quality")),
+            "RenderSettings inspector must inline its linked Quality section"
+        );
+        assert!(state.cache.sections.contains_key(&(render_id, "Render")));
     }
 }
