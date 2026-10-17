@@ -8,10 +8,103 @@ pub fn directory() -> PathBuf {
 /// Where a catalog template comes from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Source {
-    /// Built into the binary: `presets::scene(index)`.
+    /// Built into the binary: `templates::builtin_scene(index)`.
     Builtin(usize),
     /// A scene file in the templates directory.
     File(PathBuf),
+}
+#[derive(Clone, Copy)]
+enum BuiltinPayload {
+    Preset(usize),
+    Json(&'static str),
+}
+pub struct BuiltinTemplate {
+    pub name: &'static str,
+    pub description: &'static str,
+    payload: BuiltinPayload,
+}
+pub const BUILTINS: [BuiltinTemplate; 14] = [
+    BuiltinTemplate {
+        name: "Ember Bloom",
+        description: crate::presets::ANIMATED[0].description,
+        payload: BuiltinPayload::Json(include_str!("../templates/ember-bloom.frac.json")),
+    },
+    BuiltinTemplate {
+        name: "Chrome Cathedral",
+        description: crate::presets::ANIMATED[1].description,
+        payload: BuiltinPayload::Preset(1),
+    },
+    BuiltinTemplate {
+        name: "Opal Julia",
+        description: crate::presets::ANIMATED[2].description,
+        payload: BuiltinPayload::Preset(2),
+    },
+    BuiltinTemplate {
+        name: "Verdant Fold",
+        description: crate::presets::ANIMATED[3].description,
+        payload: BuiltinPayload::Preset(3),
+    },
+    BuiltinTemplate {
+        name: "Luminous Web",
+        description: crate::presets::ANIMATED[4].description,
+        payload: BuiltinPayload::Json(include_str!("../templates/luminous-web.frac.json")),
+    },
+    BuiltinTemplate {
+        name: "amethyst",
+        description: "Authored Mandelbulb scene template.",
+        payload: BuiltinPayload::Json(include_str!("../templates/amethyst.json")),
+    },
+    BuiltinTemplate {
+        name: "box",
+        description: "Authored Mandelbox scene template.",
+        payload: BuiltinPayload::Json(include_str!("../templates/box.json")),
+    },
+    BuiltinTemplate {
+        name: "mandelbulb",
+        description: "Multi-object Mandelbulb scene template.",
+        payload: BuiltinPayload::Json(include_str!("../templates/mandelbulb.frac.json")),
+    },
+    BuiltinTemplate {
+        name: "mandelwhit",
+        description: "Authored Mandelbulb scene template.",
+        payload: BuiltinPayload::Json(include_str!("../templates/mandelwhit.json")),
+    },
+    BuiltinTemplate {
+        name: "metal_frac",
+        description: "Metallic Quaternion Julia scene template.",
+        payload: BuiltinPayload::Json(include_str!("../templates/metal_frac.json")),
+    },
+    BuiltinTemplate {
+        name: "metal_frac2",
+        description: "Metallic Quaternion Julia variation template.",
+        payload: BuiltinPayload::Json(include_str!("../templates/metal_frac2.json")),
+    },
+    BuiltinTemplate {
+        name: "pinky",
+        description: "Authored Mandelbulb scene template.",
+        payload: BuiltinPayload::Json(include_str!("../templates/pinky.json")),
+    },
+    BuiltinTemplate {
+        name: "q-julia1",
+        description: "Quaternion Julia animated scene template.",
+        payload: BuiltinPayload::Json(include_str!("../templates/q-julia1.json")),
+    },
+    BuiltinTemplate {
+        name: "q-julia2",
+        description: "Quaternion Julia animated variation template.",
+        payload: BuiltinPayload::Json(include_str!("../templates/q-julia2.json")),
+    },
+];
+pub fn builtin_scene(index: usize) -> Result<crate::scene::Scene, String> {
+    let entry = BUILTINS.get(index).ok_or("Unknown built-in template")?;
+    match entry.payload {
+        BuiltinPayload::Preset(preset) => crate::presets::scene(preset),
+        BuiltinPayload::Json(text) => {
+            let mut scene = crate::io_service::decode_scene(text)?;
+            scene.name = entry.name.to_owned();
+            Ok(scene)
+        }
+    }
 }
 /// One entry of the Templates menu.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -28,7 +121,7 @@ pub struct Entry {
 /// missing directory is simply empty and is never created here. Scene decoding is identical
 /// to ordinary project files.
 pub fn catalog(directory: &Path) -> Result<Vec<Entry>, String> {
-    let mut entries: Vec<Entry> = crate::presets::ANIMATED
+    let mut entries: Vec<Entry> = BUILTINS
         .iter()
         .enumerate()
         .map(|(index, preset)| Entry {
@@ -134,15 +227,20 @@ mod tests {
         let dir =
             std::env::temp_dir().join(format!("warpbro-templates-test-{}", std::process::id()));
         let builtin = catalog(&dir).unwrap();
-        assert_eq!(builtin.len(), crate::presets::ANIMATED.len());
+        assert_eq!(builtin.len(), BUILTINS.len());
         assert!(
             builtin
                 .iter()
                 .all(|e| matches!(e.source, Source::Builtin(_)) && e.description.is_some())
         );
+        for (index, entry) in BUILTINS.iter().enumerate() {
+            let scene = builtin_scene(index).unwrap();
+            assert_eq!(scene.name, entry.name);
+            assert!(scene.document.is_some());
+        }
         assert!(!dir.exists(), "the catalog never creates the directory");
         std::fs::create_dir_all(&dir).unwrap();
-        let first = crate::presets::ANIMATED[0].name;
+        let first = BUILTINS[0].name;
         let text = serde_json::to_string(&crate::presets::scene(0).unwrap().document).unwrap();
         let replaced = dir.join(crate::fs_name::frame_file(
             &crate::fs_name::stem(first),

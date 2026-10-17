@@ -3404,7 +3404,7 @@ impl App {
                     }
                     match picked {
                         Some(crate::templates::Source::Builtin(index)) => {
-                            match crate::presets::scene(index) {
+                            match crate::templates::builtin_scene(index) {
                                 Ok(scene) => {
                                     self.status = format!("Opened template {}", scene.name);
                                     self.load(scene, Load::New);
