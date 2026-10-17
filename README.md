@@ -320,8 +320,8 @@ image, nothing traced), and **Thinning** (0..1) leaves that share of every fract
 a random 3D grid of removed cells. Set them on the Moving / Still profiles; Output renders the
 scene as authored.
 The selected quality node owns samples, resolution scale, tracing limits and adaptive sampling.
-Fresh Moving settings start at Fast, 64 samples, half resolution and two bounces; these are
-editable profile values. No real-time WorldDirect or guaranteed navigation FPS is claimed.
+Fresh Moving settings start at Fast, 8 samples, full resolution (1.0), two bounces and adaptive
+sampling off; these are editable profile values. No real-time WorldDirect or guaranteed navigation FPS is claimed.
 
 See [the node contract and remaining work](docs/render-profiles.md) for cloning, shared
 references, validation, pause/freeze and export semantics.

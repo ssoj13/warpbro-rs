@@ -3060,8 +3060,9 @@ impl WorldDocument {
         )?;
         for (id, path, value) in [
             (moving, "/render/method", json!(RenderMethod::Fast)),
-            (moving_quality, "/quality/samples", json!(32)),
-            (moving_quality, "/quality/resolution_scale", json!(0.5)),
+            (moving_quality, "/quality/adaptive/enabled", json!(false)),
+            (moving_quality, "/quality/samples", json!(8)),
+            (moving_quality, "/quality/resolution_scale", json!(1.0)),
             (moving_quality, "/quality/max_bounces", json!(2)),
         ] {
             self.set_attribute(id, path, value, 0.0, false, Tan::Constant)?;

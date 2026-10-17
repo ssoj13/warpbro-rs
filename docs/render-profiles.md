@@ -32,7 +32,7 @@ Renderer получает временный `EffectiveRender` и снимок �
 «World Settings» больше не дублирует сохраняемые render-параметры.
 
 У свежего документа есть отдельные пары Moving, Still и Output. Moving начинает
-с Fast, 64 samples, половинного разрешения и двух bounce. Still и Output получают
+с Fast, 8 samples, полного разрешения (1.0), двух bounce и отключённого адаптивного сэмплинга. Still и Output получают
 свои QualitySettings; Manual первоначально ссылается на Still. Начальная политика
 viewport: Auto, 30 FPS, settle delay 180 мс, batch budget 8 мс. Это редактируемые
 узлы, а не жёсткие ограничения preview.

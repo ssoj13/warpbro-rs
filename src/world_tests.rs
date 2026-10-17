@@ -2267,9 +2267,10 @@ fn render_profiles_route_auto_locked_and_output_without_mutating_document() {
         (
             moving.samples,
             moving.resolution_scale,
-            moving.render.max_bounces
+            moving.render.max_bounces,
+            moving.render.adaptive.enabled,
         ),
-        (32, 0.5, 2)
+        (8, 1.0, 2, false)
     );
     assert_eq!(still.profile, policy.still_id);
     assert_eq!(still.method, RenderMethod::Full);

@@ -5232,7 +5232,15 @@ mod tests {
             (ProfileTarget::Moving, policy.moving_id, true, true)
         );
         let moving = app.request.clone().unwrap();
-        assert_eq!((moving.width, moving.height), (32, 16));
+        assert_eq!(
+            (
+                moving.width,
+                moving.height,
+                moving.target_spp,
+                moving.scene.render.adaptive.enabled
+            ),
+            (64, 32, 8, false)
+        );
         app.step_viewport(64, 32, false, 100.0);
         assert_eq!(
             routed(&app).0,
