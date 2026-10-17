@@ -573,7 +573,7 @@ struct Settings {
     add_menu: crate::world_ui::AddMenuMemory,
 }
 fn default_min_take_secs() -> f64 {
-    crate::takes::MIN_SECS
+    crate::takes::DEFAULT_MIN_SECS
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -728,15 +728,21 @@ impl App {
             prefs: Default::default(),
             recorder_options: Default::default(),
             record_takes: true,
-            min_take_secs: crate::takes::MIN_SECS,
+            min_take_secs: crate::takes::DEFAULT_MIN_SECS,
             camera_slots: Default::default(),
-            takes_recorder: Default::default(),
+            takes_recorder: crate::takes::Recorder {
+                min_secs: crate::takes::DEFAULT_MIN_SECS,
+                ..Default::default()
+            },
             navigated: false,
             takes_view: Default::default(),
             tool: ViewTool::Select,
             gizmo: soluwell_viewport::gizmo::Gizmo::new(soluwell_viewport::gizmo::GizmoConfig::default()),
             gizmo_gesture: None,
-            drag_recorder: Default::default(),
+            drag_recorder: crate::takes::DragRecorder {
+                min_secs: crate::takes::DEFAULT_MIN_SECS,
+                ..Default::default()
+            },
             prefs_grids: Default::default(),
             dock: dock::default_layout(),
             dock_focus: None,

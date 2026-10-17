@@ -111,6 +111,8 @@ impl App {
                 min_secs <= crate::takes::MIN_SECS
                     || t.pinned
                     || t.duration() >= min_secs
+                    || t.duration() < crate::takes::MIN_SECS
+                    || self.takes_view.selection.contains(&t.id)
                     || !self.world.document.take_users(t.id).is_empty()
             })
             .filter(|t| needle.is_empty() || t.name.to_lowercase().contains(&needle))

@@ -27,6 +27,8 @@ pub const CLIP_VERSION: u32 = 2;
 const SETTLE_SECS: f64 = 0.3;
 /// Shorter gestures (a Home / Fit jump, a stray click) are not worth a take.
 pub const MIN_SECS: f64 = 0.1;
+/// Default minimum gesture duration (seconds) in the Takes panel (`Settings::min_take_secs`).
+pub const DEFAULT_MIN_SECS: f64 = 2.0;
 /// A runaway gesture is cut here (about ten minutes at 60 Hz) and the next move starts a new take.
 const MAX_SAMPLES: usize = 36_000;
 /// Marker of WarpBro takes on the system clipboard, so other text is never pasted as takes.
