@@ -800,10 +800,10 @@ impl WorldUi {
     }
     /// Snapshot the Add menu's history, favorites and usage counts for `settings.json`.
     pub fn add_menu_memory(&self) -> AddMenuMemory {
-        let mut usage = self.add_menu.usage();
+        let mut usage = self.add_menu.usage().to_vec();
         usage.sort();
         AddMenuMemory {
-            history: self.add_menu.history().to_vec(),
+            history: self.add_menu.history().copied().collect(),
             favorites: self.add_menu.favorites().to_vec(),
             usage,
         }
@@ -821,11 +821,10 @@ impl WorldUi {
         let auto_key = self.auto_key;
         let new_key = self.new_key;
         let file_dialogs = std::mem::take(&mut self.file_dialogs);
-        self.add_menu.close();
-        let add_menu = std::mem::take(&mut self.add_menu);
+        let add_menu = self.add_menu_memory();
         *self = Self::default();
         self.file_dialogs = file_dialogs;
-        self.add_menu = add_menu;
+        self.set_add_menu_memory(add_menu);
         self.attribute_metrics = attribute_metrics;
         self.attribute_label_width = attribute_label_width;
         self.timeline_outline_width = timeline_outline_width;
