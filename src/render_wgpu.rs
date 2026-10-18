@@ -305,9 +305,22 @@ fn shared_wgpu() -> Result<Arc<WgpuShared>, String> {
         .get_or_init(|| {
             let shared = gpu_info::shared_device()
                 .ok_or_else(|| "WGPU shared device unavailable".to_string())?;
+            let info = shared.adapter.get_info();
+            let lower = info.name.to_ascii_lowercase();
+            if info.device_type == wgpu::DeviceType::Cpu
+                || lower.contains("llvmpipe")
+                || lower.contains("lavapipe")
+                || lower.contains("swiftshader")
+                || lower.contains("microsoft basic render driver")
+            {
+                return Err(format!(
+                    "WGPU software adapter '{}' is not a hardware GPU",
+                    info.name
+                ));
+            }
             let device = shared.device.clone();
             let queue = shared.queue.clone();
-            let adapter_name = format!("{} (WGPU)", shared.adapter.get_info().name);
+            let adapter_name = format!("{} (WGPU)", info.name);
             with_error_scopes(&shared.device, || {
                 let source = shader_source();
                 let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
