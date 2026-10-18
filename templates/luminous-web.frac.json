@@ -281,7 +281,7 @@
               0.8799999952316284,
               0.6399999856948853
             ],
-            "coat": 0.20000000298023224,
+            "coat": 0.0,
             "coat_affect_color": 0.0,
             "coat_affect_roughness": 0.0,
             "coat_color": [
@@ -301,7 +301,7 @@
             ],
             "facing": null,
             "metalness": 0.6499999761581421,
-            "model": "StandardSurface",
+            "model": "Fast",
             "preset": null,
             "sheen": 0.0,
             "sheen_color": [
@@ -452,7 +452,7 @@
               "Float": 0.6499999761581421
             },
             "/material/model": {
-              "Str": "StandardSurface"
+              "Str": "Fast"
             },
             "/material/preset": {
               "Json": "null"
@@ -677,7 +677,7 @@
               0.8799999952316284,
               0.6399999856948853
             ],
-            "coat": 0.20000000298023224,
+            "coat": 0.0,
             "coat_affect_color": 0.0,
             "coat_affect_roughness": 0.0,
             "coat_color": [
@@ -697,7 +697,7 @@
             ],
             "facing": null,
             "metalness": 0.6499999761581421,
-            "model": "StandardSurface",
+            "model": "Fast",
             "preset": null,
             "sheen": 0.0,
             "sheen_color": [
@@ -1339,7 +1339,7 @@
               0.8799999952316284,
               0.6399999856948853
             ],
-            "coat": 0.20000000298023224,
+            "coat": 0.0,
             "coat_affect_color": 0.0,
             "coat_affect_roughness": 0.0,
             "coat_color": [
@@ -1359,7 +1359,7 @@
             ],
             "facing": null,
             "metalness": 0.6499999761581421,
-            "model": "StandardSurface",
+            "model": "Fast",
             "preset": null,
             "sheen": 0.0,
             "sheen_color": [
@@ -1653,7 +1653,7 @@
               0.8799999952316284,
               0.6399999856948853
             ],
-            "coat": 0.20000000298023224,
+            "coat": 0.0,
             "coat_affect_color": 0.0,
             "coat_affect_roughness": 0.0,
             "coat_color": [
@@ -1673,7 +1673,7 @@
             ],
             "facing": null,
             "metalness": 0.6499999761581421,
-            "model": "StandardSurface",
+            "model": "Fast",
             "preset": null,
             "sheen": 0.0,
             "sheen_color": [
@@ -2606,7 +2606,7 @@
               0.8799999952316284,
               0.6399999856948853
             ],
-            "coat": 0.20000000298023224,
+            "coat": 0.0,
             "coat_affect_color": 0.0,
             "coat_affect_roughness": 0.0,
             "coat_color": [
@@ -2626,7 +2626,7 @@
             ],
             "facing": null,
             "metalness": 0.6499999761581421,
-            "model": "StandardSurface",
+            "model": "Fast",
             "preset": null,
             "sheen": 0.0,
             "sheen_color": [
@@ -35689,7 +35689,7 @@
             0.8799999952316284,
             0.6399999856948853
           ],
-          "coat": 0.20000000298023224,
+          "coat": 0.0,
           "coat_affect_color": 0.0,
           "coat_affect_roughness": 0.0,
           "coat_color": [
@@ -35709,7 +35709,7 @@
           ],
           "facing": null,
           "metalness": 0.6499999761581421,
-          "model": "StandardSurface",
+          "model": "Fast",
           "preset": null,
           "sheen": 0.0,
           "sheen_color": [

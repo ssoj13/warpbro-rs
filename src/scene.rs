@@ -1081,7 +1081,6 @@ impl Scene {
         s.palette = P::Copper;
         s.material.metalness = 1.0;
         s.material.specular_roughness = 0.25;
-        s.material.model = MaterialModel::StandardSurface;
         v.push(s);
 
         let mut s = Self::preset(FAMILY_BULB);

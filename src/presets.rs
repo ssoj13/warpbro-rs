@@ -76,11 +76,9 @@ pub fn scene(index: usize) -> Result<Scene, String> {
     base.camera.f_number = 0.0;
     base.render.max_bounces = 4;
     base.render.exposure_stops = 0.0;
-    base.material.model = MaterialModel::StandardSurface;
+    base.material.model = MaterialModel::Fast;
     base.material.specular_roughness = [0.27, 0.30, 0.23, 0.3, 0.25][index];
     base.material.metalness = [0.75, 0.9, 0.12, 0.28, 0.65][index];
-    base.material.coat = [0.25, 0.3, 0.8, 0.55, 0.2][index];
-    base.material.coat_roughness = 0.14;
     base.coloring = Coloring::TrapOrigin;
     base.trap_scale = 1.25;
     let (palette, horizon, zenith, sun) = match index {

@@ -294,7 +294,7 @@
               1.0,
               1.0
             ],
-            "coat": 0.25,
+            "coat": 0.0,
             "coat_affect_color": 0.0,
             "coat_affect_roughness": 0.0,
             "coat_color": [
@@ -314,7 +314,7 @@
             ],
             "facing": null,
             "metalness": 0.75,
-            "model": "StandardSurface",
+            "model": "Fast",
             "preset": null,
             "sheen": 0.0,
             "sheen_color": [
@@ -2686,7 +2686,7 @@
             ],
             "facing": null,
             "metalness": 0.0,
-            "model": "StandardSurface",
+            "model": "Fast",
             "preset": "FeltGrey",
             "sheen": 1.0,
             "sheen_color": [
@@ -2837,7 +2837,7 @@
               "Float": 0.0
             },
             "/material/model": {
-              "Str": "StandardSurface"
+              "Str": "Fast"
             },
             "/material/preset": {
               "Str": "FeltGrey"
@@ -3595,7 +3595,7 @@
               1.0,
               1.0
             ],
-            "coat": 0.25,
+            "coat": 0.0,
             "coat_affect_color": 0.0,
             "coat_affect_roughness": 0.0,
             "coat_color": [
@@ -3615,7 +3615,7 @@
             ],
             "facing": null,
             "metalness": 0.75,
-            "model": "StandardSurface",
+            "model": "Fast",
             "preset": null,
             "sheen": 0.0,
             "sheen_color": [
@@ -3766,7 +3766,7 @@
               "Float": 0.75
             },
             "/material/model": {
-              "Str": "StandardSurface"
+              "Str": "Fast"
             },
             "/material/preset": {
               "Json": "null"
@@ -4004,7 +4004,7 @@
               1.0,
               1.0
             ],
-            "coat": 0.25,
+            "coat": 0.0,
             "coat_affect_color": 0.0,
             "coat_affect_roughness": 0.0,
             "coat_color": [
@@ -4024,7 +4024,7 @@
             ],
             "facing": null,
             "metalness": 0.75,
-            "model": "StandardSurface",
+            "model": "Fast",
             "preset": null,
             "sheen": 0.0,
             "sheen_color": [
@@ -5256,7 +5256,7 @@
             ],
             "facing": null,
             "metalness": 0.0,
-            "model": "StandardSurface",
+            "model": "Fast",
             "preset": "CottonLinen",
             "sheen": 1.0,
             "sheen_color": [
@@ -5407,7 +5407,7 @@
               "Float": 0.0
             },
             "/material/model": {
-              "Str": "StandardSurface"
+              "Str": "Fast"
             },
             "/material/preset": {
               "Str": "CottonLinen"
@@ -5645,7 +5645,7 @@
               1.0,
               1.0
             ],
-            "coat": 0.25,
+            "coat": 0.0,
             "coat_affect_color": 0.0,
             "coat_affect_roughness": 0.0,
             "coat_color": [
@@ -5665,7 +5665,7 @@
             ],
             "facing": null,
             "metalness": 0.75,
-            "model": "StandardSurface",
+            "model": "Fast",
             "preset": null,
             "sheen": 0.0,
             "sheen_color": [
@@ -5984,7 +5984,7 @@
               1.0,
               1.0
             ],
-            "coat": 0.25,
+            "coat": 0.0,
             "coat_affect_color": 0.0,
             "coat_affect_roughness": 0.0,
             "coat_color": [
@@ -6004,7 +6004,7 @@
             ],
             "facing": null,
             "metalness": 0.75,
-            "model": "StandardSurface",
+            "model": "Fast",
             "preset": null,
             "sheen": 0.0,
             "sheen_color": [
@@ -6426,7 +6426,7 @@
             ],
             "facing": null,
             "metalness": 0.0,
-            "model": "StandardSurface",
+            "model": "Fast",
             "preset": "Glass",
             "sheen": 0.0,
             "sheen_color": [
@@ -6577,7 +6577,7 @@
               "Float": 0.0
             },
             "/material/model": {
-              "Str": "StandardSurface"
+              "Str": "Fast"
             },
             "/material/preset": {
               "Str": "Glass"
@@ -7149,7 +7149,7 @@
             1.0,
             1.0
           ],
-          "coat": 0.25,
+          "coat": 0.0,
           "coat_affect_color": 0.0,
           "coat_affect_roughness": 0.0,
           "coat_color": [
@@ -7169,7 +7169,7 @@
           ],
           "facing": null,
           "metalness": 0.75,
-          "model": "StandardSurface",
+          "model": "Fast",
           "preset": null,
           "sheen": 0.0,
           "sheen_color": [

@@ -7,9 +7,7 @@ pub use fractal_materials::{CATEGORIES, MaterialPreset, PRESETS};
 impl MaterialTarget for Material {
     fn apply_material_preset(&mut self, preset: &MaterialPreset) {
         let m = self;
-        let defaults = Material::default();
-        let model = m.model;
-        *m = Material { model, ..defaults };
+        *m = Material::default();
         m.color_source = ColorSource::Material;
         m.base_color = preset.diffuse;
         m.metalness = preset.metallic;
