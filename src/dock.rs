@@ -68,11 +68,11 @@ fn tabs(panels: &[Panel]) -> Node<Panel> {
     }
 }
 
-/// `first` and `second` divided along `axis`, `first` taking `ratio` of the space.
-fn split(axis: SplitAxis, ratio: f32, first: Node<Panel>, second: Node<Panel>) -> Node<Panel> {
+/// `first` and `second` divided along `axis`.
+fn split(axis: SplitAxis, size: SplitSize, first: Node<Panel>, second: Node<Panel>) -> Node<Panel> {
     Node::Split {
         axis,
-        size: SplitSize::Ratio(ratio),
+        size,
         first: Box::new(first),
         second: Box::new(second),
     }
@@ -80,28 +80,39 @@ fn split(axis: SplitAxis, ratio: f32, first: Node<Panel>, second: Node<Panel>) -
 
 /// The start layout: the Attribute Editor over Settings / Render on the right, the Timeline
 /// under the workspace, and Outliner / Gallery / Materials over Takes left of the Viewport.
+/// Secondary panels use fixed pixel sizes so resizing the window resizes the Viewport.
 pub(super) fn default_layout() -> Layout<Panel> {
     use SplitAxis::{Horizontal, Vertical};
     let panels = split(
         Vertical,
-        0.52,
+        SplitSize::FixedSecond(260.0),
         tabs(&[Panel::Outliner, Panel::Gallery, Panel::Materials]),
         tabs(&[Panel::Takes]),
     );
     let workspace = split(
         Vertical,
-        0.82,
-        split(Horizontal, 0.23, panels, tabs(&[Panel::Viewport])),
+        SplitSize::FixedSecond(180.0),
+        split(
+            Horizontal,
+            SplitSize::FixedFirst(280.0),
+            panels,
+            tabs(&[Panel::Viewport]),
+        ),
         tabs(&[Panel::Timeline]),
     );
     let right = split(
         Vertical,
-        0.62,
+        SplitSize::FixedSecond(320.0),
         tabs(&[Panel::Inspector]),
         tabs(&[Panel::Settings, Panel::Export]),
     );
     Layout {
-        root: Some(split(Horizontal, 0.70, workspace, right)),
+        root: Some(split(
+            Horizontal,
+            SplitSize::FixedSecond(380.0),
+            workspace,
+            right,
+        )),
         floating: Vec::new(),
     }
 }
@@ -357,13 +368,16 @@ impl App {
 
     pub(super) fn dock_ui(&mut self, ui: &mut egui::Ui) {
         let area = ui.available_rect_before_wrap();
+        let style = DockStyle::from_ui(ui);
         self.open_panels(area);
+        self.dock
+            .pin_around(|p| *p == Panel::Viewport, area, style.gap);
         // The bodies borrow the whole App; the layout is only read while drawing.
         let layout = std::mem::take(&mut self.dock);
         let output = DockArea::new(egui::Id::new("frac-workspace")).show_with(
             ui,
             &layout,
-            &DockStyle::from_ui(ui),
+            &style,
             &mut Viewer { app: self },
         );
         self.dock = layout;
@@ -897,5 +911,79 @@ mod tests {
     #[test]
     fn pre_engine_blobs_are_refused() {
         assert!(restore_layout(r#"{"surfaces":[]}"#).is_err());
+    }
+
+    #[test]
+    fn window_resize_grows_viewport_and_keeps_secondary_panels_fixed() {
+        struct Measure(std::collections::HashMap<Panel, egui::Rect>);
+        impl DockContent<Panel> for Measure {
+            fn title(&self, panel: &Panel) -> String {
+                panel.title().into()
+            }
+            fn permissions(&self, panel: &Panel) -> Permissions {
+                panel.permissions()
+            }
+            fn body(&mut self, ui: &mut egui::Ui, panel: &Panel) {
+                self.0.insert(*panel, ui.max_rect());
+            }
+        }
+
+        let mut layout = default_layout();
+        let ctx = egui::Context::default();
+        let mut run_at = |w: f32, h: f32| {
+            let mut m = Measure(Default::default());
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(w, h),
+                )),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(raw, |root| {
+                egui::CentralPanel::default().show(root, |ui| {
+                    let style = DockStyle::from_ui(ui);
+                    let area = ui.available_rect_before_wrap();
+                    layout.pin_around(|p| *p == Panel::Viewport, area, style.gap);
+                    let dock_out = DockArea::new(egui::Id::new("test-warpbro-dock"))
+                        .show_with(ui, &layout, &style, &mut m);
+                    for action in dock_out.actions {
+                        layout
+                            .apply_with_permissions(action, Panel::permissions)
+                            .unwrap();
+                    }
+                });
+            });
+            out.textures_delta.clear();
+            m.0
+        };
+
+        let small = run_at(1400.0, 900.0);
+        let large = run_at(2200.0, 1300.0);
+
+        for sec in [
+            Panel::Outliner,
+            Panel::Takes,
+            Panel::Inspector,
+            Panel::Settings,
+        ] {
+            assert!(
+                (large[&sec].width() - small[&sec].width()).abs() < 0.5,
+                "{sec:?} width changed on window resize"
+            );
+        }
+        for sec_h in [Panel::Timeline, Panel::Takes, Panel::Settings] {
+            assert!(
+                (large[&sec_h].height() - small[&sec_h].height()).abs() < 0.5,
+                "{sec_h:?} height changed on window resize"
+            );
+        }
+        assert_eq!(
+            (large[&Panel::Viewport].width() - small[&Panel::Viewport].width()).round(),
+            800.0
+        );
+        assert_eq!(
+            (large[&Panel::Viewport].height() - small[&Panel::Viewport].height()).round(),
+            400.0
+        );
     }
 }

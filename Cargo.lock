@@ -8036,7 +8036,7 @@ dependencies = [
 [[package]]
 name = "soluwell-chrome"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#4338de33475858d59524b876d3d6e572e1d48530"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#7e5b5e293e72eea11b52283bb77895ab9b195ed7"
 dependencies = [
  "egui",
  "indexmap",
@@ -8050,7 +8050,7 @@ dependencies = [
 [[package]]
 name = "soluwell-config"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#4338de33475858d59524b876d3d6e572e1d48530"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#7e5b5e293e72eea11b52283bb77895ab9b195ed7"
 dependencies = [
  "egui",
  "serde",
@@ -8060,7 +8060,7 @@ dependencies = [
 [[package]]
 name = "soluwell-controls"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#4338de33475858d59524b876d3d6e572e1d48530"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#7e5b5e293e72eea11b52283bb77895ab9b195ed7"
 dependencies = [
  "curves",
  "egui",
@@ -8071,7 +8071,7 @@ dependencies = [
 [[package]]
 name = "soluwell-panels"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#4338de33475858d59524b876d3d6e572e1d48530"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#7e5b5e293e72eea11b52283bb77895ab9b195ed7"
 dependencies = [
  "box-rs",
  "egui",
@@ -8084,7 +8084,7 @@ dependencies = [
 [[package]]
 name = "soluwell-timeline"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#4338de33475858d59524b876d3d6e572e1d48530"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#7e5b5e293e72eea11b52283bb77895ab9b195ed7"
 dependencies = [
  "egui",
  "exr-core",
@@ -8102,7 +8102,7 @@ dependencies = [
 [[package]]
 name = "soluwell-viewport"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#4338de33475858d59524b876d3d6e572e1d48530"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#7e5b5e293e72eea11b52283bb77895ab9b195ed7"
 dependencies = [
  "bytemuck",
  "egui",
