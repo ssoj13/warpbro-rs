@@ -12,18 +12,15 @@ use std::path::Path;
 use exr_core::attr::Attribute;
 use exr_core::attr::{Chromaticities, ChromaticitiesAttribute, Compression, FloatAttribute};
 use exr_core::{ChannelData, Image};
-use imath_rs::{Box2i, V2i};
+use imath_rs::{Box2i, Half, V2i};
 use vfx_ocio::color_matrix::Primaries;
+use video_io::still::{Channels, ExrCompression, ExrDepth};
 
-/// OpenEXR's own default compression (`Header` default = ZIP): lossless, and the usual choice for
-/// float renders.
-const COMPRESSION: Compression = Compression::Zip;
-
-/// Largest environment map accepted, checked from the header BEFORE any pixel is allocated.
+///Largest environment map accepted, checked from the header BEFORE any pixel is allocated.
 const MAX_ENV_PIXELS: u64 = 16_777_216;
 const MAX_ENV_AXIS: i64 = 16_384;
 
-/// Write the RGB of `pixels` (alpha ignored) as a float32 EXR tagged with `prims`.
+/// Write the RGB of `pixels` (alpha ignored) as a float32 ZIP-compressed EXR tagged with `prims`.
 ///
 /// `white_nits` adds OpenEXR's `whiteLuminance` (the display-light export: 1.0 == that many nits).
 /// The file is published atomically by `exr-core` (sibling temp + rename); an existing file is
@@ -35,6 +32,38 @@ pub fn write_rgb(
     pixels: &[[f32; 4]],
     prims: &Primaries,
     white_nits: Option<f32>,
+    overwrite: bool,
+) -> Result<(), String> {
+    write_exr(
+        path,
+        width,
+        height,
+        pixels,
+        prims,
+        white_nits,
+        ExrDepth::Float,
+        ExrCompression::Zip,
+        45.0,
+        Channels::Rgb,
+        overwrite,
+    )
+}
+
+/// Write `pixels` as an OpenEXR file with configurable channel depth (`Half` / `Float`),
+/// compression (all 12 OpenEXR compression modes including DWA and HTJ2K), DWA level, and
+/// `RGB` / `RGBA` channel layout.
+#[allow(clippy::too_many_arguments)]
+pub fn write_exr(
+    path: &Path,
+    width: usize,
+    height: usize,
+    pixels: &[[f32; 4]],
+    prims: &Primaries,
+    white_nits: Option<f32>,
+    depth: ExrDepth,
+    compression: ExrCompression,
+    dwa_level: f32,
+    channels: Channels,
     overwrite: bool,
 ) -> Result<(), String> {
     if width == 0 || height == 0 || pixels.len() != width * height {
@@ -55,11 +84,17 @@ pub fn write_rgb(
             y: max(height)?,
         },
     };
-    let channel = |c: usize| ChannelData::Float(pixels.iter().map(|p| p[c]).collect());
+    let channel = |c: usize| match depth {
+        ExrDepth::Half => ChannelData::Half(pixels.iter().map(|p| Half::from(p[c])).collect()),
+        ExrDepth::Float => ChannelData::Float(pixels.iter().map(|p| p[c]).collect()),
+    };
     let mut image = Image::new(window)
         .with_channel("R", channel(0))
         .with_channel("G", channel(1))
         .with_channel("B", channel(2));
+    if channels.alpha() {
+        image = image.with_channel("A", channel(3));
+    }
     let attrs = image.attributes_mut();
     attrs
         .insert(
@@ -72,13 +107,38 @@ pub fn write_rgb(
             .insert("whiteLuminance", Box::new(FloatAttribute::new(nits)))
             .map_err(|e| e.to_string())?;
     }
+    if compression.dwa() {
+        attrs
+            .insert(
+                "dwaCompressionLevel",
+                Box::new(FloatAttribute::new(dwa_level)),
+            )
+            .map_err(|e| e.to_string())?;
+    }
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     }
     av_util_core::outfile::check_overwrite(path, overwrite).map_err(|e| e.to_string())?;
     image
-        .write(path, COMPRESSION)
+        .write(path, exr_compression(compression))
         .map_err(|e| format!("EXR {}: {e}", path.display()))
+}
+
+fn exr_compression(c: ExrCompression) -> Compression {
+    match c {
+        ExrCompression::None => Compression::NoCompression,
+        ExrCompression::Rle => Compression::Rle,
+        ExrCompression::Zips => Compression::Zips,
+        ExrCompression::Zip => Compression::Zip,
+        ExrCompression::Piz => Compression::Piz,
+        ExrCompression::Pxr24 => Compression::Pxr24,
+        ExrCompression::B44 => Compression::B44,
+        ExrCompression::B44a => Compression::B44a,
+        ExrCompression::Dwaa => Compression::Dwaa,
+        ExrCompression::Dwab => Compression::Dwab,
+        ExrCompression::Htj2k32 => Compression::Htj2k32,
+        ExrCompression::Htj2k256 => Compression::Htj2k256,
+    }
 }
 
 /// Linear float RGB read from an EXR (`read_rgb`).

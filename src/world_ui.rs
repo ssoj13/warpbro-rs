@@ -5974,10 +5974,11 @@ mod tests {
             .map(|a| a.path)
             .collect();
         assert_eq!(
-            &render_paths[..6],
+            &render_paths[..7],
             &[
                 "/render/display",
                 "/render/method",
+                "/render/backend",
                 "/render/denoise/enabled",
                 "/render/denoise/quality",
                 "/render/denoise/mode",

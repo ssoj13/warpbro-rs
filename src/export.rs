@@ -15,67 +15,94 @@ use std::{
     },
     time::Duration,
 };
-pub use video_io::catalog::PngVideo;
+pub use video_io::catalog::{
+    Chroma, Codec, CodecInfo, Container, Depth, Encoder, ExvProfile, PngVideo, ProResProfile, Rate,
+    VideoSettings,
+};
 use video_io::cli::ffmpeg;
 pub use video_io::job::{ExportJob, MAX_AXIS, MAX_QP, PEAK_NITS};
+pub use video_io::still::{
+    Channels, DWA_LEVEL, ExrCompression, ExrDepth, Still, StillOptions, StillPixels,
+    TiffCompression,
+};
 use video_io::video::{Outcome, Ticket};
 
 const HIGH_QUALITY_QP: u8 = 18;
 /// The HDR PNG export's default target peak (`ExportSettings::png_peak_nits`).
 const DEFAULT_PNG_PEAK_NITS: f32 = 1000.0;
+/// OpenEXR DWA compression level range (`0.0..=250.0`).
+pub const DWA_LEVEL_RANGE: std::ops::RangeInclusive<f32> = 0.0..=250.0;
 /// The renderer's 64 megapixel frame limit.
 const MAX_PIXELS: usize = 67_108_864;
+
+fn codec_info(codec: Codec) -> &'static CodecInfo {
+    video_io::catalog::CODECS
+        .iter()
+        .find(|c| c.codec == codec)
+        .expect("all Codec variants are in CODECS")
+}
+fn container_label(container: Container) -> &'static str {
+    match container {
+        Container::Mp4 => "MP4 (.mp4)",
+        Container::Mov => "QuickTime (.mov)",
+        Container::Exv => "EXV (.exv)",
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExportFormat {
     Exr,
-    Hevc,
     Png,
+    Jpeg,
+    Tiff,
+    Tga,
+    Hevc,
 }
 impl ExportFormat {
     /// The format tabs of the panel, in order.
-    pub const ALL: [Self; 3] = [Self::Exr, Self::Png, Self::Hevc];
+    pub const ALL: [Self; 6] = [
+        Self::Exr,
+        Self::Png,
+        Self::Jpeg,
+        Self::Tiff,
+        Self::Tga,
+        Self::Hevc,
+    ];
     fn label(self) -> &'static str {
         match self {
-            Self::Exr => "EXR sequence",
+            Self::Exr => "EXR",
             Self::Png => "PNG",
+            Self::Jpeg => "JPEG",
+            Self::Tiff => "TIFF",
+            Self::Tga => "TGA",
             Self::Hevc => "Video",
-        }
-    }
-    /// What a file of this format holds, under its options.
-    fn hint(self) -> &'static str {
-        match self {
-            Self::Exr => {
-                "Scene-linear ACEScg (AP1-tagged); no display transform or exposure baked in."
-            }
-            Self::Png => {
-                "The monitor rendering baked in: SDR 8-bit sRGB / BT.709, or HDR10 / HLG 16-bit BT.2020 with cICP. An HDR view keeps its nits and its measured peak (mDCV); pick one for HDR highlights. Video: the finished sequence also encoded by ffmpeg."
-            }
-            Self::Hevc => {
-                "HEVC 8-bit BT.709 SDR, encoded for a BT.1886 (gamma 2.4) video display; display transform baked in. Cancel saves completed frames."
-            }
         }
     }
     pub fn extension(self) -> &'static str {
         match self {
             Self::Exr => "exr",
             Self::Png => "png",
+            Self::Jpeg => "jpg",
+            Self::Tiff => "tif",
+            Self::Tga => "tga",
             Self::Hevc => "mp4",
         }
     }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VideoEncoder {
+    Auto,
     #[default]
     Vulkan,
     Kvazaar,
 }
 impl VideoEncoder {
-    pub const ALL: [Self; 2] = [Self::Vulkan, Self::Kvazaar];
+    pub const ALL: [Self; 3] = [Self::Auto, Self::Vulkan, Self::Kvazaar];
     fn label(self) -> &'static str {
         match self {
+            Self::Auto => "Auto (GPU, fallback CPU)",
             Self::Vulkan => "GPU · Vulkan Video",
-            Self::Kvazaar => "CPU · Kvazaar (I-frames)",
+            Self::Kvazaar => "CPU · Software",
         }
     }
 }
@@ -91,18 +118,44 @@ pub struct OutputSettings {
     /// Base size; the Output render profile's resolution scale applies once when a job starts.
     pub width: usize,
     pub height: usize,
-    /// HEVC QP of the built-in encoder, or libx265 CRF for a PNG export's video (0-51).
+    /// HEVC / H.264 / AV1 QP/CRF of the built-in encoder, or libx265 CRF for a PNG export's video.
     pub qp: u8,
     /// Override world cadence for offline renders: OIDN runs once at the final sample.
     pub denoise_at_completion: bool,
     pub png: PngEncoding,
-    /// The HDR view an HDR PNG export renders through when the scene's own view is not an HDR
+    /// The HDR view an HDR export renders through when the scene's own view is not an HDR
     /// view of that kind: the one whose measured peak is nearest this (`Ocio::output_transform`).
     /// The file records the rendered view's measured peak (`render_service::hdr_scale`).
     pub png_peak_nits: f32,
     /// The video a PNG export also encodes from its sequence (ffmpeg); `fps` and `qp` (CRF)
     /// are shared with the Video format.
     pub png_video: PngVideo,
+    /// Video codec when `format == ExportFormat::Hevc` (`Hevc`, `H264`, `Av1`, `ProRes`, `Exv`).
+    pub codec: Codec,
+    /// Video container for codecs that support multiple containers (`Mp4` / `Mov`).
+    pub container: Container,
+    /// Video bit depth for SDR video (`Eight` / `Ten`).
+    pub video_depth: Depth,
+    /// Video signal transfer (`Sdr8`, `Hdr10`, `Hlg`) for codecs that carry display light.
+    pub video_signal: PngEncoding,
+    /// Apple ProRes profile (`Proxy`, `Lt`, `Standard`, `Hq`, `FourFourFourFour`, `Xq`).
+    pub prores_profile: ProResProfile,
+    /// EXV float16 video profile (all 8 `ExvProfile`s: `Bc6hLossless`, `Bc6h`, `Piz`, `Zips`, `Zip`, `Rle`, `Dwaa`, `Dwab`).
+    pub exv_profile: ExvProfile,
+    /// Channel layout (`Rgb` / `Rgba`) for still formats (`EXR`, `PNG`, `TIFF`, `TGA`).
+    pub channels: Channels,
+    /// 16-bit integer output for SDR `PNG` and `TIFF` still sequences.
+    pub sixteen_bit: bool,
+    /// JPEG quality `1..=100`.
+    pub jpeg_quality: u8,
+    /// TIFF compression (`None`, `Lzw`, `Deflate`, `PackBits`).
+    pub tiff_compression: TiffCompression,
+    /// OpenEXR channel depth (`Half` 16-bit float or `Float` 32-bit float).
+    pub exr_depth: ExrDepth,
+    /// OpenEXR compression mode (all 12 modes including `Zip`, `Piz`, `Dwaa`, `Dwab`, `Htj2k32`, `Htj2k256`).
+    pub exr_compression: ExrCompression,
+    /// OpenEXR DWA compression level (`0.0..=250.0`, used by `Dwaa` and `Dwab`).
+    pub exr_dwa_level: f32,
     /// OCIO display / view overriding the automatic output transform; empty = automatic.
     pub output_display: String,
     pub output_view: String,
@@ -119,12 +172,141 @@ impl Default for OutputSettings {
             png: PngEncoding::Sdr8,
             png_peak_nits: DEFAULT_PNG_PEAK_NITS,
             png_video: PngVideo::Off,
+            codec: Codec::Hevc,
+            container: Container::Mp4,
+            video_depth: Depth::Eight,
+            video_signal: PngEncoding::Sdr8,
+            prores_profile: ProResProfile::Hq,
+            exv_profile: ExvProfile::Bc6hLossless,
+            channels: Channels::Rgba,
+            sixteen_bit: false,
+            jpeg_quality: 95,
+            tiff_compression: TiffCompression::Deflate,
+            exr_depth: ExrDepth::Float,
+            exr_compression: ExrCompression::Zip,
+            exr_dwa_level: DWA_LEVEL,
             output_display: String::new(),
             output_view: String::new(),
         }
     }
 }
 impl OutputSettings {
+    /// Effective container for the active video codec.
+    pub fn effective_container(&self) -> Container {
+        match self.codec {
+            Codec::Exv => Container::Exv,
+            Codec::ProRes => Container::Mov,
+            Codec::Av1 => Container::Mp4,
+            Codec::Hevc | Codec::H264 => {
+                if self.container == Container::Mov {
+                    Container::Mov
+                } else {
+                    Container::Mp4
+                }
+            }
+        }
+    }
+    /// Effective bit depth for the active video codec and signal.
+    pub fn effective_video_depth(&self) -> Depth {
+        match self.codec {
+            Codec::ProRes | Codec::Exv => Depth::Ten,
+            Codec::H264 => Depth::Eight,
+            Codec::Hevc | Codec::Av1 => {
+                if self.video_signal.hdr() {
+                    Depth::Ten
+                } else {
+                    self.video_depth
+                }
+            }
+        }
+    }
+    /// Effective signal for the active video codec (H.264 and EXV are always `Sdr8` in `video-io` validation).
+    pub fn effective_video_signal(&self) -> PngEncoding {
+        match self.codec {
+            Codec::H264 | Codec::Exv => PngEncoding::Sdr8,
+            Codec::Hevc | Codec::Av1 | Codec::ProRes => self.video_signal,
+        }
+    }
+    /// Build the [`VideoSettings`] passed to `video-io::native::Encoder`.
+    pub fn video_settings(&self) -> VideoSettings {
+        let encoder = match self.codec {
+            Codec::Hevc => match self.encoder {
+                VideoEncoder::Auto => None,
+                VideoEncoder::Vulkan => Some(Encoder::HevcVulkan),
+                VideoEncoder::Kvazaar => Some(Encoder::Kvazaar),
+            },
+            Codec::H264 => match self.encoder {
+                VideoEncoder::Auto => None,
+                VideoEncoder::Vulkan => Some(Encoder::H264Vulkan),
+                VideoEncoder::Kvazaar => Some(Encoder::OpenH264),
+            },
+            Codec::Av1 | Codec::ProRes | Codec::Exv => None,
+        };
+        VideoSettings {
+            codec: self.codec,
+            container: self.effective_container(),
+            depth: self.effective_video_depth(),
+            chroma: Chroma::Yuv420,
+            rate: Rate::Crf(u32::from(self.qp)),
+            preset: None,
+            prores: self.prores_profile,
+            exv: self.exv_profile,
+            encoder,
+        }
+    }
+    /// Build the [`StillOptions`] for `PNG` / `JPEG` / `TIFF` / `TGA` still exports.
+    pub fn still_options(&self) -> StillOptions {
+        StillOptions {
+            channels: match self.format {
+                ExportFormat::Jpeg => Channels::Rgb,
+                _ => self.channels,
+            },
+            sixteen_bit: self.sixteen_bit,
+            jpeg_quality: self.jpeg_quality,
+            tiff_compression: self.tiff_compression,
+            exr_depth: self.exr_depth,
+            exr_compression: self.exr_compression,
+            exr_dwa_level: self.exr_dwa_level,
+            ..StillOptions::default()
+        }
+    }
+    /// What a file of this format holds, under its current options.
+    pub fn hint(&self) -> &'static str {
+        match self.format {
+            ExportFormat::Exr => {
+                "Scene-linear ACEScg (AP1-tagged) OpenEXR sequence; no display transform or exposure baked in."
+            }
+            ExportFormat::Png => {
+                "The monitor rendering baked in: SDR 8/16-bit sRGB / BT.709, or HDR10 / HLG 16-bit BT.2020 with cICP. Video: the finished sequence also encoded by ffmpeg."
+            }
+            ExportFormat::Jpeg => {
+                "8-bit sRGB / BT.709 JPEG still sequence (baseline DCT, RGB only) with the display transform baked in."
+            }
+            ExportFormat::Tiff => {
+                "8-bit or 16-bit sRGB / BT.709 TIFF still sequence (None, LZW, Deflate, or PackBits compression) with the display transform baked in."
+            }
+            ExportFormat::Tga => {
+                "8-bit RLE-compressed Truevision TGA still sequence (RGB or RGBA) with the display transform baked in."
+            }
+            ExportFormat::Hevc => match self.codec {
+                Codec::Hevc => {
+                    "H.265 / HEVC video (GPU Vulkan Video or CPU Kvazaar, 8/10-bit SDR or 10-bit HDR10 / HLG). Cancel saves completed frames."
+                }
+                Codec::H264 => {
+                    "H.264 / AVC 8-bit SDR video (GPU Vulkan Video or CPU OpenH264) for universal compatibility. Cancel saves completed frames."
+                }
+                Codec::Av1 => {
+                    "AV1 video (CPU rav1e, 8/10-bit SDR or 10-bit HDR10 / HLG). Cancel saves completed frames."
+                }
+                Codec::ProRes => {
+                    "Apple ProRes 10-bit intra-frame mastering video in QuickTime (.mov) across all 6 profiles (Proxy, LT, 422, 422 HQ, 4444, 4444 XQ)."
+                }
+                Codec::Exv => {
+                    "EXV float16 HDR container (.exv): stores linear display light directly in all 8 profiles (BC6H lossless/fast, PIZ, ZIPS, ZIP, RLE, DWAA, DWAB)."
+                }
+            },
+        }
+    }
     /// The recipe's limits, checked when an export starts and shown by the form. The document
     /// enforces each field's range on edit; the cross-field rules live only here. The job adds
     /// its name, range, folder and cadence checks (`ExportSettings::validate`).
@@ -146,27 +328,70 @@ impl OutputSettings {
         {
             return Err("Resolution exceeds the 64 megapixel renderer limit".into());
         }
-        if self.qp > MAX_QP {
-            return Err("Invalid encoder quality".into());
+        if !(1..=100).contains(&self.jpeg_quality) {
+            return Err("JPEG quality must be 1–100".into());
         }
-        // The suffix follows the format (`suffix`), so only the encoder's own limits remain.
-        if self.hevc() && (!self.width.is_multiple_of(2) || !self.height.is_multiple_of(2)) {
-            return Err("HEVC 4:2:0 requires even width and height".into());
+        if !DWA_LEVEL_RANGE.contains(&self.exr_dwa_level) {
+            return Err(format!(
+                "EXR DWA compression level must be {}–{}",
+                DWA_LEVEL_RANGE.start(),
+                DWA_LEVEL_RANGE.end()
+            ));
+        }
+        if self.format == ExportFormat::Hevc {
+            let max_q = if self.codec == Codec::Av1 {
+                255
+            } else {
+                MAX_QP
+            };
+            if self.qp > max_q {
+                return Err("Invalid encoder quality".into());
+            }
+            let video = self.video_settings();
+            video_io::video::Backend::Native
+                .supports(&video, self.effective_video_signal())
+                .map_err(|e| e.to_string())?;
+            if video.subsampled()
+                && (!self.width.is_multiple_of(2) || !self.height.is_multiple_of(2))
+            {
+                return Err(format!(
+                    "{} 4:2:0 requires even width and height",
+                    video.info().label
+                ));
+            }
+            if self.codec == Codec::H264
+                && self.encoder == VideoEncoder::Kvazaar
+                && (!self.width.is_multiple_of(16) || !self.height.is_multiple_of(16))
+            {
+                return Err(
+                    "H.264 CPU (OpenH264) requires width and height multiples of 16".into(),
+                );
+            }
+        } else {
+            if self.qp > MAX_QP {
+                return Err("Invalid encoder quality".into());
+            }
+            if self.format == ExportFormat::Png
+                && self.png_video == PngVideo::Hevc
+                && (!self.width.is_multiple_of(2) || !self.height.is_multiple_of(2))
+            {
+                return Err("HEVC 4:2:0 requires even width and height".into());
+            }
         }
         Ok(())
-    }
-    /// Whether any HEVC is written: the Video format, or a PNG export's HEVC video.
-    fn hevc(&self) -> bool {
-        self.format == ExportFormat::Hevc
-            || (self.format == ExportFormat::Png && self.png_video == PngVideo::Hevc)
     }
     /// The display a file of this format is encoded for; None for scene-linear EXR.
     pub fn output_kind(&self) -> Option<crate::ocio::OutputKind> {
         use crate::ocio::OutputKind;
         match self.format {
             ExportFormat::Exr => None,
-            ExportFormat::Hevc => Some(OutputKind::Sdr),
+            ExportFormat::Jpeg | ExportFormat::Tiff | ExportFormat::Tga => Some(OutputKind::Sdr),
             ExportFormat::Png => Some(match self.png {
+                PngEncoding::Sdr8 => OutputKind::Sdr,
+                PngEncoding::Hdr10 => OutputKind::Pq,
+                PngEncoding::Hlg => OutputKind::Hlg,
+            }),
+            ExportFormat::Hevc => Some(match self.effective_video_signal() {
                 PngEncoding::Sdr8 => OutputKind::Sdr,
                 PngEncoding::Hdr10 => OutputKind::Pq,
                 PngEncoding::Hlg => OutputKind::Hlg,
@@ -278,10 +503,11 @@ impl ExportSettings {
     }
 
     /// The suffix after the file stem: a PNG names its transfer (`PngEncoding::suffix`), so an
-    /// HDR PNG is not taken for an SDR one.
+    /// HDR PNG is not taken for an SDR one; a Video export uses the effective container's extension.
     fn suffix(&self) -> &'static str {
         match self.output.format {
             ExportFormat::Png => self.output.png.suffix(),
+            ExportFormat::Hevc => self.output.effective_container().extension(),
             format => format.extension(),
         }
     }
@@ -684,50 +910,30 @@ impl ExportController {
                 if let (Some(kind), Some(ocio)) = (self.settings.output.output_kind(), ocio) {
                     self.output_transform_ui(ui, ocio, current, kind);
                 }
-                if self.settings.output.format == ExportFormat::Png {
-                    ui.label("Encoding");
-                    egui::ComboBox::from_id_salt("png_encoding").selected_text(self.settings.output.png.label()).show_ui(ui, |ui| {
-                        for encoding in PngEncoding::ALL {
-                            ui.selectable_value(&mut self.settings.output.png, encoding, encoding.label());
-                        }
-                    }); ui.end_row();
-                    if self.settings.output.png.hdr() {
-                        ui.label("HDR peak");
-                        ui.add(egui::DragValue::new(&mut self.settings.output.png_peak_nits).range(PEAK_NITS).suffix(" nits"))
-                            .on_hover_text("When the scene's view is not an HDR view of this kind, the HDR view whose measured peak is nearest this. The file records the rendered view's measured peak (mDCV, HLG system gamma).");
-                        ui.end_row();
+                match self.settings.output.format {
+                    ExportFormat::Exr => {
+                        self.exr_ui(ui);
                     }
-                    ui.label("Video");
-                    let found = ffmpeg().map(|p| format!("Also encode the finished sequence with {} into the PNGs' name with .mov / .mp4 (name.pq.mp4), tagged like the PNGs; an HDR10 HEVC carries the PNGs' mastering peak and the clip's MaxCLL / MaxFALL. A stopgap until the built-in encoder carries HDR.", p.display()));
-                    egui::ComboBox::from_id_salt("png_video").selected_text(self.settings.output.png_video.label()).show_ui(ui, |ui| {
-                        for video in PngVideo::ALL {
-                            ui.selectable_value(&mut self.settings.output.png_video, video, video.label());
-                        }
-                    }).response.on_hover_text(found.unwrap_or_else(|e| e.to_string())); ui.end_row();
-                    if self.settings.output.png_video != PngVideo::Off {
-                        self.fps_row(ui);
+                    ExportFormat::Png => {
+                        self.png_ui(ui);
                     }
-                    if self.settings.output.png_video == PngVideo::Hevc {
-                        self.quality_row(ui, "CRF");
+                    ExportFormat::Jpeg => {
+                        self.jpeg_ui(ui);
                     }
-                }
-                if self.settings.output.format == ExportFormat::Hevc {
-                    ui.label("Encoder");
-                    egui::ComboBox::from_id_salt("video_encoder").selected_text(self.settings.output.encoder.label()).show_ui(ui, |ui| {
-                        for encoder in VideoEncoder::ALL {
-                            ui.selectable_value(&mut self.settings.output.encoder, encoder, encoder.label());
-                        }
-                    }); ui.end_row();
-                    self.fps_row(ui);
-                    self.quality_row(ui, "QP");
-                    if self.settings.output.encoder == VideoEncoder::Kvazaar {
-                        ui.label("Prediction"); ui.label("Independent I-frames"); ui.end_row();
+                    ExportFormat::Tiff => {
+                        self.tiff_ui(ui);
+                    }
+                    ExportFormat::Tga => {
+                        self.channels_row(ui);
+                    }
+                    ExportFormat::Hevc => {
+                        self.video_ui(ui);
                     }
                 }
             });
             // An override names a display of one kind (SDR / PQ / HLG): a new kind starts automatic.
             self.settings.output.normalize_override(kind_before);
-            ui.small(self.settings.output.format.hint());
+            ui.small(self.settings.output.hint());
             ui.weak(format!("Written to {}", self.out_root.join("<date_time>").display()));
             ui.weak("Animation is sampled at each frame. The scene and keys are frozen when export starts.");
             // The same quality, scaling and checks a start applies (`start`).
@@ -758,6 +964,260 @@ impl ExportController {
             }
         }
         ui.label(&self.status);
+    }
+    fn exr_ui(&mut self, ui: &mut egui::Ui) {
+        ui.label("Depth");
+        ui.horizontal(|ui| {
+            for depth in ExrDepth::ALL {
+                ui.selectable_value(&mut self.settings.output.exr_depth, depth, depth.label());
+            }
+        });
+        ui.end_row();
+        ui.label("Compression");
+        egui::ComboBox::from_id_salt("exr_compression")
+            .selected_text(self.settings.output.exr_compression.label())
+            .show_ui(ui, |ui| {
+                for comp in ExrCompression::ALL {
+                    ui.selectable_value(
+                        &mut self.settings.output.exr_compression,
+                        comp,
+                        comp.label(),
+                    );
+                }
+            });
+        ui.end_row();
+        if self.settings.output.exr_compression.dwa() {
+            ui.label("DWA level");
+            ui.add(
+                egui::Slider::new(&mut self.settings.output.exr_dwa_level, DWA_LEVEL_RANGE)
+                    .text("compression"),
+            )
+            .on_hover_text(
+                "DreamWorks lossy wavelet level (45 is OpenEXR's default; higher compresses more).",
+            );
+            ui.end_row();
+        }
+        self.channels_row(ui);
+    }
+    fn png_ui(&mut self, ui: &mut egui::Ui) {
+        ui.label("Encoding");
+        egui::ComboBox::from_id_salt("png_encoding")
+            .selected_text(self.settings.output.png.label())
+            .show_ui(ui, |ui| {
+                for encoding in PngEncoding::ALL {
+                    ui.selectable_value(&mut self.settings.output.png, encoding, encoding.label());
+                }
+            });
+        ui.end_row();
+        if self.settings.output.png.hdr() {
+            self.hdr_peak_row(ui);
+        } else {
+            self.sixteen_bit_row(ui);
+        }
+        self.channels_row(ui);
+        ui.label("Video");
+        let found = ffmpeg().map(|p| {
+            format!(
+                "Also encode the finished sequence with {} into the PNGs' name with .mov / .mp4 (name.pq.mp4), tagged like the PNGs; an HDR10 HEVC carries the PNGs' mastering peak and the clip's MaxCLL / MaxFALL.",
+                p.display()
+            )
+        });
+        egui::ComboBox::from_id_salt("png_video")
+            .selected_text(self.settings.output.png_video.label())
+            .show_ui(ui, |ui| {
+                for video in PngVideo::ALL {
+                    ui.selectable_value(&mut self.settings.output.png_video, video, video.label());
+                }
+            })
+            .response
+            .on_hover_text(found.unwrap_or_else(|e| e.to_string()));
+        ui.end_row();
+        if self.settings.output.png_video != PngVideo::Off {
+            self.fps_row(ui);
+        }
+        if self.settings.output.png_video == PngVideo::Hevc {
+            self.quality_row(ui, "CRF", MAX_QP);
+        }
+    }
+    fn jpeg_ui(&mut self, ui: &mut egui::Ui) {
+        ui.label("Quality");
+        ui.add(egui::Slider::new(&mut self.settings.output.jpeg_quality, 1..=100).text("%"))
+            .on_hover_text("JPEG baseline DCT quality (1–100; 95 is near-lossless).");
+        ui.end_row();
+    }
+    fn tiff_ui(&mut self, ui: &mut egui::Ui) {
+        ui.label("Compression");
+        egui::ComboBox::from_id_salt("tiff_compression")
+            .selected_text(self.settings.output.tiff_compression.label())
+            .show_ui(ui, |ui| {
+                for comp in TiffCompression::ALL {
+                    ui.selectable_value(
+                        &mut self.settings.output.tiff_compression,
+                        comp,
+                        comp.label(),
+                    );
+                }
+            });
+        ui.end_row();
+        self.sixteen_bit_row(ui);
+        self.channels_row(ui);
+    }
+    fn channels_row(&mut self, ui: &mut egui::Ui) {
+        ui.label("Channels");
+        ui.horizontal(|ui| {
+            for ch in Channels::ALL {
+                ui.selectable_value(&mut self.settings.output.channels, ch, ch.label());
+            }
+        });
+        ui.end_row();
+    }
+    fn sixteen_bit_row(&mut self, ui: &mut egui::Ui) {
+        ui.label("Bit depth");
+        ui.horizontal(|ui| {
+            ui.selectable_value(&mut self.settings.output.sixteen_bit, false, "8-bit");
+            ui.selectable_value(&mut self.settings.output.sixteen_bit, true, "16-bit");
+        });
+        ui.end_row();
+    }
+    fn hdr_peak_row(&mut self, ui: &mut egui::Ui) {
+        ui.label("HDR peak");
+        ui.add(
+            egui::DragValue::new(&mut self.settings.output.png_peak_nits)
+                .range(PEAK_NITS)
+                .suffix(" nits"),
+        )
+        .on_hover_text("When the scene's view is not an HDR view of this kind, the HDR view whose measured peak is nearest this. The file records the rendered view's measured peak (mDCV, HLG system gamma).");
+        ui.end_row();
+    }
+    fn video_ui(&mut self, ui: &mut egui::Ui) {
+        let prev_codec = self.settings.output.codec;
+        ui.label("Codec");
+        egui::ComboBox::from_id_salt("video_codec")
+            .selected_text(codec_info(self.settings.output.codec).label)
+            .show_ui(ui, |ui| {
+                for info in video_io::catalog::CODECS {
+                    ui.selectable_value(&mut self.settings.output.codec, info.codec, info.label);
+                }
+            });
+        ui.end_row();
+        if self.settings.output.codec != prev_codec {
+            self.settings.output.container = codec_info(self.settings.output.codec).containers[0];
+            if self.settings.output.codec != Codec::Av1 && self.settings.output.qp > MAX_QP {
+                self.settings.output.qp = HIGH_QUALITY_QP;
+            }
+        }
+        let codec = self.settings.output.codec;
+        match codec {
+            Codec::Exv => {
+                ui.label("Profile");
+                egui::ComboBox::from_id_salt("exv_profile")
+                    .selected_text(self.settings.output.exv_profile.label())
+                    .show_ui(ui, |ui| {
+                        for profile in ExvProfile::ALL {
+                            ui.selectable_value(
+                                &mut self.settings.output.exv_profile,
+                                profile,
+                                profile.label(),
+                            );
+                        }
+                    });
+                ui.end_row();
+                self.fps_row(ui);
+            }
+            Codec::ProRes => {
+                ui.label("Profile");
+                egui::ComboBox::from_id_salt("prores_profile")
+                    .selected_text(self.settings.output.prores_profile.label())
+                    .show_ui(ui, |ui| {
+                        for profile in ProResProfile::ALL {
+                            ui.selectable_value(
+                                &mut self.settings.output.prores_profile,
+                                profile,
+                                profile.label(),
+                            );
+                        }
+                    });
+                ui.end_row();
+                self.video_signal_rows(ui);
+                self.fps_row(ui);
+            }
+            Codec::Av1 => {
+                self.video_signal_rows(ui);
+                if !self.settings.output.video_signal.hdr() {
+                    self.video_depth_row(ui);
+                }
+                self.fps_row(ui);
+                self.quality_row(ui, "Q", 255);
+            }
+            Codec::H264 => {
+                self.video_container_row(ui);
+                self.video_encoder_row(ui);
+                self.fps_row(ui);
+                self.quality_row(ui, "QP", MAX_QP);
+            }
+            Codec::Hevc => {
+                self.video_container_row(ui);
+                self.video_signal_rows(ui);
+                if !self.settings.output.video_signal.hdr() {
+                    self.video_depth_row(ui);
+                }
+                self.video_encoder_row(ui);
+                self.fps_row(ui);
+                self.quality_row(ui, "QP", MAX_QP);
+                if self.settings.output.encoder == VideoEncoder::Kvazaar {
+                    ui.label("Prediction");
+                    ui.label("Independent I-frames");
+                    ui.end_row();
+                }
+            }
+        }
+    }
+    fn video_container_row(&mut self, ui: &mut egui::Ui) {
+        ui.label("Container");
+        ui.horizontal(|ui| {
+            for &c in codec_info(self.settings.output.codec).containers {
+                ui.selectable_value(&mut self.settings.output.container, c, container_label(c));
+            }
+        });
+        ui.end_row();
+    }
+    fn video_signal_rows(&mut self, ui: &mut egui::Ui) {
+        ui.label("Signal");
+        egui::ComboBox::from_id_salt("video_signal")
+            .selected_text(self.settings.output.video_signal.label())
+            .show_ui(ui, |ui| {
+                for sig in PngEncoding::ALL {
+                    ui.selectable_value(&mut self.settings.output.video_signal, sig, sig.label());
+                }
+            });
+        ui.end_row();
+        if self.settings.output.video_signal.hdr() {
+            self.hdr_peak_row(ui);
+        }
+    }
+    fn video_depth_row(&mut self, ui: &mut egui::Ui) {
+        ui.label("Bit depth");
+        ui.horizontal(|ui| {
+            for &d in codec_info(self.settings.output.codec).depths {
+                ui.selectable_value(&mut self.settings.output.video_depth, d, d.label());
+            }
+        });
+        ui.end_row();
+    }
+    fn video_encoder_row(&mut self, ui: &mut egui::Ui) {
+        ui.label("Encoder");
+        egui::ComboBox::from_id_salt("video_encoder")
+            .selected_text(self.settings.output.encoder.label())
+            .show_ui(ui, |ui| {
+                for encoder in VideoEncoder::ALL {
+                    ui.selectable_value(
+                        &mut self.settings.output.encoder,
+                        encoder,
+                        encoder.label(),
+                    );
+                }
+            });
+        ui.end_row();
     }
     /// The "FPS" grid row of every video (the Video format, a PNG export's video).
     fn fps_row(&mut self, ui: &mut egui::Ui) {
@@ -794,17 +1254,16 @@ impl ExportController {
         });
         ui.end_row();
     }
-    /// The "Quality" grid row of an HEVC: `qp` as the built-in encoder's QP or libx265's CRF
-    /// (`unit`), the same 0-51 scale.
-    fn quality_row(&mut self, ui: &mut egui::Ui, unit: &str) {
+    /// The "Quality" grid row of a video encoder: `qp` as QP/CRF (`0..=max_q`).
+    fn quality_row(&mut self, ui: &mut egui::Ui, unit: &str, max_q: u8) {
         ui.label("Quality");
         ui.horizontal(|ui| {
-            ui.add(egui::Slider::new(&mut self.settings.output.qp, 0..=MAX_QP).text(unit))
+            ui.add(egui::Slider::new(&mut self.settings.output.qp, 0..=max_q).text(unit))
                 .on_hover_text(format!(
                     "Lower {unit} preserves more detail and produces larger files."
                 ));
             if ui.button("High quality").clicked() {
-                self.settings.output.qp = HIGH_QUALITY_QP;
+                self.settings.output.qp = if max_q > MAX_QP { 60 } else { HIGH_QUALITY_QP };
             }
         });
         ui.end_row();
@@ -1186,23 +1645,57 @@ impl ExportWriter {
                         let path = settings.frame_path(number);
                         match settings.output.format {
                             ExportFormat::Hevc => {
-                                hevc.as_mut().ok_or("HEVC sink missing")?.write(&frame)?
+                                hevc.as_mut().ok_or("Video sink missing")?.write(&frame)?
                             }
-                            ExportFormat::Exr => write_exr(&path, &frame, settings.job.overwrite)?,
+                            ExportFormat::Exr => {
+                                write_exr(&path, &frame, &settings.output, settings.job.overwrite)?
+                            }
                             // The mastering peak is the rendered view's measured one (`hdr_scale`);
                             // an OCIO export never has relative light (Reinhard is off), so the
                             // SDR white argument only matters for an SDR file.
                             ExportFormat::Png => {
-                                if let Some(frame_levels) = frame.save_png(
+                                if let Some(frame_levels) = write_still(
                                     &path,
+                                    video_io::job::ExportFormat::Png,
+                                    &frame,
                                     settings.output.png,
-                                    crate::color::BT2408_SDR_WHITE_NITS,
+                                    settings.output.still_options(),
                                     settings.job.overwrite,
                                 )? {
                                     levels = Some(
                                         levels.map_or(frame_levels, |l| l.merge(frame_levels)),
                                     );
                                 }
+                            }
+                            ExportFormat::Jpeg => {
+                                write_still(
+                                    &path,
+                                    video_io::job::ExportFormat::Jpeg,
+                                    &frame,
+                                    PngEncoding::Sdr8,
+                                    settings.output.still_options(),
+                                    settings.job.overwrite,
+                                )?;
+                            }
+                            ExportFormat::Tiff => {
+                                write_still(
+                                    &path,
+                                    video_io::job::ExportFormat::Tiff,
+                                    &frame,
+                                    PngEncoding::Sdr8,
+                                    settings.output.still_options(),
+                                    settings.job.overwrite,
+                                )?;
+                            }
+                            ExportFormat::Tga => {
+                                write_still(
+                                    &path,
+                                    video_io::job::ExportFormat::Tga,
+                                    &frame,
+                                    PngEncoding::Sdr8,
+                                    settings.output.still_options(),
+                                    settings.job.overwrite,
+                                )?;
                             }
                         }
                         if tx.send(WriteEvent::Written(number)).is_err() {
@@ -1244,97 +1737,247 @@ impl Drop for ExportWriter {
     }
 }
 
-fn write_exr(path: &Path, frame: &Frame, overwrite: bool) -> Result<(), String> {
+fn write_exr(
+    path: &Path,
+    frame: &Frame,
+    output: &OutputSettings,
+    overwrite: bool,
+) -> Result<(), String> {
     if frame.radiance.len() != frame.width * frame.height {
         return Err("Scene-linear radiance is missing".into());
     }
-    crate::exr_io::write_rgb(
+    crate::exr_io::write_exr(
         path,
         frame.width,
         frame.height,
         &frame.radiance,
         &crate::color::WORKING_PRIMS,
         None,
+        output.exr_depth,
+        output.exr_compression,
+        output.exr_dwa_level,
+        output.channels,
         overwrite,
     )
 }
 
-/// Thin SDR HEVC adapter over [`video_io::native::Encoder`]: encodes linear BT.709 display light
-/// (`frame.light`) into 8-bit BT.1886 RGB24 (`crate::color::bt1886_code`) and pushes it into the
-/// shared native encoder (`hevc_vulkan` or `hevc_kvz`).
+fn write_still(
+    path: &Path,
+    format: video_io::job::ExportFormat,
+    frame: &Frame,
+    encoding: PngEncoding,
+    opts: StillOptions,
+    overwrite: bool,
+) -> Result<Option<HdrLevels>, String> {
+    if let Some(e) = &frame.colour_error {
+        return Err(format!("Colour transform failed: {e}"));
+    }
+    if format == video_io::job::ExportFormat::Png
+        && (!opts.sixteen_bit || encoding != PngEncoding::Sdr8)
+    {
+        let scale = video_io::export::hdr_scale(
+            frame.light_kind,
+            &frame.light,
+            crate::color::BT2408_SDR_WHITE_NITS,
+            encoding,
+        );
+        let still = Still {
+            width: frame.width as u32,
+            height: frame.height as u32,
+            pixels: StillPixels::DisplayLight {
+                light: &frame.light,
+                sdr: &frame.sdr_bytes,
+                scale,
+            },
+            signal: encoding,
+        };
+        return video_io::still::write_still(path, format, &opts, &still, overwrite)
+            .map_err(|e| e.to_string());
+    }
+    let codes16_buf: Vec<u16>;
+    let codes8_buf: Vec<u8>;
+    let pixels = if opts.sixteen_bit
+        && matches!(
+            format,
+            video_io::job::ExportFormat::Png | video_io::job::ExportFormat::Tiff
+        )
+        && !frame.light.is_empty()
+    {
+        codes16_buf = frame
+            .light
+            .iter()
+            .flat_map(|&[r, g, b, a]| {
+                [
+                    (crate::color::oetf(r) * 65535.0 + 0.5) as u16,
+                    (crate::color::oetf(g) * 65535.0 + 0.5) as u16,
+                    (crate::color::oetf(b) * 65535.0 + 0.5) as u16,
+                    (a.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16,
+                ]
+            })
+            .collect();
+        StillPixels::Codes16(&codes16_buf)
+    } else if !frame.sdr_bytes.is_empty() {
+        StillPixels::Codes8(&frame.sdr_bytes)
+    } else {
+        codes8_buf = frame
+            .light
+            .iter()
+            .flat_map(|&[r, g, b, a]| {
+                [
+                    (crate::color::oetf(r) * 255.0 + 0.5) as u8,
+                    (crate::color::oetf(g) * 255.0 + 0.5) as u8,
+                    (crate::color::oetf(b) * 255.0 + 0.5) as u8,
+                    (a.clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
+                ]
+            })
+            .collect();
+        StillPixels::Codes8(&codes8_buf)
+    };
+    let still = Still {
+        width: frame.width as u32,
+        height: frame.height as u32,
+        pixels,
+        signal: encoding,
+    };
+    video_io::still::write_still(path, format, &opts, &still, overwrite).map_err(|e| e.to_string())
+}
+
+/// Native video sink over [`video_io::native::Encoder`] supporting all 5 codecs (`Hevc`, `H264`,
+/// `Av1`, `ProRes`, `Exv`), 8-bit (`Rgb24`), 10-bit (`Rgba64` SDR/HDR10/HLG), and float16 EXV
+/// (`RgbaF32`).
 struct HevcSink {
     encoder: video_io::native::Encoder,
+    codec: Codec,
+    depth: Depth,
+    signal: PngEncoding,
     rgb: Vec<u8>,
+    rgba16: Vec<u16>,
     width: usize,
     height: usize,
     frames: usize,
 }
 impl HevcSink {
     fn new(settings: &ExportSettings) -> Result<Self, String> {
-        use video_io::catalog::{Chroma, Codec, Container, Depth, Encoder, Rate, VideoSettings};
-        let hardware = settings.output.encoder == VideoEncoder::Vulkan;
-        let video = VideoSettings {
-            codec: Codec::Hevc,
-            container: Container::Mp4,
-            depth: Depth::Eight,
-            chroma: Chroma::Yuv420,
-            rate: Rate::Crf(u32::from(settings.output.qp)),
-            preset: None,
-            encoder: Some(if hardware {
-                Encoder::HevcVulkan
-            } else {
-                Encoder::Kvazaar
-            }),
-            ..VideoSettings::default()
-        };
+        let video = settings.output.video_settings();
+        let signal = settings.output.effective_video_signal();
+        let levels = signal.hdr().then_some(HdrLevels {
+            peak_nits: settings.output.png_peak_nits,
+            content: None,
+        });
         let params = video_io::native::Params {
             video: &video,
-            signal: PngEncoding::Sdr8,
+            signal,
             width: settings.output.width as u32,
             height: settings.output.height as u32,
             fps_num: settings.job.fps_num,
             fps_den: settings.job.fps_den,
-            levels: None,
+            levels,
             audio: None,
         };
+        let hardware = settings.output.encoder == VideoEncoder::Vulkan
+            && matches!(video.codec, Codec::Hevc | Codec::H264);
         let encoder =
             video_io::native::Encoder::open(&params, &settings.output(), settings.job.overwrite)
                 .map_err(|error| {
                     if hardware {
                         format!(
-                            "Vulkan Video cannot encode {}×{}: {error}. Select CPU · Kvazaar for software encoding.",
+                            "Vulkan Video cannot encode {}×{}: {error}. Select CPU · Software or Auto for software encoding.",
                             settings.output.width, settings.output.height
                         )
                     } else {
                         error.to_string()
                     }
                 })?;
+        let n = settings.output.width * settings.output.height;
         Ok(Self {
             encoder,
-            rgb: vec![0u8; settings.output.width * settings.output.height * 3],
+            codec: video.codec,
+            depth: video.depth,
+            signal,
+            rgb: if video.codec != Codec::Exv && video.depth == Depth::Eight {
+                vec![0u8; n * 3]
+            } else {
+                Vec::new()
+            },
+            rgba16: if video.codec != Codec::Exv && video.depth == Depth::Ten {
+                vec![0u16; n * 4]
+            } else {
+                Vec::new()
+            },
             width: settings.output.width,
             height: settings.output.height,
             frames: 0,
         })
     }
     fn write(&mut self, frame: &Frame) -> Result<(), String> {
-        if frame.light_kind.hdr() {
-            return Err("HEVC SDR sink cannot encode HDR display codes".into());
-        }
         if let Some(error) = &frame.colour_error {
             return Err(format!("Colour transform failed: {error}"));
         }
         if frame.light.len() != self.width * self.height {
             return Err("Linear display pixel buffer is incomplete".into());
         }
-        for (dst, p) in self.rgb.as_chunks_mut::<3>().0.iter_mut().zip(&frame.light) {
-            for c in 0..3 {
-                dst[c] = (crate::color::bt1886_code(p[c]) * 255.0 + 0.5) as u8;
+        if self.codec == Codec::Exv {
+            self.encoder
+                .push(video_io::native::Pixels::RgbaF32(bytemuck::cast_slice(
+                    &frame.light,
+                )))
+                .map_err(|e| e.to_string())?;
+            self.frames += 1;
+            return Ok(());
+        }
+        if !self.signal.hdr() && frame.light_kind.hdr() {
+            return Err("SDR video sink cannot encode HDR display codes".into());
+        }
+        match self.depth {
+            Depth::Eight => {
+                for (dst, p) in self.rgb.as_chunks_mut::<3>().0.iter_mut().zip(&frame.light) {
+                    for c in 0..3 {
+                        dst[c] = (crate::color::bt1886_code(p[c]) * 255.0 + 0.5) as u8;
+                    }
+                }
+                self.encoder
+                    .push(video_io::native::Pixels::Rgb24(&self.rgb))
+                    .map_err(|e| e.to_string())?;
+            }
+            Depth::Ten => {
+                let scale = self.signal.hdr().then(|| {
+                    video_io::export::hdr_scale(
+                        frame.light_kind,
+                        &frame.light,
+                        crate::color::BT2408_SDR_WHITE_NITS,
+                        self.signal,
+                    )
+                });
+                for (dst, p) in self
+                    .rgba16
+                    .as_chunks_mut::<4>()
+                    .0
+                    .iter_mut()
+                    .zip(&frame.light)
+                {
+                    let [r, g, b] = match (self.signal, scale) {
+                        (PngEncoding::Sdr8, _) => [p[0], p[1], p[2]].map(crate::color::bt1886_code),
+                        (PngEncoding::Hdr10, Some(s)) => {
+                            video_io::color::rec2020_nits([p[0], p[1], p[2]], s.unit_nits).map(
+                                |v| video_io::color::pq(v.clamp(0.0, video_io::color::PQ_PEAK)),
+                            )
+                        }
+                        (PngEncoding::Hlg, Some(s)) => video_io::color::hlg(
+                            video_io::color::rec2020_nits([p[0], p[1], p[2]], s.unit_nits),
+                            s.peak_nits,
+                        ),
+                        _ => [0.0; 3],
+                    };
+                    dst[0] = (r.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16;
+                    dst[1] = (g.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16;
+                    dst[2] = (b.clamp(0.0, 1.0) * 65535.0 + 0.5) as u16;
+                    dst[3] = (p[3].clamp(0.0, 1.0) * 65535.0 + 0.5) as u16;
+                }
+                self.encoder
+                    .push(video_io::native::Pixels::Rgba64(&self.rgba16))
+                    .map_err(|e| e.to_string())?;
             }
         }
-        self.encoder
-            .push(video_io::native::Pixels::Rgb24(&self.rgb))
-            .map_err(|e| e.to_string())?;
         self.frames += 1;
         Ok(())
     }
@@ -2458,5 +3101,154 @@ mod tests {
         s.output.height = 64;
         s.job.last = 6;
         assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn still_formats_and_exr_profiles_write_valid_files() {
+        let _gpu_test = crate::test_gpu::lock();
+        let dir = temp_dir("stills");
+        for (format, ext) in [
+            (ExportFormat::Jpeg, "jpg"),
+            (ExportFormat::Tiff, "tif"),
+            (ExportFormat::Tga, "tga"),
+            (ExportFormat::Png, "png"),
+            (ExportFormat::Exr, "exr"),
+        ] {
+            let settings = ExportSettings {
+                dir: dir.clone(),
+                samples: 4,
+                output: OutputSettings {
+                    format,
+                    width: 8,
+                    height: 8,
+                    sixteen_bit: true,
+                    channels: Channels::Rgba,
+                    jpeg_quality: 90,
+                    tiff_compression: TiffCompression::Lzw,
+                    exr_depth: ExrDepth::Half,
+                    exr_compression: ExrCompression::Dwaa,
+                    exr_dwa_level: 60.0,
+                    ..OutputSettings::default()
+                },
+                job: ExportJob {
+                    name: format!("still-{ext}"),
+                    first: 1,
+                    last: 1,
+                    overwrite: true,
+                    ..ExportJob::default()
+                },
+                ..Default::default()
+            };
+            assert_eq!(settings.suffix(), ext);
+            let writer = ExportWriter::spawn(settings.clone()).unwrap();
+            let mut f = frame(8, 8);
+            f.sdr_bytes = Arc::new(vec![180; 8 * 8 * 4]);
+            writer
+                .frames
+                .as_ref()
+                .unwrap()
+                .send((1, Arc::new(f)))
+                .unwrap();
+            assert!(matches!(
+                writer.events.recv_timeout(Duration::from_secs(30)).unwrap(),
+                WriteEvent::Written(1)
+            ));
+            assert!(matches!(
+                writer.events.recv_timeout(Duration::from_secs(30)).unwrap(),
+                WriteEvent::Finished(_)
+            ));
+            let out = settings.output();
+            assert!(out.exists(), "missing {}", out.display());
+            assert!(std::fs::metadata(&out).unwrap().len() > 16);
+            if format == ExportFormat::Exr {
+                assert_eq!(
+                    crate::exr_io::read_attr::<f32>(&out, "dwaCompressionLevel"),
+                    Some(60.0)
+                );
+            }
+        }
+        finish_fixture(dir);
+    }
+
+    #[test]
+    fn all_exv_and_prores_profiles_and_software_codecs_encode_cleanly() {
+        let _gpu_test = crate::test_gpu::lock();
+        let dir = temp_dir("video-profiles");
+        for profile in ExvProfile::ALL {
+            let settings = ExportSettings {
+                dir: dir.clone(),
+                output: OutputSettings {
+                    format: ExportFormat::Hevc,
+                    codec: Codec::Exv,
+                    exv_profile: profile,
+                    width: 16,
+                    height: 16,
+                    ..OutputSettings::default()
+                },
+                job: ExportJob {
+                    name: format!("exv-{profile:?}"),
+                    overwrite: true,
+                    ..ExportJob::default()
+                },
+                ..Default::default()
+            };
+            assert_eq!(settings.suffix(), "exv");
+            assert!(settings.output.validate().is_ok());
+            let mut sink = HevcSink::new(&settings).unwrap();
+            sink.write(&frame(16, 16)).unwrap();
+            sink.finish(&AtomicBool::new(false)).unwrap();
+            assert!(settings.output().exists());
+        }
+        for profile in ProResProfile::ALL {
+            let settings = ExportSettings {
+                dir: dir.clone(),
+                output: OutputSettings {
+                    format: ExportFormat::Hevc,
+                    codec: Codec::ProRes,
+                    prores_profile: profile,
+                    width: 16,
+                    height: 16,
+                    ..OutputSettings::default()
+                },
+                job: ExportJob {
+                    name: format!("prores-{profile:?}"),
+                    overwrite: true,
+                    ..ExportJob::default()
+                },
+                ..Default::default()
+            };
+            assert_eq!(settings.suffix(), "mov");
+            assert!(settings.output.validate().is_ok());
+            let mut sink = HevcSink::new(&settings).unwrap();
+            sink.write(&frame(16, 16)).unwrap();
+            sink.finish(&AtomicBool::new(false)).unwrap();
+            assert!(settings.output().exists());
+        }
+        for codec in [Codec::H264, Codec::Av1] {
+            let settings = ExportSettings {
+                dir: dir.clone(),
+                output: OutputSettings {
+                    format: ExportFormat::Hevc,
+                    codec,
+                    encoder: VideoEncoder::Kvazaar,
+                    width: 64,
+                    height: 64,
+                    ..OutputSettings::default()
+                },
+                job: ExportJob {
+                    name: format!("sw-{codec:?}"),
+                    overwrite: true,
+                    ..ExportJob::default()
+                },
+                ..Default::default()
+            };
+            assert_eq!(settings.suffix(), "mp4");
+            assert!(settings.output.validate().is_ok());
+            let mut sink = HevcSink::new(&settings).unwrap();
+            sink.write(&frame(64, 64)).unwrap();
+            sink.finish(&AtomicBool::new(false)).unwrap();
+            assert!(settings.output().exists());
+        }
+        finish_fixture(dir);
     }
 }

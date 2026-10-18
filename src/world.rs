@@ -1655,6 +1655,29 @@ fn attribute_choices(path: &str) -> Vec<Value> {
         "/output/encoder" => return variants(crate::export::VideoEncoder::ALL),
         "/output/png" => return variants(video_io::export::PngEncoding::ALL),
         "/output/png_video" => return variants(video_io::catalog::PngVideo::ALL),
+        "/output/codec" => {
+            return variants(video_io::catalog::CODECS.iter().map(|c| c.codec));
+        }
+        "/output/container" => {
+            return variants([
+                video_io::catalog::Container::Mp4,
+                video_io::catalog::Container::Mov,
+                video_io::catalog::Container::Exv,
+            ]);
+        }
+        "/output/video_depth" => {
+            return variants([
+                video_io::catalog::Depth::Eight,
+                video_io::catalog::Depth::Ten,
+            ]);
+        }
+        "/output/video_signal" => return variants(video_io::export::PngEncoding::ALL),
+        "/output/prores_profile" => return variants(video_io::catalog::ProResProfile::ALL),
+        "/output/exv_profile" => return variants(video_io::catalog::ExvProfile::ALL),
+        "/output/channels" => return variants(video_io::still::Channels::ALL),
+        "/output/tiff_compression" => return variants(video_io::still::TiffCompression::ALL),
+        "/output/exr_depth" => return variants(video_io::still::ExrDepth::ALL),
+        "/output/exr_compression" => return variants(video_io::still::ExrCompression::ALL),
         _ => {}
     }
     let values: &[&str] = match path {
@@ -1716,7 +1739,12 @@ pub(crate) fn attribute_range(path: &str) -> Option<(f64, f64)> {
         "/viewport/settle_delay_ms" => Some((0.0, 10000.0)),
         "/viewport/batch_budget_ms" => Some((0.1, 1000.0)),
         "/output/width" | "/output/height" => Some((1.0, crate::export::MAX_AXIS as f64)),
-        "/output/qp" => Some((0.0, f64::from(crate::export::MAX_QP))),
+        "/output/qp" => Some((0.0, 255.0)),
+        "/output/jpeg_quality" => Some((1.0, 100.0)),
+        "/output/exr_dwa_level" => Some((
+            f64::from(*crate::export::DWA_LEVEL_RANGE.start()),
+            f64::from(*crate::export::DWA_LEVEL_RANGE.end()),
+        )),
         "/output/png_peak_nits" => Some((
             f64::from(*crate::export::PEAK_NITS.start()),
             f64::from(*crate::export::PEAK_NITS.end()),
@@ -1776,6 +1804,19 @@ pub(crate) fn attribute_label(path: &str) -> String {
         "/output/png_video" => return "PNG video".into(),
         "/output/png_peak_nits" => return "HDR peak (nits)".into(),
         "/output/qp" => return "QP / CRF".into(),
+        "/output/codec" => return "Video codec".into(),
+        "/output/container" => return "Video container".into(),
+        "/output/video_depth" => return "Video bit depth".into(),
+        "/output/video_signal" => return "Video signal".into(),
+        "/output/prores_profile" => return "ProRes profile".into(),
+        "/output/exv_profile" => return "EXV profile".into(),
+        "/output/channels" => return "Channels".into(),
+        "/output/sixteen_bit" => return "16-bit integer".into(),
+        "/output/jpeg_quality" => return "JPEG quality (%)".into(),
+        "/output/tiff_compression" => return "TIFF compression".into(),
+        "/output/exr_depth" => return "EXR depth".into(),
+        "/output/exr_compression" => return "EXR compression".into(),
+        "/output/exr_dwa_level" => return "EXR DWA level".into(),
         "/output/output_display" => return "Display override".into(),
         "/output/output_view" => return "View override".into(),
         "/output/denoise_at_completion" => return "Denoise at completion".into(),
@@ -2168,27 +2209,58 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
             "Keep the currently displayed viewport image and stop new viewport batches; the image may no longer reflect scene edits."
         }
         "/output/format" => {
-            "EXR: scene-linear ACEScg sequence. PNG: the display rendering baked in (SDR, HDR10 or HLG). Video: HEVC BT.709 SDR."
+            "EXR: scene-linear ACEScg sequence. PNG / JPEG / TIFF / TGA: display rendering baked in. Video: HEVC, H.264, AV1, ProRes or EXV."
         }
         "/output/encoder" => {
-            "The HEVC encoder of the Video format: Vulkan Video on the GPU or Kvazaar on the CPU."
+            "Video encoder implementation for HEVC and H.264: Auto (GPU with CPU fallback), GPU · Vulkan Video, or CPU · Software."
         }
         "/output/width" | "/output/height" => {
             "Base export size; the Output render profile's resolution scale applies once when the export starts."
         }
         "/output/qp" => {
-            "HEVC QP of the built-in encoder, or libx265 CRF of a PNG export's video. Lower keeps more detail in larger files."
+            "Quantizer / CRF of the built-in video encoder (0–51 for HEVC/H.264, 0–255 for AV1), or libx265 CRF of a PNG export's video. Lower keeps more detail."
         }
         "/output/denoise_at_completion" => {
             "Run OIDN once after all samples of each exported frame, overriding the Output profile's denoise cadence."
         }
         "/output/png" => {
-            "How a PNG encodes display light: SDR 8-bit, HDR10 (PQ) or HLG, 16-bit BT.2020."
+            "How a PNG encodes display light: SDR 8/16-bit, HDR10 (PQ) or HLG, 16-bit BT.2020."
         }
         "/output/png_peak_nits" => {
-            "For an HDR PNG whose scene view is not an HDR view of that kind: the HDR view whose measured peak is nearest this."
+            "For an HDR PNG or video whose scene view is not an HDR view of that kind: the HDR view whose measured peak is nearest this."
         }
         "/output/png_video" => "A video ffmpeg also encodes from the finished PNG sequence.",
+        "/output/codec" => {
+            "Native video codec: HEVC (H.265), H.264 (AVC), AV1, Apple ProRes, or EXV float16 HDR container."
+        }
+        "/output/container" => "Video container format (.mp4, .mov, or .exv).",
+        "/output/video_depth" => "Bit depth for SDR HEVC / AV1 video (8-bit or 10-bit).",
+        "/output/video_signal" => {
+            "Signal transfer for HEVC, AV1 and ProRes video: SDR BT.709, HDR10 (PQ) or HLG."
+        }
+        "/output/prores_profile" => {
+            "Apple ProRes 10-bit intra-frame profile: Proxy, LT, 422, 422 HQ, 4444, or 4444 XQ."
+        }
+        "/output/exv_profile" => {
+            "EXV float16 HDR video profile: BC6H lossless/fast, PIZ, ZIPS, ZIP, RLE, DWAA, or DWAB."
+        }
+        "/output/channels" => "Still image channels: RGB (3 channels) or RGBA (with alpha).",
+        "/output/sixteen_bit" => {
+            "Write 16-bit integer samples per channel for SDR PNG and TIFF stills."
+        }
+        "/output/jpeg_quality" => "JPEG baseline DCT quality (1–100; 95 is near-lossless).",
+        "/output/tiff_compression" => {
+            "TIFF lossless compression: None, LZW, Deflate (zlib), or PackBits."
+        }
+        "/output/exr_depth" => {
+            "OpenEXR channel depth: 16-bit float (Half) or 32-bit float (Float)."
+        }
+        "/output/exr_compression" => {
+            "OpenEXR compression mode: None, RLE, ZIPS, ZIP, PIZ, PXR24, B44, B44A, DWAA, DWAB, HTJ2K 32, or HTJ2K 256."
+        }
+        "/output/exr_dwa_level" => {
+            "OpenEXR DreamWorks lossy wavelet compression level (0–250; 45 is default)."
+        }
         "/output/output_display" | "/output/output_view" => {
             "OCIO display / view overriding the automatic output transform; empty is automatic."
         }
