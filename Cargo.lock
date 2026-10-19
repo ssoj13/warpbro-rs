@@ -449,7 +449,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "av-codec"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec-aac",
  "av-codec-aac-enc",
@@ -476,7 +476,7 @@ dependencies = [
 [[package]]
 name = "av-codec-aac"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -490,7 +490,7 @@ dependencies = [
 [[package]]
 name = "av-codec-aac-enc"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec-aac",
  "av-codec-core",
@@ -506,7 +506,7 @@ dependencies = [
 [[package]]
 name = "av-codec-av1"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec-core",
  "av-codec-dovi",
@@ -524,7 +524,7 @@ dependencies = [
 [[package]]
 name = "av-codec-av1-enc"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec-av1",
  "av-codec-core",
@@ -541,7 +541,7 @@ dependencies = [
 [[package]]
 name = "av-codec-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-util-core",
  "av-util-data",
@@ -558,7 +558,7 @@ dependencies = [
 [[package]]
 name = "av-codec-dovi"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -572,7 +572,7 @@ dependencies = [
 [[package]]
 name = "av-codec-h264-enc"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -586,7 +586,7 @@ dependencies = [
 [[package]]
 name = "av-codec-h265"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec-core",
  "av-codec-dovi",
@@ -609,7 +609,7 @@ dependencies = [
 [[package]]
 name = "av-codec-h265-enc"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec-core",
  "av-codec-h265",
@@ -629,7 +629,7 @@ dependencies = [
 [[package]]
 name = "av-codec-h26x"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -645,7 +645,7 @@ dependencies = [
 [[package]]
 name = "av-codec-h274"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-util-core",
  "av-util-frame",
@@ -655,7 +655,7 @@ dependencies = [
 [[package]]
 name = "av-codec-jxl"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -670,7 +670,7 @@ dependencies = [
 [[package]]
 name = "av-codec-mjpeg"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec-core",
  "av-codec-mpegvideo",
@@ -687,7 +687,7 @@ dependencies = [
 [[package]]
 name = "av-codec-mp3"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -700,7 +700,7 @@ dependencies = [
 [[package]]
 name = "av-codec-mpegvideo"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -712,7 +712,7 @@ dependencies = [
 [[package]]
 name = "av-codec-pcm"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -725,7 +725,7 @@ dependencies = [
 [[package]]
 name = "av-codec-prores"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -740,7 +740,7 @@ dependencies = [
 [[package]]
 name = "av-codec-raw"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -754,7 +754,7 @@ dependencies = [
 [[package]]
 name = "av-codec-sei"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec-core",
  "av-codec-dovi",
@@ -768,7 +768,7 @@ dependencies = [
 [[package]]
 name = "av-codec-vp9"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -784,7 +784,7 @@ dependencies = [
 [[package]]
 name = "av-decode"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec",
  "av-codec-core",
@@ -804,7 +804,7 @@ dependencies = [
 [[package]]
 name = "av-format"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec",
  "av-codec-core",
@@ -827,7 +827,7 @@ dependencies = [
 [[package]]
 name = "av-format-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -846,7 +846,7 @@ dependencies = [
 [[package]]
 name = "av-format-mov"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec",
  "av-codec-core",
@@ -864,7 +864,7 @@ dependencies = [
 [[package]]
 name = "av-format-movenc"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec-av1",
  "av-codec-core",
@@ -882,7 +882,7 @@ dependencies = [
 [[package]]
 name = "av-format-mp3"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec-core",
  "av-codec-mp3",
@@ -895,7 +895,7 @@ dependencies = [
 [[package]]
 name = "av-format-raw"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec",
  "av-codec-core",
@@ -909,7 +909,7 @@ dependencies = [
 [[package]]
 name = "av-format-wav"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec-core",
  "av-format-core",
@@ -921,7 +921,7 @@ dependencies = [
 [[package]]
 name = "av-frame-io"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-swscale",
  "av-util-core",
@@ -936,7 +936,7 @@ dependencies = [
 [[package]]
 name = "av-hwaccel-vulkan"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "ash",
  "av-codec-av1",
@@ -959,7 +959,7 @@ dependencies = [
 [[package]]
 name = "av-player"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-codec",
  "av-codec-core",
@@ -998,7 +998,7 @@ dependencies = [
 [[package]]
 name = "av-swresample"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-util-core",
  "av-util-cpu",
@@ -1011,7 +1011,7 @@ dependencies = [
 [[package]]
 name = "av-swscale"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-util-core",
  "av-util-cpu",
@@ -1024,7 +1024,7 @@ dependencies = [
 [[package]]
 name = "av-sync"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-decode",
  "av-util-samplefmt",
@@ -1033,7 +1033,7 @@ dependencies = [
 [[package]]
 name = "av-util-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "bytemuck",
  "log",
@@ -1043,7 +1043,7 @@ dependencies = [
 [[package]]
 name = "av-util-cpu"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-util-core",
  "num-traits",
@@ -1052,7 +1052,7 @@ dependencies = [
 [[package]]
 name = "av-util-crypto"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-util-core",
 ]
@@ -1060,7 +1060,7 @@ dependencies = [
 [[package]]
 name = "av-util-data"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-util-core",
  "av-util-math",
@@ -1071,7 +1071,7 @@ dependencies = [
 [[package]]
 name = "av-util-frame"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-util-core",
  "av-util-data",
@@ -1084,7 +1084,7 @@ dependencies = [
 [[package]]
 name = "av-util-hash"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-util-core",
 ]
@@ -1092,7 +1092,7 @@ dependencies = [
 [[package]]
 name = "av-util-hwcontext"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-util-core",
  "av-util-frame",
@@ -1103,7 +1103,7 @@ dependencies = [
 [[package]]
 name = "av-util-math"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-util-core",
  "av-util-hash",
@@ -1113,7 +1113,7 @@ dependencies = [
 [[package]]
 name = "av-util-pixfmt"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-util-core",
  "av-util-math",
@@ -1124,7 +1124,7 @@ dependencies = [
 [[package]]
 name = "av-util-samplefmt"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-util-core",
  "av-util-str",
@@ -1133,7 +1133,7 @@ dependencies = [
 [[package]]
 name = "av-util-str"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-util-core",
 ]
@@ -1141,7 +1141,7 @@ dependencies = [
 [[package]]
 name = "av-util-time"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-util-core",
  "av-util-math",
@@ -1150,7 +1150,7 @@ dependencies = [
 [[package]]
 name = "av-util-tx"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#3b38a09f75c42d666c490e7d879081c10bb11e76"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
 dependencies = [
  "av-util-core",
  "av-util-cpu",
@@ -3389,7 +3389,7 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 [[package]]
 name = "deflate-rs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#6b9ac193aa6b04079b5ca3c2e8b6815888b423ab"
+source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#50823d3ea2de431d23940eff6046c6de8ff59aef"
 
 [[package]]
 name = "deflate64"
@@ -4047,7 +4047,7 @@ dependencies = [
 [[package]]
 name = "exr-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#6b9ac193aa6b04079b5ca3c2e8b6815888b423ab"
+source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#50823d3ea2de431d23940eff6046c6de8ff59aef"
 dependencies = [
  "codec-simd",
  "deflate-rs",
@@ -4062,7 +4062,7 @@ dependencies = [
 [[package]]
 name = "exv-codec"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#6b9ac193aa6b04079b5ca3c2e8b6815888b423ab"
+source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#50823d3ea2de431d23940eff6046c6de8ff59aef"
 dependencies = [
  "codec-simd",
  "deflate-rs",
@@ -4077,7 +4077,7 @@ dependencies = [
 [[package]]
 name = "exv-format"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#6b9ac193aa6b04079b5ca3c2e8b6815888b423ab"
+source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#50823d3ea2de431d23940eff6046c6de8ff59aef"
 dependencies = [
  "bytemuck",
  "exr-core",
@@ -4090,7 +4090,7 @@ dependencies = [
 [[package]]
 name = "exv-tile"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#6b9ac193aa6b04079b5ca3c2e8b6815888b423ab"
+source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#50823d3ea2de431d23940eff6046c6de8ff59aef"
 dependencies = [
  "exv-format",
  "gpu-info-rs",
@@ -4100,7 +4100,7 @@ dependencies = [
 [[package]]
 name = "exv-video"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#6b9ac193aa6b04079b5ca3c2e8b6815888b423ab"
+source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#50823d3ea2de431d23940eff6046c6de8ff59aef"
 dependencies = [
  "codec-simd",
  "exv-codec",
@@ -5263,7 +5263,7 @@ dependencies = [
 [[package]]
 name = "imath-rs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#6b9ac193aa6b04079b5ca3c2e8b6815888b423ab"
+source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#50823d3ea2de431d23940eff6046c6de8ff59aef"
 
 [[package]]
 name = "imgref"
@@ -7797,7 +7797,7 @@ checksum = "a611d15b50743feb4c76b7d03edcb0e64f399c26961e4efe6975bc398be6aa3d"
 [[package]]
 name = "rans-rs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#6b9ac193aa6b04079b5ca3c2e8b6815888b423ab"
+source = "git+ssh://git@github.com/ssoj13/exr-rs.git?branch=main#50823d3ea2de431d23940eff6046c6de8ff59aef"
 
 [[package]]
 name = "rapidhash"
@@ -10291,7 +10291,7 @@ dependencies = [
 [[package]]
 name = "video-io"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/video-io-rs.git?branch=main#1d184bd64f61cb18191ae108190e6125fd9b1754"
+source = "git+ssh://git@github.com/ssoj13/video-io-rs.git?branch=main#3b6f3c899036e60d0f986c2cc2ac8c9937602303"
 dependencies = [
  "av-codec",
  "av-codec-core",

@@ -270,6 +270,161 @@ impl OutputSettings {
             ..StillOptions::default()
         }
     }
+    /// Default shared presets directory (`$OFX_RS_PRESETS_DIR/video-io` or `~/.ofx-rs/presets/video-io`).
+    pub fn default_presets_dir() -> Option<PathBuf> {
+        let root = std::env::var_os("OFX_RS_PRESETS_DIR")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .or_else(|| {
+                dirs::home_dir()
+                    .filter(|p| p.is_absolute())
+                    .map(|h| h.join(".ofx-rs").join("presets"))
+            })?;
+        Some(root.join("video-io"))
+    }
+    /// Convert this recipe to a shared [`video_io::job::Preset`].
+    pub fn to_preset(&self) -> video_io::job::Preset {
+        video_io::job::Preset {
+            format: match self.format {
+                ExportFormat::Exr => video_io::job::ExportFormat::Exr,
+                ExportFormat::Png => video_io::job::ExportFormat::Png,
+                ExportFormat::Jpeg => video_io::job::ExportFormat::Jpeg,
+                ExportFormat::Tiff => video_io::job::ExportFormat::Tiff,
+                ExportFormat::Tga => video_io::job::ExportFormat::Tga,
+                ExportFormat::Hevc => video_io::job::ExportFormat::Video,
+            },
+            width: self.width,
+            height: self.height,
+            video: self.video_settings(),
+            qp: self.qp.min(MAX_QP),
+            png: if self.format == ExportFormat::Hevc {
+                self.video_signal
+            } else {
+                self.png
+            },
+            png_peak_nits: self.png_peak_nits,
+            png_video: self.png_video,
+            still: self.still_options(),
+        }
+    }
+    /// Apply a shared [`video_io::job::Preset`] onto this recipe while preserving WarpBro-specific fields.
+    pub fn apply_preset(&mut self, preset: &video_io::job::Preset) {
+        self.format = match preset.format {
+            video_io::job::ExportFormat::Exr | video_io::job::ExportFormat::ExrPassThrough => {
+                ExportFormat::Exr
+            }
+            video_io::job::ExportFormat::Png => ExportFormat::Png,
+            video_io::job::ExportFormat::Jpeg => ExportFormat::Jpeg,
+            video_io::job::ExportFormat::Tiff => ExportFormat::Tiff,
+            video_io::job::ExportFormat::Tga => ExportFormat::Tga,
+            video_io::job::ExportFormat::Video => ExportFormat::Hevc,
+        };
+        self.width = preset.width;
+        self.height = preset.height;
+        self.codec = preset.video.codec;
+        self.container = preset.video.container;
+        self.video_depth = preset.video.depth;
+        self.prores_profile = preset.video.prores;
+        self.exv_profile = preset.video.exv;
+        self.encoder = match preset.video.encoder {
+            None => VideoEncoder::Auto,
+            Some(Encoder::HevcVulkan | Encoder::H264Vulkan) => VideoEncoder::Vulkan,
+            Some(_) => VideoEncoder::Kvazaar,
+        };
+        self.qp = if preset.format == video_io::job::ExportFormat::Video {
+            match preset.video.rate {
+                Rate::Crf(q) => q.min(255) as u8,
+                Rate::BitrateKbps(_) => HIGH_QUALITY_QP,
+            }
+        } else {
+            preset.qp
+        };
+        if self.format == ExportFormat::Hevc {
+            self.video_signal = preset.png;
+        } else {
+            self.png = preset.png;
+        }
+        self.png_peak_nits = preset.png_peak_nits;
+        self.png_video = preset.png_video;
+        self.channels = preset.still.channels;
+        self.sixteen_bit = preset.still.sixteen_bit;
+        self.jpeg_quality = preset.still.jpeg_quality;
+        self.tiff_compression = preset.still.tiff_compression;
+        self.exr_depth = preset.still.exr_depth;
+        self.exr_compression = preset.still.exr_compression;
+        self.exr_dwa_level = preset.still.exr_dwa_level;
+    }
+    /// Save this recipe as a `.json` preset file on disk (compatible with `video-io-egui`).
+    pub fn save_preset_file(&self, path: &Path) -> Result<String, String> {
+        let mut target = path.to_path_buf();
+        if target.extension().is_none() {
+            target.set_extension("json");
+        }
+        if let Some(parent) = target.parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let stem = target
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("preset")
+            .to_owned();
+        let json = serde_json::to_string_pretty(&self.to_preset()).map_err(|e| e.to_string())?;
+        std::fs::write(&target, json).map_err(|e| e.to_string())?;
+        Ok(stem)
+    }
+    /// Load a `.json` preset file from disk (accepts [`video_io::job::Preset`], `{ "preset": ... }`, or [`OutputSettings`]).
+    pub fn load_preset_file(&mut self, path: &Path) -> Result<String, String> {
+        #[derive(Deserialize)]
+        struct NamedPreset {
+            preset: video_io::job::Preset,
+        }
+        let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+        if let Ok(preset) = serde_json::from_str::<video_io::job::Preset>(&text)
+            .or_else(|_| serde_json::from_str::<NamedPreset>(&text).map(|n| n.preset))
+        {
+            self.apply_preset(&preset);
+        } else {
+            let output = serde_json::from_str::<Self>(&text).map_err(|e| e.to_string())?;
+            *self = output;
+        }
+        let stem = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or("preset")
+            .to_owned();
+        Ok(stem)
+    }
+    /// List all `*.json` preset files in [`Self::default_presets_dir`], sorted by stem name.
+    pub fn list_preset_files() -> Vec<(String, PathBuf)> {
+        let Some(dir) = Self::default_presets_dir() else {
+            return Vec::new();
+        };
+        let _ = std::fs::create_dir_all(&dir);
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut list = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+                && path.is_file()
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                && !stem.is_empty()
+            {
+                list.push((stem.to_owned(), path));
+            }
+        }
+        list.sort_by(|a, b| a.0.cmp(&b.0));
+        list
+    }
     /// What a file of this format holds, under its current options.
     pub fn hint(&self) -> &'static str {
         match self.format {
@@ -631,6 +786,10 @@ pub struct ExportController {
     /// The Output quality (samples, resolution scale) the host evaluated from the document
     /// for the form's check, or why the Output render profile cannot be exported.
     pub quality: Result<(u32, f32), String>,
+    /// Name of the last loaded/saved file preset in `~/.ofx-rs/presets/video-io`.
+    pub selected_preset: Option<String>,
+    /// Active file dialog for saving (`true`) or loading (`false`) a `.json` preset file.
+    preset_picker: Option<(bool, egui_file_dialog::FileDialog)>,
 }
 #[derive(Clone, Default)]
 struct Progress {
@@ -675,6 +834,8 @@ impl Default for ExportController {
             out_root: crate::out_root(),
             last: None,
             quality: Err("The Output render profile cannot be evaluated".into()),
+            selected_preset: None,
+            preset_picker: None,
         }
     }
 }
@@ -856,6 +1017,126 @@ impl ExportController {
             self.status = "Cancelling export…".into();
         }
     }
+    fn open_preset_dialog(&mut self, save: bool) {
+        let mut dialog = egui_file_dialog::FileDialog::new()
+            .id(egui::Id::new(if save {
+                "export.preset.save"
+            } else {
+                "export.preset.load"
+            }))
+            .add_file_filter_extensions("Export preset (.json)", vec!["json"]);
+        dialog.config_mut().default_file_filter = Some("Export preset (.json)".into());
+        if let Some(dir) = OutputSettings::default_presets_dir() {
+            let _ = std::fs::create_dir_all(&dir);
+            dialog = dialog.initial_directory(dir);
+        }
+        if save {
+            let base = self
+                .selected_preset
+                .as_deref()
+                .unwrap_or(self.settings.job.name.as_str());
+            let stem = crate::fs_name::stem(base);
+            let stem = if stem.is_empty() { "preset" } else { &stem };
+            dialog = dialog.default_file_name(&format!("{stem}.json"));
+            dialog.save_file();
+        } else {
+            dialog.pick_file();
+        }
+        self.preset_picker = Some((save, dialog));
+    }
+    fn update_preset_picker(&mut self, ctx: &egui::Context) {
+        let Some((save, picker)) = &mut self.preset_picker else {
+            return;
+        };
+        picker.update(ctx);
+        let Some(path) = picker.take_picked() else {
+            if matches!(
+                picker.state(),
+                egui_file_dialog::DialogState::Closed | egui_file_dialog::DialogState::Cancelled
+            ) {
+                self.preset_picker = None;
+            }
+            return;
+        };
+        let save = *save;
+        self.preset_picker = None;
+        if save {
+            match self.settings.output.save_preset_file(&path) {
+                Ok(stem) => {
+                    self.selected_preset = Some(stem.clone());
+                    self.status = format!("Saved preset {stem}");
+                }
+                Err(error) => self.status = format!("Preset save failed: {error}"),
+            }
+        } else {
+            match self.settings.output.load_preset_file(&path) {
+                Ok(stem) => {
+                    self.selected_preset = Some(stem.clone());
+                    self.status = format!("Loaded preset {stem}");
+                }
+                Err(error) => self.status = format!("Preset load failed: {error}"),
+            }
+        }
+    }
+    fn preset_row(&mut self, ui: &mut egui::Ui) {
+        let presets = OutputSettings::list_preset_files();
+        if let Some(sel) = &self.selected_preset
+            && !presets.iter().any(|(name, _)| name == sel)
+        {
+            self.selected_preset = None;
+        }
+        ui.label("Preset").on_hover_text(
+            "Shared file-based export presets in ~/.ofx-rs/presets/video-io (*.json), compatible across WarpBro, Playa, and exr-view.",
+        );
+        ui.horizontal(|ui| {
+            let selected_text = self.selected_preset.as_deref().unwrap_or("—").to_owned();
+            let mut chosen_path: Option<PathBuf> = None;
+            egui::ComboBox::from_id_salt("export_file_presets")
+                .selected_text(selected_text)
+                .show_ui(ui, |ui| {
+                    for (name, path) in &presets {
+                        let is_selected = self.selected_preset.as_deref() == Some(name.as_str());
+                        if ui.selectable_label(is_selected, name).clicked() {
+                            chosen_path = Some(path.clone());
+                        }
+                    }
+                });
+            if let Some(path) = chosen_path {
+                match self.settings.output.load_preset_file(&path) {
+                    Ok(stem) => {
+                        self.selected_preset = Some(stem.clone());
+                        self.status = format!("Loaded preset {stem}");
+                    }
+                    Err(error) => self.status = format!("Preset load failed: {error}"),
+                }
+            }
+            if ui
+                .button("Save Preset")
+                .on_hover_text("Save the current encode recipe to a .json preset file (starts in ~/.ofx-rs/presets/video-io).")
+                .clicked()
+            {
+                self.open_preset_dialog(true);
+            }
+            if ui
+                .button("Load Preset")
+                .on_hover_text("Load an encode recipe from a .json preset file on disk.")
+                .clicked()
+            {
+                self.open_preset_dialog(false);
+            }
+            if ui
+                .add_enabled(self.selected_preset.is_some(), egui::Button::new("Delete"))
+                .on_hover_text("Delete the selected preset file from ~/.ofx-rs/presets/video-io.")
+                .clicked()
+                && let Some(sel) = self.selected_preset.take()
+                && let Some((_, path)) = presets.iter().find(|(n, _)| n == &sel)
+            {
+                let _ = std::fs::remove_file(path);
+                self.status = format!("Deleted preset {sel}");
+            }
+        });
+        ui.end_row();
+    }
     /// `timeline` is (first, last, fps, playhead) of the world document. The host fills
     /// `settings.output` from the document's OutputSettings node before this call and authors
     /// any change made here back to that node (`App::export_ui`). `rows` draws the host's own
@@ -875,11 +1156,13 @@ impl ExportController {
     ) {
         let running = self.is_running();
         let kind_before = self.settings.output.output_kind();
+        self.update_preset_picker(ui.ctx());
         ui.add_enabled_ui(!running, |ui| {
             // One grid, so every value column lines up: the host's rows, the settings every
             // format shares, then the format row (the tabs) and only that format's options.
             egui::Grid::new("render_encode").num_columns(2).show(ui, |ui| {
                 rows(ui, host);
+                self.preset_row(ui);
                 ui.label("Name"); ui.horizontal(|ui| {
                     ui.text_edit_singleline(&mut self.settings.job.name);
                     ui.label(format!(".{}", self.settings.suffix()));
@@ -904,7 +1187,12 @@ impl ExportController {
                 }); ui.end_row();
                 ui.label("Format"); ui.horizontal(|ui| {
                     for format in ExportFormat::ALL {
-                        ui.selectable_value(&mut self.settings.output.format, format, format.label());
+                        let r = ui.selectable_value(&mut self.settings.output.format, format, format.label());
+                        if format == ExportFormat::Hevc {
+                            r.on_hover_text(video_io::video::Backend::Native.hint());
+                        } else if format == ExportFormat::Png {
+                            r.on_hover_text(video_io::video::Backend::Cli.hint());
+                        }
                     }
                 }); ui.end_row();
                 if let (Some(kind), Some(ocio)) = (self.settings.output.output_kind(), ocio) {
@@ -1015,10 +1303,12 @@ impl ExportController {
             self.sixteen_bit_row(ui);
         }
         self.channels_row(ui);
-        ui.label("Video");
+        ui.label("Video")
+            .on_hover_text(video_io::video::Backend::Cli.hint());
         let found = ffmpeg().map(|p| {
             format!(
-                "Also encode the finished sequence with {} into the PNGs' name with .mov / .mp4 (name.pq.mp4), tagged like the PNGs; an HDR10 HEVC carries the PNGs' mastering peak and the clip's MaxCLL / MaxFALL.",
+                "{}\nAlso encode the finished sequence with {} into the PNGs' name with .mov / .mp4 (name.pq.mp4), tagged like the PNGs; an HDR10 HEVC carries the PNGs' mastering peak and the clip's MaxCLL / MaxFALL.",
+                video_io::video::Backend::Cli.hint(),
                 p.display()
             )
         });
@@ -1030,7 +1320,10 @@ impl ExportController {
                 }
             })
             .response
-            .on_hover_text(found.unwrap_or_else(|e| e.to_string()));
+            .on_hover_text(
+                found
+                    .unwrap_or_else(|e| format!("{}\n({e})", video_io::video::Backend::Cli.hint())),
+            );
         ui.end_row();
         if self.settings.output.png_video != PngVideo::Off {
             self.fps_row(ui);
@@ -1205,7 +1498,8 @@ impl ExportController {
         ui.end_row();
     }
     fn video_encoder_row(&mut self, ui: &mut egui::Ui) {
-        ui.label("Encoder");
+        ui.label("Encoder")
+            .on_hover_text(video_io::video::Backend::Native.hint());
         egui::ComboBox::from_id_salt("video_encoder")
             .selected_text(self.settings.output.encoder.label())
             .show_ui(ui, |ui| {
@@ -1216,7 +1510,9 @@ impl ExportController {
                         encoder.label(),
                     );
                 }
-            });
+            })
+            .response
+            .on_hover_text(video_io::video::Backend::Native.hint());
         ui.end_row();
     }
     /// The "FPS" grid row of every video (the Video format, a PNG export's video).
@@ -3249,6 +3545,53 @@ mod tests {
             sink.finish(&AtomicBool::new(false)).unwrap();
             assert!(settings.output().exists());
         }
+        finish_fixture(dir);
+    }
+
+    #[test]
+    fn preset_files_round_trip_and_backend_hints_are_exposed() {
+        assert!(!video_io::video::Backend::Native.hint().is_empty());
+        assert!(
+            video_io::video::Backend::Cli
+                .hint()
+                .contains("PNG sequence")
+        );
+        let dir = temp_dir("preset-files");
+        let original = OutputSettings {
+            format: ExportFormat::Hevc,
+            encoder: VideoEncoder::Kvazaar,
+            width: 3840,
+            height: 2160,
+            qp: 16,
+            codec: Codec::Exv,
+            exv_profile: ExvProfile::Htj2kLossy,
+            prores_profile: ProResProfile::P4444,
+            channels: Channels::Rgb,
+            sixteen_bit: true,
+            jpeg_quality: 92,
+            tiff_compression: TiffCompression::Lzw,
+            exr_depth: ExrDepth::Half,
+            exr_compression: ExrCompression::Dwab,
+            exr_dwa_level: 35.0,
+            ..OutputSettings::default()
+        };
+        let path = dir.join("my_master_preset");
+        let stem = original.save_preset_file(&path).unwrap();
+        assert_eq!(stem, "my_master_preset");
+        assert!(dir.join("my_master_preset.json").exists());
+
+        let mut loaded = OutputSettings::default();
+        let loaded_stem = loaded
+            .load_preset_file(&dir.join("my_master_preset.json"))
+            .unwrap();
+        assert_eq!(loaded_stem, "my_master_preset");
+        assert_eq!(loaded.format, ExportFormat::Hevc);
+        assert_eq!(loaded.width, 3840);
+        assert_eq!(loaded.height, 2160);
+        assert_eq!(loaded.codec, Codec::Exv);
+        assert_eq!(loaded.exv_profile, ExvProfile::Htj2kLossy);
+        assert_eq!(loaded.exr_compression, ExrCompression::Dwab);
+        assert_eq!(loaded.exr_dwa_level, 35.0);
         finish_fixture(dir);
     }
 }
