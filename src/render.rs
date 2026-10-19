@@ -4274,12 +4274,12 @@ mod tests {
                 let mut min_reach = f32::INFINITY;
                 let mut first_q = [0.0f32; 3];
                 let mut reaches = [0.0f32; 8];
-                for i in 0..count {
+                for (i, reach_slot) in reaches.iter_mut().enumerate().take(count) {
                     let row = i * OBJECT_STRIDE;
                     let q = inv_affine(row, pt);
                     let reach =
                         (len3(q) - objs[row + O_CLIP_RADIUS]) * objs[row + O_DISTANCE_SCALE];
-                    reaches[i] = reach;
+                    *reach_slot = reach;
                     if reach < min_reach {
                         min_reach = reach;
                         first = i;
@@ -4287,8 +4287,8 @@ mod tests {
                     }
                 }
                 let mut best = eval_de_hoisted(first, first_q);
-                for i in 0..count {
-                    if i == first || reaches[i] >= best {
+                for (i, &reach) in reaches.iter().enumerate().take(count) {
+                    if i == first || reach >= best {
                         continue;
                     }
                     let row = i * OBJECT_STRIDE;
