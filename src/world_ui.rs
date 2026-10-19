@@ -671,9 +671,36 @@ impl WorldUi {
             && !ctx.input(|input| input.pointer.secondary_down())
             && crate::hotkeys::active(ctx) == Some(crate::hotkeys::Scope::Timeline)
     }
+    /// Global `0-9` (jump to time mark) and `Shift + 0-9` (set time mark at playhead).
+    /// Consumed in `Scope::Global` so marks work across all panels while `hotkeys::consume`
+    /// protects focused text and numeric (`DragValue`) editors in Attribute Editor and elsewhere.
+    pub fn mark_shortcuts(&mut self, ctx: &egui::Context, e: &mut WorldEditor) {
+        use crate::hotkeys::{self, Command as Hotkey, Scope};
+        if ctx.input(|input| input.pointer.secondary_down()) {
+            return;
+        }
+        let cursor = self.playhead;
+        for slot in 0..10 {
+            if hotkeys::consume(ctx, Scope::Global, Hotkey::SetMark(slot)) {
+                self.command(
+                    e,
+                    WorldCommand::SetMark {
+                        slot,
+                        frame: Some(cursor),
+                    },
+                );
+            }
+            if hotkeys::consume(ctx, Scope::Global, Hotkey::Mark(slot))
+                && let Some(&frame) = e.document.marks.get(&slot)
+            {
+                self.seek(frame);
+            }
+        }
+    }
     fn timeline_shortcuts(&mut self, ui: &egui::Ui, e: &mut WorldEditor, nodes: &[WorldNodeInfo]) {
         use crate::hotkeys::{self, Command as Hotkey, Scope};
         hotkeys::register(ui, Scope::Timeline, ui.max_rect());
+        self.mark_shortcuts(ui.ctx(), e);
         if !self.shortcuts_active(ui.ctx()) {
             return;
         }
@@ -766,22 +793,6 @@ impl WorldUi {
                 fps,
             };
             self.command(e, range);
-        }
-        for slot in 0..10 {
-            if pressed(Hotkey::SetMark(slot)) {
-                self.command(
-                    e,
-                    WorldCommand::SetMark {
-                        slot,
-                        frame: Some(cursor),
-                    },
-                );
-            }
-            if pressed(Hotkey::Mark(slot))
-                && let Some(&frame) = e.document.marks.get(&slot)
-            {
-                self.seek(frame);
-            }
         }
     }
     /// Fit the working range into the actual canvas beside the outline.

@@ -4760,6 +4760,7 @@ impl App {
                 }
             });
         self.world_ui.add_menu_ui(root.ctx(), &mut self.world);
+        self.world_ui.mark_shortcuts(root.ctx(), &mut self.world);
 
         if !self.viewport_visible {
             if let Some(request) = &mut self.request

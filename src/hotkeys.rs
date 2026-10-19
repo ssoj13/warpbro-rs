@@ -177,6 +177,26 @@ pub const GLOBAL: &[Binding] = &[
         Modifiers::COMMAND.plus(Modifiers::SHIFT),
     ),
     binding(Command::Duplicate, Key::D, Modifiers::COMMAND),
+    physical(Command::SetMark(0), Key::Num0, Modifiers::SHIFT),
+    physical(Command::SetMark(1), Key::Num1, Modifiers::SHIFT),
+    physical(Command::SetMark(2), Key::Num2, Modifiers::SHIFT),
+    physical(Command::SetMark(3), Key::Num3, Modifiers::SHIFT),
+    physical(Command::SetMark(4), Key::Num4, Modifiers::SHIFT),
+    physical(Command::SetMark(5), Key::Num5, Modifiers::SHIFT),
+    physical(Command::SetMark(6), Key::Num6, Modifiers::SHIFT),
+    physical(Command::SetMark(7), Key::Num7, Modifiers::SHIFT),
+    physical(Command::SetMark(8), Key::Num8, Modifiers::SHIFT),
+    physical(Command::SetMark(9), Key::Num9, Modifiers::SHIFT),
+    physical(Command::Mark(0), Key::Num0, Modifiers::NONE),
+    physical(Command::Mark(1), Key::Num1, Modifiers::NONE),
+    physical(Command::Mark(2), Key::Num2, Modifiers::NONE),
+    physical(Command::Mark(3), Key::Num3, Modifiers::NONE),
+    physical(Command::Mark(4), Key::Num4, Modifiers::NONE),
+    physical(Command::Mark(5), Key::Num5, Modifiers::NONE),
+    physical(Command::Mark(6), Key::Num6, Modifiers::NONE),
+    physical(Command::Mark(7), Key::Num7, Modifiers::NONE),
+    physical(Command::Mark(8), Key::Num8, Modifiers::NONE),
+    physical(Command::Mark(9), Key::Num9, Modifiers::NONE),
 ];
 pub const VIEWPORT: &[Binding] = &[
     binding(Command::Fit, Key::F, Modifiers::NONE),
@@ -225,26 +245,6 @@ pub const TIMELINE: &[Binding] = &[
     binding(Command::End, Key::End, Modifiers::NONE),
     binding(Command::SetStart, Key::B, Modifiers::NONE),
     binding(Command::SetEnd, Key::N, Modifiers::NONE),
-    physical(Command::SetMark(0), Key::Num0, Modifiers::SHIFT),
-    physical(Command::SetMark(1), Key::Num1, Modifiers::SHIFT),
-    physical(Command::SetMark(2), Key::Num2, Modifiers::SHIFT),
-    physical(Command::SetMark(3), Key::Num3, Modifiers::SHIFT),
-    physical(Command::SetMark(4), Key::Num4, Modifiers::SHIFT),
-    physical(Command::SetMark(5), Key::Num5, Modifiers::SHIFT),
-    physical(Command::SetMark(6), Key::Num6, Modifiers::SHIFT),
-    physical(Command::SetMark(7), Key::Num7, Modifiers::SHIFT),
-    physical(Command::SetMark(8), Key::Num8, Modifiers::SHIFT),
-    physical(Command::SetMark(9), Key::Num9, Modifiers::SHIFT),
-    physical(Command::Mark(0), Key::Num0, Modifiers::NONE),
-    physical(Command::Mark(1), Key::Num1, Modifiers::NONE),
-    physical(Command::Mark(2), Key::Num2, Modifiers::NONE),
-    physical(Command::Mark(3), Key::Num3, Modifiers::NONE),
-    physical(Command::Mark(4), Key::Num4, Modifiers::NONE),
-    physical(Command::Mark(5), Key::Num5, Modifiers::NONE),
-    physical(Command::Mark(6), Key::Num6, Modifiers::NONE),
-    physical(Command::Mark(7), Key::Num7, Modifiers::NONE),
-    physical(Command::Mark(8), Key::Num8, Modifiers::NONE),
-    physical(Command::Mark(9), Key::Num9, Modifiers::NONE),
     binding(Command::Preview, Key::Insert, Modifiers::NONE),
     binding(Command::CachePreview, Key::Insert, Modifiers::SHIFT),
     binding(
@@ -467,9 +467,25 @@ pub fn menu_item(ui: &mut Ui, text: &str, scope: Scope, command: Command) -> egu
     ui.add(button)
 }
 
+/// True when any `TextEdit` or `DragValue` numeric field owns keyboard focus on this frame.
+/// Latching per `cumulative_frame_nr()` ensures that if `Enter` or `Escape` surrenders focus
+/// mid-frame inside a widget, any key events from that same frame are not consumed as hotkeys
+/// after the UI pass, while the very next frame immediately accepts hotkeys again.
+fn text_input_active(ctx: &Context) -> bool {
+    let frame = ctx.cumulative_frame_nr();
+    let latch_id = Id::new("dcc-hotkey-text-active-frame");
+    let active_now = ctx.memory(|m| m.focused().is_some());
+    if active_now {
+        ctx.data_mut(|d| d.insert_temp(latch_id, frame));
+        true
+    } else {
+        ctx.data(|d| d.get_temp::<u64>(latch_id)) == Some(frame)
+    }
+}
+
 /// Consume exactly one non-repeated command event, only in its owning scope.
 pub fn consume(ctx: &Context, scope: Scope, command: Command) -> bool {
-    if ctx.text_edit_focused() || (scope != Scope::Global && active(ctx) != Some(scope)) {
+    if text_input_active(ctx) || (scope != Scope::Global && active(ctx) != Some(scope)) {
         return false;
     }
     let doubles = double_taps(ctx);
@@ -497,7 +513,7 @@ pub fn consume(ctx: &Context, scope: Scope, command: Command) -> bool {
 /// `Event::Copy`, not a key event. Consumed only when `wanted` and no text editor has focus,
 /// so text fields and selectable labels keep their own copy.
 pub fn take_copy(ctx: &Context, wanted: bool) -> bool {
-    if !wanted || ctx.text_edit_focused() {
+    if !wanted || text_input_active(ctx) {
         return false;
     }
     ctx.input_mut(|input| {
@@ -511,7 +527,7 @@ pub fn take_copy(ctx: &Context, wanted: bool) -> bool {
 /// The platform Paste (`Event::Paste`, clipboard text) when `accept` claims it and no text
 /// editor has focus; other text stays for the widgets.
 pub fn take_paste(ctx: &Context, accept: impl Fn(&str) -> bool) -> Option<String> {
-    if ctx.text_edit_focused() {
+    if text_input_active(ctx) {
         return None;
     }
     ctx.input_mut(|input| {
@@ -742,22 +758,146 @@ mod tests {
         );
         assert_eq!(
             resolve(t, Key::Num3, Some(Key::Num3), Modifiers::NONE, false),
-            Some((t, Command::Mark(3)))
+            Some((Scope::Global, Command::Mark(3)))
+        );
+        assert_eq!(
+            resolve(
+                Scope::Viewport,
+                Key::Num3,
+                Some(Key::Num3),
+                Modifiers::NONE,
+                false
+            ),
+            Some((Scope::Global, Command::Mark(3)))
         );
         // Shift + 3 types "!" (US) or "№" (no egui key) but is the physical 3.
         let shifted = resolve(
-            t,
+            Scope::AttributeEditor,
             Key::Exclamationmark,
             Some(Key::Num3),
             Modifiers::SHIFT,
             false,
         );
-        assert_eq!(shifted, Some((t, Command::SetMark(3))));
+        assert_eq!(shifted, Some((Scope::Global, Command::SetMark(3))));
         // Property filters keep their additive Shift.
         assert_eq!(
             resolve(t, Key::U, None, Modifiers::SHIFT, false),
             Some((t, Command::Keyed))
         );
+    }
+    #[test]
+    fn global_digit_marks_never_steal_keys_from_focused_numeric_fields() {
+        let ctx = Context::default();
+        let mut value = 1.0_f64;
+        let mut field_rect = Rect::NOTHING;
+        let step = |ctx: &Context, events: Vec<egui::Event>, value: &mut f64, rect: &mut Rect| {
+            let mut mark_fired = false;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 200.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |root| {
+                    // Poll global marks both before and after the UI to ensure neither steals input.
+                    mark_fired |= consume(root, Scope::Global, Command::Mark(5));
+                    mark_fired |= consume(root, Scope::Global, Command::SetMark(5));
+                    egui::CentralPanel::default().show(root, |ui| {
+                        let resp = ui.add(soluwell_config::num::drag(value));
+                        *rect = resp.rect;
+                    });
+                    mark_fired |= consume(root, Scope::Global, Command::Mark(5));
+                    mark_fired |= consume(root, Scope::Global, Command::SetMark(5));
+                },
+            );
+            output.textures_delta.clear();
+            mark_fired
+        };
+
+        // 1. Initial layout pass.
+        assert!(!step(&ctx, vec![], &mut value, &mut field_rect));
+
+        // 2. Click the numeric field to enter text editing mode.
+        let center = field_rect.center();
+        assert!(!step(
+            &ctx,
+            vec![
+                egui::Event::PointerMoved(center),
+                egui::Event::PointerButton {
+                    pos: center,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: center,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: Modifiers::NONE,
+                },
+            ],
+            &mut value,
+            &mut field_rect,
+        ));
+
+        // 3. Type "5" and commit with Enter while the numeric field is focused.
+        assert!(
+            !step(
+                &ctx,
+                vec![
+                    egui::Event::Key {
+                        key: Key::Num5,
+                        physical_key: Some(Key::Num5),
+                        pressed: true,
+                        repeat: false,
+                        modifiers: Modifiers::NONE,
+                    },
+                    egui::Event::Text("5".into()),
+                    egui::Event::Key {
+                        key: Key::Num5,
+                        physical_key: Some(Key::Num5),
+                        pressed: false,
+                        repeat: false,
+                        modifiers: Modifiers::NONE,
+                    },
+                    egui::Event::Key {
+                        key: Key::Enter,
+                        physical_key: Some(Key::Enter),
+                        pressed: true,
+                        repeat: false,
+                        modifiers: Modifiers::NONE,
+                    },
+                    egui::Event::Key {
+                        key: Key::Enter,
+                        physical_key: Some(Key::Enter),
+                        pressed: false,
+                        repeat: false,
+                        modifiers: Modifiers::NONE,
+                    },
+                ],
+                &mut value,
+                &mut field_rect,
+            ),
+            "typing 5 in a focused numeric field must never trigger Command::Mark(5)"
+        );
+        assert_eq!(value, 5.0);
+
+        // 4. Once committed (no longer editing), pressing 5 fires Command::Mark(5) globally.
+        assert!(step(
+            &ctx,
+            vec![egui::Event::Key {
+                key: Key::Num5,
+                physical_key: Some(Key::Num5),
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            }],
+            &mut value,
+            &mut field_rect,
+        ));
     }
     #[test]
     fn delete_belongs_to_the_outliner_and_the_takes() {
