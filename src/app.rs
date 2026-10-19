@@ -352,7 +352,8 @@ fn sample_status_ui(
     } else {
         frame.samples as f32 / target_spp.max(1) as f32
     };
-    let mut bar = egui::ProgressBar::new(fraction).desired_width(bar_width.max(0.0));
+    let bar_w = (ui.available_width() - 4.0).clamp(0.0, bar_width.max(0.0));
+    let mut bar = egui::ProgressBar::new(fraction).desired_width(bar_w);
     if frame.converged {
         bar = bar.text("converged");
     } else if total > 0 && active < total {
@@ -3810,13 +3811,7 @@ impl App {
                     }
                     3 => {
                         if let Some(frame) = frame {
-                            sample_status_ui(
-                                ui,
-                                frame,
-                                target_spp,
-                                preview,
-                                ui.available_width() - 4.0,
-                            );
+                            sample_status_ui(ui, frame, target_spp, preview, 120.0);
                         }
                     }
                     4 => {

@@ -3232,6 +3232,15 @@ fn grid_value(value: &Value) -> GridValue {
         _ => GridValue::Label(value.to_string()),
     }
 }
+fn clean_f64(v: f32) -> f64 {
+    if v.is_finite() {
+        v.to_string()
+            .parse::<f64>()
+            .unwrap_or_else(|_| f64::from(v))
+    } else {
+        f64::from(v)
+    }
+}
 fn grid_json(value: GridValue, template: &Value) -> Value {
     match value {
         GridValue::Bool(v) => json!(v),
@@ -3240,9 +3249,9 @@ fn grid_json(value: GridValue, template: &Value) -> Value {
         GridValue::Int(v) => numeric_value(template, f64::from(v)),
         GridValue::Int64(v) => json!(v),
         GridValue::UInt(v) => numeric_value(template, f64::from(v)),
-        GridValue::Float(v) => numeric_value(template, f64::from(v)),
-        GridValue::Vec3(v) => json!(v),
-        GridValue::Vec4(v) => json!(v),
+        GridValue::Float(v) => numeric_value(template, clean_f64(v)),
+        GridValue::Vec3(v) => json!(v.map(clean_f64)),
+        GridValue::Vec4(v) => json!(v.map(clean_f64)),
         GridValue::List(v) => Value::Array(
             v.into_iter()
                 .enumerate()

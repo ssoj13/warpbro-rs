@@ -16,7 +16,7 @@ use std::{
     time::Duration,
 };
 pub use video_io::catalog::{
-    Chroma, Codec, CodecInfo, Container, Depth, Encoder, ExvProfile, PngVideo, ProResProfile, Rate,
+    Chroma, Codec, Container, Depth, Encoder, ExvProfile, PngVideo, ProResProfile, Rate,
     VideoSettings,
 };
 use video_io::cli::ffmpeg;
@@ -34,20 +34,6 @@ const DEFAULT_PNG_PEAK_NITS: f32 = 1000.0;
 pub const DWA_LEVEL_RANGE: std::ops::RangeInclusive<f32> = 0.0..=250.0;
 /// The renderer's 64 megapixel frame limit.
 const MAX_PIXELS: usize = 67_108_864;
-
-fn codec_info(codec: Codec) -> &'static CodecInfo {
-    video_io::catalog::CODECS
-        .iter()
-        .find(|c| c.codec == codec)
-        .expect("all Codec variants are in CODECS")
-}
-fn container_label(container: Container) -> &'static str {
-    match container {
-        Container::Mp4 => "MP4 (.mp4)",
-        Container::Mov => "QuickTime (.mov)",
-        Container::Exv => "EXV (.exv)",
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExportFormat {
@@ -68,16 +54,6 @@ impl ExportFormat {
         Self::Tga,
         Self::Hevc,
     ];
-    fn label(self) -> &'static str {
-        match self {
-            Self::Exr => "EXR",
-            Self::Png => "PNG",
-            Self::Jpeg => "JPEG",
-            Self::Tiff => "TIFF",
-            Self::Tga => "TGA",
-            Self::Hevc => "Video",
-        }
-    }
     pub fn extension(self) -> &'static str {
         match self {
             Self::Exr => "exr",
@@ -98,13 +74,6 @@ pub enum VideoEncoder {
 }
 impl VideoEncoder {
     pub const ALL: [Self; 3] = [Self::Auto, Self::Vulkan, Self::Kvazaar];
-    fn label(self) -> &'static str {
-        match self {
-            Self::Auto => "Auto (GPU, fallback CPU)",
-            Self::Vulkan => "GPU · Vulkan Video",
-            Self::Kvazaar => "CPU · Software",
-        }
-    }
 }
 
 /// The encode recipe of an export: the values of the document's `OutputSettings` node (branch
@@ -130,7 +99,7 @@ pub struct OutputSettings {
     /// The video a PNG export also encodes from its sequence (ffmpeg); `fps` and `qp` (CRF)
     /// are shared with the Video format.
     pub png_video: PngVideo,
-    /// Video codec when `format == ExportFormat::Hevc` (`Hevc`, `H264`, `Av1`, `ProRes`, `Exv`).
+    /// Video codec when `format == ExportFormat::Hevc` (`Hevc`, `H264`, `Av1`, `Vp9`, `ProRes`, `Exv`).
     pub codec: Codec,
     /// Video container for codecs that support multiple containers (`Mp4` / `Mov`).
     pub container: Container,
@@ -196,7 +165,7 @@ impl OutputSettings {
         match self.codec {
             Codec::Exv => Container::Exv,
             Codec::ProRes => Container::Mov,
-            Codec::Av1 => Container::Mp4,
+            Codec::Av1 | Codec::Vp9 => Container::Mp4,
             Codec::Hevc | Codec::H264 => {
                 if self.container == Container::Mov {
                     Container::Mov
@@ -211,7 +180,7 @@ impl OutputSettings {
         match self.codec {
             Codec::ProRes | Codec::Exv => Depth::Ten,
             Codec::H264 => Depth::Eight,
-            Codec::Hevc | Codec::Av1 => {
+            Codec::Hevc | Codec::Av1 | Codec::Vp9 => {
                 if self.video_signal.hdr() {
                     Depth::Ten
                 } else {
@@ -224,7 +193,7 @@ impl OutputSettings {
     pub fn effective_video_signal(&self) -> PngEncoding {
         match self.codec {
             Codec::H264 | Codec::Exv => PngEncoding::Sdr8,
-            Codec::Hevc | Codec::Av1 | Codec::ProRes => self.video_signal,
+            Codec::Hevc | Codec::Av1 | Codec::Vp9 | Codec::ProRes => self.video_signal,
         }
     }
     /// Build the [`VideoSettings`] passed to `video-io::native::Encoder`.
@@ -240,7 +209,12 @@ impl OutputSettings {
                 VideoEncoder::Vulkan => Some(Encoder::H264Vulkan),
                 VideoEncoder::Kvazaar => Some(Encoder::OpenH264),
             },
-            Codec::Av1 | Codec::ProRes | Codec::Exv => None,
+            Codec::Av1 => match self.encoder {
+                VideoEncoder::Auto => None,
+                VideoEncoder::Vulkan => Some(Encoder::Av1Vulkan),
+                VideoEncoder::Kvazaar => Some(Encoder::Rav1e),
+            },
+            Codec::Vp9 | Codec::ProRes | Codec::Exv => None,
         };
         VideoSettings {
             codec: self.codec,
@@ -329,7 +303,9 @@ impl OutputSettings {
         self.exv_profile = preset.video.exv;
         self.encoder = match preset.video.encoder {
             None => VideoEncoder::Auto,
-            Some(Encoder::HevcVulkan | Encoder::H264Vulkan) => VideoEncoder::Vulkan,
+            Some(Encoder::HevcVulkan | Encoder::H264Vulkan | Encoder::Av1Vulkan) => {
+                VideoEncoder::Vulkan
+            }
             Some(_) => VideoEncoder::Kvazaar,
         };
         self.qp = if preset.format == video_io::job::ExportFormat::Video {
@@ -356,6 +332,7 @@ impl OutputSettings {
         self.exr_dwa_level = preset.still.exr_dwa_level;
     }
     /// Save this recipe as a `.json` preset file on disk (compatible with `video-io-egui`).
+    #[cfg(test)]
     pub fn save_preset_file(&self, path: &Path) -> Result<String, String> {
         let mut target = path.to_path_buf();
         if target.extension().is_none() {
@@ -399,32 +376,6 @@ impl OutputSettings {
             .to_owned();
         Ok(stem)
     }
-    /// List all `*.json` preset files in [`Self::default_presets_dir`], sorted by stem name.
-    pub fn list_preset_files() -> Vec<(String, PathBuf)> {
-        let Some(dir) = Self::default_presets_dir() else {
-            return Vec::new();
-        };
-        let _ = std::fs::create_dir_all(&dir);
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            return Vec::new();
-        };
-        let mut list = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path
-                .extension()
-                .and_then(|e| e.to_str())
-                .is_some_and(|e| e.eq_ignore_ascii_case("json"))
-                && path.is_file()
-                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
-                && !stem.is_empty()
-            {
-                list.push((stem.to_owned(), path));
-            }
-        }
-        list.sort_by(|a, b| a.0.cmp(&b.0));
-        list
-    }
     /// What a file of this format holds, under its current options.
     pub fn hint(&self) -> &'static str {
         match self.format {
@@ -451,7 +402,10 @@ impl OutputSettings {
                     "H.264 / AVC 8-bit SDR video (GPU Vulkan Video or CPU OpenH264) for universal compatibility. Cancel saves completed frames."
                 }
                 Codec::Av1 => {
-                    "AV1 video (CPU rav1e, 8/10-bit SDR or 10-bit HDR10 / HLG). Cancel saves completed frames."
+                    "AV1 video (GPU Vulkan Video or CPU rav1e, 8/10-bit SDR or 10-bit HDR10 / HLG). Cancel saves completed frames."
+                }
+                Codec::Vp9 => {
+                    "VP9 video (CPU, 8/10-bit SDR or 10-bit HDR10 / HLG). Cancel saves completed frames."
                 }
                 Codec::ProRes => {
                     "Apple ProRes 10-bit intra-frame mastering video in QuickTime (.mov) across all 6 profiles (Proxy, LT, 422, 422 HQ, 4444, 4444 XQ)."
@@ -494,7 +448,7 @@ impl OutputSettings {
             ));
         }
         if self.format == ExportFormat::Hevc {
-            let max_q = if self.codec == Codec::Av1 {
+            let max_q = if matches!(self.codec, Codec::Av1 | Codec::Vp9) {
                 255
             } else {
                 MAX_QP
@@ -786,8 +740,8 @@ pub struct ExportController {
     /// The Output quality (samples, resolution scale) the host evaluated from the document
     /// for the form's check, or why the Output render profile cannot be exported.
     pub quality: Result<(u32, f32), String>,
-    /// Name of the last loaded/saved file preset in `~/.ofx-rs/presets/video-io`.
-    pub selected_preset: Option<String>,
+    /// Shared `video-io-egui` export widget (`Preset`, `Format`, `Resolution`, and format/codec rows).
+    dialog: video_io_egui::ExportDialog,
     /// Active file dialog for saving (`true`) or loading (`false`) a `.json` preset file.
     preset_picker: Option<(bool, egui_file_dialog::FileDialog)>,
 }
@@ -824,6 +778,9 @@ impl Drop for Run {
 }
 impl Default for ExportController {
     fn default() -> Self {
+        let mut dialog =
+            video_io_egui::ExportDialog::new("render_encode", video_io_egui::Export::default());
+        dialog.set_presets_dir(OutputSettings::default_presets_dir());
         Self {
             settings: ExportSettings::default(),
             status: String::new(),
@@ -834,7 +791,7 @@ impl Default for ExportController {
             out_root: crate::out_root(),
             last: None,
             quality: Err("The Output render profile cannot be evaluated".into()),
-            selected_preset: None,
+            dialog,
             preset_picker: None,
         }
     }
@@ -1017,27 +974,19 @@ impl ExportController {
             self.status = "Cancelling export…".into();
         }
     }
-    fn open_preset_dialog(&mut self, save: bool) {
+    fn open_preset_dialog(&mut self, req: video_io_egui::PresetPickRequest) {
+        let save = req.kind == video_io_egui::PresetPickKind::Save;
         let mut dialog = egui_file_dialog::FileDialog::new()
             .id(egui::Id::new(if save {
                 "export.preset.save"
             } else {
                 "export.preset.load"
             }))
-            .add_file_filter_extensions("Export preset (.json)", vec!["json"]);
+            .add_file_filter_extensions("Export preset (.json)", vec!["json"])
+            .initial_directory(req.dir);
         dialog.config_mut().default_file_filter = Some("Export preset (.json)".into());
-        if let Some(dir) = OutputSettings::default_presets_dir() {
-            let _ = std::fs::create_dir_all(&dir);
-            dialog = dialog.initial_directory(dir);
-        }
         if save {
-            let base = self
-                .selected_preset
-                .as_deref()
-                .unwrap_or(self.settings.job.name.as_str());
-            let stem = crate::fs_name::stem(base);
-            let stem = if stem.is_empty() { "preset" } else { &stem };
-            dialog = dialog.default_file_name(&format!("{stem}.json"));
+            dialog = dialog.default_file_name(&req.default_name);
             dialog.save_file();
         } else {
             dialog.pick_file();
@@ -1061,81 +1010,20 @@ impl ExportController {
         let save = *save;
         self.preset_picker = None;
         if save {
-            match self.settings.output.save_preset_file(&path) {
-                Ok(stem) => {
-                    self.selected_preset = Some(stem.clone());
-                    self.status = format!("Saved preset {stem}");
-                }
+            self.dialog.export_mut().preset = self.settings.output.to_preset();
+            match self.dialog.save_preset_file(&path) {
+                Ok(stem) => self.status = format!("Saved preset {stem}"),
                 Err(error) => self.status = format!("Preset save failed: {error}"),
             }
         } else {
             match self.settings.output.load_preset_file(&path) {
                 Ok(stem) => {
-                    self.selected_preset = Some(stem.clone());
+                    let _ = self.dialog.load_preset_file(&path, None);
                     self.status = format!("Loaded preset {stem}");
                 }
                 Err(error) => self.status = format!("Preset load failed: {error}"),
             }
         }
-    }
-    fn preset_row(&mut self, ui: &mut egui::Ui) {
-        let presets = OutputSettings::list_preset_files();
-        if let Some(sel) = &self.selected_preset
-            && !presets.iter().any(|(name, _)| name == sel)
-        {
-            self.selected_preset = None;
-        }
-        ui.label("Preset").on_hover_text(
-            "Shared file-based export presets in ~/.ofx-rs/presets/video-io (*.json), compatible across WarpBro, Playa, and exr-view.",
-        );
-        ui.horizontal(|ui| {
-            let selected_text = self.selected_preset.as_deref().unwrap_or("—").to_owned();
-            let mut chosen_path: Option<PathBuf> = None;
-            egui::ComboBox::from_id_salt("export_file_presets")
-                .selected_text(selected_text)
-                .show_ui(ui, |ui| {
-                    for (name, path) in &presets {
-                        let is_selected = self.selected_preset.as_deref() == Some(name.as_str());
-                        if ui.selectable_label(is_selected, name).clicked() {
-                            chosen_path = Some(path.clone());
-                        }
-                    }
-                });
-            if let Some(path) = chosen_path {
-                match self.settings.output.load_preset_file(&path) {
-                    Ok(stem) => {
-                        self.selected_preset = Some(stem.clone());
-                        self.status = format!("Loaded preset {stem}");
-                    }
-                    Err(error) => self.status = format!("Preset load failed: {error}"),
-                }
-            }
-            if ui
-                .button("Save Preset")
-                .on_hover_text("Save the current encode recipe to a .json preset file (starts in ~/.ofx-rs/presets/video-io).")
-                .clicked()
-            {
-                self.open_preset_dialog(true);
-            }
-            if ui
-                .button("Load Preset")
-                .on_hover_text("Load an encode recipe from a .json preset file on disk.")
-                .clicked()
-            {
-                self.open_preset_dialog(false);
-            }
-            if ui
-                .add_enabled(self.selected_preset.is_some(), egui::Button::new("Delete"))
-                .on_hover_text("Delete the selected preset file from ~/.ofx-rs/presets/video-io.")
-                .clicked()
-                && let Some(sel) = self.selected_preset.take()
-                && let Some((_, path)) = presets.iter().find(|(n, _)| n == &sel)
-            {
-                let _ = std::fs::remove_file(path);
-                self.status = format!("Deleted preset {sel}");
-            }
-        });
-        ui.end_row();
     }
     /// `timeline` is (first, last, fps, playhead) of the world document. The host fills
     /// `settings.output` from the document's OutputSettings node before this call and authors
@@ -1158,67 +1046,98 @@ impl ExportController {
         let kind_before = self.settings.output.output_kind();
         self.update_preset_picker(ui.ctx());
         ui.add_enabled_ui(!running, |ui| {
-            // One grid, so every value column lines up: the host's rows, the settings every
-            // format shares, then the format row (the tabs) and only that format's options.
             egui::Grid::new("render_encode").num_columns(2).show(ui, |ui| {
                 rows(ui, host);
-                self.preset_row(ui);
-                ui.label("Name"); ui.horizontal(|ui| {
+                ui.label("Name");
+                ui.horizontal(|ui| {
                     ui.text_edit_singleline(&mut self.settings.job.name);
                     ui.label(format!(".{}", self.settings.suffix()));
-                }); ui.end_row();
-                ui.label("Resolution"); ui.horizontal(|ui| { ui.add(egui::DragValue::new(&mut self.settings.output.width).range(1..=MAX_AXIS)); ui.label("×"); ui.add(egui::DragValue::new(&mut self.settings.output.height).range(1..=MAX_AXIS)); }); ui.end_row();
-                ui.label("Samples / frame"); ui.label(match &self.quality {
-                    Ok((samples, scale)) => format!("{samples} · Output Quality · {:.0}% resolution", scale * 100.0),
+                });
+                ui.end_row();
+                ui.label("Samples / frame");
+                ui.label(match &self.quality {
+                    Ok((samples, scale)) => {
+                        format!("{samples} · Output Quality · {:.0}% resolution", scale * 100.0)
+                    }
                     Err(_) => "Output Quality unavailable".into(),
-                }); ui.end_row();
-                ui.label("Denoise"); ui.checkbox(&mut self.settings.output.denoise_at_completion, "Once at completion").on_hover_text("Run OIDN once after all samples of each exported frame; override Output profile denoise cadence."); ui.end_row();
-                ui.label("Frame range"); ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut self.settings.job.first).range(0..=u32::MAX)); ui.label("…"); ui.add(egui::DragValue::new(&mut self.settings.job.last).range(0..=u32::MAX));
-                    if ui.button("Current frame").on_hover_text("Render only the frame under the playhead.").clicked() {
+                });
+                ui.end_row();
+                ui.label("Denoise");
+                ui.checkbox(
+                    &mut self.settings.output.denoise_at_completion,
+                    "Once at completion",
+                )
+                .on_hover_text(
+                    "Run OIDN once after all samples of each exported frame; override Output profile denoise cadence.",
+                );
+                ui.end_row();
+                ui.label("Frame range");
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut self.settings.job.first).range(0..=u32::MAX));
+                    ui.label("…");
+                    ui.add(egui::DragValue::new(&mut self.settings.job.last).range(0..=u32::MAX));
+                    if ui
+                        .button("Current frame")
+                        .on_hover_text("Render only the frame under the playhead.")
+                        .clicked()
+                    {
                         self.settings.job.first = timeline.3;
                         self.settings.job.last = timeline.3;
                     }
-                    if ui.button("Timeline").on_hover_text("The timeline's range, and its FPS for video.").clicked() {
+                    if ui
+                        .button("Timeline")
+                        .on_hover_text("The timeline's range, and its FPS for video.")
+                        .clicked()
+                    {
                         self.settings.job.first = timeline.0;
                         self.settings.job.last = timeline.1;
                         self.settings.job.set_fps(timeline.2);
                     }
-                }); ui.end_row();
-                ui.label("Format"); ui.horizontal(|ui| {
-                    for format in ExportFormat::ALL {
-                        let r = ui.selectable_value(&mut self.settings.output.format, format, format.label());
-                        if format == ExportFormat::Hevc {
-                            r.on_hover_text(video_io::video::Backend::Native.hint());
-                        } else if format == ExportFormat::Png {
-                            r.on_hover_text(video_io::video::Backend::Cli.hint());
-                        }
-                    }
-                }); ui.end_row();
-                if let (Some(kind), Some(ocio)) = (self.settings.output.output_kind(), ocio) {
-                    self.output_transform_ui(ui, ocio, current, kind);
-                }
-                match self.settings.output.format {
-                    ExportFormat::Exr => {
-                        self.exr_ui(ui);
-                    }
-                    ExportFormat::Png => {
-                        self.png_ui(ui);
-                    }
-                    ExportFormat::Jpeg => {
-                        self.jpeg_ui(ui);
-                    }
-                    ExportFormat::Tiff => {
-                        self.tiff_ui(ui);
-                    }
-                    ExportFormat::Tga => {
-                        self.channels_row(ui);
-                    }
-                    ExportFormat::Hevc => {
-                        self.video_ui(ui);
-                    }
+                });
+                ui.end_row();
+                if self.settings.output.format == ExportFormat::Hevc
+                    || (self.settings.output.format == ExportFormat::Png
+                        && self.settings.output.png_video != PngVideo::Off)
+                {
+                    self.fps_row(ui);
                 }
             });
+            self.dialog.export_mut().preset = self.settings.output.to_preset();
+            self.dialog.export_mut().job = self.settings.job.clone();
+            let config = video_io_egui::ShowConfig {
+                show_range: false,
+                show_size: true,
+                allow_pass_through: false,
+                allow_bitrate: false,
+                allow_speed_preset: false,
+                allowed_codecs: None,
+                show_backend: false,
+                ..video_io_egui::ShowConfig::default()
+            };
+            let output = &mut self.settings.output;
+            self.dialog.show_panel_with(ui, &config, &mut |ui| {
+                if let (Some(kind), Some(ocio)) = (output.output_kind(), ocio) {
+                    output.output_transform_ui(ui, ocio, current, kind);
+                }
+            });
+            let preset = self.dialog.export().preset.clone();
+            self.settings.output.apply_preset(&preset);
+            if let Some(req) = self.dialog.take_preset_pick_request() {
+                self.open_preset_dialog(req);
+            }
+            for event in self.dialog.take_preset_events() {
+                match event {
+                    video_io_egui::PresetEvent::Saved(stem) => {
+                        self.status = format!("Saved preset {stem}");
+                    }
+                    video_io_egui::PresetEvent::Applied(stem) => {
+                        self.status = format!("Loaded preset {stem}");
+                    }
+                    video_io_egui::PresetEvent::Deleted(stem) => {
+                        self.status = format!("Deleted preset {stem}");
+                    }
+                }
+            }
             // An override names a display of one kind (SDR / PQ / HLG): a new kind starts automatic.
             self.settings.output.normalize_override(kind_before);
             ui.small(self.settings.output.hint());
@@ -1231,10 +1150,17 @@ impl ExportController {
                 preview.resolve(&self.out_root);
                 preview.validate()
             });
-            if let Err(error) = &validation { ui.colored_label(egui::Color32::LIGHT_RED,error); }
-            if ui.add_enabled(validation.is_ok(),egui::Button::new("Start render")).clicked() {
+            if let Err(error) = &validation {
+                ui.colored_label(egui::Color32::LIGHT_RED, error);
+            }
+            if ui
+                .add_enabled(validation.is_ok(), egui::Button::new("Start render"))
+                .clicked()
+            {
                 let scene = freeze(host);
-                if let Err(error) = self.start(&scene,service) { self.status = error; }
+                if let Err(error) = self.start(&scene, service) {
+                    self.status = error;
+                }
             }
         });
         if running {
@@ -1252,268 +1178,6 @@ impl ExportController {
             }
         }
         ui.label(&self.status);
-    }
-    fn exr_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label("Depth");
-        ui.horizontal(|ui| {
-            for depth in ExrDepth::ALL {
-                ui.selectable_value(&mut self.settings.output.exr_depth, depth, depth.label());
-            }
-        });
-        ui.end_row();
-        ui.label("Compression");
-        egui::ComboBox::from_id_salt("exr_compression")
-            .selected_text(self.settings.output.exr_compression.label())
-            .show_ui(ui, |ui| {
-                for comp in ExrCompression::ALL {
-                    ui.selectable_value(
-                        &mut self.settings.output.exr_compression,
-                        comp,
-                        comp.label(),
-                    );
-                }
-            });
-        ui.end_row();
-        if self.settings.output.exr_compression.dwa() {
-            ui.label("DWA level");
-            ui.add(
-                egui::Slider::new(&mut self.settings.output.exr_dwa_level, DWA_LEVEL_RANGE)
-                    .text("compression"),
-            )
-            .on_hover_text(
-                "DreamWorks lossy wavelet level (45 is OpenEXR's default; higher compresses more).",
-            );
-            ui.end_row();
-        }
-        self.channels_row(ui);
-    }
-    fn png_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label("Encoding");
-        egui::ComboBox::from_id_salt("png_encoding")
-            .selected_text(self.settings.output.png.label())
-            .show_ui(ui, |ui| {
-                for encoding in PngEncoding::ALL {
-                    ui.selectable_value(&mut self.settings.output.png, encoding, encoding.label());
-                }
-            });
-        ui.end_row();
-        if self.settings.output.png.hdr() {
-            self.hdr_peak_row(ui);
-        } else {
-            self.sixteen_bit_row(ui);
-        }
-        self.channels_row(ui);
-        ui.label("Video")
-            .on_hover_text(video_io::video::Backend::Cli.hint());
-        let found = ffmpeg().map(|p| {
-            format!(
-                "{}\nAlso encode the finished sequence with {} into the PNGs' name with .mov / .mp4 (name.pq.mp4), tagged like the PNGs; an HDR10 HEVC carries the PNGs' mastering peak and the clip's MaxCLL / MaxFALL.",
-                video_io::video::Backend::Cli.hint(),
-                p.display()
-            )
-        });
-        egui::ComboBox::from_id_salt("png_video")
-            .selected_text(self.settings.output.png_video.label())
-            .show_ui(ui, |ui| {
-                for video in PngVideo::ALL {
-                    ui.selectable_value(&mut self.settings.output.png_video, video, video.label());
-                }
-            })
-            .response
-            .on_hover_text(
-                found
-                    .unwrap_or_else(|e| format!("{}\n({e})", video_io::video::Backend::Cli.hint())),
-            );
-        ui.end_row();
-        if self.settings.output.png_video != PngVideo::Off {
-            self.fps_row(ui);
-        }
-        if self.settings.output.png_video == PngVideo::Hevc {
-            self.quality_row(ui, "CRF", MAX_QP);
-        }
-    }
-    fn jpeg_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label("Quality");
-        ui.add(egui::Slider::new(&mut self.settings.output.jpeg_quality, 1..=100).text("%"))
-            .on_hover_text("JPEG baseline DCT quality (1–100; 95 is near-lossless).");
-        ui.end_row();
-    }
-    fn tiff_ui(&mut self, ui: &mut egui::Ui) {
-        ui.label("Compression");
-        egui::ComboBox::from_id_salt("tiff_compression")
-            .selected_text(self.settings.output.tiff_compression.label())
-            .show_ui(ui, |ui| {
-                for comp in TiffCompression::ALL {
-                    ui.selectable_value(
-                        &mut self.settings.output.tiff_compression,
-                        comp,
-                        comp.label(),
-                    );
-                }
-            });
-        ui.end_row();
-        self.sixteen_bit_row(ui);
-        self.channels_row(ui);
-    }
-    fn channels_row(&mut self, ui: &mut egui::Ui) {
-        ui.label("Channels");
-        ui.horizontal(|ui| {
-            for ch in Channels::ALL {
-                ui.selectable_value(&mut self.settings.output.channels, ch, ch.label());
-            }
-        });
-        ui.end_row();
-    }
-    fn sixteen_bit_row(&mut self, ui: &mut egui::Ui) {
-        ui.label("Bit depth");
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.settings.output.sixteen_bit, false, "8-bit");
-            ui.selectable_value(&mut self.settings.output.sixteen_bit, true, "16-bit");
-        });
-        ui.end_row();
-    }
-    fn hdr_peak_row(&mut self, ui: &mut egui::Ui) {
-        ui.label("HDR peak");
-        ui.add(
-            egui::DragValue::new(&mut self.settings.output.png_peak_nits)
-                .range(PEAK_NITS)
-                .suffix(" nits"),
-        )
-        .on_hover_text("When the scene's view is not an HDR view of this kind, the HDR view whose measured peak is nearest this. The file records the rendered view's measured peak (mDCV, HLG system gamma).");
-        ui.end_row();
-    }
-    fn video_ui(&mut self, ui: &mut egui::Ui) {
-        let prev_codec = self.settings.output.codec;
-        ui.label("Codec");
-        egui::ComboBox::from_id_salt("video_codec")
-            .selected_text(codec_info(self.settings.output.codec).label)
-            .show_ui(ui, |ui| {
-                for info in video_io::catalog::CODECS {
-                    ui.selectable_value(&mut self.settings.output.codec, info.codec, info.label);
-                }
-            });
-        ui.end_row();
-        if self.settings.output.codec != prev_codec {
-            self.settings.output.container = codec_info(self.settings.output.codec).containers[0];
-            if self.settings.output.codec != Codec::Av1 && self.settings.output.qp > MAX_QP {
-                self.settings.output.qp = HIGH_QUALITY_QP;
-            }
-        }
-        let codec = self.settings.output.codec;
-        match codec {
-            Codec::Exv => {
-                ui.label("Profile");
-                egui::ComboBox::from_id_salt("exv_profile")
-                    .selected_text(self.settings.output.exv_profile.label())
-                    .show_ui(ui, |ui| {
-                        for profile in ExvProfile::ALL {
-                            ui.selectable_value(
-                                &mut self.settings.output.exv_profile,
-                                profile,
-                                profile.label(),
-                            );
-                        }
-                    });
-                ui.end_row();
-                self.fps_row(ui);
-            }
-            Codec::ProRes => {
-                ui.label("Profile");
-                egui::ComboBox::from_id_salt("prores_profile")
-                    .selected_text(self.settings.output.prores_profile.label())
-                    .show_ui(ui, |ui| {
-                        for profile in ProResProfile::ALL {
-                            ui.selectable_value(
-                                &mut self.settings.output.prores_profile,
-                                profile,
-                                profile.label(),
-                            );
-                        }
-                    });
-                ui.end_row();
-                self.video_signal_rows(ui);
-                self.fps_row(ui);
-            }
-            Codec::Av1 => {
-                self.video_signal_rows(ui);
-                if !self.settings.output.video_signal.hdr() {
-                    self.video_depth_row(ui);
-                }
-                self.fps_row(ui);
-                self.quality_row(ui, "Q", 255);
-            }
-            Codec::H264 => {
-                self.video_container_row(ui);
-                self.video_encoder_row(ui);
-                self.fps_row(ui);
-                self.quality_row(ui, "QP", MAX_QP);
-            }
-            Codec::Hevc => {
-                self.video_container_row(ui);
-                self.video_signal_rows(ui);
-                if !self.settings.output.video_signal.hdr() {
-                    self.video_depth_row(ui);
-                }
-                self.video_encoder_row(ui);
-                self.fps_row(ui);
-                self.quality_row(ui, "QP", MAX_QP);
-                if self.settings.output.encoder == VideoEncoder::Kvazaar {
-                    ui.label("Prediction");
-                    ui.label("Independent I-frames");
-                    ui.end_row();
-                }
-            }
-        }
-    }
-    fn video_container_row(&mut self, ui: &mut egui::Ui) {
-        ui.label("Container");
-        ui.horizontal(|ui| {
-            for &c in codec_info(self.settings.output.codec).containers {
-                ui.selectable_value(&mut self.settings.output.container, c, container_label(c));
-            }
-        });
-        ui.end_row();
-    }
-    fn video_signal_rows(&mut self, ui: &mut egui::Ui) {
-        ui.label("Signal");
-        egui::ComboBox::from_id_salt("video_signal")
-            .selected_text(self.settings.output.video_signal.label())
-            .show_ui(ui, |ui| {
-                for sig in PngEncoding::ALL {
-                    ui.selectable_value(&mut self.settings.output.video_signal, sig, sig.label());
-                }
-            });
-        ui.end_row();
-        if self.settings.output.video_signal.hdr() {
-            self.hdr_peak_row(ui);
-        }
-    }
-    fn video_depth_row(&mut self, ui: &mut egui::Ui) {
-        ui.label("Bit depth");
-        ui.horizontal(|ui| {
-            for &d in codec_info(self.settings.output.codec).depths {
-                ui.selectable_value(&mut self.settings.output.video_depth, d, d.label());
-            }
-        });
-        ui.end_row();
-    }
-    fn video_encoder_row(&mut self, ui: &mut egui::Ui) {
-        ui.label("Encoder")
-            .on_hover_text(video_io::video::Backend::Native.hint());
-        egui::ComboBox::from_id_salt("video_encoder")
-            .selected_text(self.settings.output.encoder.label())
-            .show_ui(ui, |ui| {
-                for encoder in VideoEncoder::ALL {
-                    ui.selectable_value(
-                        &mut self.settings.output.encoder,
-                        encoder,
-                        encoder.label(),
-                    );
-                }
-            })
-            .response
-            .on_hover_text(video_io::video::Backend::Native.hint());
-        ui.end_row();
     }
     /// The "FPS" grid row of every video (the Video format, a PNG export's video).
     fn fps_row(&mut self, ui: &mut egui::Ui) {
@@ -1550,20 +1214,8 @@ impl ExportController {
         });
         ui.end_row();
     }
-    /// The "Quality" grid row of a video encoder: `qp` as QP/CRF (`0..=max_q`).
-    fn quality_row(&mut self, ui: &mut egui::Ui, unit: &str, max_q: u8) {
-        ui.label("Quality");
-        ui.horizontal(|ui| {
-            ui.add(egui::Slider::new(&mut self.settings.output.qp, 0..=max_q).text(unit))
-                .on_hover_text(format!(
-                    "Lower {unit} preserves more detail and produces larger files."
-                ));
-            if ui.button("High quality").clicked() {
-                self.settings.output.qp = if max_q > MAX_QP { 60 } else { HIGH_QUALITY_QP };
-            }
-        });
-        ui.end_row();
-    }
+}
+impl OutputSettings {
     /// "Output transform": what this export renders through from ACEScg, automatic by default.
     fn output_transform_ui(
         &mut self,
@@ -1573,7 +1225,7 @@ impl ExportController {
         kind: crate::ocio::OutputKind,
     ) {
         let hdr = kind != crate::ocio::OutputKind::Sdr;
-        let resolved = self.settings.output.resolve_transform(ocio, current);
+        let resolved = self.resolve_transform(ocio, current);
         ui.label("Output transform").on_hover_text(
             "The OCIO display / view this file is rendered through from ACEScg, independent of the viewport. Automatic: the scene's own view when it fits the format, else the config's first fitting display (PQ / HLG by name) and, for HDR, the view whose measured peak is nearest the HDR peak.",
         );
@@ -1591,18 +1243,18 @@ impl ExportController {
                         .filter(|d| ocio.display_is(d, kind))
                         .collect(),
                 );
-                let before = self.settings.output.output_display.clone();
+                let before = self.output_display.clone();
                 crate::ocio::combo(
                     ui,
                     "export.output_display",
-                    &mut self.settings.output.output_display,
+                    &mut self.output_display,
                     &displays,
                     "auto",
                 );
-                if self.settings.output.output_display != before {
-                    self.settings.output.output_view.clear();
+                if self.output_display != before {
+                    self.output_view.clear();
                 }
-                let display = if self.settings.output.output_display.is_empty() {
+                let display = if self.output_display.is_empty() {
                     resolved
                         .as_ref()
                         .ok()
@@ -1610,7 +1262,7 @@ impl ExportController {
                         .map(|(d, _)| d.clone())
                         .unwrap_or_default()
                 } else {
-                    self.settings.output.output_display.clone()
+                    self.output_display.clone()
                 };
                 let views = owned(
                     ocio.views(&display, hdr)
@@ -1618,11 +1270,11 @@ impl ExportController {
                         .filter(|v| ocio.view_is(&display, v, kind))
                         .collect(),
                 );
-                ui.add_enabled_ui(!self.settings.output.output_display.is_empty(), |ui| {
+                ui.add_enabled_ui(!self.output_display.is_empty(), |ui| {
                     crate::ocio::combo(
                         ui,
                         "export.output_view",
-                        &mut self.settings.output.output_view,
+                        &mut self.output_view,
                         &views,
                         "first",
                     );

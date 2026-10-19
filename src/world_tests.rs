@@ -3966,6 +3966,34 @@ fn templates_upgrade_in_place() {
         m_attrs.set("/quality/adaptive/enabled", AttrValue::Bool(false));
         doc.store_attrs(policy.moving_id, &m_attrs).unwrap();
 
+        if let Some(render) = doc
+            .graph
+            .bus_slots
+            .get_mut("world")
+            .and_then(|w| w.pointer_mut("/render"))
+            .and_then(Value::as_object_mut)
+            && render.contains_key("exposure_stops")
+        {
+            render.insert("exposure_stops".into(), json!(0.0));
+        }
+        let node_ids: Vec<_> = doc.nodes().into_iter().map(|n| n.id).collect();
+        for node_id in node_ids {
+            let key = node_id.to_string();
+            if let Some(node) = doc.graph.nodes.get_mut(&key)
+                && let Some(render) = node.pointer_mut("/gpu/render")
+                && let Some(obj) = render.as_object_mut()
+                && obj.contains_key("exposure_stops")
+            {
+                obj.insert("exposure_stops".into(), json!(0.0));
+            }
+            if let Ok(mut attrs) = doc.attrs(node_id)
+                && attrs.contains("/render/exposure_stops")
+            {
+                attrs.set("/render/exposure_stops", AttrValue::Float(0.0));
+                doc.store_attrs(node_id, &attrs).unwrap();
+            }
+        }
+
         let existing: Value = serde_json::from_str(&text).unwrap();
         let saved = serde_json::to_string_pretty(&doc).unwrap();
         let hydrated: Value = serde_json::from_str(&saved).unwrap();

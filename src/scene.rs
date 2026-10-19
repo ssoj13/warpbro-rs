@@ -1027,7 +1027,7 @@ impl Scene {
                 hit_epsilon,
                 step_factor: 0.85,
                 max_bounces: 6,
-                exposure_stops: -1.0,
+                exposure_stops: 0.0,
                 saturation: 1.0,
                 reinhard: false,
                 denoise: crate::denoise::Settings::default(),

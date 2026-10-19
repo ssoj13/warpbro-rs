@@ -449,7 +449,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "av-codec"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-codec-aac",
  "av-codec-aac-enc",
@@ -476,7 +476,7 @@ dependencies = [
 [[package]]
 name = "av-codec-aac"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -490,7 +490,7 @@ dependencies = [
 [[package]]
 name = "av-codec-aac-enc"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-codec-aac",
  "av-codec-core",
@@ -506,7 +506,7 @@ dependencies = [
 [[package]]
 name = "av-codec-av1"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-codec-core",
  "av-codec-dovi",
@@ -524,7 +524,7 @@ dependencies = [
 [[package]]
 name = "av-codec-av1-enc"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-codec-av1",
  "av-codec-core",
@@ -541,7 +541,7 @@ dependencies = [
 [[package]]
 name = "av-codec-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-util-core",
  "av-util-data",
@@ -558,7 +558,7 @@ dependencies = [
 [[package]]
 name = "av-codec-dovi"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -572,7 +572,7 @@ dependencies = [
 [[package]]
 name = "av-codec-h264-enc"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -586,7 +586,7 @@ dependencies = [
 [[package]]
 name = "av-codec-h265"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-codec-core",
  "av-codec-dovi",
@@ -609,7 +609,7 @@ dependencies = [
 [[package]]
 name = "av-codec-h265-enc"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-codec-core",
  "av-codec-h265",
@@ -629,7 +629,7 @@ dependencies = [
 [[package]]
 name = "av-codec-h26x"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -645,7 +645,7 @@ dependencies = [
 [[package]]
 name = "av-codec-h274"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-util-core",
  "av-util-frame",
@@ -655,7 +655,7 @@ dependencies = [
 [[package]]
 name = "av-codec-jxl"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -670,7 +670,7 @@ dependencies = [
 [[package]]
 name = "av-codec-mjpeg"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-codec-core",
  "av-codec-mpegvideo",
@@ -687,7 +687,7 @@ dependencies = [
 [[package]]
 name = "av-codec-mp3"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -700,7 +700,7 @@ dependencies = [
 [[package]]
 name = "av-codec-mpegvideo"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -712,7 +712,7 @@ dependencies = [
 [[package]]
 name = "av-codec-pcm"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -725,7 +725,7 @@ dependencies = [
 [[package]]
 name = "av-codec-prores"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -740,7 +740,7 @@ dependencies = [
 [[package]]
 name = "av-codec-raw"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -754,7 +754,7 @@ dependencies = [
 [[package]]
 name = "av-codec-sei"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-codec-core",
  "av-codec-dovi",
@@ -768,7 +768,7 @@ dependencies = [
 [[package]]
 name = "av-codec-vp9"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -827,7 +827,7 @@ dependencies = [
 [[package]]
 name = "av-format-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -864,7 +864,7 @@ dependencies = [
 [[package]]
 name = "av-format-movenc"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-codec-av1",
  "av-codec-core",
@@ -936,7 +936,7 @@ dependencies = [
 [[package]]
 name = "av-hwaccel-vulkan"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "ash",
  "av-codec-av1",
@@ -1011,7 +1011,7 @@ dependencies = [
 [[package]]
 name = "av-swscale"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-util-core",
  "av-util-cpu",
@@ -1033,7 +1033,7 @@ dependencies = [
 [[package]]
 name = "av-util-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "bytemuck",
  "log",
@@ -1043,7 +1043,7 @@ dependencies = [
 [[package]]
 name = "av-util-cpu"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-util-core",
  "num-traits",
@@ -1052,7 +1052,7 @@ dependencies = [
 [[package]]
 name = "av-util-crypto"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-util-core",
 ]
@@ -1060,7 +1060,7 @@ dependencies = [
 [[package]]
 name = "av-util-data"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-util-core",
  "av-util-math",
@@ -1071,7 +1071,7 @@ dependencies = [
 [[package]]
 name = "av-util-frame"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-util-core",
  "av-util-data",
@@ -1084,7 +1084,7 @@ dependencies = [
 [[package]]
 name = "av-util-hash"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-util-core",
 ]
@@ -1092,7 +1092,7 @@ dependencies = [
 [[package]]
 name = "av-util-hwcontext"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-util-core",
  "av-util-frame",
@@ -1103,7 +1103,7 @@ dependencies = [
 [[package]]
 name = "av-util-math"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-util-core",
  "av-util-hash",
@@ -1113,7 +1113,7 @@ dependencies = [
 [[package]]
 name = "av-util-pixfmt"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-util-core",
  "av-util-math",
@@ -1124,7 +1124,7 @@ dependencies = [
 [[package]]
 name = "av-util-samplefmt"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-util-core",
  "av-util-str",
@@ -1133,7 +1133,7 @@ dependencies = [
 [[package]]
 name = "av-util-str"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-util-core",
 ]
@@ -1141,7 +1141,7 @@ dependencies = [
 [[package]]
 name = "av-util-time"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-util-core",
  "av-util-math",
@@ -1150,7 +1150,7 @@ dependencies = [
 [[package]]
 name = "av-util-tx"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#20a465d48b30dc24029695c15a1a8332654db94c"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#99bc3f16ae19d6c0feb225a60912edab2181c70c"
 dependencies = [
  "av-util-core",
  "av-util-cpu",
@@ -2180,7 +2180,7 @@ checksum = "af491d569909a7e4dee0ad7db7f5341fef5c614d5b8ec8cf765732aba3cff681"
 dependencies = [
  "serde",
  "termcolor",
- "unicode-width 0.2.2",
+ "unicode-width",
 ]
 
 [[package]]
@@ -2210,7 +2210,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3977,7 +3977,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -6075,7 +6075,7 @@ checksum = "5f98efec8807c63c752b5bd61f862c165c115b0a35685bdcfd9238c7aeb592b7"
 dependencies = [
  "cfg-if",
  "miette-derive",
- "unicode-width 0.1.14",
+ "unicode-width",
 ]
 
 [[package]]
@@ -7546,7 +7546,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b570b25f7617e43d59005d0990ccb79e950a423952cea19671b7a876da390adf"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.12.1",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -8207,7 +8207,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -8691,7 +8691,7 @@ checksum = "c4fdfe13e1c42e45f497416afb8dc4e783bf0e25b7be9077c1c77c5fb14cb998"
 [[package]]
 name = "soluwell-chrome"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#7e5b5e293e72eea11b52283bb77895ab9b195ed7"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#2c79c03e9939bdc427663f983cee75247cf5a4f2"
 dependencies = [
  "egui",
  "indexmap",
@@ -8705,7 +8705,7 @@ dependencies = [
 [[package]]
 name = "soluwell-config"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#7e5b5e293e72eea11b52283bb77895ab9b195ed7"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#2c79c03e9939bdc427663f983cee75247cf5a4f2"
 dependencies = [
  "egui",
  "serde",
@@ -8715,7 +8715,7 @@ dependencies = [
 [[package]]
 name = "soluwell-controls"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#7e5b5e293e72eea11b52283bb77895ab9b195ed7"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#2c79c03e9939bdc427663f983cee75247cf5a4f2"
 dependencies = [
  "curves",
  "egui",
@@ -8726,7 +8726,7 @@ dependencies = [
 [[package]]
 name = "soluwell-panels"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#7e5b5e293e72eea11b52283bb77895ab9b195ed7"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#2c79c03e9939bdc427663f983cee75247cf5a4f2"
 dependencies = [
  "box-rs",
  "egui",
@@ -8739,7 +8739,7 @@ dependencies = [
 [[package]]
 name = "soluwell-timeline"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#7e5b5e293e72eea11b52283bb77895ab9b195ed7"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#2c79c03e9939bdc427663f983cee75247cf5a4f2"
 dependencies = [
  "egui",
  "exr-core",
@@ -8757,7 +8757,7 @@ dependencies = [
 [[package]]
 name = "soluwell-viewport"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#7e5b5e293e72eea11b52283bb77895ab9b195ed7"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#2c79c03e9939bdc427663f983cee75247cf5a4f2"
 dependencies = [
  "bytemuck",
  "egui",
@@ -8882,7 +8882,7 @@ version = "0.2.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c2499c2d826531388872b2268718aed907a39bd785ab0dcfe57fab26283f92e"
 dependencies = [
- "skrifa 0.44.0",
+ "skrifa 0.40.0",
  "yazi",
  "zeno",
 ]
@@ -9010,7 +9010,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.5",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -9719,12 +9719,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7dd6e30e90baa6f72411720665d41d89b9a3d039dc45b8faea1ddd07f617f6af"
 
 [[package]]
-name = "unicode-width"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b4ac048d71ede7ee76d585517add45da530660ef4390e49b098733c6e897f254"
-
-[[package]]
 name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10291,7 +10285,7 @@ dependencies = [
 [[package]]
 name = "video-io"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/video-io-rs.git?branch=main#3b6f3c899036e60d0f986c2cc2ac8c9937602303"
+source = "git+ssh://git@github.com/ssoj13/video-io-rs.git?branch=main#49a8ff58de35ef6989727677c0bdefb1195165af"
 dependencies = [
  "av-codec",
  "av-codec-core",
@@ -10315,6 +10309,19 @@ dependencies = [
  "serde",
  "thiserror 2.0.21",
  "tiff",
+]
+
+[[package]]
+name = "video-io-egui"
+version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/video-io-rs.git?branch=main#49a8ff58de35ef6989727677c0bdefb1195165af"
+dependencies = [
+ "egui",
+ "serde",
+ "serde_json",
+ "soluwell-config",
+ "soluwell-controls",
+ "video-io",
 ]
 
 [[package]]
@@ -10390,6 +10397,7 @@ dependencies = [
  "standard-surface-bsdf",
  "vfx-ocio",
  "video-io",
+ "video-io-egui",
  "wgpu",
  "winit",
 ]
@@ -10881,7 +10889,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
