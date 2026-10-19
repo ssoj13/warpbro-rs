@@ -4037,4 +4037,300 @@ mod tests {
         let hdr_new = crate::render_service::hdr_canvas_bytes(&light_new, 1.0);
         assert_eq!(hdr_old, hdr_new);
     }
+
+    fn build_benchmark_fractal_world() -> Scene {
+        let mut quat = Scene::preset(FAMILY_QUAT);
+        if let crate::scene::Formula::QuaternionJulia(q) = &mut quat.formula {
+            q.rotation_degrees = [15.0, 25.0, 10.0];
+        }
+        let mut world = crate::world::WorldDocument::from_scene(&quat)
+            .snapshot(0.0)
+            .unwrap();
+        world.objects[0].object.offset = [-8.0, 0.0, 0.0];
+        world.objects[0].object_world = None;
+
+        let mut bulb = Scene::preset(FAMILY_BULB);
+        if let crate::scene::Formula::Mandelbulb(b) = &mut bulb.formula {
+            b.rotation_degrees = [10.0, 20.0, 5.0];
+        }
+        bulb.object.offset = [8.0, 0.0, 0.0];
+        bulb.object_world = None;
+        world.objects.push(bulb);
+
+        let mut hybrid = Scene::preset(FAMILY_HYBRID);
+        if let crate::scene::Formula::Hybrid(h) = &mut hybrid.formula {
+            h.bulb.rotation_degrees = [12.0, 18.0, 6.0];
+        }
+        hybrid.object.offset = [0.0, 8.0, 0.0];
+        hybrid.object_world = None;
+        world.objects.push(hybrid);
+
+        let mut apollo = Scene::preset(FAMILY_APOLLONIAN);
+        apollo.object.offset = [0.0, -8.0, 0.0];
+        apollo.object_world = None;
+        world.objects.push(apollo);
+
+        world.camera.target = [0.0, 8.0, 0.0];
+        world.camera.distance = 3.2;
+        world
+    }
+
+    #[test]
+    fn fractal_scene_benchmark() {
+        let scene = build_benchmark_fractal_world();
+        let grid_w = 240usize;
+        let grid_h = 135usize;
+        let upload = WorldUpload::new(&scene, grid_w as u32, grid_h as u32).unwrap();
+        let p = &upload.params;
+        let objs = &upload.objects;
+        let count = p[P_OBJECT_COUNT] as usize;
+        assert_eq!(count, 4);
+
+        let cam_origin = [p[P_CAM_ORIGIN], p[P_CAM_ORIGIN + 1], p[P_CAM_ORIGIN + 2]];
+        let cam_fwd = [p[P_CAM_FORWARD], p[P_CAM_FORWARD + 1], p[P_CAM_FORWARD + 2]];
+        let cam_right = [p[P_CAM_RIGHT], p[P_CAM_RIGHT + 1], p[P_CAM_RIGHT + 2]];
+        let cam_up = [p[P_CAM_UP], p[P_CAM_UP + 1], p[P_CAM_UP + 2]];
+        let half_w = p[P_HALF_W];
+        let half_h = p[P_HALF_H];
+
+        let inv_affine = |base: usize, x: [f32; 3]| -> [f32; 3] {
+            let m = &objs[base + O_INVERSE..base + O_INVERSE + 12];
+            [
+                m[0] * x[0] + m[1] * x[1] + m[2] * x[2] + m[3],
+                m[4] * x[0] + m[5] * x[1] + m[6] * x[2] + m[7],
+                m[8] * x[0] + m[9] * x[1] + m[10] * x[2] + m[11],
+            ]
+        };
+        let len3 = |v: [f32; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+
+        // Unhoisted DE (reads parameters from storage buffer inside every iteration)
+        let eval_de_unhoisted = |idx: usize, q: [f32; 3]| -> f32 {
+            let base = idx * OBJECT_STRIDE;
+            let mut z = q;
+            let c = q;
+            let mut dr = 1.0f32;
+            let iters = objs[base + P_ITERATIONS].max(1.0) as usize;
+            for _ in 0..iters {
+                let scale = std::hint::black_box(objs[base + P_BOX_SCALE]);
+                let fold = std::hint::black_box(objs[base + P_BOX_FOLD]);
+                let min_r2 = std::hint::black_box(objs[base + P_BOX_MIN_R2]);
+                let fixed_r2 = std::hint::black_box(objs[base + P_BOX_FIXED_R2]);
+                if std::hint::black_box(objs[base + P_ITER_ROTATE]) != 0.0 {
+                    let r0 = &objs[base + P_ITER_ROT..base + P_ITER_ROT + 3];
+                    let r1 = &objs[base + P_ITER_ROT + 3..base + P_ITER_ROT + 6];
+                    let r2 = &objs[base + P_ITER_ROT + 6..base + P_ITER_ROT + 9];
+                    z = [
+                        r0[0] * z[0] + r0[1] * z[1] + r0[2] * z[2],
+                        r1[0] * z[0] + r1[1] * z[1] + r1[2] * z[2],
+                        r2[0] * z[0] + r2[1] * z[1] + r2[2] * z[2],
+                    ];
+                }
+                z = [
+                    z[0].clamp(-fold, fold) * 2.0 - z[0],
+                    z[1].clamp(-fold, fold) * 2.0 - z[1],
+                    z[2].clamp(-fold, fold) * 2.0 - z[2],
+                ];
+                let r2 = z[0] * z[0] + z[1] * z[1] + z[2] * z[2];
+                let factor = if r2 < min_r2 {
+                    fixed_r2 / min_r2
+                } else if r2 < fixed_r2 {
+                    fixed_r2 / r2
+                } else {
+                    1.0
+                };
+                let step = factor * scale;
+                z = [z[0] * step + c[0], z[1] * step + c[1], z[2] * step + c[2]];
+                dr = dr * step.abs() + 1.0;
+            }
+            let clip_r = objs[base + O_CLIP_RADIUS];
+            let d_scale = objs[base + O_DISTANCE_SCALE];
+            ((len3(z) / dr).max(len3(q) - clip_r) * d_scale).max(0.0)
+        };
+
+        // Hoisted DE (loads parameters into registers before the iteration loop)
+        let eval_de_hoisted = |idx: usize, q: [f32; 3]| -> f32 {
+            let base = idx * OBJECT_STRIDE;
+            let mut z = q;
+            let c = q;
+            let mut dr = 1.0f32;
+            let iters = objs[base + P_ITERATIONS].max(1.0) as usize;
+            let scale = std::hint::black_box(objs[base + P_BOX_SCALE]);
+            let fold = std::hint::black_box(objs[base + P_BOX_FOLD]);
+            let min_r2 = std::hint::black_box(objs[base + P_BOX_MIN_R2]);
+            let fixed_r2 = std::hint::black_box(objs[base + P_BOX_FIXED_R2]);
+            let fixed_over_min = fixed_r2 / min_r2;
+            let rot_enabled = std::hint::black_box(objs[base + P_ITER_ROTATE]) != 0.0;
+            let (r0, r1, r2_row) = if rot_enabled {
+                (
+                    [
+                        objs[base + P_ITER_ROT],
+                        objs[base + P_ITER_ROT + 1],
+                        objs[base + P_ITER_ROT + 2],
+                    ],
+                    [
+                        objs[base + P_ITER_ROT + 3],
+                        objs[base + P_ITER_ROT + 4],
+                        objs[base + P_ITER_ROT + 5],
+                    ],
+                    [
+                        objs[base + P_ITER_ROT + 6],
+                        objs[base + P_ITER_ROT + 7],
+                        objs[base + P_ITER_ROT + 8],
+                    ],
+                )
+            } else {
+                ([0.0; 3], [0.0; 3], [0.0; 3])
+            };
+            for _ in 0..iters {
+                if rot_enabled {
+                    z = [
+                        r0[0] * z[0] + r0[1] * z[1] + r0[2] * z[2],
+                        r1[0] * z[0] + r1[1] * z[1] + r1[2] * z[2],
+                        r2_row[0] * z[0] + r2_row[1] * z[1] + r2_row[2] * z[2],
+                    ];
+                }
+                z = [
+                    z[0].clamp(-fold, fold) * 2.0 - z[0],
+                    z[1].clamp(-fold, fold) * 2.0 - z[1],
+                    z[2].clamp(-fold, fold) * 2.0 - z[2],
+                ];
+                let r2 = z[0] * z[0] + z[1] * z[1] + z[2] * z[2];
+                let factor = if r2 < min_r2 {
+                    fixed_over_min
+                } else if r2 < fixed_r2 {
+                    fixed_r2 / r2
+                } else {
+                    1.0
+                };
+                let step = factor * scale;
+                z = [z[0] * step + c[0], z[1] * step + c[1], z[2] * step + c[2]];
+                dr = dr * step.abs() + 1.0;
+            }
+            let clip_r = objs[base + O_CLIP_RADIUS];
+            let d_scale = objs[base + O_DISTANCE_SCALE];
+            ((len3(z) / dr).max(len3(q) - clip_r) * d_scale).max(0.0)
+        };
+
+        let rays: Vec<[f32; 3]> = (0..grid_w * grid_h)
+            .map(|idx| {
+                let x = (idx % grid_w) as f32;
+                let y = (idx / grid_w) as f32;
+                let u = ((x + 0.5) / grid_w as f32 * 2.0 - 1.0) * half_w;
+                let v = (1.0 - (y + 0.5) / grid_h as f32 * 2.0) * half_h;
+                let dx = cam_fwd[0] + u * cam_right[0] + v * cam_up[0];
+                let dy = cam_fwd[1] + u * cam_right[1] + v * cam_up[1];
+                let dz = cam_fwd[2] + u * cam_right[2] + v * cam_up[2];
+                let inv = (dx * dx + dy * dy + dz * dz).sqrt().recip();
+                [dx * inv, dy * inv, dz * inv]
+            })
+            .collect();
+
+        // Benchmark old raymarch (sequential 0..count + unhoisted inner loop)
+        let t_old_scene = Instant::now();
+        let mut total_old = 0.0f32;
+        for dir in &rays {
+            let mut t = 0.0f32;
+            for _step in 0..24 {
+                let pt = [
+                    cam_origin[0] + dir[0] * t,
+                    cam_origin[1] + dir[1] * t,
+                    cam_origin[2] + dir[2] * t,
+                ];
+                let mut best = 1.0e10f32;
+                for i in 0..count {
+                    let row = i * OBJECT_STRIDE;
+                    let q = inv_affine(row, pt);
+                    let reach =
+                        (len3(q) - objs[row + O_CLIP_RADIUS]) * objs[row + O_DISTANCE_SCALE];
+                    if reach >= best {
+                        continue;
+                    }
+                    let d = eval_de_unhoisted(i, q);
+                    if i == 0 || d < best {
+                        best = d;
+                    }
+                }
+                if best < 1.0e-3 || t > 20.0 {
+                    break;
+                }
+                t += best;
+            }
+            total_old += t;
+        }
+        let ms_old_scene = t_old_scene.elapsed().as_secs_f64() * 1000.0;
+
+        // Benchmark new raymarch (min-reach-first culling + hoisted inner loop)
+        let t_new_scene = Instant::now();
+        let mut total_new = 0.0f32;
+        for dir in &rays {
+            let mut t = 0.0f32;
+            for _step in 0..24 {
+                let pt = [
+                    cam_origin[0] + dir[0] * t,
+                    cam_origin[1] + dir[1] * t,
+                    cam_origin[2] + dir[2] * t,
+                ];
+                let mut first = 0usize;
+                let mut min_reach = f32::INFINITY;
+                let mut first_q = [0.0f32; 3];
+                let mut reaches = [0.0f32; 8];
+                for i in 0..count {
+                    let row = i * OBJECT_STRIDE;
+                    let q = inv_affine(row, pt);
+                    let reach =
+                        (len3(q) - objs[row + O_CLIP_RADIUS]) * objs[row + O_DISTANCE_SCALE];
+                    reaches[i] = reach;
+                    if reach < min_reach {
+                        min_reach = reach;
+                        first = i;
+                        first_q = q;
+                    }
+                }
+                let mut best = eval_de_hoisted(first, first_q);
+                for i in 0..count {
+                    if i == first || reaches[i] >= best {
+                        continue;
+                    }
+                    let row = i * OBJECT_STRIDE;
+                    let q = inv_affine(row, pt);
+                    let d = eval_de_hoisted(i, q);
+                    if d < best {
+                        best = d;
+                    }
+                }
+                if best < 1.0e-3 || t > 20.0 {
+                    break;
+                }
+                t += best;
+            }
+            total_new += t;
+        }
+        let ms_new_scene = t_new_scene.elapsed().as_secs_f64() * 1000.0;
+        assert!((total_old - total_new).abs() <= 1e-2);
+
+        eprintln!(
+            "FRACTAL SCENE BENCH (240x135x24 steps, 4 fractal objects): {:.2}ms -> {:.2}ms ({:.2}x speedup)",
+            ms_old_scene,
+            ms_new_scene,
+            ms_old_scene / ms_new_scene
+        );
+    }
+
+    #[test]
+    fn cuda_fractal_scene_benchmark() {
+        let _gpu_test = crate::test_gpu::lock();
+        let mut gpu = Gpu::new().unwrap();
+        let scene = build_benchmark_fractal_world();
+        let mut target = gpu.target(640, 360);
+        gpu.step(&mut target, &scene, 1, 1, None, false);
+        let t0 = Instant::now();
+        gpu.step(&mut target, &scene, 4, 2, None, false);
+        let elapsed_ms = t0.elapsed().as_secs_f64() * 1000.0;
+        assert!(target.samples >= 5);
+        eprintln!(
+            "GPU FRACTAL SCENE BENCH (640x360, 4 spp, 4 objects): {:.2} ms ({:.2} MSamples/s)",
+            elapsed_ms,
+            target.msamples_per_s()
+        );
+    }
 }
