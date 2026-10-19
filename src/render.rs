@@ -1008,33 +1008,19 @@ impl Gpu {
                 .copy_to_host(&cuda.stream, &mut target.raw)
                 .expect("readback");
         }
-        match self.colour.apply(
-            target.width,
-            target.height,
+        match self.colour.apply_into(
+            (target.width, target.height),
             &target.raw,
             &scene.colour,
             scene.render.reinhard,
+            &mut target.light,
+            &mut target.pixels,
         ) {
-            Ok((light, encoded, kind)) => {
-                target.light = light;
+            Ok(kind) => {
                 target.light_kind = kind;
                 target.colour_error = None;
                 if display_changed {
                     target.display_key = Some(DisplayKey::new(scene, self.colour_revision));
-                }
-                let pack = |(p, l): (&mut u32, &[f32; 4])| {
-                    let code = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
-                    *p = u32::from_le_bytes([code(l[0]), code(l[1]), code(l[2]), 255]);
-                };
-                if target.pixels.len() >= 16_384 {
-                    use rayon::prelude::*;
-                    target
-                        .pixels
-                        .par_iter_mut()
-                        .zip(encoded.par_iter())
-                        .for_each(pack);
-                } else {
-                    target.pixels.iter_mut().zip(encoded.iter()).for_each(pack);
                 }
             }
             Err(e) => target.colour_error = Some(e),
@@ -3964,5 +3950,91 @@ mod tests {
                 "missing compute entry point {name}"
             );
         }
+    }
+
+    #[test]
+    fn display_pipeline_and_untile_equivalence() {
+        let width = 67usize;
+        let height = 35usize;
+        let n = width * height;
+        let raw: Vec<[f32; 4]> = (0..n)
+            .map(|i| {
+                let f = (i % 512) as f32 / 128.0 - 0.1;
+                [f * 0.8, f * 0.5, f * 1.2, 4.0]
+            })
+            .collect();
+
+        let mut sdr_old = vec![0u32; n];
+        let to_light = |p: &[f32; 4]| {
+            let f = |v: f32| v.max(0.0) / (1.0 + v.max(0.0));
+            let [r, g, b] = crate::color::to_709([p[0], p[1], p[2]]);
+            [f(r), f(g), f(b), 1.0]
+        };
+        let light_old: Vec<_> = raw.iter().map(to_light).collect();
+        for (p, l) in sdr_old.iter_mut().zip(light_old.iter()) {
+            let code = |v: f32| (crate::color::oetf(v).clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
+            *p = u32::from_le_bytes([code(l[0]), code(l[1]), code(l[2]), 255]);
+        }
+
+        let mut pipe = crate::color::ColorPipeline::new();
+        let mut sel = crate::color::default_selection();
+        sel.on = false;
+        let mut light_new = Vec::new();
+        let mut sdr_new = vec![0u32; n];
+        pipe.apply_into(
+            (width, height),
+            &raw,
+            &sel,
+            true,
+            &mut light_new,
+            &mut sdr_new,
+        )
+        .unwrap();
+        assert_eq!(sdr_old, sdr_new);
+        assert_eq!(light_old, light_new);
+
+        let padded = width.div_ceil(8) * height.div_ceil(4) * 32;
+        let tiled: Vec<[f32; 4]> = (0..padded)
+            .map(|i| [(i % 251) as f32 * 0.01, 0.2, 0.4, 4.0])
+            .collect();
+        for normalize in [false, true] {
+            let mut out_old = vec![[0.0f32; 4]; n];
+            let tiles_per_row = width.div_ceil(8);
+            for y in 0..height {
+                let tile_row = (y / 4) * tiles_per_row;
+                let in_tile_y = (y % 4) * 8;
+                for x in 0..width {
+                    let tile = tile_row + x / 8;
+                    let pixel = tiled[tile * 32 + in_tile_y + x % 8];
+                    out_old[y * width + x] = if normalize {
+                        let inv = if pixel[3] > 0.0 {
+                            pixel[3].recip()
+                        } else {
+                            0.0
+                        };
+                        [pixel[0] * inv, pixel[1] * inv, pixel[2] * inv, 1.0]
+                    } else {
+                        pixel
+                    };
+                }
+            }
+            let mut out_new = Vec::new();
+            untile_into(&tiled, width, height, normalize, &mut out_new);
+            assert_eq!(out_old, out_new);
+        }
+
+        let mut hdr_old = Vec::new();
+        for pixel in &light_new {
+            for value in [
+                crate::color::oetf(pixel[0]),
+                crate::color::oetf(pixel[1]),
+                crate::color::oetf(pixel[2]),
+                1.0,
+            ] {
+                hdr_old.extend_from_slice(&value.to_ne_bytes());
+            }
+        }
+        let hdr_new = crate::render_service::hdr_canvas_bytes(&light_new, 1.0);
+        assert_eq!(hdr_old, hdr_new);
     }
 }

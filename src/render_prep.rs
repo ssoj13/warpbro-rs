@@ -440,49 +440,41 @@ pub(crate) fn untile_into(
     output: &mut Vec<[f32; 4]>,
 ) {
     output.resize(width * height, [0.0; 4]);
+    if width == 0 || height == 0 {
+        return;
+    }
     let tiles_per_row = width.div_ceil(8);
-    if width * height >= 16_384 && width > 0 {
+    let untile_row = |(y, row): (usize, &mut [[f32; 4]])| {
+        let tile_row = (y / 4) * tiles_per_row;
+        let in_tile_y = (y % 4) * 8;
+        if normalize {
+            for (tx, chunk) in row.chunks_mut(8).enumerate() {
+                let base = (tile_row + tx) * 32 + in_tile_y;
+                let src = &tiled[base..base + chunk.len()];
+                for (dst, &pixel) in chunk.iter_mut().zip(src.iter()) {
+                    let inv = if pixel[3] > 0.0 {
+                        pixel[3].recip()
+                    } else {
+                        0.0
+                    };
+                    *dst = [pixel[0] * inv, pixel[1] * inv, pixel[2] * inv, 1.0];
+                }
+            }
+        } else {
+            for (tx, chunk) in row.chunks_mut(8).enumerate() {
+                let base = (tile_row + tx) * 32 + in_tile_y;
+                chunk.copy_from_slice(&tiled[base..base + chunk.len()]);
+            }
+        }
+    };
+    if width * height >= 16_384 {
         use rayon::prelude::*;
         output
             .par_chunks_mut(width)
             .enumerate()
-            .for_each(|(y, row)| {
-                let tile_row = (y / 4) * tiles_per_row;
-                let in_tile_y = (y % 4) * 8;
-                for (x, dst) in row.iter_mut().enumerate() {
-                    let tile = tile_row + x / 8;
-                    let pixel = tiled[tile * 32 + in_tile_y + x % 8];
-                    *dst = if normalize {
-                        let inv = if pixel[3] > 0.0 {
-                            pixel[3].recip()
-                        } else {
-                            0.0
-                        };
-                        [pixel[0] * inv, pixel[1] * inv, pixel[2] * inv, 1.0]
-                    } else {
-                        pixel
-                    };
-                }
-            });
-        return;
-    }
-    for y in 0..height {
-        let tile_row = (y / 4) * tiles_per_row;
-        let in_tile_y = (y % 4) * 8;
-        for x in 0..width {
-            let tile = tile_row + x / 8;
-            let pixel = tiled[tile * 32 + in_tile_y + x % 8];
-            output[y * width + x] = if normalize {
-                let inv = if pixel[3] > 0.0 {
-                    pixel[3].recip()
-                } else {
-                    0.0
-                };
-                [pixel[0] * inv, pixel[1] * inv, pixel[2] * inv, 1.0]
-            } else {
-                pixel
-            };
-        }
+            .for_each(untile_row);
+    } else {
+        output.chunks_mut(width).enumerate().for_each(untile_row);
     }
 }
 

@@ -112,26 +112,33 @@ pub fn write_display_exr(
         overwrite,
     )
 }
-pub(crate) fn hdr_canvas_bytes(light: &[[f32; 4]], gain: f32) -> Vec<u8> {
-    let mut encoded = vec![[0.0f32; 4]; light.len()];
-    let encode_pixel = |(dst, pixel): (&mut [f32; 4], &[f32; 4])| {
-        *dst = [
-            crate::color::oetf(pixel[0] * gain),
-            crate::color::oetf(pixel[1] * gain),
-            crate::color::oetf(pixel[2] * gain),
-            1.0,
-        ];
+pub(crate) fn hdr_canvas_bytes_into(light: &[[f32; 4]], gain: f32, out: &mut Vec<u8>) {
+    out.resize(light.len() * 16, 0);
+    let chunks = out.as_chunks_mut::<16>().0;
+    let encode_pixel = |(dst, pixel): (&mut [u8; 16], &[f32; 4])| {
+        let r = crate::color::oetf(pixel[0] * gain).to_ne_bytes();
+        let g = crate::color::oetf(pixel[1] * gain).to_ne_bytes();
+        let b = crate::color::oetf(pixel[2] * gain).to_ne_bytes();
+        let a = 1.0f32.to_ne_bytes();
+        dst[0..4].copy_from_slice(&r);
+        dst[4..8].copy_from_slice(&g);
+        dst[8..12].copy_from_slice(&b);
+        dst[12..16].copy_from_slice(&a);
     };
     if light.len() >= 16_384 {
         use rayon::prelude::*;
-        encoded
+        chunks
             .par_iter_mut()
             .zip(light.par_iter())
             .for_each(encode_pixel);
     } else {
-        encoded.iter_mut().zip(light.iter()).for_each(encode_pixel);
+        chunks.iter_mut().zip(light.iter()).for_each(encode_pixel);
     }
-    bytemuck::cast_slice(&encoded).to_vec()
+}
+pub(crate) fn hdr_canvas_bytes(light: &[[f32; 4]], gain: f32) -> Vec<u8> {
+    let mut out = Vec::with_capacity(light.len() * 16);
+    hdr_canvas_bytes_into(light, gain, &mut out);
+    out
 }
 impl Frame {
     pub(crate) fn snapshot(

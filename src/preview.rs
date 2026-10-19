@@ -540,13 +540,8 @@ impl PreviewCache {
             denoise_ms: frame.denoise_ms,
             denoise_error: frame.denoise_error.clone(),
         };
-        let codes = frame
-            .pixels
-            .iter()
-            .copied()
-            .flat_map(u32::to_le_bytes)
-            .collect();
-        let linear = frame.light.iter().flatten().copied().collect();
+        let codes = bytemuck::cast_slice(&frame.pixels).to_vec();
+        let linear = bytemuck::cast_slice(&frame.light).to_vec();
         let codes = PlayaFrame::from_cpu_buffer(
             PixelBuffer::U8(codes),
             PixelFormat::Rgba8,
@@ -589,22 +584,14 @@ impl PreviewCache {
         else {
             return None;
         };
-        frame.pixels.clear();
-        frame.pixels.extend(
-            codes
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|v| u32::from_le_bytes([v[0], v[1], v[2], v[3]])),
-        );
-        frame.light.clear();
-        frame.light.extend(
-            linear
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|v| [v[0], v[1], v[2], v[3]]),
-        );
+        let n_pixels = codes.len() / 4;
+        frame.pixels.resize(n_pixels, 0);
+        bytemuck::cast_slice_mut::<u32, u8>(&mut frame.pixels)
+            .copy_from_slice(&codes[..n_pixels * 4]);
+        let n_light = linear.len() / 4;
+        frame.light.resize(n_light, [0.0; 4]);
+        bytemuck::cast_slice_mut::<[f32; 4], f32>(&mut frame.light)
+            .copy_from_slice(&linear[..n_light * 4]);
         let sdr = Arc::get_mut(&mut frame.sdr_bytes)?;
         sdr.clear();
         sdr.extend_from_slice(codes);
@@ -616,16 +603,7 @@ impl PreviewCache {
             } else {
                 1.0
             };
-            for pixel in &frame.light {
-                for value in [
-                    crate::color::oetf(pixel[0] * gain),
-                    crate::color::oetf(pixel[1] * gain),
-                    crate::color::oetf(pixel[2] * gain),
-                    1.0,
-                ] {
-                    hdr.extend_from_slice(&value.to_ne_bytes());
-                }
-            }
+            crate::render_service::hdr_canvas_bytes_into(&frame.light, gain, hdr);
         }
         frame.generation = self.request.generation;
         frame.preview = true;

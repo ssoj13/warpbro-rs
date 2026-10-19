@@ -151,42 +151,68 @@ fn orbit_constant(is_world: bool, obj: u32, p: vec3<f32>) -> vec4<f32> {
     return vec4<f32>(base_pt + pr3(is_world, obj, P_ORBIT_OFFSET), 1.0 - t);
 }
 
-fn iter_rotate(is_world: bool, obj: u32, v: vec3<f32>) -> vec3<f32> {
-    if pr(is_world, obj, P_ITER_ROTATE) == 0.0 {
-        return v;
+struct IterRot {
+    enabled: bool,
+    r0: vec3<f32>,
+    r1: vec3<f32>,
+    r2: vec3<f32>,
+}
+
+fn load_iter_rot(is_world: bool, obj: u32) -> IterRot {
+    let enabled = pr(is_world, obj, P_ITER_ROTATE) != 0.0;
+    if !enabled {
+        return IterRot(false, vec3<f32>(0.0), vec3<f32>(0.0), vec3<f32>(0.0));
     }
-    return vec3<f32>(
-        dot(pr3(is_world, obj, P_ITER_ROT), v),
-        dot(pr3(is_world, obj, P_ITER_ROT + 3u), v),
-        dot(pr3(is_world, obj, P_ITER_ROT + 6u), v),
+    return IterRot(
+        true,
+        pr3(is_world, obj, P_ITER_ROT),
+        pr3(is_world, obj, P_ITER_ROT + 3u),
+        pr3(is_world, obj, P_ITER_ROT + 6u),
     );
 }
 
-fn trap3(is_world: bool, obj: u32, v: vec3<f32>, mode: u32) -> f32 {
-    if mode == 1u {
-        return length(v);
+fn apply_iter_rot(rot: IterRot, v: vec3<f32>) -> vec3<f32> {
+    if !rot.enabled {
+        return v;
     }
-    let rel = v - pr3(is_world, obj, P_TRAP_POINT);
-    let n = pr3(is_world, obj, P_TRAP_NORMAL);
-    let proj = dot(rel, n);
-    if mode == 2u {
-        return abs(proj);
-    }
-    return length(rel - n * proj);
+    return vec3<f32>(dot(rot.r0, v), dot(rot.r1, v), dot(rot.r2, v));
 }
 
-fn trap4(is_world: bool, obj: u32, q: vec4<f32>, mode: u32) -> f32 {
-    let v = q.xyz;
-    if mode == 1u {
-        return length(q);
+struct Trap3 {
+    mode: u32,
+    point: vec3<f32>,
+    normal: vec3<f32>,
+}
+
+fn load_trap3(is_world: bool, obj: u32, mode: u32) -> Trap3 {
+    if mode <= 1u {
+        return Trap3(mode, vec3<f32>(0.0), vec3<f32>(0.0));
     }
-    let rel = v - pr3(is_world, obj, P_TRAP_POINT);
-    let n = pr3(is_world, obj, P_TRAP_NORMAL);
-    let proj = dot(rel, n);
-    if mode == 2u {
+    return Trap3(mode, pr3(is_world, obj, P_TRAP_POINT), pr3(is_world, obj, P_TRAP_NORMAL));
+}
+
+fn eval_trap3(t: Trap3, v: vec3<f32>) -> f32 {
+    if t.mode == 1u {
+        return length(v);
+    }
+    let rel = v - t.point;
+    let proj = dot(rel, t.normal);
+    if t.mode == 2u {
         return abs(proj);
     }
-    let o = rel - n * proj;
+    return length(rel - t.normal * proj);
+}
+
+fn eval_trap4(t: Trap3, q: vec4<f32>) -> f32 {
+    if t.mode == 1u {
+        return length(q);
+    }
+    let rel = q.xyz - t.point;
+    let proj = dot(rel, t.normal);
+    if t.mode == 2u {
+        return abs(proj);
+    }
+    let o = rel - t.normal * proj;
     return sqrt(dot(o, o) + q.w * q.w);
 }
 
@@ -236,16 +262,42 @@ fn bulb_estimate(r: f32, dr: f32, bailout: f32) -> f32 {
     return 0.5 * log(r) * r / dr;
 }
 
-fn bulb_step(
-    is_world: bool,
-    obj: u32,
+struct BulbConfig {
+    fast8: bool,
+    power: f32,
+    growth_scale: f32,
+    theta_power: f32,
+    theta_phase: f32,
+    phi_power: f32,
+    phi_phase: f32,
+}
+
+fn load_bulb_config(is_world: bool, obj: u32) -> BulbConfig {
+    let fast8 = pr(is_world, obj, P_BULB_FAST8) != 0.0;
+    if fast8 {
+        return BulbConfig(true, 8.0, 1.0, 8.0, 0.0, 8.0, 0.0);
+    }
+    return BulbConfig(
+        false,
+        pr(is_world, obj, P_BULB_POWER),
+        pr(is_world, obj, P_BULB_GROWTH),
+        pr(is_world, obj, P_BULB_THETA_POWER),
+        pr(is_world, obj, P_BULB_THETA_PHASE),
+        pr(is_world, obj, P_BULB_PHI_POWER),
+        pr(is_world, obj, P_BULB_PHI_PHASE),
+    );
+}
+
+fn bulb_step_cfg(
+    cfg: BulbConfig,
+    rot: IterRot,
     z: ptr<function, vec3<f32>>,
     dr: ptr<function, f32>,
     r: f32,
     c: vec3<f32>,
     dr_constant: f32,
 ) -> bool {
-    if pr(is_world, obj, P_BULB_FAST8) != 0.0 {
+    if cfg.fast8 {
         let r2 = r * r;
         let r4 = r2 * r2;
         let r7 = r4 * r2 * r;
@@ -255,45 +307,43 @@ fn bulb_step(
         }
         let x2 = (*z).x * (*z).x;
         let y2 = (*z).y * (*z).y;
-        let z2 = (*z).z * (*z).z;
-        let xy = x2 + y2;
-        if xy <= 1.0e-30 {
+        let xy2 = x2 + y2;
+        if xy2 <= 1.0e-30 {
             *dr = growth * (*dr) + dr_constant;
             *z = vec3<f32>(0.0, 0.0, r4 * r4) + c;
             return true;
         }
-        let xy2 = xy * xy;
-        let xy4 = xy2 * xy2;
-        let z4 = z2 * z2;
+        let inv_r = 1.0 / r;
+        let inv_xy = inverseSqrt(xy2);
+        var ct = (*z).z * inv_r;
+        var st = xy2 * inv_xy * inv_r;
+        var cp = (*z).x * inv_xy;
+        var sp = (*z).y * inv_xy;
+        for (var k = 0u; k < 3u; k = k + 1u) {
+            let nct = ct * ct - st * st;
+            st = 2.0 * st * ct;
+            ct = nct;
+            let ncp = cp * cp - sp * sp;
+            sp = 2.0 * sp * cp;
+            cp = ncp;
+        }
         let r8 = r4 * r4;
-        let cos8_theta = r8 - 28.0 * xy * z2 * (z4 + xy2) + 70.0 * xy2 * z4;
-        let sin8_over_xy4 = 8.0 * (*z).z * (z2 - xy) * (z4 - 6.0 * xy * z2 + xy2) / r8;
-        let u = x2 - y2;
-        let v = 2.0 * (*z).x * (*z).y;
-        let u2 = u * u;
-        let v2 = v * v;
-        let cos8_phi = u2 * u2 - 6.0 * u2 * v2 + v2 * v2;
-        let sin8_phi = 4.0 * u * v * (u2 - v2);
         *dr = growth * (*dr) + dr_constant;
-        *z = vec3<f32>(
-            sin8_over_xy4 * cos8_phi,
-            sin8_over_xy4 * sin8_phi,
-            cos8_theta,
-        ) + c;
+        *z = vec3<f32>(st * cp, st * sp, ct) * r8 + c;
         return true;
     }
-    let power = pr(is_world, obj, P_BULB_POWER);
-    let turned = iter_rotate(is_world, obj, *z);
+    let turned = apply_iter_rot(rot, *z);
     let theta = acos(clamp(turned.z / r, -1.0, 1.0));
     let phi = atan2(turned.y, turned.x);
-    let growth = power * pow(r, power - 1.0) * pr(is_world, obj, P_BULB_GROWTH);
+    let r_pow_m1 = pow(r, cfg.power - 1.0);
+    let growth = cfg.power * r_pow_m1 * cfg.growth_scale;
     if *dr > DERIVATIVE_LIMIT / growth {
         return false;
     }
-    let magnitude = pow(r, power);
+    let magnitude = r_pow_m1 * r;
     *dr = growth * (*dr) + dr_constant;
-    let a = theta * pr(is_world, obj, P_BULB_THETA_POWER) + pr(is_world, obj, P_BULB_THETA_PHASE);
-    let b = phi * pr(is_world, obj, P_BULB_PHI_POWER) + pr(is_world, obj, P_BULB_PHI_PHASE);
+    let a = theta * cfg.theta_power + cfg.theta_phase;
+    let b = phi * cfg.phi_power + cfg.phi_phase;
     let sa = sin(a);
     let ca = cos(a);
     let sb = sin(b);
@@ -317,6 +367,9 @@ fn bulb_distance(
     var r = length(z);
     var trap = TRAP_START;
     let bailout = pr(is_world, obj, P_BAILOUT);
+    let cfg = load_bulb_config(is_world, obj);
+    let rot = load_iter_rot(is_world, obj);
+    let trap_cfg = load_trap3(is_world, obj, trap_mode);
     var frac = fraction_new(is_world, obj, iter_override);
     for (var i = 0u; i < frac.run; i = i + 1u) {
         if fraction_due(frac, i) {
@@ -328,12 +381,12 @@ fn bulb_distance(
         if r < 1.0e-8 {
             return vec2<f32>(0.0, trap);
         }
-        if !bulb_step(is_world, obj, &z, &dr, r, c, dr_constant) {
+        if !bulb_step_cfg(cfg, rot, &z, &dr, r, c, dr_constant) {
             break;
         }
         r = length(z);
         if trap_mode != 0u {
-            trap = min(trap, trap3(is_world, obj, z, trap_mode));
+            trap = min(trap, eval_trap3(trap_cfg, z));
         }
     }
     return fraction_blend(frac, bulb_estimate(r, dr, bailout), trap);
@@ -347,6 +400,8 @@ fn bulb_distance_endpoints(is_world: bool, obj: u32, q: vec3<f32>) -> vec2<f32> 
     var dr = 1.0;
     var r = length(z);
     let bailout = pr(is_world, obj, P_BAILOUT);
+    let cfg = load_bulb_config(is_world, obj);
+    let rot = load_iter_rot(is_world, obj);
     let whole = u32(floor(max(pr(is_world, obj, P_ITERATIONS), 0.0)));
     let run = whole + 1u;
     var d0 = 0.0;
@@ -362,7 +417,7 @@ fn bulb_distance_endpoints(is_world: bool, obj: u32, q: vec3<f32>) -> vec2<f32> 
         if r < 1.0e-8 {
             return vec2<f32>(0.0, 0.0);
         }
-        if !bulb_step(is_world, obj, &z, &dr, r, c, dr_constant) {
+        if !bulb_step_cfg(cfg, rot, &z, &dr, r, c, dr_constant) {
             break;
         }
         r = length(z);
@@ -375,30 +430,42 @@ fn box_fold(v: vec3<f32>, fold: f32) -> vec3<f32> {
     return clamp(v, vec3<f32>(-fold), vec3<f32>(fold)) * 2.0 - v;
 }
 
-fn box_step(
-    is_world: bool,
-    obj: u32,
+struct BoxConfig {
+    scale: f32,
+    fold: f32,
+    min_r2: f32,
+    fixed_r2: f32,
+}
+
+fn load_box_config(is_world: bool, obj: u32) -> BoxConfig {
+    return BoxConfig(
+        pr(is_world, obj, P_BOX_SCALE),
+        pr(is_world, obj, P_BOX_FOLD),
+        pr(is_world, obj, P_BOX_MIN_R2),
+        pr(is_world, obj, P_BOX_FIXED_R2),
+    );
+}
+
+fn box_step_cfg(
+    cfg: BoxConfig,
+    rot: IterRot,
     z: ptr<function, vec3<f32>>,
     dr: ptr<function, f32>,
     c: vec3<f32>,
     dr_constant: f32,
 ) -> bool {
-    let scale = pr(is_world, obj, P_BOX_SCALE);
-    let fold = pr(is_world, obj, P_BOX_FOLD);
-    let min_r2 = pr(is_world, obj, P_BOX_MIN_R2);
-    let fixed_r2 = pr(is_world, obj, P_BOX_FIXED_R2);
-    var t = iter_rotate(is_world, obj, *z);
-    t = box_fold(t, fold);
+    var t = apply_iter_rot(rot, *z);
+    t = box_fold(t, cfg.fold);
     let r2 = dot(t, t);
     var factor: f32;
-    if r2 < min_r2 {
-        factor = fixed_r2 / min_r2;
-    } else if r2 < fixed_r2 {
-        factor = fixed_r2 / r2;
+    if r2 < cfg.min_r2 {
+        factor = cfg.fixed_r2 / cfg.min_r2;
+    } else if r2 < cfg.fixed_r2 {
+        factor = cfg.fixed_r2 / r2;
     } else {
         factor = 1.0;
     }
-    let step_scale = factor * scale;
+    let step_scale = factor * cfg.scale;
     let abs_step = abs(step_scale);
     if *dr > DERIVATIVE_LIMIT / abs_step {
         return false;
@@ -421,16 +488,19 @@ fn box_distance(
     var z = q;
     var dr = 1.0;
     var trap = TRAP_START;
+    let cfg = load_box_config(is_world, obj);
+    let rot = load_iter_rot(is_world, obj);
+    let trap_cfg = load_trap3(is_world, obj, trap_mode);
     var frac = fraction_new(is_world, obj, iter_override);
     for (var i = 0u; i < frac.run; i = i + 1u) {
         if fraction_due(frac, i) {
             fraction_save(&frac, length(z) / dr, trap);
         }
-        if !box_step(is_world, obj, &z, &dr, c, dr_constant) {
+        if !box_step_cfg(cfg, rot, &z, &dr, c, dr_constant) {
             break;
         }
         if trap_mode != 0u {
-            trap = min(trap, trap3(is_world, obj, z, trap_mode));
+            trap = min(trap, eval_trap3(trap_cfg, z));
         }
     }
     return fraction_blend(frac, length(z) / dr, trap);
@@ -459,6 +529,7 @@ fn quat_distance(
     var r = length(q);
     var trap = TRAP_START;
     let bailout = pr(is_world, obj, P_BAILOUT);
+    let trap_cfg = load_trap3(is_world, obj, trap_mode);
     var frac = fraction_new(is_world, obj, iter_override);
     for (var i = 0u; i < frac.run; i = i + 1u) {
         if fraction_due(frac, i) {
@@ -485,18 +556,35 @@ fn quat_distance(
         );
         r = length(q);
         if trap_mode != 0u {
-            trap = min(trap, trap4(is_world, obj, q, trap_mode));
+            trap = min(trap, eval_trap4(trap_cfg, q));
         }
     }
     return fraction_blend(frac, bulb_estimate(r, dr, bailout), trap);
 }
 
-fn kifs_fold(is_world: bool, obj: u32, v: vec3<f32>) -> vec3<f32> {
-    let kind = u32(pr(is_world, obj, P_KIFS_KIND));
+struct KifsConfig {
+    kind: u32,
+    fold_height: f32,
+    scale: f32,
+    bound: f32,
+    shift: vec3<f32>,
+}
+
+fn load_kifs_config(is_world: bool, obj: u32) -> KifsConfig {
+    return KifsConfig(
+        u32(pr(is_world, obj, P_KIFS_KIND)),
+        pr(is_world, obj, P_KIFS_FOLD_HEIGHT),
+        pr(is_world, obj, P_KIFS_SCALE),
+        pr(is_world, obj, P_KIFS_BOUND),
+        pr3(is_world, obj, P_KIFS_SHIFT),
+    );
+}
+
+fn kifs_fold_cfg(cfg: KifsConfig, v: vec3<f32>) -> vec3<f32> {
     var x = v.x;
     var y = v.y;
     var z = v.z;
-    if kind == 0u {
+    if cfg.kind == 0u {
         if x + y < 0.0 {
             let nx = -y;
             let ny = -x;
@@ -535,9 +623,8 @@ fn kifs_fold(is_world: bool, obj: u32, v: vec3<f32>) -> vec3<f32> {
         y = z;
         z = t;
     }
-    if kind == 2u {
-        let h = pr(is_world, obj, P_KIFS_FOLD_HEIGHT);
-        z = h - abs(z - h);
+    if cfg.kind == 2u {
+        z = cfg.fold_height - abs(z - cfg.fold_height);
     }
     return vec3<f32>(x, y, z);
 }
@@ -549,29 +636,27 @@ fn unit_box_distance(p: vec3<f32>) -> f32 {
     return length(outside) + inside;
 }
 
-fn kifs_step(
-    is_world: bool,
-    obj: u32,
+fn kifs_step_cfg(
+    cfg: KifsConfig,
+    rot: IterRot,
     z: ptr<function, vec3<f32>>,
     dr: ptr<function, f32>,
 ) -> bool {
-    let scale = pr(is_world, obj, P_KIFS_SCALE);
-    if *dr > DERIVATIVE_LIMIT / scale {
+    if *dr > DERIVATIVE_LIMIT / cfg.scale {
         return false;
     }
-    let shift = pr3(is_world, obj, P_KIFS_SHIFT);
-    var t = iter_rotate(is_world, obj, *z);
-    t = kifs_fold(is_world, obj, t);
-    *z = t * scale - shift;
-    *dr = (*dr) * scale;
+    var t = apply_iter_rot(rot, *z);
+    t = kifs_fold_cfg(cfg, t);
+    *z = t * cfg.scale - cfg.shift;
+    *dr = (*dr) * cfg.scale;
     return true;
 }
 
-fn kifs_estimate(is_world: bool, obj: u32, z: vec3<f32>, dr: f32) -> f32 {
-    if u32(pr(is_world, obj, P_KIFS_KIND)) == 2u {
+fn kifs_estimate_cfg(cfg: KifsConfig, z: vec3<f32>, dr: f32) -> f32 {
+    if cfg.kind == 2u {
         return unit_box_distance(z) / dr;
     }
-    return (length(z) - pr(is_world, obj, P_KIFS_BOUND)) / dr;
+    return (length(z) - cfg.bound) / dr;
 }
 
 fn kifs_distance(
@@ -584,19 +669,36 @@ fn kifs_distance(
     var z = q;
     var dr = 1.0;
     var trap = TRAP_START;
+    let cfg = load_kifs_config(is_world, obj);
+    let rot = load_iter_rot(is_world, obj);
+    let trap_cfg = load_trap3(is_world, obj, trap_mode);
     var frac = fraction_new(is_world, obj, iter_override);
     for (var i = 0u; i < frac.run; i = i + 1u) {
         if fraction_due(frac, i) {
-            fraction_save(&frac, kifs_estimate(is_world, obj, z, dr), trap);
+            fraction_save(&frac, kifs_estimate_cfg(cfg, z, dr), trap);
         }
-        if !kifs_step(is_world, obj, &z, &dr) {
+        if !kifs_step_cfg(cfg, rot, &z, &dr) {
             break;
         }
         if trap_mode != 0u {
-            trap = min(trap, trap3(is_world, obj, z, trap_mode));
+            trap = min(trap, eval_trap3(trap_cfg, z));
         }
     }
-    return fraction_blend(frac, kifs_estimate(is_world, obj, z, dr), trap);
+    return fraction_blend(frac, kifs_estimate_cfg(cfg, z, dr), trap);
+}
+
+fn kleinian_wrap(x: f32, a: f32, s: f32) -> f32 {
+    return x - s * floor(x / s + 0.5 * (1.0 - a));
+}
+
+fn exact_sign(x: f32) -> f32 {
+    if x < 0.0 {
+        return -1.0;
+    }
+    if x > 0.0 {
+        return 1.0;
+    }
+    return 0.0;
 }
 
 fn kleinian_distance(
@@ -617,45 +719,57 @@ fn kleinian_distance(
     let skew = pr(is_world, obj, P_KLEIN_SKEW);
     let amp = pr(is_world, obj, P_KLEIN_LINE_AMP);
     let rate = pr(is_world, obj, P_KLEIN_LINE_RATE);
-    var p = q;
+    let rot = load_iter_rot(is_world, obj);
+    let trap_cfg = load_trap3(is_world, obj, trap_mode);
+    let face_camera = vec3<f32>(q.x, q.z, -q.y);
+    let oc = orbit_constant(is_world, obj, face_camera);
+    var z = oc.xyz;
     var dr = 1.0;
     var trap = TRAP_START;
     var frac = fraction_new(is_world, obj, iter_override);
     for (var i = 0u; i < frac.run; i = i + 1u) {
         if fraction_due(frac, i) {
-            let line = a * (0.5 + amp * sin(rate * p.z));
-            let estimate = min(p.x + abs(b - p.x), abs(p.y - line)) / max(dr, 1.0);
-            fraction_save(&frac, estimate, trap);
+            fraction_save(&frac, min(z.y, 0.05) / max(dr, 1.0), trap);
         }
-        p = iter_rotate(is_world, obj, p);
-        p.y = p.y + skew * p.z;
-        p.z = 2.0 * fract(0.5 * (p.z + 1.0)) - 1.0;
-        p.y = p.y - skew * p.z;
-        let bound = l2 + l1 * p.x * (l3 - p.x);
-        if p.y <= bound {
-            p.x = b - p.x;
-            p.y = a - p.y;
+        z = apply_iter_rot(rot, z);
+        if amp != 0.0 {
+            let push = exp(-abs(z.y));
+            z.x = z.x + push * amp * sin(rate * z.x);
+            z.z = z.z + push * amp * cos(rate * z.z);
         }
-        let r2 = dot(p, p);
-        if r2 <= 0.0 {
+        z.x = z.x + b / a * z.y;
+        z.x = kleinian_wrap(z.x, skew, 2.0);
+        z.z = kleinian_wrap(z.z, skew, 2.0);
+        z.x = z.x - b / a * z.y;
+        let line = l2 + l1 * z.y * (l3 - z.y);
+        if z.x >= line {
+            z = vec3<f32>(-b - z.x, a - z.y, -z.z);
+        }
+        let inv = 1.0 / max(dot(z, z), 1.0e-30);
+        if dr > DERIVATIVE_LIMIT / inv {
             break;
         }
-        let k = 1.0 / r2;
-        if k < 1.0 {
-            break;
-        }
-        if dr > DERIVATIVE_LIMIT / k {
-            break;
-        }
-        p = p * k;
-        dr = dr * k;
+        z = z * inv;
+        dr = dr * inv;
         if trap_mode != 0u {
-            trap = min(trap, trap3(is_world, obj, p, trap_mode));
+            trap = min(trap, eval_trap3(trap_cfg, z));
+        }
+        let x0 = z.x + 0.5 * b;
+        let fl = floor(z.z + 0.5);
+        let sq = x0 * x0 + z.y * z.y + (z.z - fl) * (z.z - fl);
+        let diff = z.z - 0.5 - fl;
+        if exact_sign(diff) * sq < diff {
+            break;
         }
     }
-    let line = a * (0.5 + amp * sin(rate * p.z));
-    let d = min(p.x + abs(b - p.x), abs(p.y - line)) / max(dr, 1.0);
-    return fraction_blend(frac, d, trap);
+    return fraction_blend(frac, min(z.y, 0.05) / max(dr, 1.0), trap);
+}
+
+fn pseudo_kleinian_estimate(z: vec3<f32>, dr: f32, offset: f32, thickness: f32) -> f32 {
+    let o = z - vec3<f32>(0.0, 0.0, offset);
+    let rxy = length(o.xy);
+    let thingy = abs(rxy * o.z) - thickness;
+    return 0.5 * thingy / max(sqrt(dot(o, o) + abs(thickness)), 1.0e-30) / max(dr, 1.0e-30);
 }
 
 fn pseudo_kleinian_distance(
@@ -670,17 +784,17 @@ fn pseudo_kleinian_distance(
     let c = pr3(is_world, obj, P_PK_C);
     let offset = pr(is_world, obj, P_PK_OFFSET);
     let thickness = pr(is_world, obj, P_PK_THICKNESS);
+    let rot = load_iter_rot(is_world, obj);
+    let trap_cfg = load_trap3(is_world, obj, trap_mode);
     var p = q;
     var dr = 1.0;
     var trap = TRAP_START;
     var frac = fraction_new(is_world, obj, iter_override);
     for (var i = 0u; i < frac.run; i = i + 1u) {
         if fraction_due(frac, i) {
-            let rxy = length(p.xy);
-            let estimate = 0.5 * max(rxy - offset, abs(rxy * p.z / max(length(p), 1.0e-8)) - thickness) / dr;
-            fraction_save(&frac, estimate, trap);
+            fraction_save(&frac, pseudo_kleinian_estimate(p, dr, offset, thickness), trap);
         }
-        p = iter_rotate(is_world, obj, p);
+        p = apply_iter_rot(rot, p);
         p = clamp(p, -csize, csize) * 2.0 - p;
         let r2 = dot(p, p);
         if r2 <= 0.0 {
@@ -693,22 +807,19 @@ fn pseudo_kleinian_distance(
         p = p * k + c;
         dr = dr * k;
         if trap_mode != 0u {
-            trap = min(trap, trap3(is_world, obj, p, trap_mode));
+            trap = min(trap, eval_trap3(trap_cfg, p));
         }
     }
-    let rxy = length(p.xy);
-    let d = 0.5 * max(rxy - offset, abs(rxy * p.z / max(length(p), 1.0e-8)) - thickness) / dr;
-    return fraction_blend(frac, d, trap);
+    return fraction_blend(frac, pseudo_kleinian_estimate(p, dr, offset, thickness), trap);
 }
 
-fn apollonian_step(
-    is_world: bool,
-    obj: u32,
+fn apollonian_step_cfg(
+    scale: f32,
+    rot: IterRot,
     z: ptr<function, vec3<f32>>,
     dr: ptr<function, f32>,
 ) -> bool {
-    let scale = pr(is_world, obj, P_APOLLO_SCALE);
-    var p = iter_rotate(is_world, obj, *z);
+    var p = apply_iter_rot(rot, *z);
     p = vec3<f32>(
         2.0 * fract(0.5 * (p.x + 1.0)) - 1.0,
         2.0 * fract(0.5 * (p.y + 1.0)) - 1.0,
@@ -737,19 +848,29 @@ fn apollonian_distance(
     var z = q + vec3<f32>(0.0, 1.0, 0.0);
     var dr = 1.0;
     var trap = TRAP_START;
+    let scale = pr(is_world, obj, P_APOLLO_SCALE);
+    let rot = load_iter_rot(is_world, obj);
+    let trap_cfg = load_trap3(is_world, obj, trap_mode);
     var frac = fraction_new(is_world, obj, iter_override);
     for (var i = 0u; i < frac.run; i = i + 1u) {
         if fraction_due(frac, i) {
             fraction_save(&frac, 0.25 * abs(z.y) / dr, trap);
         }
-        if !apollonian_step(is_world, obj, &z, &dr) {
+        if !apollonian_step_cfg(scale, rot, &z, &dr) {
             break;
         }
         if trap_mode != 0u {
-            trap = min(trap, trap3(is_world, obj, z, trap_mode));
+            trap = min(trap, eval_trap3(trap_cfg, z));
         }
     }
     return fraction_blend(frac, 0.25 * abs(z.y) / dr, trap);
+}
+
+fn hybrid_estimate(r: f32, dr: f32, bailout: f32) -> f32 {
+    if r <= bailout || dr <= 0.0 {
+        return 0.0;
+    }
+    return 0.5 * r / dr;
 }
 
 fn hybrid_distance(
@@ -764,37 +885,44 @@ fn hybrid_distance(
     var dr = 1.0;
     var trap = TRAP_START;
     let bailout = pr(is_world, obj, P_BAILOUT);
-    let count = max(u32(pr(is_world, obj, P_HYBRID_COUNT)), 1u);
+    let count = clamp(u32(pr(is_world, obj, P_HYBRID_COUNT)), 1u, 4u);
+    let steps = u32(pr(is_world, obj, P_HYBRID_STEPS));
+    let bulb_cfg = load_bulb_config(is_world, obj);
+    let box_cfg = load_box_config(is_world, obj);
+    let kifs_cfg = load_kifs_config(is_world, obj);
+    let apollo_scale = pr(is_world, obj, P_APOLLO_SCALE);
+    let rot = load_iter_rot(is_world, obj);
+    let trap_cfg = load_trap3(is_world, obj, trap_mode);
     var frac = fraction_new(is_world, obj, iter_override);
     for (var i = 0u; i < frac.run; i = i + 1u) {
         let r = length(z);
         if fraction_due(frac, i) {
-            fraction_save(&frac, 0.5 * r / dr, trap);
+            fraction_save(&frac, hybrid_estimate(r, dr, bailout), trap);
         }
         if r > bailout {
             break;
         }
-        let step = u32(pr(is_world, obj, P_HYBRID_STEPS + (i % count)));
+        let step = (steps >> (3u * (i % count))) & 7u;
         var ok = false;
         if step == 0u {
             ok = true;
         } else if step == 1u {
-            ok = r >= 1.0e-8 && bulb_step(is_world, obj, &z, &dr, r, c, 1.0);
+            ok = r >= 1.0e-8 && bulb_step_cfg(bulb_cfg, rot, &z, &dr, r, c, 1.0);
         } else if step == 2u {
-            ok = box_step(is_world, obj, &z, &dr, c, 1.0);
+            ok = box_step_cfg(box_cfg, rot, &z, &dr, c, 1.0);
         } else if step == 3u {
-            ok = kifs_step(is_world, obj, &z, &dr);
+            ok = kifs_step_cfg(kifs_cfg, rot, &z, &dr);
         } else if step == 4u {
-            ok = apollonian_step(is_world, obj, &z, &dr);
+            ok = apollo_scale != 0.0 && apollonian_step_cfg(apollo_scale, rot, &z, &dr);
         }
         if !ok {
             break;
         }
         if trap_mode != 0u {
-            trap = min(trap, trap3(is_world, obj, z, trap_mode));
+            trap = min(trap, eval_trap3(trap_cfg, z));
         }
     }
-    return fraction_blend(frac, 0.5 * length(z) / dr, trap);
+    return fraction_blend(frac, hybrid_estimate(length(z), dr, bailout), trap);
 }
 
 fn family_distance(
@@ -1120,8 +1248,31 @@ fn march_sample(
 ) -> SceneSample {
     if is_world {
         let count = u32(param(P_OBJECT_COUNT));
-        var best = SceneSample(TRAP_START, TRAP_START, 0u);
+        if count <= 1u {
+            let color_mode = u32(pr(true, 0u, P_COLOR_MODE));
+            let trap_mode = select(color_mode, 0u, kind == RAY_VISIBILITY);
+            let dt = clipped_distance_and_trap(true, 0u, family_override, x, trap_mode, -1.0);
+            return SceneSample(max(dt.x, 0.0), dt.y, 0u);
+        }
+        var first = 0u;
+        let row0 = 0u;
+        var min_reach = (length(object_point(true, 0u, x)) - objects[row0 + O_CLIP_RADIUS]) * objects[row0 + O_DISTANCE_SCALE];
+        for (var i = 1u; i < count; i = i + 1u) {
+            let row = i * OBJECT_STRIDE;
+            let reach = (length(object_point(true, i, x)) - objects[row + O_CLIP_RADIUS]) * objects[row + O_DISTANCE_SCALE];
+            if reach < min_reach {
+                min_reach = reach;
+                first = i;
+            }
+        }
+        let first_color_mode = u32(pr(true, first, P_COLOR_MODE));
+        let first_trap_mode = select(first_color_mode, 0u, kind == RAY_VISIBILITY);
+        let first_dt = clipped_distance_and_trap(true, first, family_override, x, first_trap_mode, -1.0);
+        var best = SceneSample(max(first_dt.x, 0.0), first_dt.y, first);
         for (var i = 0u; i < count; i = i + 1u) {
+            if i == first {
+                continue;
+            }
             let row = i * OBJECT_STRIDE;
             let reach = (length(object_point(true, i, x)) - objects[row + O_CLIP_RADIUS]) * objects[row + O_DISTANCE_SCALE];
             if reach >= best.d {
@@ -1131,7 +1282,7 @@ fn march_sample(
             let trap_mode = select(color_mode, 0u, kind == RAY_VISIBILITY);
             let dt = clipped_distance_and_trap(true, i, family_override, x, trap_mode, -1.0);
             let d = max(dt.x, 0.0);
-            if i == 0u || d < best.d {
+            if d < best.d || (d == best.d && i < best.object) {
                 best = SceneSample(d, dt.y, i);
             }
         }
@@ -1183,33 +1334,57 @@ fn fractional_bulb_endpoints(is_world: bool, obj: u32, x: vec3<f32>) -> vec2<f32
     return vec2<f32>(d0 * scale, d1 * scale);
 }
 
-fn fractional_march_distance(is_world: bool, family_override: u32, x: vec3<f32>) -> f32 {
+fn fractional_object_march_distance(
+    obj: u32,
+    family_override: u32,
+    x: vec3<f32>,
+    sample_d: f32,
+    nearest: u32,
+) -> f32 {
+    if fractional_bulb(true, obj, family_override) {
+        let end = fractional_bulb_endpoints(true, obj, x);
+        let d0 = max(end.x, 0.0);
+        let d1 = max(end.y, 0.0);
+        return max(d0, d1);
+    }
+    if obj == nearest {
+        return sample_d;
+    }
+    return max(clipped_distance_and_trap(true, obj, family_override, x, 0u, -1.0).x, 0.0);
+}
+
+fn fractional_march_distance(
+    is_world: bool,
+    family_override: u32,
+    x: vec3<f32>,
+    sample_d: f32,
+    nearest: u32,
+) -> f32 {
     if is_world {
         let count = u32(param(P_OBJECT_COUNT));
-        var best = TRAP_START;
+        let first = min(nearest, max(count, 1u) - 1u);
+        var best = fractional_object_march_distance(first, family_override, x, sample_d, nearest);
         for (var i = 0u; i < count; i = i + 1u) {
-            var d: f32;
-            if fractional_bulb(true, i, family_override) {
-                let n = max(pr(true, i, P_ITERATIONS), 0.0);
-                let f = n - floor(n);
-                let end = fractional_bulb_endpoints(true, i, x);
-                d = min(end.x + (end.y - end.x) * f, max(end.x, end.y));
-            } else {
-                d = clipped_distance_and_trap(true, i, family_override, x, 0u, -1.0).x;
+            if i == first {
+                continue;
             }
-            if i == 0u || d < best {
+            let row = i * OBJECT_STRIDE;
+            let reach = (length(object_point(true, i, x)) - objects[row + O_CLIP_RADIUS]) * objects[row + O_DISTANCE_SCALE];
+            if reach >= best {
+                continue;
+            }
+            let d = fractional_object_march_distance(i, family_override, x, sample_d, nearest);
+            if d < best {
                 best = d;
             }
         }
         return best;
     }
     if fractional_bulb(false, 0u, family_override) {
-        let n = max(param(P_ITERATIONS), 0.0);
-        let f = n - floor(n);
         let end = fractional_bulb_endpoints(false, 0u, x);
-        return min(end.x + (end.y - end.x) * f, max(end.x, end.y));
+        return max(max(end.x, 0.0), max(end.y, 0.0));
     }
-    return clipped_distance_and_trap(false, 0u, family_override, x, 0u, -1.0).x;
+    return sample_d;
 }
 
 fn march_span(is_world: bool, origin: vec3<f32>, dir: vec3<f32>) -> vec2<f32> {
@@ -1244,19 +1419,13 @@ fn cone_start(is_world: bool, family_override: u32, origin: vec3<f32>, dir: vec3
     let w = 2.0 * param(P_HALF_W) / param(P_WIDTH);
     let h = 2.0 * param(P_HALF_H) / param(P_HEIGHT);
     let cone = 0.5 * sqrt(w * w + h * h);
-    let frac_bulb = has_fractional_bulb(is_world, family_override);
     var t = t_enter;
     for (var i = 0u; i < CONE_START_STEPS; i = i + 1u) {
         if t > t_exit {
             break;
         }
         let point = origin + dir * t;
-        var d: f32;
-        if frac_bulb {
-            d = fractional_march_distance(is_world, family_override, point);
-        } else {
-            d = march_sample(is_world, family_override, point, RAY_VISIBILITY).d;
-        }
+        let d = march_sample(is_world, family_override, point, RAY_VISIBILITY).d;
         let eps = footprint(0.0, slope, t, point);
         let step = min((0.5 * d - cone * t - eps) / (1.0 + cone), step_cap);
         if step <= 0.0 {
@@ -1306,16 +1475,16 @@ fn march_visibility(
         }
         let point = origin + dir * t;
         let eps = footprint(base, 0.0, t, point);
-        var d: f32;
-        if frac_bulb {
-            d = fractional_march_distance(is_world, family_override, point);
-        } else {
-            d = march_sample(is_world, family_override, point, RAY_VISIBILITY).d;
-        }
+        let s = march_sample(is_world, family_override, point, RAY_VISIBILITY);
+        var d = s.d;
         if d < eps {
             return MarchResult(true, false, point, TRAP_START, eps, 0.0, i == 0u, 0u);
         }
-        t = t + min(max(step_factor * d, 0.5 * eps), step_cap);
+        var march_d = d;
+        if frac_bulb && d < 4.0 * eps {
+            march_d = min(d, fractional_march_distance(is_world, family_override, point, d, s.object));
+        }
+        t = t + min(max(step_factor * march_d, 0.5 * eps), step_cap);
     }
     if t > t_exit {
         return march_miss(origin);
@@ -1439,8 +1608,8 @@ fn march(
         prev_t = t;
         has_prev = true;
         var march_d = d;
-        if frac_bulb {
-            march_d = min(d, fractional_march_distance(is_world, family_override, point));
+        if frac_bulb && d < 4.0 * eps {
+            march_d = min(d, fractional_march_distance(is_world, family_override, point, d, hit_object));
         }
         t = t + min(max(step_factor * march_d, 0.5 * eps), step_cap);
     }

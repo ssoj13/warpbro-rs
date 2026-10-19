@@ -146,12 +146,19 @@ pub const BT2408_SDR_WHITE_NITS: f32 = 203.0;
 /// Canonical display-light units shared by renderers and file exporters.
 pub use video_io::export::DisplayLight;
 
+enum EncodedSource {
+    SrgbOetf,
+    Identity,
+    Executor(Box<vfx_ocio::GpuBufferExecutor>),
+}
+
 struct Cached {
     selection: crate::ocio::Sel,
     linear: vfx_ocio::GpuBufferExecutor,
-    encoded: vfx_ocio::GpuBufferExecutor,
+    encoded: EncodedSource,
     light: DisplayLight,
 }
+#[cfg(test)]
 type DisplayPixels = (Vec<[f32; 4]>, Vec<[f32; 4]>, DisplayLight);
 pub struct ColorPipeline {
     cached: Vec<Cached>,
@@ -160,7 +167,183 @@ impl ColorPipeline {
     pub fn new() -> Self {
         Self { cached: Vec::new() }
     }
+
+    fn ensure_cached(&mut self, sel: &crate::ocio::Sel) -> Result<(), String> {
+        if self.cached.iter().any(|c| c.selection == *sel) {
+            return Ok(());
+        }
+        let ocio = crate::ocio::Ocio::load(&crate::ocio::source(&sel.config))
+            .map_err(|e| e.to_string())?;
+        let names = ocio.resolve(sel, true).map_err(|e| e.to_string())?;
+        let light = ocio.transform(&names, true).map_err(|e| e.to_string())?;
+        let absolute = light.absolute();
+        let preview_names = if absolute {
+            let mut sdr = sel.clone();
+            sdr.display = "sRGB - Display".into();
+            sdr.view = SDR_VIEW.into();
+            ocio.resolve(&sdr, false).map_err(|e| e.to_string())?
+        } else {
+            names
+        };
+        let encoded_transform = ocio
+            .transform(&preview_names, false)
+            .map_err(|e| e.to_string())?;
+        let mut probe_lin = [
+            [0.0f32, 0.0, 0.0, 1.0],
+            [0.001, 0.02, 0.05, 1.0],
+            [0.18, 0.5, 0.9, 1.0],
+            [1.0, 2.5, 10.0, 1.0],
+        ];
+        let mut probe_enc = probe_lin;
+        light.processor().apply_rgba(&mut probe_lin);
+        encoded_transform.processor().apply_rgba(&mut probe_enc);
+        let is_identity = !absolute
+            && probe_lin
+                .iter()
+                .zip(probe_enc.iter())
+                .all(|(l, e)| (0..3).all(|k| (l[k] - e[k]).abs() <= 1e-5 * l[k].abs().max(1.0)));
+        let is_srgb_oetf = !absolute
+            && !is_identity
+            && probe_lin.iter().zip(probe_enc.iter()).all(|(l, e)| {
+                (0..3).all(|k| (oetf(l[k]) - e[k]).abs() <= 1e-4 * e[k].abs().max(1.0))
+            });
+        // Everything fallible first: a failure keeps the cache as it was.
+        let kind = light.light()?;
+        let linear =
+            vfx_ocio::GpuBufferExecutor::compile(light.processor()).map_err(|e| e.to_string())?;
+        let encoded = if is_identity {
+            EncodedSource::Identity
+        } else if is_srgb_oetf {
+            EncodedSource::SrgbOetf
+        } else {
+            EncodedSource::Executor(Box::new(
+                vfx_ocio::GpuBufferExecutor::compile(encoded_transform.processor())
+                    .map_err(|e| e.to_string())?,
+            ))
+        };
+        if self.cached.len() == 8 {
+            self.cached.remove(0);
+        }
+        self.cached.push(Cached {
+            selection: sel.clone(),
+            linear,
+            encoded,
+            light: kind,
+        });
+        Ok(())
+    }
+
+    /// Write the selected monitor rendering in display light into `light_out`, and its packed
+    /// 8-bit SDR preview codes into `sdr_pixels_out`, without intermediate full-frame allocations.
+    pub fn apply_into(
+        &mut self,
+        dims: (usize, usize),
+        pixels: &[[f32; 4]],
+        sel: &crate::ocio::Sel,
+        reinhard: bool,
+        light_out: &mut Vec<[f32; 4]>,
+        sdr_pixels_out: &mut [u32],
+    ) -> Result<DisplayLight, String> {
+        let (width, height) = dims;
+        if !sel.on || reinhard {
+            // Display primaries first: Reinhard is a display operator, and `oetf` encodes Rec.709.
+            light_out.resize(pixels.len(), [0.0; 4]);
+            let step = |((p, l), px): ((&[f32; 4], &mut [f32; 4]), &mut u32)| {
+                let [r, g, b] = to_709([p[0], p[1], p[2]]);
+                let (lr, lg, lb) = if reinhard {
+                    let f = |v: f32| {
+                        let m = v.max(0.0);
+                        m / (1.0 + m)
+                    };
+                    (f(r), f(g), f(b))
+                } else {
+                    (r, g, b)
+                };
+                *l = [lr, lg, lb, 1.0];
+                *px = u32::from_le_bytes([srgb_u8(lr), srgb_u8(lg), srgb_u8(lb), 255]);
+            };
+            if pixels.len() >= 16_384 {
+                use rayon::prelude::*;
+                pixels
+                    .par_iter()
+                    .zip(light_out.par_iter_mut())
+                    .zip(sdr_pixels_out.par_iter_mut())
+                    .for_each(step);
+            } else {
+                pixels
+                    .iter()
+                    .zip(light_out.iter_mut())
+                    .zip(sdr_pixels_out.iter_mut())
+                    .for_each(step);
+            }
+            return Ok(DisplayLight::Relative);
+        }
+        self.ensure_cached(sel)?;
+        let Some(c) = self.cached.iter().find(|c| c.selection == *sel) else {
+            return Err("Colour cache lost its selection".into());
+        };
+        *light_out = c
+            .linear
+            .execute(width as u32, height as u32, pixels)
+            .map_err(|e| e.to_string())?;
+        match &c.encoded {
+            EncodedSource::SrgbOetf => {
+                let pack = |(px, l): (&mut u32, &[f32; 4])| {
+                    *px = u32::from_le_bytes([srgb_u8(l[0]), srgb_u8(l[1]), srgb_u8(l[2]), 255]);
+                };
+                if sdr_pixels_out.len() >= 16_384 {
+                    use rayon::prelude::*;
+                    sdr_pixels_out
+                        .par_iter_mut()
+                        .zip(light_out.par_iter())
+                        .for_each(pack);
+                } else {
+                    sdr_pixels_out
+                        .iter_mut()
+                        .zip(light_out.iter())
+                        .for_each(pack);
+                }
+            }
+            EncodedSource::Identity => {
+                let pack = |(px, l): (&mut u32, &[f32; 4])| {
+                    *px = u32::from_le_bytes([code_u8(l[0]), code_u8(l[1]), code_u8(l[2]), 255]);
+                };
+                if sdr_pixels_out.len() >= 16_384 {
+                    use rayon::prelude::*;
+                    sdr_pixels_out
+                        .par_iter_mut()
+                        .zip(light_out.par_iter())
+                        .for_each(pack);
+                } else {
+                    sdr_pixels_out
+                        .iter_mut()
+                        .zip(light_out.iter())
+                        .for_each(pack);
+                }
+            }
+            EncodedSource::Executor(exec) => {
+                let encoded = exec
+                    .execute(width as u32, height as u32, pixels)
+                    .map_err(|e| e.to_string())?;
+                let pack = |(px, l): (&mut u32, &[f32; 4])| {
+                    *px = u32::from_le_bytes([code_u8(l[0]), code_u8(l[1]), code_u8(l[2]), 255]);
+                };
+                if sdr_pixels_out.len() >= 16_384 {
+                    use rayon::prelude::*;
+                    sdr_pixels_out
+                        .par_iter_mut()
+                        .zip(encoded.par_iter())
+                        .for_each(pack);
+                } else {
+                    sdr_pixels_out.iter_mut().zip(encoded.iter()).for_each(pack);
+                }
+            }
+        }
+        Ok(c.light)
+    }
+
     /// The selected monitor rendering in display light, and its SDR preview codes.
+    #[cfg(test)]
     pub fn apply(
         &mut self,
         width: usize,
@@ -170,64 +353,17 @@ impl ColorPipeline {
         reinhard: bool,
     ) -> Result<DisplayPixels, String> {
         if !sel.on || reinhard {
-            // Display primaries first: Reinhard is a display operator, and `oetf` encodes Rec.709.
-            let to_light = |p: &[f32; 4]| {
-                let f = |v: f32| {
-                    if reinhard {
-                        v.max(0.0) / (1.0 + v.max(0.0))
-                    } else {
-                        v
-                    }
-                };
-                let [r, g, b] = to_709([p[0], p[1], p[2]]);
-                [f(r), f(g), f(b), 1.0]
-            };
-            let to_encoded = |p: &[f32; 4]| [oetf(p[0]), oetf(p[1]), oetf(p[2]), 1.0];
-            let (light, encoded) = if pixels.len() >= 16_384 {
-                use rayon::prelude::*;
-                let light: Vec<_> = pixels.par_iter().map(to_light).collect();
-                let encoded: Vec<_> = light.par_iter().map(to_encoded).collect();
-                (light, encoded)
-            } else {
-                let light: Vec<_> = pixels.iter().map(to_light).collect();
-                let encoded: Vec<_> = light.iter().map(to_encoded).collect();
-                (light, encoded)
-            };
-            return Ok((light, encoded, DisplayLight::Relative));
+            let mut light = Vec::new();
+            let mut sdr = vec![0u32; pixels.len()];
+            let kind =
+                self.apply_into((width, height), pixels, sel, reinhard, &mut light, &mut sdr)?;
+            let encoded = light
+                .iter()
+                .map(|p| [oetf(p[0]), oetf(p[1]), oetf(p[2]), 1.0])
+                .collect();
+            return Ok((light, encoded, kind));
         }
-        if !self.cached.iter().any(|c| c.selection == *sel) {
-            let ocio = crate::ocio::Ocio::load(&crate::ocio::source(&sel.config))
-                .map_err(|e| e.to_string())?;
-            let names = ocio.resolve(sel, true).map_err(|e| e.to_string())?;
-            let light = ocio.transform(&names, true).map_err(|e| e.to_string())?;
-            let absolute = light.absolute();
-            let preview_names = if absolute {
-                let mut sdr = sel.clone();
-                sdr.display = "sRGB - Display".into();
-                sdr.view = SDR_VIEW.into();
-                ocio.resolve(&sdr, false).map_err(|e| e.to_string())?
-            } else {
-                names
-            };
-            let encoded = ocio
-                .transform(&preview_names, false)
-                .map_err(|e| e.to_string())?;
-            // Everything fallible first: a failure keeps the cache as it was.
-            let kind = light.light()?;
-            let linear = vfx_ocio::GpuBufferExecutor::compile(light.processor())
-                .map_err(|e| e.to_string())?;
-            let encoded = vfx_ocio::GpuBufferExecutor::compile(encoded.processor())
-                .map_err(|e| e.to_string())?;
-            if self.cached.len() == 8 {
-                self.cached.remove(0);
-            }
-            self.cached.push(Cached {
-                selection: sel.clone(),
-                linear,
-                encoded,
-                light: kind,
-            });
-        }
+        self.ensure_cached(sel)?;
         let Some(c) = self.cached.iter().find(|c| c.selection == *sel) else {
             return Err("Colour cache lost its selection".into());
         };
@@ -235,10 +371,16 @@ impl ColorPipeline {
             .linear
             .execute(width as u32, height as u32, pixels)
             .map_err(|e| e.to_string())?;
-        let encoded = c
-            .encoded
-            .execute(width as u32, height as u32, pixels)
-            .map_err(|e| e.to_string())?;
+        let encoded = match &c.encoded {
+            EncodedSource::SrgbOetf => light
+                .iter()
+                .map(|p| [oetf(p[0]), oetf(p[1]), oetf(p[2]), 1.0])
+                .collect(),
+            EncodedSource::Identity => light.clone(),
+            EncodedSource::Executor(exec) => exec
+                .execute(width as u32, height as u32, pixels)
+                .map_err(|e| e.to_string())?,
+        };
         Ok((light, encoded, c.light))
     }
 }
@@ -249,7 +391,27 @@ impl ColorPipeline {
 /// sRGB and Rec.1886 displays differ in exactly this encoding). Every SDR video writer uses it.
 pub use video_io::color::bt1886_code;
 
+#[inline]
+pub fn code_u8(v: f32) -> u8 {
+    (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+}
+
+#[inline]
+pub fn srgb_u8(v: f32) -> u8 {
+    let c = v.clamp(0.0, 1.0);
+    if c <= 0.0 {
+        0
+    } else if c >= 1.0 {
+        255
+    } else if c <= 0.003_130_8 {
+        (c * (12.92 * 255.0) + 0.5) as u8
+    } else {
+        ((1.055 * c.powf(1.0 / 2.4) - 0.055) * 255.0 + 0.5) as u8
+    }
+}
+
 /// Extended sRGB canvas encoding; preserves negative values and values above 1.
+#[inline]
 pub fn oetf(v: f32) -> f32 {
     let a = v.abs();
     v.signum()
