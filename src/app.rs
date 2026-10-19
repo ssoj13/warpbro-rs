@@ -480,9 +480,15 @@ struct Controls {
     /// The viewport manipulator's size in points and its line width.
     gizmo_size: f32,
     gizmo_stroke: f32,
+    /// Draw a wireframe bounding box around selected fractal object(s) in the viewport.
+    #[serde(default = "default_selection_bounds")]
+    selection_bounds: bool,
     /// Holding Ctrl during orbit or flight eases the view to the nearest world coordinate
     /// plane or axis (within 15° of two planes) with this time constant in seconds.
     align_seconds: f32,
+}
+fn default_selection_bounds() -> bool {
+    true
 }
 impl Default for Controls {
     fn default() -> Self {
@@ -499,6 +505,7 @@ impl Default for Controls {
             swap_slot_buttons: false,
             gizmo_size: 120.0,
             gizmo_stroke: 3.0,
+            selection_bounds: default_selection_bounds(),
             align_seconds: 0.5,
         }
     }
@@ -1122,10 +1129,18 @@ impl App {
                                     d.gizmo_size,
                                 ),
                                 f_row("Line width, pt", c.gizmo_stroke, 0.5..=10.0, d.gizmo_stroke),
+                                b_row(
+                                    "Selection bounding box",
+                                    c.selection_bounds,
+                                    d.selection_bounds,
+                                ),
                             ],
                             |label, v| match (label, v) {
                                 ("Size, pt", AttrValue::Float(v)) => c.gizmo_size = v,
                                 ("Line width, pt", AttrValue::Float(v)) => c.gizmo_stroke = v,
+                                ("Selection bounding box", AttrValue::Bool(v)) => {
+                                    c.selection_bounds = v
+                                }
                                 _ => {}
                             },
                         );
@@ -1303,6 +1318,14 @@ impl App {
             .as_ref()
             .map(|cached| cached.3.bounds.as_slice())
             .unwrap_or_default();
+        let objects = if self.controls.selection_bounds {
+            self.viewport_scene
+                .as_ref()
+                .map(|cached| cached.3.objects.as_slice())
+                .unwrap_or(self.scene.objects.as_slice())
+        } else {
+            &[]
+        };
         let wires = self
             .overlays
             .iter()
@@ -1312,7 +1335,14 @@ impl App {
             .as_ref()
             .map(|(key, _)| key.3.clone())
             .unwrap_or_default();
-        for wire in wires.chain(crate::overlay::bounds(bounds, &selection)) {
+        for wire in wires
+            .chain(crate::overlay::bounds(bounds, &selection))
+            .chain(crate::overlay::selected_object_bounds(
+                objects,
+                &self.world.document,
+                &selection,
+            ))
+        {
             for [a, b] in crate::overlay::project(&wire, clip, rect) {
                 match wire.style {
                     crate::overlay::Style::Plain => {

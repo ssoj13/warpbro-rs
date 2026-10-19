@@ -248,6 +248,36 @@ pub fn bounds<'a>(bounds: &'a [Bounds], selected: &'a [NodeId]) -> impl Iterator
     })
 }
 
+/// The wireframe bounding boxes of selected fractal objects (`objects` is empty in
+/// `Display::Bounds`, where [`bounds`] already draws all fractals). Drawn with [`Style::Selected`]
+/// and `node: None` so the bounding box does not intercept viewport clicks onto objects behind its
+/// empty corners. Also highlights fractals descending from a selected group.
+pub fn selected_object_bounds<'a>(
+    objects: &'a [crate::scene::Scene],
+    document: &'a WorldDocument,
+    selected: &'a [NodeId],
+) -> impl Iterator<Item = Wire> + 'a {
+    objects
+        .iter()
+        .filter(move |object| {
+            object.node.is_some_and(|n| {
+                selected
+                    .iter()
+                    .any(|&sel| sel == n || document.descends(n, sel))
+            })
+        })
+        .flat_map(|object| {
+            let world = object
+                .object_world
+                .unwrap_or(Mat4::IDENTITY.to_cols_array_2d());
+            cube(
+                Mat4::from_cols_array_2d(&world),
+                Vec3::splat(object.formula.framing_radius()),
+                Style::Selected,
+            )
+        })
+}
+
 /// The node of the wire nearest `pos` within `reach` points, on screen through `clip` into
 /// `rect` (`project`), among the nodes `accept` takes: what a viewport click on the extras
 /// picks. Wires are drawn over the image, so they win over the fractal behind them.
@@ -351,5 +381,53 @@ mod tests {
             |node| node == two,
         );
         assert_eq!(only_two, Some(two));
+    }
+
+    #[test]
+    fn selected_object_bounds_draws_selected_fractal_and_group_children_without_pick_nodes() {
+        let doc = WorldDocument::from_scene(&crate::scene::Scene::preset(0));
+        let mut e = crate::world::WorldEditor::new(doc);
+        let fractal = e
+            .document
+            .nodes()
+            .into_iter()
+            .find(|n| n.kind == WorldKind::Fractal)
+            .unwrap()
+            .id;
+        e.execute(crate::world::WorldCommand::Create {
+            kind: WorldKind::Group,
+            name: "Grp".into(),
+            parent: None,
+        })
+        .unwrap();
+        let group = e.selection.unwrap();
+        e.execute(crate::world::WorldCommand::Reparent {
+            id: fractal,
+            parent: Some(group),
+        })
+        .unwrap();
+        let evaluated = e.document.snapshot(0.0).unwrap();
+
+        assert_eq!(
+            selected_object_bounds(&evaluated.objects, &e.document, &[]).count(),
+            0
+        );
+
+        let direct: Vec<_> =
+            selected_object_bounds(&evaluated.objects, &e.document, &[fractal]).collect();
+        assert_eq!(direct.len(), 12, "one cube has 12 wireframe edges");
+        assert!(
+            direct
+                .iter()
+                .all(|w| w.style == Style::Selected && w.node.is_none())
+        );
+
+        let via_group: Vec<_> =
+            selected_object_bounds(&evaluated.objects, &e.document, &[group]).collect();
+        assert_eq!(
+            via_group.len(),
+            12,
+            "selecting a group draws its child fractal's box"
+        );
     }
 }
