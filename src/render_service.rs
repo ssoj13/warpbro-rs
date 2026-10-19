@@ -113,18 +113,25 @@ pub fn write_display_exr(
     )
 }
 pub(crate) fn hdr_canvas_bytes(light: &[[f32; 4]], gain: f32) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(std::mem::size_of_val(light));
-    for pixel in light {
-        for value in [
+    let mut encoded = vec![[0.0f32; 4]; light.len()];
+    let encode_pixel = |(dst, pixel): (&mut [f32; 4], &[f32; 4])| {
+        *dst = [
             crate::color::oetf(pixel[0] * gain),
             crate::color::oetf(pixel[1] * gain),
             crate::color::oetf(pixel[2] * gain),
             1.0,
-        ] {
-            bytes.extend_from_slice(&value.to_ne_bytes());
-        }
+        ];
+    };
+    if light.len() >= 16_384 {
+        use rayon::prelude::*;
+        encoded
+            .par_iter_mut()
+            .zip(light.par_iter())
+            .for_each(encode_pixel);
+    } else {
+        encoded.iter_mut().zip(light.iter()).for_each(encode_pixel);
     }
-    bytes
+    bytemuck::cast_slice(&encoded).to_vec()
 }
 impl Frame {
     pub(crate) fn snapshot(
@@ -136,7 +143,7 @@ impl Frame {
     ) -> Self {
         let pixels = target.pixels.clone();
         let light = target.light.clone();
-        let sdr_bytes = Arc::new(pixels.iter().flat_map(|p| p.to_le_bytes()).collect());
+        let sdr_bytes = Arc::new(bytemuck::cast_slice(&pixels).to_vec());
         let gain = if target.light_kind.hdr() && output_hdr {
             100.0 / white_nits.max(1.0)
         } else {
@@ -784,17 +791,26 @@ impl Viewport {
         }
     }
     fn update(&mut self, request: ViewportRequest) {
-        let key = trace_key(&request);
-        if key != self.key
-            || request.scene.palette != self.request.scene.palette
-            || request.scene.environment.key() != self.request.scene.environment.key()
-            || request.seed != self.request.seed
-        {
-            // Seed is deliberately absent from Gpu's accumulation key, so explicitly discard its targets.
-            if request.seed != self.request.seed {
-                self.target = None;
+        let scene_or_dims_changed = request.width != self.request.width
+            || request.height != self.request.height
+            || request.scene != self.request.scene;
+        if scene_or_dims_changed || request.seed != self.request.seed {
+            let key = if scene_or_dims_changed {
+                trace_key(&request)
+            } else {
+                self.key.clone()
+            };
+            if key != self.key
+                || request.scene.palette != self.request.scene.palette
+                || request.scene.environment.key() != self.request.scene.environment.key()
+                || request.seed != self.request.seed
+            {
+                // Seed is deliberately absent from Gpu's accumulation key, so explicitly discard its targets.
+                if request.seed != self.request.seed {
+                    self.target = None;
+                }
+                self.key = key;
             }
-            self.key = key;
         }
         self.dirty |= self.request != request;
         self.request = request;

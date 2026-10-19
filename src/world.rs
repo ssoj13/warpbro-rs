@@ -4673,6 +4673,14 @@ impl WorldDocument {
         }
     }
     fn evaluated_node(&self, id: NodeId, frame: f64) -> Result<Value, String> {
+        self.evaluated_node_with_render(id, frame, None)
+    }
+    fn evaluated_node_with_render(
+        &self,
+        id: NodeId,
+        frame: f64,
+        render_override: Option<&Value>,
+    ) -> Result<Value, String> {
         let data = self.node(id)?;
         let mut v = data["gpu"].clone();
         let attrs = self.attrs(id)?;
@@ -4700,11 +4708,14 @@ impl WorldDocument {
         }
         if self.info_with(id, data, &attrs)?.kind == WorldKind::Fractal {
             let iterations = v["render"]["iterations"].clone();
-            v["render"] = serde_json::to_value(
-                self.effective_render(self.output_render_profile()?, frame)?
-                    .render,
-            )
-            .map_err(|e| e.to_string())?;
+            v["render"] = match render_override {
+                Some(render) => render.clone(),
+                None => serde_json::to_value(
+                    self.effective_render(self.output_render_profile()?, frame)?
+                        .render,
+                )
+                .map_err(|e| e.to_string())?,
+            };
             v["render"]["iterations"] = iterations;
         }
         Ok(v)
@@ -5021,7 +5032,7 @@ impl WorldDocument {
     }
 
     /// `node` is `ancestor` or lies in its subtree.
-    fn descends(&self, node: NodeId, ancestor: NodeId) -> bool {
+    pub(crate) fn descends(&self, node: NodeId, ancestor: NodeId) -> bool {
         let mut current = Some(node);
         for _ in 0..=self.graph.nodes.len() {
             match current {
@@ -5367,7 +5378,8 @@ impl WorldDocument {
             .get("world")
             .ok_or("World settings missing")?
             .clone();
-        base["render"] = serde_json::to_value(effective.render).map_err(|e| e.to_string())?;
+        let render_value = serde_json::to_value(effective.render).map_err(|e| e.to_string())?;
+        base["render"] = render_value.clone();
         let mut scene: Scene =
             serde_json::from_value(base).map_err(|e| format!("Invalid world settings: {e}"))?;
         scene.document = None;
@@ -5388,7 +5400,7 @@ impl WorldDocument {
             _ => None,
         };
         let environment_light = if let Some(id) = environment {
-            let v = self.evaluated_node(id, frame)?;
+            let v = self.evaluated_node_with_render(id, frame, Some(&render_value))?;
             scene.environment =
                 serde_json::from_value(v["environment"].clone()).map_err(|e| e.to_string())?;
             scene.environment.revision =
@@ -5449,8 +5461,12 @@ impl WorldDocument {
                     in_scope.push(*mask);
                 }
             }
-            let mut object: Scene = serde_json::from_value(self.evaluated_node(node.id, frame)?)
-                .map_err(|e| e.to_string())?;
+            let mut object: Scene = serde_json::from_value(self.evaluated_node_with_render(
+                node.id,
+                frame,
+                Some(&render_value),
+            )?)
+            .map_err(|e| e.to_string())?;
             if let Some(material) = self.node(node.id)?["material"]
                 .as_str()
                 .and_then(NodeId::parse)

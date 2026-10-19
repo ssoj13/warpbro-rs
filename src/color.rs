@@ -171,24 +171,28 @@ impl ColorPipeline {
     ) -> Result<DisplayPixels, String> {
         if !sel.on || reinhard {
             // Display primaries first: Reinhard is a display operator, and `oetf` encodes Rec.709.
-            let light: Vec<_> = pixels
-                .iter()
-                .map(|p| {
-                    let f = |v: f32| {
-                        if reinhard {
-                            v.max(0.0) / (1.0 + v.max(0.0))
-                        } else {
-                            v
-                        }
-                    };
-                    let [r, g, b] = to_709([p[0], p[1], p[2]]);
-                    [f(r), f(g), f(b), 1.0]
-                })
-                .collect();
-            let encoded = light
-                .iter()
-                .map(|p| [oetf(p[0]), oetf(p[1]), oetf(p[2]), 1.0])
-                .collect();
+            let to_light = |p: &[f32; 4]| {
+                let f = |v: f32| {
+                    if reinhard {
+                        v.max(0.0) / (1.0 + v.max(0.0))
+                    } else {
+                        v
+                    }
+                };
+                let [r, g, b] = to_709([p[0], p[1], p[2]]);
+                [f(r), f(g), f(b), 1.0]
+            };
+            let to_encoded = |p: &[f32; 4]| [oetf(p[0]), oetf(p[1]), oetf(p[2]), 1.0];
+            let (light, encoded) = if pixels.len() >= 16_384 {
+                use rayon::prelude::*;
+                let light: Vec<_> = pixels.par_iter().map(to_light).collect();
+                let encoded: Vec<_> = light.par_iter().map(to_encoded).collect();
+                (light, encoded)
+            } else {
+                let light: Vec<_> = pixels.iter().map(to_light).collect();
+                let encoded: Vec<_> = light.iter().map(to_encoded).collect();
+                (light, encoded)
+            };
             return Ok((light, encoded, DisplayLight::Relative));
         }
         if !self.cached.iter().any(|c| c.selection == *sel) {

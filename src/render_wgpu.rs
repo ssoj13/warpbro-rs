@@ -443,6 +443,7 @@ pub struct WgpuTarget {
     pub active: wgpu::Buffer,
     pub out: wgpu::Buffer,
     pub staging: wgpu::Buffer,
+    bind_groups: std::sync::Mutex<Option<(u64, wgpu::BindGroup, wgpu::BindGroup)>>,
 }
 
 pub struct WgpuEngine {
@@ -454,6 +455,7 @@ pub struct WgpuEngine {
     objects_len: usize,
     lights_buf: wgpu::Buffer,
     lights_len: usize,
+    buf_generation: u64,
     pick_aux: wgpu::Buffer,
     pick_staging: wgpu::Buffer,
     lut_resident: Resident<LutResidentKey>,
@@ -517,6 +519,7 @@ impl WgpuEngine {
                 objects_len: 4,
                 lights_buf,
                 lights_len: 4,
+                buf_generation: 1,
                 pick_aux,
                 pick_staging,
                 lut_resident: Default::default(),
@@ -576,6 +579,7 @@ impl WgpuEngine {
             active,
             out: make_vec4("warpbro_wgpu_out", out_len),
             staging,
+            bind_groups: std::sync::Mutex::new(None),
         }
     }
 
@@ -621,6 +625,7 @@ impl WgpuEngine {
         let table = &mut self.lut_staging;
         let lut_buf = &mut self.lut_buf;
         let lut_len = &mut self.lut_len;
+        let buf_gen = &mut self.buf_generation;
         let changed = self
             .lut_resident
             .update(LutResidentKey(prepared.clone()), || {
@@ -642,6 +647,7 @@ impl WgpuEngine {
                         })
                     })?;
                     *lut_len = needed;
+                    *buf_gen = buf_gen.wrapping_add(1);
                 }
                 queue.write_buffer(lut_buf, 0, bytemuck::cast_slice(table));
                 Ok(())
@@ -654,6 +660,7 @@ impl WgpuEngine {
         if world {
             let objects_buf = &mut self.objects_buf;
             let objects_len = &mut self.objects_len;
+            let buf_gen = &mut self.buf_generation;
             let data = &prepared.upload.objects;
             let changed =
                 self.object_resident
@@ -669,6 +676,7 @@ impl WgpuEngine {
                                 })
                             })?;
                             *objects_len = needed;
+                            *buf_gen = buf_gen.wrapping_add(1);
                         }
                         if !data.is_empty() {
                             queue.write_buffer(objects_buf, 0, bytemuck::cast_slice(data));
@@ -682,6 +690,7 @@ impl WgpuEngine {
 
             let lights_buf = &mut self.lights_buf;
             let lights_len = &mut self.lights_len;
+            let buf_gen = &mut self.buf_generation;
             let data = &prepared.upload.lights;
             let changed = self
                 .light_resident
@@ -697,6 +706,7 @@ impl WgpuEngine {
                             })
                         })?;
                         *lights_len = needed;
+                        *buf_gen = buf_gen.wrapping_add(1);
                     }
                     if !data.is_empty() {
                         queue.write_buffer(lights_buf, 0, bytemuck::cast_slice(data));
@@ -754,7 +764,7 @@ impl WgpuEngine {
         untile_into(tiled, width, height, normalize, output);
     }
 
-    fn trace_bind_group(&self, wt: &WgpuTarget) -> wgpu::BindGroup {
+    fn create_trace_bind_group(&self, wt: &WgpuTarget) -> wgpu::BindGroup {
         self.shared
             .device
             .create_bind_group(&wgpu::BindGroupDescriptor {
@@ -801,7 +811,7 @@ impl WgpuEngine {
             })
     }
 
-    fn post_bind_group(&self, wt: &WgpuTarget) -> wgpu::BindGroup {
+    fn create_post_bind_group(&self, wt: &WgpuTarget) -> wgpu::BindGroup {
         self.shared
             .device
             .create_bind_group(&wgpu::BindGroupDescriptor {
@@ -834,6 +844,27 @@ impl WgpuEngine {
                     },
                 ],
             })
+    }
+
+    fn bind_groups(&self, wt: &WgpuTarget) -> (wgpu::BindGroup, wgpu::BindGroup) {
+        let mut guard = wt.bind_groups.lock().expect("bind_groups lock");
+        if let Some((cached_gen, trace_bg, post_bg)) = guard.as_ref()
+            && *cached_gen == self.buf_generation
+        {
+            return (trace_bg.clone(), post_bg.clone());
+        }
+        let trace_bg = self.create_trace_bind_group(wt);
+        let post_bg = self.create_post_bind_group(wt);
+        *guard = Some((self.buf_generation, trace_bg.clone(), post_bg.clone()));
+        (trace_bg, post_bg)
+    }
+
+    fn trace_bind_group(&self, wt: &WgpuTarget) -> wgpu::BindGroup {
+        self.bind_groups(wt).0
+    }
+
+    fn post_bind_group(&self, wt: &WgpuTarget) -> wgpu::BindGroup {
+        self.bind_groups(wt).1
     }
 
     pub(crate) fn launch_trace(

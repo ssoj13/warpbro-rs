@@ -3335,6 +3335,117 @@ impl App {
 
     fn frame_camera(&mut self, width: u32, height: u32) {
         use cam_controls::{CameraController, CameraPose, SpaceFlight};
+        use glam::{Mat4, Vec3};
+        let reference = self
+            .scene
+            .camera_reference
+            .unwrap_or(self.scene.formula.framing_radius())
+            .max(1e-4);
+        if self.scene.world_render {
+            let selected: Vec<_> = if self.world.selected.is_empty() {
+                self.world.selection.into_iter().collect()
+            } else {
+                self.world.selected.clone()
+            };
+            let matches_selection = |node: Option<crate::world::NodeId>| {
+                let Some(node) = node else {
+                    return false;
+                };
+                selected
+                    .iter()
+                    .any(|&sel| sel == node || self.world.document.descends(node, sel))
+            };
+            let object_sphere = |object: &Scene| -> (Vec3, f32) {
+                let matrix = object
+                    .object_world
+                    .map(|m| Mat4::from_cols_array_2d(&m))
+                    .unwrap_or_else(|| {
+                        Mat4::from_scale_rotation_translation(
+                            Vec3::splat(object.object.scale),
+                            glam::Quat::IDENTITY,
+                            Vec3::from_array(object.object.offset),
+                        )
+                    });
+                let local_radius = if object.inversion_strength != 0.0 {
+                    let mut local = object.clone();
+                    local.object = crate::scene::ObjectTransform {
+                        offset: [0.0; 3],
+                        rotation_degrees: [0.0; 3],
+                        scale: 1.0,
+                    };
+                    local.pack(1, 1)[crate::params::P_CLIP_RADIUS]
+                } else {
+                    object.formula.framing_radius()
+                };
+                let scale = matrix
+                    .x_axis
+                    .truncate()
+                    .length()
+                    .max(matrix.y_axis.truncate().length())
+                    .max(matrix.z_axis.truncate().length());
+                (
+                    matrix.transform_point3(Vec3::ZERO),
+                    (local_radius * scale).max(1e-4),
+                )
+            };
+            let bounds_sphere = |b: &crate::scene::Bounds| -> (Vec3, f32) {
+                let matrix = Mat4::from_cols_array_2d(&b.world);
+                let scale = matrix
+                    .x_axis
+                    .truncate()
+                    .length()
+                    .max(matrix.y_axis.truncate().length())
+                    .max(matrix.z_axis.truncate().length());
+                (
+                    matrix.transform_point3(Vec3::ZERO),
+                    (b.half * scale).max(1e-4),
+                )
+            };
+            let mut spheres: Vec<(Vec3, f32)> = self
+                .scene
+                .objects
+                .iter()
+                .filter(|o| matches_selection(o.node))
+                .map(object_sphere)
+                .chain(
+                    self.scene
+                        .bounds
+                        .iter()
+                        .filter(|b| matches_selection(b.node))
+                        .map(bounds_sphere),
+                )
+                .collect();
+            if spheres.is_empty() {
+                spheres.extend(self.scene.objects.iter().map(object_sphere));
+                spheres.extend(self.scene.bounds.iter().map(bounds_sphere));
+            }
+            let (center, radius) = if spheres.is_empty() {
+                (Vec3::ZERO, 1.0)
+            } else {
+                let mut lower = Vec3::splat(f32::INFINITY);
+                let mut upper = Vec3::splat(f32::NEG_INFINITY);
+                for &(c, r) in &spheres {
+                    lower = lower.min(c - Vec3::splat(r));
+                    upper = upper.max(c + Vec3::splat(r));
+                }
+                let center = (lower + upper) * 0.5;
+                let radius = spheres
+                    .iter()
+                    .map(|&(c, r)| c.distance(center) + r)
+                    .fold(0.0f32, f32::max)
+                    .max(1e-4);
+                (center, radius)
+            };
+            let cam = &mut self.scene.camera;
+            let half_y = (cam.fov_y_degrees.to_radians() * 0.5).tan().max(1e-4);
+            let aspect = (width.max(1) as f32) / (height.max(1) as f32);
+            let half_min = half_y.min((half_y * aspect).max(1e-4));
+            cam.target = center.to_array();
+            cam.distance = (1.1 * radius / half_min).max(0.0001) / reference;
+            self.fly = None;
+            self.status = "Camera framed to bounds".into();
+            return;
+        }
         let (min, max) = self.scene.framing_bounds();
         let cam = &mut self.scene.camera;
         let mut fly = SpaceFlight::from_pose(CameraPose {
@@ -3351,11 +3462,7 @@ impl App {
         controller.frame_bounds(min, max, width, height, margin);
         let center = (min + max) * 0.5;
         cam.target = center.to_array();
-        cam.distance = controller.pose().eye.distance(center)
-            / self
-                .scene
-                .camera_reference
-                .unwrap_or(self.scene.formula.framing_radius());
+        cam.distance = controller.pose().eye.distance(center) / reference;
         self.fly = None;
         self.status = "Camera framed to bounds".into();
     }
@@ -4665,27 +4772,29 @@ impl App {
                 self.fly = None;
                 self.status = error;
             }
-            let gesture = soluwell_panels::attr_grid::edit_gesture(&ctx)
-                .or(camera_gesture)
-                .or_else(|| {
-                    ctx.input(|input| input.pointer.primary_released())
-                        .then(|| self.world.active_edit())
-                        .flatten()
-                });
-            let result = if gesture.is_some() {
-                self.world.edit_snapshot_with_gesture(
-                    self.world.selection,
-                    before,
-                    &self.scene,
-                    edit_frame,
-                    gesture,
-                )
-            } else {
-                self.world
-                    .edit_snapshot(self.world.selection, before, &self.scene, edit_frame)
-            };
-            if let Err(error) = result {
-                self.status = error;
+            if self.scene.render != before.render || self.scene.colour != before.colour {
+                let gesture = soluwell_panels::attr_grid::edit_gesture(&ctx)
+                    .or(camera_gesture)
+                    .or_else(|| {
+                        ctx.input(|input| input.pointer.primary_released())
+                            .then(|| self.world.active_edit())
+                            .flatten()
+                    });
+                let result = if gesture.is_some() {
+                    self.world.edit_snapshot_with_gesture(
+                        self.world.selection,
+                        before,
+                        &self.scene,
+                        edit_frame,
+                        gesture,
+                    )
+                } else {
+                    self.world
+                        .edit_snapshot(self.world.selection, before, &self.scene, edit_frame)
+                };
+                if let Err(error) = result {
+                    self.status = error;
+                }
             }
         }
         self.snapshot_before = before;
@@ -6526,6 +6635,50 @@ mod tests {
             serde_json::from_str(&serde_json::to_string(&app.controls).unwrap()).unwrap();
         assert_eq!(loaded.look_sensitivity, 0.4);
         assert_eq!(loaded.fly_speed, 3.0);
+    }
+
+    #[test]
+    fn world_frame_camera_fits_visual_sphere_and_respects_selection() {
+        let _gpu_test = crate::test_gpu::lock();
+        let mut app = App::new();
+        app.refresh_scene().unwrap();
+        assert!(app.scene.world_render);
+        app.frame_camera(1600, 900);
+        assert!(
+            app.scene.camera.distance > 2.5 && app.scene.camera.distance < 3.5,
+            "World Mandelbulb framing distance should match ~3.0 visual radii, got {}",
+            app.scene.camera.distance
+        );
+        app.world
+            .execute(crate::world::WorldCommand::Create {
+                kind: crate::world::WorldKind::Fractal,
+                name: "Fractal 2".into(),
+                parent: None,
+            })
+            .unwrap();
+        let second = app.world.selection.expect("created fractal selected");
+        app.world
+            .execute(crate::world::WorldCommand::SetAttribute {
+                id: second,
+                path: "/transform/position".into(),
+                value: serde_json::json!([25.0, 0.0, 0.0]),
+                frame: 0.0,
+            })
+            .unwrap();
+        app.refresh_scene().unwrap();
+        app.world.selection = Some(second);
+        app.world.selected = vec![second];
+        app.frame_camera(1600, 900);
+        assert!(
+            (app.scene.camera.target[0] - 25.0).abs() < 1e-4,
+            "Selected fractal must be framed at its world position, got {:?}",
+            app.scene.camera.target
+        );
+        assert!(
+            app.scene.camera.distance > 2.5 && app.scene.camera.distance < 3.5,
+            "Selected fractal framing distance should stay tight, got {}",
+            app.scene.camera.distance
+        );
     }
 
     #[test]

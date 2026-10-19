@@ -240,6 +240,7 @@ pub struct Target {
     /// out of steps, `gpu::Outcome`): a visible share means holes or missing light - raise the
     /// step budget.
     pub unresolved: f32,
+    tally_dirty: bool,
     active_host: Vec<u32>,
     /// Tiles still sampling / all tiles, after the last adaptive decision.
     pub active_tiles: (usize, usize),
@@ -464,6 +465,7 @@ impl Gpu {
             wgpu: None,
             tally_host: vec![[0.0; 2]; TALLY_THREADS],
             unresolved: 0.0,
+            tally_dirty: false,
             active_host: vec![1; padded / 32],
             active_tiles: (padded / 32, padded / 32),
             converged: false,
@@ -613,6 +615,7 @@ impl Gpu {
             }
         }
         target.unresolved = 0.0;
+        target.tally_dirty = false;
         self.activate_all(target);
         target.denoise.reset();
         target.denoise_selected = false;
@@ -938,7 +941,7 @@ impl Gpu {
             }
             target.samples += spp;
             target.display_key = None;
-            self.tally(target);
+            target.tally_dirty = true;
             self.adapt(target, scene);
         }
         if !display(target) {
@@ -947,6 +950,10 @@ impl Gpu {
                 target.last_spp = spp;
             }
             return;
+        }
+        if target.tally_dirty {
+            self.tally(target);
+            target.tally_dirty = false;
         }
         // Converging early ends the render: run the final-pass work (OIDN at completion) now.
         let final_pass = final_pass || target.converged;
@@ -964,19 +971,27 @@ impl Gpu {
                 .output
                 .as_ref()
                 .expect("selected denoised output");
-            for (raw, pixel) in target.raw.iter_mut().zip(output) {
-                let c = [
-                    pixel[0] * p[P_EXPOSURE],
-                    pixel[1] * p[P_EXPOSURE],
-                    pixel[2] * p[P_EXPOSURE],
-                ];
+            let exp = p[P_EXPOSURE];
+            let sat = p[P_SATURATION];
+            let tone = |(raw, pixel): (&mut [f32; 4], &[f32; 4])| {
+                let c = [pixel[0] * exp, pixel[1] * exp, pixel[2] * exp];
                 let l = crate::color::luma(c);
                 *raw = [
-                    l + (c[0] - l) * p[P_SATURATION],
-                    l + (c[1] - l) * p[P_SATURATION],
-                    l + (c[2] - l) * p[P_SATURATION],
+                    l + (c[0] - l) * sat,
+                    l + (c[1] - l) * sat,
+                    l + (c[2] - l) * sat,
                     1.0,
                 ];
+            };
+            if target.raw.len() >= 16_384 {
+                use rayon::prelude::*;
+                target
+                    .raw
+                    .par_iter_mut()
+                    .zip(output.par_iter())
+                    .for_each(tone);
+            } else {
+                target.raw.iter_mut().zip(output.iter()).for_each(tone);
             }
         } else if resolved_backend == crate::render_profiles::Backend::Wgpu {
             if let (Some(Ok(wgpu)), Some(wt)) = (&self.wgpu, &target.wgpu) {
@@ -1007,9 +1022,19 @@ impl Gpu {
                 if display_changed {
                     target.display_key = Some(DisplayKey::new(scene, self.colour_revision));
                 }
-                for (p, l) in target.pixels.iter_mut().zip(&encoded) {
+                let pack = |(p, l): (&mut u32, &[f32; 4])| {
                     let code = |v: f32| (v.clamp(0.0, 1.0) * 255.0 + 0.5) as u8;
                     *p = u32::from_le_bytes([code(l[0]), code(l[1]), code(l[2]), 255]);
+                };
+                if target.pixels.len() >= 16_384 {
+                    use rayon::prelude::*;
+                    target
+                        .pixels
+                        .par_iter_mut()
+                        .zip(encoded.par_iter())
+                        .for_each(pack);
+                } else {
+                    target.pixels.iter_mut().zip(encoded.iter()).for_each(pack);
                 }
             }
             Err(e) => target.colour_error = Some(e),
@@ -1193,7 +1218,7 @@ impl Target {
         if let Some(e) = &self.colour_error {
             return Err(format!("Colour transform failed: {e}"));
         }
-        let sdr = || self.pixels.iter().flat_map(|p| p.to_le_bytes()).collect();
+        let sdr = || bytemuck::cast_slice(&self.pixels).to_vec();
         let scale = crate::render_service::hdr_scale(
             self.light_kind,
             &self.light,

@@ -441,10 +441,37 @@ pub(crate) fn untile_into(
 ) {
     output.resize(width * height, [0.0; 4]);
     let tiles_per_row = width.div_ceil(8);
+    if width * height >= 16_384 && width > 0 {
+        use rayon::prelude::*;
+        output
+            .par_chunks_mut(width)
+            .enumerate()
+            .for_each(|(y, row)| {
+                let tile_row = (y / 4) * tiles_per_row;
+                let in_tile_y = (y % 4) * 8;
+                for (x, dst) in row.iter_mut().enumerate() {
+                    let tile = tile_row + x / 8;
+                    let pixel = tiled[tile * 32 + in_tile_y + x % 8];
+                    *dst = if normalize {
+                        let inv = if pixel[3] > 0.0 {
+                            pixel[3].recip()
+                        } else {
+                            0.0
+                        };
+                        [pixel[0] * inv, pixel[1] * inv, pixel[2] * inv, 1.0]
+                    } else {
+                        pixel
+                    };
+                }
+            });
+        return;
+    }
     for y in 0..height {
+        let tile_row = (y / 4) * tiles_per_row;
+        let in_tile_y = (y % 4) * 8;
         for x in 0..width {
-            let tile = (y / 4) * tiles_per_row + x / 8;
-            let pixel = tiled[tile * 32 + (y % 4) * 8 + x % 8];
+            let tile = tile_row + x / 8;
+            let pixel = tiled[tile * 32 + in_tile_y + x % 8];
             output[y * width + x] = if normalize {
                 let inv = if pixel[3] > 0.0 {
                     pixel[3].recip()
@@ -488,14 +515,22 @@ impl DisplayKey {
 
 /// Render-relevant runtime data only; hierarchy names and UUIDs never enter this signature.
 pub(crate) fn scene_trace_data(scene: &Scene) -> Vec<f32> {
-    let mut values = vec![
+    if !scene.world_render {
+        return vec![
+            scene.world_render as u8 as f32,
+            scene.objects.len() as f32,
+            scene.lights.len() as f32,
+        ];
+    }
+    let mut values = Vec::with_capacity(
+        3 + scene.objects.len() * (P_COUNT + 18 + MAX_MASKS * MASK_STRIDE)
+            + scene.lights.len() * (P_SKY_INTENSITY - P_LIGHT_DIR),
+    );
+    values.extend_from_slice(&[
         scene.world_render as u8 as f32,
         scene.objects.len() as f32,
         scene.lights.len() as f32,
-    ];
-    if !scene.world_render {
-        return values;
-    }
+    ]);
     for object in &scene.objects {
         let p = object.pack(1, 1);
         values.extend_from_slice(&p[P_FAMILY..P_LIGHT_DIR]);
@@ -513,10 +548,10 @@ pub(crate) fn scene_trace_data(scene: &Scene) -> Vec<f32> {
             values.extend(mask_row(m).unwrap_or([f32::NAN; MASK_STRIDE]));
         }
     }
+    let mut light_template = Scene::preset(FAMILY_BULB);
     for light in &scene.lights {
-        let mut packed = Scene::preset(FAMILY_BULB);
-        packed.lighting = *light;
-        let p = packed.pack(1, 1);
+        light_template.lighting = *light;
+        let p = light_template.pack(1, 1);
         values.extend_from_slice(&p[P_LIGHT_DIR..P_SKY_INTENSITY]);
     }
     values
