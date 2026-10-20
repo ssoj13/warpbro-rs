@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.0 - 2026-10-20
+
+- **20 new fractal & procedural shape families (`8..28`, 28 families total) with declarative metadata (`src/formulas.rs`, `src/formulas.wgsl`):**
+  - Added 20 distance-estimated families: `AmazingSurface` (KaliBox), `Bristorbrot`, `BurningShip`, `KaleidoTwist` (Marble Marcher IFS), `PolyhedralKifs` (Icosahedron / Dodecahedron), `HarmonicBulb`, `Mandelbar3D` (Tricorn), `MobiusIfs`, `GyroidTpms` (`Gyroid`, `SchwarzP`, `SchwarzD`, `Neovius` with multi-octave FBM), `LidinoidTpms` (`Lidinoid`, `FischerKochS`, `SplitP`), `AttractorTube` (`Aizawa`, `Halvorsen`, `Thomas`), `TorusKnotBraid`, `HopfFibration`, `DupinCyclide`, `Superformula3D` (Radiolaria), `PhyllotaxisShell` (closed-form $O(1)$ inverse spherical Fibonacci Romanesco), `NautilusShell`, `VoronoiFoam`, `CrystalGeode`, and `AstrolabeGimbal`.
+  - Unified all 28 families under `FORMULAS: [FormulaMeta; 28]` with `ParamMeta` tables driving Attribute Editor labels, tooltips, soft slider spans, hard validation ranges, discrete enum dropdowns, inspector ordering, and conditional greying (`formula_param_inactive_reason`).
+  - Expanded the built-in Gallery (`Scene::gallery()`) from 18 to 38 curated presets while preserving `Scene::classic_gallery()` for the 18 classic CUDA golden routes.
+- **Raymarching, normal stencil, and display pipeline optimizations (`src/render_wgpu.wgsl`, `src/render.rs`, `src/color.rs`):**
+  - **4-probe tetrahedral surface normals** (`stencil_normal`, `direct_normal`), reducing DE evaluations per surface normal from 6 to 4 (`33%` fewer DE calls per normal).
+  - **Multi-object ray-sphere union span culling (`march_span`)** and **cached per-step local coordinates (`q`, `len_q`, `reach`) with min-reach-first ordering (`march_sample`)**, delivering a `2.44x` raymarching speedup and an additional `1.36x` full-pipeline speedup in `render::tests::fractal_scene_benchmark`.
+  - **Zero-allocation progressive viewport display buffers** (`ColorPipeline::apply_into`, `untile_into`, parallelized `hdr_canvas_bytes`), eliminating per-frame `Vec` allocations and redundant untiling passes (`1.74x` display pipeline speedup).
+- **Documentation & mdBook (`docs/formulas.md`, `book.toml`, `docs/SUMMARY.md`):**
+  - Added comprehensive reference documentation for all 28 fractal and procedural shape families and configured `mdbook` build support.
+
 ## 0.1.0 — 2026-10-17
 
 - **Unified `wgpu` / `cuda` compute backend architecture (`BUG1.md`):**

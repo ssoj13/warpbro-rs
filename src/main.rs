@@ -18,6 +18,7 @@ mod camera_slots;
 mod color;
 mod denoise;
 mod environment;
+mod formulas;
 mod fs_name;
 // Keep the copied viewer API intact, including its CPU oracle used by tests.
 mod export;

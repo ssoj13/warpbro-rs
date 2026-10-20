@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::formulas::*;
 use crate::palette::PaletteScheme;
 use crate::params::*;
 
@@ -105,6 +106,26 @@ pub enum Formula {
     PseudoKleinian(PseudoKleinian),
     Apollonian(Apollonian),
     Hybrid(Hybrid),
+    AmazingSurface(AmazingSurface),
+    Bristorbrot(Bristorbrot),
+    BurningShip(BurningShip),
+    KaleidoTwist(KaleidoTwist),
+    PolyhedralKifs(PolyhedralKifs),
+    HarmonicBulb(HarmonicBulb),
+    Mandelbar3D(Mandelbar3D),
+    MobiusIfs(MobiusIfs),
+    GyroidTpms(GyroidTpms),
+    LidinoidTpms(LidinoidTpms),
+    AttractorTube(AttractorTube),
+    TorusKnotBraid(TorusKnotBraid),
+    HopfFibration(HopfFibration),
+    DupinCyclide(DupinCyclide),
+    Superformula3D(Superformula3D),
+    PhyllotaxisShell(PhyllotaxisShell),
+    NautilusShell(NautilusShell),
+    VoronoiFoam(VoronoiFoam),
+    CrystalGeode(CrystalGeode),
+    AstrolabeGimbal(AstrolabeGimbal),
 }
 
 impl Bulb {
@@ -237,7 +258,8 @@ pub const DEFAULT_GLASS_PROBES: u32 = 256;
 const HIT_EPSILON_PER_PIXEL: f32 = 0.008;
 
 impl Formula {
-    pub const NAMES: [&'static str; 8] = [
+    pub const COUNT: u32 = TOTAL_FORMULA_COUNT;
+    pub const NAMES: [&'static str; TOTAL_FORMULA_COUNT as usize] = [
         "Mandelbulb",
         "Mandelbox",
         "Quaternion Julia",
@@ -246,6 +268,26 @@ impl Formula {
         "Pseudo-Kleinian",
         "Apollonian",
         "Hybrid",
+        "Amazing Surface",
+        "Bristorbrot",
+        "Burning Ship 3D",
+        "Kaleido Twist IFS",
+        "Polyhedral KIFS",
+        "Harmonic Bulb",
+        "Mandelbar 3D",
+        "Möbius Sphere IFS",
+        "Gyroid / Schwarz TPMS",
+        "Lidinoid / Fischer-Koch TPMS",
+        "Strange Attractor Flow",
+        "Torus Knot Braid",
+        "Hopf Fibration Tori",
+        "Dupin Cyclide",
+        "3D Superformula",
+        "Fibonacci Phyllotaxis",
+        "Nautilus / Ammonite Shell",
+        "Voronoi Trabecular Foam",
+        "Quartz Crystal Cluster",
+        "Mechanical Astrolabe",
     ];
 
     pub fn code(&self) -> u32 {
@@ -258,11 +300,42 @@ impl Formula {
             Self::PseudoKleinian(_) => FAMILY_PSEUDO_KLEINIAN,
             Self::Apollonian(_) => FAMILY_APOLLONIAN,
             Self::Hybrid(_) => FAMILY_HYBRID,
+            Self::AmazingSurface(_) => FAMILY_AMAZING_SURFACE,
+            Self::Bristorbrot(_) => FAMILY_BRISTORBROT,
+            Self::BurningShip(_) => FAMILY_BURNING_SHIP,
+            Self::KaleidoTwist(_) => FAMILY_KALEIDO_TWIST,
+            Self::PolyhedralKifs(_) => FAMILY_POLYHEDRAL_KIFS,
+            Self::HarmonicBulb(_) => FAMILY_HARMONIC_BULB,
+            Self::Mandelbar3D(_) => FAMILY_MANDELBAR,
+            Self::MobiusIfs(_) => FAMILY_MOBIUS_IFS,
+            Self::GyroidTpms(_) => FAMILY_GYROID_TPMS,
+            Self::LidinoidTpms(_) => FAMILY_LIDINOID_TPMS,
+            Self::AttractorTube(_) => FAMILY_ATTRACTOR_TUBE,
+            Self::TorusKnotBraid(_) => FAMILY_TORUS_KNOT,
+            Self::HopfFibration(_) => FAMILY_HOPF_FIBRATION,
+            Self::DupinCyclide(_) => FAMILY_DUPIN_CYCLIDE,
+            Self::Superformula3D(_) => FAMILY_SUPERFORMULA,
+            Self::PhyllotaxisShell(_) => FAMILY_PHYLLOTAXIS,
+            Self::NautilusShell(_) => FAMILY_NAUTILUS,
+            Self::VoronoiFoam(_) => FAMILY_VORONOI_FOAM,
+            Self::CrystalGeode(_) => FAMILY_CRYSTAL_GEODE,
+            Self::AstrolabeGimbal(_) => FAMILY_ASTROLABE,
         }
     }
 
     pub fn name(&self) -> &'static str {
         Self::NAMES[self.code() as usize]
+    }
+
+    pub fn display_name(&self) -> &'static str {
+        let code = self.code();
+        let meta = &crate::formulas::FORMULAS[code as usize];
+        debug_assert_eq!(meta.code, code);
+        meta.display_name
+    }
+
+    pub fn hint(&self) -> &'static str {
+        crate::formulas::FORMULAS[self.code() as usize].hint
     }
 
     /// Formula3d::framing_radius: the radius the camera distance is measured in.
@@ -276,6 +349,26 @@ impl Formula {
             Self::PseudoKleinian(_) => 1.0,
             Self::Apollonian(_) => BOUND_FRAMING * Apollonian::PRESET.bound_radius,
             Self::Hybrid(_) => 2.0,
+            Self::AmazingSurface(f) => f.bound_radius.max(1.2),
+            Self::Bristorbrot(_) => 1.25,
+            Self::BurningShip(_) => 1.2,
+            Self::KaleidoTwist(f) => f.bound_radius.max(1.2),
+            Self::PolyhedralKifs(f) => f.bound_radius.max(1.0),
+            Self::HarmonicBulb(_) => 1.15,
+            Self::Mandelbar3D(_) => 1.15,
+            Self::MobiusIfs(f) => f.bound_radius.max(1.0),
+            Self::GyroidTpms(f) => f.bound_radius.max(1.0),
+            Self::LidinoidTpms(f) => f.bound_radius.max(1.0),
+            Self::AttractorTube(f) => f.bound_radius.max(1.0),
+            Self::TorusKnotBraid(f) => f.bound_radius.max(1.0),
+            Self::HopfFibration(f) => f.bound_radius.max(1.0),
+            Self::DupinCyclide(f) => f.bound_radius.max(1.0),
+            Self::Superformula3D(f) => f.bound_radius.max(1.0),
+            Self::PhyllotaxisShell(f) => f.bound_radius.max(1.0),
+            Self::NautilusShell(f) => f.bound_radius.max(1.0),
+            Self::VoronoiFoam(f) => f.bound_radius.max(1.0),
+            Self::CrystalGeode(f) => f.bound_radius.max(1.0),
+            Self::AstrolabeGimbal(f) => f.bound_radius.max(1.0),
         }
     }
 
@@ -284,6 +377,22 @@ impl Formula {
             Self::Kleinian(k) => k.bound_radius,
             Self::PseudoKleinian(k) => k.bound_radius,
             Self::Apollonian(k) => k.bound_radius,
+            Self::AmazingSurface(f) => f.bound_radius,
+            Self::KaleidoTwist(f) => f.bound_radius,
+            Self::PolyhedralKifs(f) => f.bound_radius,
+            Self::MobiusIfs(f) => f.bound_radius,
+            Self::GyroidTpms(f) => f.bound_radius,
+            Self::LidinoidTpms(f) => f.bound_radius,
+            Self::AttractorTube(f) => f.bound_radius,
+            Self::TorusKnotBraid(f) => f.bound_radius,
+            Self::HopfFibration(f) => f.bound_radius,
+            Self::DupinCyclide(f) => f.bound_radius,
+            Self::Superformula3D(f) => f.bound_radius,
+            Self::PhyllotaxisShell(f) => f.bound_radius,
+            Self::NautilusShell(f) => f.bound_radius,
+            Self::VoronoiFoam(f) => f.bound_radius,
+            Self::CrystalGeode(f) => f.bound_radius,
+            Self::AstrolabeGimbal(f) => f.bound_radius,
             _ => 0.0,
         }
     }
@@ -291,7 +400,16 @@ impl Formula {
     /// Whether the formula iterates z <- f(z) + c with the shared orbit constant (fractal-kernels
     /// `orbit_constant`): only these read the Julia mix, the Julia constant and the orbit offset.
     pub fn has_orbit_constant(&self) -> bool {
-        matches!(self, Self::Mandelbulb(_) | Self::Mandelbox(_))
+        matches!(
+            self,
+            Self::Mandelbulb(_)
+                | Self::Mandelbox(_)
+                | Self::AmazingSurface(_)
+                | Self::Bristorbrot(_)
+                | Self::BurningShip(_)
+                | Self::HarmonicBulb(_)
+                | Self::Mandelbar3D(_)
+        )
     }
 
     /// The default formula of each family (index = family code).
@@ -304,6 +422,27 @@ impl Formula {
             FAMILY_KLEINIAN => Self::Kleinian(Kleinian::PRESET),
             FAMILY_PSEUDO_KLEINIAN => Self::PseudoKleinian(PseudoKleinian::PRESET),
             FAMILY_APOLLONIAN => Self::Apollonian(Apollonian::PRESET),
+            FAMILY_HYBRID => Self::Hybrid(Hybrid::PRESET),
+            FAMILY_AMAZING_SURFACE => Self::AmazingSurface(AmazingSurface::PRESET),
+            FAMILY_BRISTORBROT => Self::Bristorbrot(Bristorbrot::PRESET),
+            FAMILY_BURNING_SHIP => Self::BurningShip(BurningShip::PRESET),
+            FAMILY_KALEIDO_TWIST => Self::KaleidoTwist(KaleidoTwist::PRESET),
+            FAMILY_POLYHEDRAL_KIFS => Self::PolyhedralKifs(PolyhedralKifs::PRESET),
+            FAMILY_HARMONIC_BULB => Self::HarmonicBulb(HarmonicBulb::PRESET),
+            FAMILY_MANDELBAR => Self::Mandelbar3D(Mandelbar3D::PRESET),
+            FAMILY_MOBIUS_IFS => Self::MobiusIfs(MobiusIfs::PRESET),
+            FAMILY_GYROID_TPMS => Self::GyroidTpms(GyroidTpms::PRESET),
+            FAMILY_LIDINOID_TPMS => Self::LidinoidTpms(LidinoidTpms::PRESET),
+            FAMILY_ATTRACTOR_TUBE => Self::AttractorTube(AttractorTube::PRESET),
+            FAMILY_TORUS_KNOT => Self::TorusKnotBraid(TorusKnotBraid::PRESET),
+            FAMILY_HOPF_FIBRATION => Self::HopfFibration(HopfFibration::PRESET),
+            FAMILY_DUPIN_CYCLIDE => Self::DupinCyclide(DupinCyclide::PRESET),
+            FAMILY_SUPERFORMULA => Self::Superformula3D(Superformula3D::PRESET),
+            FAMILY_PHYLLOTAXIS => Self::PhyllotaxisShell(PhyllotaxisShell::PRESET),
+            FAMILY_NAUTILUS => Self::NautilusShell(NautilusShell::PRESET),
+            FAMILY_VORONOI_FOAM => Self::VoronoiFoam(VoronoiFoam::PRESET),
+            FAMILY_CRYSTAL_GEODE => Self::CrystalGeode(CrystalGeode::PRESET),
+            FAMILY_ASTROLABE => Self::AstrolabeGimbal(AstrolabeGimbal::PRESET),
             _ => Self::Hybrid(Hybrid::PRESET),
         }
     }
@@ -902,6 +1041,13 @@ impl Default for Material {
 }
 
 impl Scene {
+    /// Whether this scene (or any object in a world scene) uses an extended formula (`code >= 8`)
+    /// supported by the WGPU compute shader.
+    pub fn uses_extended_formula(&self) -> bool {
+        self.formula.code() >= 8
+            || (self.world_render && self.objects.iter().any(|o| o.formula.code() >= 8))
+    }
+
     /// World-space bounds: use the DE's explicit bounds, otherwise a local 10³ box.
     pub fn framing_bounds(&self) -> (glam::Vec3, glam::Vec3) {
         use glam::Vec3;
@@ -954,9 +1100,13 @@ impl Scene {
                 Formula::Kifs(k) if k.kind != KifsKind::Menger => {
                     Vec3::splat(k.kind.bounding_radius() * self.object.scale)
                 }
-                Formula::Mandelbulb(_) | Formula::QuaternionJulia(_) | Formula::Hybrid(_) => {
-                    Vec3::splat(self.pack(1, 1)[P_CLIP_RADIUS])
-                }
+                Formula::Mandelbulb(_)
+                | Formula::QuaternionJulia(_)
+                | Formula::Hybrid(_)
+                | Formula::Bristorbrot(_)
+                | Formula::BurningShip(_)
+                | Formula::HarmonicBulb(_)
+                | Formula::Mandelbar3D(_) => Vec3::splat(self.pack(1, 1)[P_CLIP_RADIUS]),
                 _ if self.formula.bound_radius() > 0.0 => {
                     Vec3::splat(self.formula.bound_radius() * self.object.scale)
                 }
@@ -1037,7 +1187,7 @@ impl Scene {
         }
     }
 
-    /// The family preset (Scene3d::mandelbulb / mandelbox / ... / hybrid).
+    /// The family preset (`0..Scene::COUNT`).
     pub fn preset(code: u32) -> Self {
         use PaletteScheme as P;
         let f = Formula::preset(code);
@@ -1050,8 +1200,59 @@ impl Scene {
             FAMILY_KLEINIAN => Self::base(name, f, 38.0, 16.0, 0.001, P::Ocean),
             FAMILY_PSEUDO_KLEINIAN => Self::base(name, f, 38.0, 6.0, 0.001, P::Ember),
             FAMILY_APOLLONIAN => Self::base(name, f, 38.0, 8.0, 0.001, P::Twilight),
+            FAMILY_AMAZING_SURFACE => Self::base(name, f, 36.0, 14.0, 0.001, P::Copper),
+            FAMILY_BRISTORBROT => Self::base(name, f, 38.0, 16.0, 0.001, P::Sunset),
+            FAMILY_BURNING_SHIP => Self::base(name, f, 38.0, 14.0, 0.001, P::Fire),
+            FAMILY_KALEIDO_TWIST => Self::base(name, f, 38.0, 12.0, 0.0008, P::Neon),
+            FAMILY_POLYHEDRAL_KIFS => Self::base(name, f, 38.0, 12.0, 0.0008, P::RoseGold),
+            FAMILY_HARMONIC_BULB => Self::base(name, f, 38.0, 14.0, 0.001, P::Aurora),
+            FAMILY_MANDELBAR => Self::base(name, f, 38.0, 14.0, 0.001, P::Amethyst),
+            FAMILY_MOBIUS_IFS => Self::base(name, f, 38.0, 12.0, 0.001, P::Ocean),
+            FAMILY_GYROID_TPMS => Self::base(name, f, 38.0, 8.0, 0.001, P::Verdant),
+            FAMILY_LIDINOID_TPMS => Self::base(name, f, 38.0, 8.0, 0.001, P::Ice),
+            FAMILY_ATTRACTOR_TUBE => Self::base(name, f, 38.0, 10.0, 0.001, P::Ember),
+            FAMILY_TORUS_KNOT => Self::base(name, f, 38.0, 8.0, 0.001, P::Copper),
+            FAMILY_HOPF_FIBRATION => Self::base(name, f, 38.0, 8.0, 0.001, P::Twilight),
+            FAMILY_DUPIN_CYCLIDE => Self::base(name, f, 38.0, 8.0, 0.001, P::RoseGold),
+            FAMILY_SUPERFORMULA => Self::base(name, f, 38.0, 8.0, 0.001, P::Ocean),
+            FAMILY_PHYLLOTAXIS => Self::base(name, f, 38.0, 8.0, 0.001, P::Verdant),
+            FAMILY_NAUTILUS => Self::base(name, f, 38.0, 8.0, 0.001, P::Sunset),
+            FAMILY_VORONOI_FOAM => Self::base(name, f, 38.0, 8.0, 0.001, P::Mono),
+            FAMILY_CRYSTAL_GEODE => Self::base(name, f, 38.0, 8.0, 0.001, P::Amethyst),
+            FAMILY_ASTROLABE => Self::base(name, f, 38.0, 8.0, 0.001, P::Copper),
             _ => Self::base(name, f, 38.0, 12.0, 0.001, P::Aurora),
         };
+        if code >= FAMILY_AMAZING_SURFACE {
+            s.coloring = Coloring::TrapOrigin;
+        }
+        match code {
+            FAMILY_KALEIDO_TWIST => {
+                s.material.metalness = 0.35;
+                s.material.specular_roughness = 0.2;
+            }
+            FAMILY_POLYHEDRAL_KIFS => {
+                s.material.metalness = 0.65;
+                s.material.specular_roughness = 0.22;
+            }
+            FAMILY_TORUS_KNOT => {
+                s.material.metalness = 0.85;
+                s.material.specular_roughness = 0.2;
+            }
+            FAMILY_DUPIN_CYCLIDE => {
+                s.material.metalness = 0.5;
+                s.material.specular_roughness = 0.18;
+            }
+            FAMILY_CRYSTAL_GEODE => {
+                s.material.model = MaterialModel::StandardSurface;
+                s.material.coat = 1.0;
+                s.material.specular_roughness = 0.12;
+            }
+            FAMILY_ASTROLABE => {
+                s.material.metalness = 0.9;
+                s.material.specular_roughness = 0.2;
+            }
+            _ => {}
+        }
         // A three-quarter view a little further out than ofx-fractal's neutral default reads
         // better in the gallery.
         s.camera.yaw_degrees = 35.0;
@@ -1060,8 +1261,8 @@ impl Scene {
         s
     }
 
-    /// The built-in gallery: the eight family presets plus variations.
-    pub fn gallery() -> Vec<Scene> {
+    /// The 18 classic gallery presets (the 8 original families plus 10 variations).
+    pub fn classic_gallery() -> Vec<Scene> {
         use PaletteScheme as P;
         let mut v: Vec<Scene> = (0..8).map(Self::preset).collect();
 
@@ -1158,6 +1359,13 @@ impl Scene {
         s.lighting.sky_intensity = 12.0;
         v.push(s);
 
+        v
+    }
+
+    /// The built-in gallery: the 18 classic presets plus all 20 extended fractal & procedural families (38 total).
+    pub fn gallery() -> Vec<Scene> {
+        let mut v = Self::classic_gallery();
+        v.extend((8..Formula::COUNT).map(Self::preset));
         v
     }
 
@@ -1259,7 +1467,13 @@ impl Scene {
         };
         // Bounding sphere (see fractal-kernels march): exact where the estimate itself says "outside".
         let clip_object = match self.formula {
-            Formula::Mandelbulb(_) | Formula::QuaternionJulia(_) | Formula::Hybrid(_) => None, // set below from P_BAILOUT
+            Formula::Mandelbulb(_)
+            | Formula::QuaternionJulia(_)
+            | Formula::Hybrid(_)
+            | Formula::Bristorbrot(_)
+            | Formula::BurningShip(_)
+            | Formula::HarmonicBulb(_)
+            | Formula::Mandelbar3D(_) => None, // set below from P_BAILOUT
             _ if self.formula.bound_radius() > 0.0 => Some(self.formula.bound_radius()),
             _ => Some(REACH_MARGIN_FRAMES * radius),
         };
@@ -1422,6 +1636,10 @@ impl Scene {
                     .fold(0u32, |acc, (i, c)| acc | (c << (3 * i)))
                     as f32;
                 p[P_HYBRID_COUNT] = active.len() as f32;
+            }
+            other => {
+                let orbit_escape = self.julia_mix * length(self.julia) + length(self.orbit_offset);
+                crate::formulas::pack_extended_formula(&mut p, other, orbit_escape, euler_matrix);
             }
         }
 

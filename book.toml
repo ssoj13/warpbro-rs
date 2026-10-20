@@ -1,0 +1,13 @@
+[book]
+title = "WarpBro Documentation"
+authors = ["WarpBro Contributors"]
+language = "en"
+src = "docs"
+
+[build]
+build-dir = "target/book"
+create-missing = false
+
+[output.html]
+mathjax-support = true
+git-repository-url = "https://github.com/ssoj13/WarpBro"

@@ -132,9 +132,7 @@ fn resolved_family(is_world: bool, obj: u32, family_override: u32) -> u32 {
 }
 
 fn unsigned_family(family: u32) -> bool {
-    return family != FAMILY_KIFS
-        && family != FAMILY_KLEINIAN
-        && family != FAMILY_PSEUDO_KLEINIAN;
+    return !ext_signed_family(family);
 }
 
 fn orbit_constant(is_world: bool, obj: u32, p: vec3<f32>) -> vec4<f32> {
@@ -956,6 +954,66 @@ fn family_distance(
         case FAMILY_HYBRID: {
             return hybrid_distance(is_world, obj, p, trap_mode, iter_override);
         }
+        case FAMILY_AMAZING_SURFACE: {
+            return amazing_surface_distance(is_world, obj, p, trap_mode, iter_override);
+        }
+        case FAMILY_BRISTORBROT: {
+            return bristorbrot_distance(is_world, obj, p, trap_mode, iter_override);
+        }
+        case FAMILY_BURNING_SHIP: {
+            return burning_ship_distance(is_world, obj, p, trap_mode, iter_override);
+        }
+        case FAMILY_KALEIDO_TWIST: {
+            return kaleido_twist_distance(is_world, obj, p, trap_mode, iter_override);
+        }
+        case FAMILY_POLYHEDRAL_KIFS: {
+            return polyhedral_kifs_distance(is_world, obj, p, trap_mode, iter_override);
+        }
+        case FAMILY_HARMONIC_BULB: {
+            return harmonic_bulb_distance(is_world, obj, p, trap_mode, iter_override);
+        }
+        case FAMILY_MANDELBAR: {
+            return mandelbar_distance(is_world, obj, p, trap_mode, iter_override);
+        }
+        case FAMILY_MOBIUS_IFS: {
+            return mobius_ifs_distance(is_world, obj, p, trap_mode, iter_override);
+        }
+        case FAMILY_GYROID_TPMS: {
+            return gyroid_tpms_distance(is_world, obj, p, trap_mode);
+        }
+        case FAMILY_LIDINOID_TPMS: {
+            return lidinoid_tpms_distance(is_world, obj, p, trap_mode);
+        }
+        case FAMILY_ATTRACTOR_TUBE: {
+            return attractor_tube_distance(is_world, obj, p, trap_mode, iter_override);
+        }
+        case FAMILY_TORUS_KNOT: {
+            return torus_knot_braid_distance(is_world, obj, p, trap_mode);
+        }
+        case FAMILY_HOPF_FIBRATION: {
+            return hopf_fibration_distance(is_world, obj, p, trap_mode);
+        }
+        case FAMILY_DUPIN_CYCLIDE: {
+            return dupin_cyclide_distance(is_world, obj, p, trap_mode);
+        }
+        case FAMILY_SUPERFORMULA: {
+            return superformula_distance(is_world, obj, p, trap_mode);
+        }
+        case FAMILY_PHYLLOTAXIS: {
+            return phyllotaxis_distance(is_world, obj, p, trap_mode);
+        }
+        case FAMILY_NAUTILUS: {
+            return nautilus_distance(is_world, obj, p, trap_mode);
+        }
+        case FAMILY_VORONOI_FOAM: {
+            return voronoi_foam_distance(is_world, obj, p, trap_mode);
+        }
+        case FAMILY_CRYSTAL_GEODE: {
+            return crystal_geode_distance(is_world, obj, p, trap_mode);
+        }
+        case FAMILY_ASTROLABE: {
+            return astrolabe_distance(is_world, obj, p, trap_mode);
+        }
         default: {
             return bulb_distance(is_world, obj, p, trap_mode, iter_override);
         }
@@ -987,6 +1045,14 @@ fn object_point(is_world: bool, obj: u32, x: vec3<f32>) -> vec3<f32> {
         dot(param3(P_OBJ_AXES + 3u), rel),
         dot(param3(P_OBJ_AXES + 6u), rel),
     );
+}
+
+fn object_vector(obj: u32, v: vec3<f32>) -> vec3<f32> {
+    let base = obj * OBJECT_STRIDE + O_INVERSE;
+    let rx = vec3<f32>(objects[base], objects[base + 1u], objects[base + 2u]);
+    let ry = vec3<f32>(objects[base + 4u], objects[base + 5u], objects[base + 6u]);
+    let rz = vec3<f32>(objects[base + 8u], objects[base + 9u], objects[base + 10u]);
+    return vec3<f32>(dot(rx, v), dot(ry, v), dot(rz, v));
 }
 
 fn mask_point(base: u32, x: vec3<f32>) -> vec3<f32> {
@@ -1193,15 +1259,16 @@ fn distance_and_trap(
     return vec2<f32>(formula_bound(is_world, obj, q, dt.x), dt.y);
 }
 
-fn clipped_distance_and_trap(
+fn clipped_distance_and_trap_q(
     is_world: bool,
     obj: u32,
     family_override: u32,
     x: vec3<f32>,
+    q: vec3<f32>,
+    len_q: f32,
     trap_mode: u32,
     iter_override: f32,
 ) -> vec2<f32> {
-    let q = object_point(is_world, obj, x);
     let s = pr(is_world, obj, P_INVERT_STRENGTH);
     var d: f32;
     var trap: f32;
@@ -1223,11 +1290,24 @@ fn clipped_distance_and_trap(
     if is_world {
         let base = obj * OBJECT_STRIDE;
         let clip_r = objects[base + O_CLIP_RADIUS];
-        d = max(d, length(q) - clip_r);
+        d = max(d, len_q - clip_r);
         let scale = objects[base + O_DISTANCE_SCALE];
         return vec2<f32>(masked(obj, x, d * scale), trap);
     }
     return vec2<f32>(d * param(P_OBJ_SCALE), trap);
+}
+
+fn clipped_distance_and_trap(
+    is_world: bool,
+    obj: u32,
+    family_override: u32,
+    x: vec3<f32>,
+    trap_mode: u32,
+    iter_override: f32,
+) -> vec2<f32> {
+    let q = object_point(is_world, obj, x);
+    let len_q = select(0.0, length(q), is_world);
+    return clipped_distance_and_trap_q(is_world, obj, family_override, x, q, len_q, trap_mode, iter_override);
 }
 
 struct SceneSample {
@@ -1254,12 +1334,27 @@ fn march_sample(
             let dt = clipped_distance_and_trap(true, 0u, family_override, x, trap_mode, -1.0);
             return SceneSample(max(dt.x, 0.0), dt.y, 0u);
         }
-        var first = 0u;
+        var qs: array<vec3<f32>, 16>;
+        var len_qs: array<f32, 16>;
+        var reaches: array<f32, 16>;
+        let q0 = object_point(true, 0u, x);
+        let len_q0 = length(q0);
         let row0 = 0u;
-        var min_reach = (length(object_point(true, 0u, x)) - objects[row0 + O_CLIP_RADIUS]) * objects[row0 + O_DISTANCE_SCALE];
+        var min_reach = (len_q0 - objects[row0 + O_CLIP_RADIUS]) * objects[row0 + O_DISTANCE_SCALE];
+        qs[0] = q0;
+        len_qs[0] = len_q0;
+        reaches[0] = min_reach;
+        var first = 0u;
         for (var i = 1u; i < count; i = i + 1u) {
             let row = i * OBJECT_STRIDE;
-            let reach = (length(object_point(true, i, x)) - objects[row + O_CLIP_RADIUS]) * objects[row + O_DISTANCE_SCALE];
+            let q = object_point(true, i, x);
+            let len_q = length(q);
+            let reach = (len_q - objects[row + O_CLIP_RADIUS]) * objects[row + O_DISTANCE_SCALE];
+            if i < 16u {
+                qs[i] = q;
+                len_qs[i] = len_q;
+                reaches[i] = reach;
+            }
             if reach < min_reach {
                 min_reach = reach;
                 first = i;
@@ -1267,20 +1362,39 @@ fn march_sample(
         }
         let first_color_mode = u32(pr(true, first, P_COLOR_MODE));
         let first_trap_mode = select(first_color_mode, 0u, kind == RAY_VISIBILITY);
-        let first_dt = clipped_distance_and_trap(true, first, family_override, x, first_trap_mode, -1.0);
+        var first_dt: vec2<f32>;
+        if first < 16u {
+            first_dt = clipped_distance_and_trap_q(true, first, family_override, x, qs[first], len_qs[first], first_trap_mode, -1.0);
+        } else {
+            first_dt = clipped_distance_and_trap(true, first, family_override, x, first_trap_mode, -1.0);
+        }
         var best = SceneSample(max(first_dt.x, 0.0), first_dt.y, first);
         for (var i = 0u; i < count; i = i + 1u) {
             if i == first {
                 continue;
             }
-            let row = i * OBJECT_STRIDE;
-            let reach = (length(object_point(true, i, x)) - objects[row + O_CLIP_RADIUS]) * objects[row + O_DISTANCE_SCALE];
-            if reach >= best.d {
-                continue;
+            var q: vec3<f32>;
+            var len_q: f32;
+            var reach: f32;
+            if i < 16u {
+                reach = reaches[i];
+                if reach >= best.d {
+                    continue;
+                }
+                q = qs[i];
+                len_q = len_qs[i];
+            } else {
+                let row = i * OBJECT_STRIDE;
+                q = object_point(true, i, x);
+                len_q = length(q);
+                reach = (len_q - objects[row + O_CLIP_RADIUS]) * objects[row + O_DISTANCE_SCALE];
+                if reach >= best.d {
+                    continue;
+                }
             }
             let color_mode = u32(pr(true, i, P_COLOR_MODE));
             let trap_mode = select(color_mode, 0u, kind == RAY_VISIBILITY);
-            let dt = clipped_distance_and_trap(true, i, family_override, x, trap_mode, -1.0);
+            let dt = clipped_distance_and_trap_q(true, i, family_override, x, q, len_q, trap_mode, -1.0);
             let d = max(dt.x, 0.0);
             if d < best.d || (d == best.d && i < best.object) {
                 best = SceneSample(d, dt.y, i);
@@ -1369,8 +1483,10 @@ fn fractional_march_distance(
                 continue;
             }
             let row = i * OBJECT_STRIDE;
-            let reach = (length(object_point(true, i, x)) - objects[row + O_CLIP_RADIUS]) * objects[row + O_DISTANCE_SCALE];
-            if reach >= best {
+            let q = object_point(true, i, x);
+            let scale = max(objects[row + O_DISTANCE_SCALE], 1.0e-30);
+            let rhs = objects[row + O_CLIP_RADIUS] + best / scale;
+            if rhs >= 0.0 && dot(q, q) >= rhs * rhs {
                 continue;
             }
             let d = fractional_object_march_distance(i, family_override, x, sample_d, nearest);
@@ -1404,7 +1520,49 @@ fn march_span(is_world: bool, origin: vec3<f32>, dir: vec3<f32>) -> vec2<f32> {
     if t_exit <= 0.0 {
         return vec2<f32>(1.0, 0.0);
     }
-    return vec2<f32>(max(-b - root, 0.0), min(t_exit, max_distance));
+    let global_span = vec2<f32>(max(-b - root, 0.0), min(t_exit, max_distance));
+    if is_world {
+        let count = u32(param(P_OBJECT_COUNT));
+        if count > 1u && count <= 16u {
+            var min_enter = max_distance + 1.0;
+            var max_exit = -1.0;
+            for (var i = 0u; i < count; i = i + 1u) {
+                let row = i * OBJECT_STRIDE;
+                let obj_r = objects[row + O_CLIP_RADIUS];
+                if obj_r <= 0.0 {
+                    return global_span;
+                }
+                let q0 = object_point(true, i, origin);
+                let qd = object_vector(i, dir);
+                let a = dot(qd, qd);
+                if a <= 1.0e-20 {
+                    continue;
+                }
+                let hb = dot(q0, qd);
+                let c = dot(q0, q0) - obj_r * obj_r;
+                let d_disc = hb * hb - a * c;
+                if d_disc <= 0.0 {
+                    continue;
+                }
+                let inv_a = 1.0 / a;
+                let d_root = sqrt(d_disc);
+                let t1 = (-hb + d_root) * inv_a;
+                if t1 <= 0.0 {
+                    continue;
+                }
+                let t0 = max((-hb - d_root) * inv_a, 0.0);
+                if t0 <= max_distance {
+                    min_enter = min(min_enter, t0);
+                    max_exit = max(max_exit, min(t1, max_distance));
+                }
+            }
+            if min_enter > max_exit {
+                return vec2<f32>(1.0, 0.0);
+            }
+            return vec2<f32>(max(global_span.x, min_enter), min(global_span.y, max_exit));
+        }
+    }
+    return global_span;
 }
 
 fn cone_start(is_world: bool, family_override: u32, origin: vec3<f32>, dir: vec3<f32>) -> f32 {
@@ -1725,25 +1883,22 @@ fn endpoint_normal(
     if unsigned_family(family) {
         p = x - dir * eps;
     }
+    let k0 = vec3<f32>(1.0, -1.0, -1.0);
+    let k1 = vec3<f32>(-1.0, -1.0, 1.0);
+    let k2 = vec3<f32>(-1.0, 1.0, -1.0);
+    let k3 = vec3<f32>(1.0, 1.0, 1.0);
     var h = 0.25 * eps;
     for (var tries = 0u; tries < 4u; tries = tries + 1u) {
-        let px = clipped_distance_and_trap(is_world, obj, family_override, vec3<f32>(p.x + h, p.y, p.z), 0u, n_iter).x;
-        let mx = clipped_distance_and_trap(is_world, obj, family_override, vec3<f32>(p.x - h, p.y, p.z), 0u, n_iter).x;
-        let py = clipped_distance_and_trap(is_world, obj, family_override, vec3<f32>(p.x, p.y + h, p.z), 0u, n_iter).x;
-        let my = clipped_distance_and_trap(is_world, obj, family_override, vec3<f32>(p.x, p.y - h, p.z), 0u, n_iter).x;
-        let pz = clipped_distance_and_trap(is_world, obj, family_override, vec3<f32>(p.x, p.y, p.z + h), 0u, n_iter).x;
-        let mz = clipped_distance_and_trap(is_world, obj, family_override, vec3<f32>(p.x, p.y, p.z - h), 0u, n_iter).x;
-        let gx = px - mx;
-        let gy = py - my;
-        let gz = pz - mz;
-        let m = max(abs(gx), max(abs(gy), abs(gz)));
+        let s = h * 0.57735027;
+        let d0 = clipped_distance_and_trap(is_world, obj, family_override, p + k0 * s, 0u, n_iter).x;
+        let d1 = clipped_distance_and_trap(is_world, obj, family_override, p + k1 * s, 0u, n_iter).x;
+        let d2 = clipped_distance_and_trap(is_world, obj, family_override, p + k2 * s, 0u, n_iter).x;
+        let d3 = clipped_distance_and_trap(is_world, obj, family_override, p + k3 * s, 0u, n_iter).x;
+        let g = k0 * d0 + k1 * d1 + k2 * d2 + k3 * d3;
+        let m = max(abs(g.x), max(abs(g.y), abs(g.z)));
         if m > 0.0 {
-            let inv_m = 1.0 / m;
-            let sx = gx * inv_m;
-            let sy = gy * inv_m;
-            let sz = gz * inv_m;
-            let inv = inverseSqrt(sx * sx + sy * sy + sz * sz);
-            return vec3<f32>(sx * inv, sy * inv, sz * inv);
+            let s_vec = g * (1.0 / m);
+            return s_vec * inverseSqrt(dot(s_vec, s_vec));
         }
         h = 0.5 * h;
     }
@@ -2864,16 +3019,19 @@ fn direct_stencil(
 ) -> vec3<f32> {
     let family = resolved_family(is_world, obj, family_override);
     let signed_fam = !unsigned_family(family);
+    let k0 = vec3<f32>(1.0, -1.0, -1.0);
+    let k1 = vec3<f32>(-1.0, -1.0, 1.0);
+    let k2 = vec3<f32>(-1.0, 1.0, -1.0);
+    let k3 = vec3<f32>(1.0, 1.0, 1.0);
     var h = h_in;
     for (var k = 0u; k <= 3u; k = k + 1u) {
-        let ax = clipped_distance_and_trap(is_world, obj, family_override, vec3<f32>(center.x + h, center.y, center.z), 0u, -1.0).x;
-        let bx = clipped_distance_and_trap(is_world, obj, family_override, vec3<f32>(center.x - h, center.y, center.z), 0u, -1.0).x;
-        let ay = clipped_distance_and_trap(is_world, obj, family_override, vec3<f32>(center.x, center.y + h, center.z), 0u, -1.0).x;
-        let by = clipped_distance_and_trap(is_world, obj, family_override, vec3<f32>(center.x, center.y - h, center.z), 0u, -1.0).x;
-        let az = clipped_distance_and_trap(is_world, obj, family_override, vec3<f32>(center.x, center.y, center.z + h), 0u, -1.0).x;
-        let bz = clipped_distance_and_trap(is_world, obj, family_override, vec3<f32>(center.x, center.y, center.z - h), 0u, -1.0).x;
-        if signed_fam || (ax > 0.0 && bx > 0.0 && ay > 0.0 && by > 0.0 && az > 0.0 && bz > 0.0) {
-            let g = vec3<f32>(ax - bx, ay - by, az - bz);
+        let s = h * 0.57735027;
+        let d0 = clipped_distance_and_trap(is_world, obj, family_override, center + k0 * s, 0u, -1.0).x;
+        let d1 = clipped_distance_and_trap(is_world, obj, family_override, center + k1 * s, 0u, -1.0).x;
+        let d2 = clipped_distance_and_trap(is_world, obj, family_override, center + k2 * s, 0u, -1.0).x;
+        let d3 = clipped_distance_and_trap(is_world, obj, family_override, center + k3 * s, 0u, -1.0).x;
+        if signed_fam || (d0 > 0.0 && d1 > 0.0 && d2 > 0.0 && d3 > 0.0) {
+            let g = k0 * d0 + k1 * d1 + k2 * d2 + k3 * d3;
             if length(g) >= 1.0e-7 {
                 return normalize(g);
             }
@@ -3335,6 +3493,21 @@ fn direct_apollonian(@builtin(global_invocation_id) gid: vec3<u32>) {
 @compute @workgroup_size(128, 1, 1)
 fn direct_hybrid(@builtin(global_invocation_id) gid: vec3<u32>) {
     trace_pixel(gid.x, false, FAMILY_HYBRID, MAT_FULL, true);
+}
+
+@compute @workgroup_size(128, 1, 1)
+fn single_fast(@builtin(global_invocation_id) gid: vec3<u32>) {
+    trace_pixel(gid.x, false, FAMILY_WORLD, MAT_FAST, false);
+}
+
+@compute @workgroup_size(128, 1, 1)
+fn single_full(@builtin(global_invocation_id) gid: vec3<u32>) {
+    trace_pixel(gid.x, false, FAMILY_WORLD, MAT_FULL, false);
+}
+
+@compute @workgroup_size(128, 1, 1)
+fn single_direct(@builtin(global_invocation_id) gid: vec3<u32>) {
+    trace_pixel(gid.x, false, FAMILY_WORLD, MAT_FULL, true);
 }
 
 @compute @workgroup_size(128, 1, 1)

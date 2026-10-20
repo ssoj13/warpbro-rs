@@ -1636,12 +1636,15 @@ impl WorldEditor {
 }
 fn attribute_choices(path: &str) -> Vec<Value> {
     if path == "/formula" {
-        return (0..8)
+        return (0..crate::scene::Formula::COUNT)
             .map(|family| {
                 serde_json::to_value(Scene::preset(family).formula)
                     .expect("Formula defaults serialize")
             })
             .collect();
+    }
+    if let Some(choices) = crate::formulas::formula_param_choices(path) {
+        return choices;
     }
     // Export enums list their own variants, so the choices follow the types.
     fn variants<T: Serialize>(all: impl IntoIterator<Item = T>) -> Vec<Value> {
@@ -1710,6 +1713,9 @@ fn attribute_choices(path: &str) -> Vec<Value> {
     values.iter().map(|v| json!(v)).collect()
 }
 pub(crate) fn attribute_range(path: &str) -> Option<(f64, f64)> {
+    if let Some(range) = crate::formulas::formula_param_range(path) {
+        return Some(range);
+    }
     if let Some(tail) = path.strip_prefix("/quality/") {
         return match tail {
             "samples" => Some((1.0, 65536.0)),
@@ -1822,6 +1828,13 @@ pub(crate) fn attribute_label(path: &str) -> String {
         "/output/denoise_at_completion" => return "Denoise at completion".into(),
         _ => {}
     }
+    if let Some((variant, _)) = crate::formulas::parse_formula_attr_path(path)
+        && variant != "Hybrid"
+        && crate::formulas::find_formula_meta_by_variant(variant).is_some_and(|m| m.code >= 8)
+        && let Some(label) = crate::formulas::formula_param_label(path)
+    {
+        return label;
+    }
     let parts: Vec<_> = path.trim_start_matches('/').split('/').collect();
     let tail = match parts.as_slice() {
         ["formula", "Hybrid", rest @ ..] => rest,
@@ -1860,10 +1873,23 @@ pub(crate) fn attribute_default(kind: WorldKind, path: &str) -> Option<Value> {
             let Ok(attrs) = world.attrs(node.id) else {
                 continue;
             };
+            // The first node of a kind defines it (one camera, one sun, ...).
             for (path, _) in attrs.iter() {
                 if let Ok(value) = world.attribute_value(node.id, path, 0.0) {
-                    // The first node of a kind defines it (one camera, one sun, ...).
                     defaults.entry((node.kind, path.clone())).or_insert(value);
+                }
+            }
+        }
+        for code in 0..crate::scene::Formula::COUNT {
+            if let Ok(formula_json) = serde_json::to_value(Scene::preset(code).formula) {
+                let mut f_attrs = Attrs::new();
+                discover(&formula_json, "/formula", &mut f_attrs);
+                for (p, v) in f_attrs.iter() {
+                    if p != "/formula" {
+                        defaults
+                            .entry((WorldKind::Fractal, p.clone()))
+                            .or_insert_with(|| attr_json(v.clone()));
+                    }
                 }
             }
         }
@@ -1976,7 +2002,11 @@ fn attribute_slider(path: &str) -> Option<Slider> {
             ("QuaternionJulia", "slice_w") => lin(-8.0, 8.0),
             // Hybrid uses length(z) / dr, without the logarithmic DE restriction.
             ("Hybrid", "bailout") => log(0.01, 64.0),
-            _ => None,
+            _ => crate::formulas::formula_param_slider(path).map(|(min, max)| Slider {
+                min,
+                max,
+                log: false,
+            }),
         };
     }
     match path {
@@ -2107,7 +2137,11 @@ fn formula_hint(family: &str, field: &str) -> Option<&'static str> {
         ("Hybrid", "steps") => {
             "The formulas applied in turn every iteration (Off skips a slot); their parameters are the Mandelbulb / Mandelbox / KIFS sub-sections."
         }
-        _ => return None,
+        _ => {
+            return crate::formulas::find_formula_meta_by_variant(family)
+                .and_then(|fm| fm.params.iter().find(|p| p.name == field))
+                .map(|p| p.hint);
+        }
     })
 }
 
@@ -2522,7 +2556,10 @@ pub(crate) fn inactive_reason<'a>(
     }
     if under("/julia") || under("/julia_mix") || under("/orbit_offset") {
         let family = value("/formula")?.as_object()?.keys().next()?.clone();
-        if !matches!(family.as_str(), "Mandelbulb" | "Mandelbox") {
+        let has_orbit = crate::formulas::find_formula_meta_by_variant(&family)
+            .map(|m| m.has_orbit_constant)
+            .unwrap_or_else(|| matches!(family.as_str(), "Mandelbulb" | "Mandelbox"));
+        if !has_orbit {
             return Some(format!("The {family} formula has no orbit constant"));
         }
         return (under("/julia") && value("/julia_mix")?.as_f64()? == 0.0)
@@ -2543,6 +2580,21 @@ pub(crate) fn inactive_reason<'a>(
             _ => true,
         };
         return (!used).then(|| format!("Not used by the {coloring} colouring"));
+    }
+    if path == "/render/iterations" {
+        let family = value("/formula")?.as_object()?.keys().next()?;
+        if let Some(meta) = crate::formulas::find_formula_meta_by_variant(family)
+            && !meta.uses_iterations()
+        {
+            return Some(format!(
+                "{} is analytical (no iteration loop)",
+                meta.display_name
+            ));
+        }
+        return None;
+    }
+    if let Some(reason) = crate::formulas::formula_param_inactive_reason(path, &value) {
+        return Some(reason);
     }
     let rest = path.strip_prefix("/formula/Hybrid/")?;
     // A hybrid packs only the sub-formulas' shape parameters: one rotation for the whole hybrid
@@ -2729,6 +2781,17 @@ fn set_pointer(root: &mut Value, path: &str, value: Value, create: bool) -> Resu
         .collect();
     fn put(root: &mut Value, parts: &[String], value: Value, create: bool) -> Result<(), String> {
         if parts.is_empty() {
+            if !create
+                && (root.is_u64() || root.is_i64())
+                && let Some(f) = value.as_f64()
+            {
+                *root = if root.is_u64() {
+                    json!(f.round().max(0.0) as u64)
+                } else {
+                    json!(f.round() as i64)
+                };
+                return Ok(());
+            }
             *root = value;
             return Ok(());
         }
@@ -5620,7 +5683,7 @@ impl WorldDocument {
         if let Some(obj) = default_world.as_object_mut() {
             obj.remove("render");
         }
-        let formula_presets: Vec<Value> = (0..8)
+        let formula_presets: Vec<Value> = (0..crate::scene::Formula::COUNT)
             .filter_map(|family| serde_json::to_value(Scene::preset(family).formula).ok())
             .collect();
         let facing_schema = json!({
@@ -6345,7 +6408,7 @@ fn attribute_order(path: &str) -> u16 {
         "/formula" => 10,
         "/render/iterations" => 11,
         "/formula/Hybrid/steps" => 12,
-        p if p.starts_with("/formula/") => 20,
+        p if p.starts_with("/formula/") => crate::formulas::formula_param_order(p).unwrap_or(20),
         "/julia_mix" => 30,
         "/julia" => 31,
         "/orbit_offset" => 32,

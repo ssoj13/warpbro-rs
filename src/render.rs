@@ -284,11 +284,29 @@ impl Target {
 impl Gpu {
     /// Resolve `requested` (`Auto`, `Cuda`, `Wgpu`) to a concrete engine (`Cuda` or `Wgpu`).
     /// Never falls back silently when an explicit backend (`Cuda` or `Wgpu`) is requested.
+    #[cfg(test)]
     pub fn resolve_backend(
         &mut self,
         requested: crate::render_profiles::Backend,
     ) -> Result<crate::render_profiles::Backend, String> {
+        self.resolve_backend_for_scene(requested, false)
+    }
+
+    pub fn resolve_backend_for_scene(
+        &mut self,
+        requested: crate::render_profiles::Backend,
+        uses_extended_formula: bool,
+    ) -> Result<crate::render_profiles::Backend, String> {
         use crate::render_profiles::Backend;
+        if uses_extended_formula && requested == Backend::Auto {
+            return match self
+                .wgpu
+                .get_or_insert_with(crate::render_wgpu::WgpuEngine::new)
+            {
+                Ok(_) => Ok(Backend::Wgpu),
+                Err(err) => Err(err.clone()),
+            };
+        }
         let cuda_err = self
             .cuda_unavailable
             .as_ref()
@@ -538,7 +556,9 @@ impl Gpu {
         scene: &Scene,
         bounces_cap: Option<u32>,
     ) -> bool {
-        let resolved_backend = match self.resolve_backend(scene.render.backend) {
+        let resolved_backend = match self
+            .resolve_backend_for_scene(scene.render.backend, scene.uses_extended_formula())
+        {
             Ok(backend) => backend,
             Err(error) => {
                 target.colour_error = Some(error);
@@ -657,7 +677,8 @@ impl Gpu {
         if !scene.world_render || scene.objects.is_empty() {
             return Ok(None);
         }
-        let resolved_backend = self.resolve_backend(scene.render.backend)?;
+        let resolved_backend =
+            self.resolve_backend_for_scene(scene.render.backend, scene.uses_extended_formula())?;
         let prepared = self.preparation.get(scene, width as u32, height as u32)?;
         let env = self.environment_for(prepared.environment.as_ref())?;
         let p = prepared.params(scene, None);
@@ -765,7 +786,9 @@ impl Gpu {
         final_pass: bool,
         display: impl FnOnce(&Target) -> bool,
     ) {
-        let resolved_backend = match self.resolve_backend(scene.render.backend) {
+        let resolved_backend = match self
+            .resolve_backend_for_scene(scene.render.backend, scene.uses_extended_formula())
+        {
             Ok(backend) => backend,
             Err(error) => {
                 target.colour_error = Some(error);
@@ -1314,7 +1337,7 @@ mod tests {
         };
         let _gpu_test = crate::test_gpu::lock();
         let mut gpu = Gpu::new().unwrap();
-        let gallery = Scene::gallery();
+        let gallery = Scene::classic_gallery();
         assert_eq!(2 * gallery.len(), routes, "the golden covers the gallery");
         for (index, scene) in gallery.iter().enumerate() {
             for world in [false, true] {
@@ -1357,7 +1380,7 @@ mod tests {
     fn cuda_inactive_orbit_and_inversion_values_change_nothing() {
         let _gpu_test = crate::test_gpu::lock();
         let mut gpu = Gpu::new().unwrap();
-        for scene in Scene::gallery() {
+        for scene in Scene::classic_gallery() {
             let mut idle = scene.clone();
             idle.inversion_center = [0.4, -0.3, 2.5];
             idle.inversion_radius = 0.7;
@@ -3936,6 +3959,9 @@ mod tests {
             "direct_pseudo_kleinian",
             "direct_apollonian",
             "direct_hybrid",
+            "single_fast",
+            "single_full",
+            "single_direct",
             "tally",
             "adapt",
             "tonemap",
@@ -3949,6 +3975,170 @@ mod tests {
                     .any(|ep| ep.name == name && ep.stage == naga::ShaderStage::Compute),
                 "missing compute entry point {name}"
             );
+        }
+
+        // Verify all 28 formula families round-trip through WorldDocument, metadata, and Scene::pack
+        assert_eq!(crate::scene::Formula::COUNT, 28);
+        for code in 0..crate::scene::Formula::COUNT {
+            let preset = Scene::preset(code);
+            assert_eq!(preset.formula.code(), code);
+            assert!(!preset.formula.name().is_empty());
+            assert!(!preset.formula.display_name().is_empty());
+            assert!(!preset.formula.hint().is_empty());
+            let packed = preset.pack(64, 64);
+            assert_eq!(packed[P_FAMILY] as u32, code);
+            assert!(packed[P_CLIP_RADIUS] > 0.0 && packed[P_CLIP_RADIUS].is_finite());
+
+            let doc = crate::world::WorldDocument::from_scene(&preset);
+            let fractal_id = doc
+                .nodes()
+                .into_iter()
+                .find(|n| n.kind == crate::world::WorldKind::Fractal)
+                .unwrap()
+                .id;
+            let attrs = doc.attributes(fractal_id, 0.0).unwrap();
+            let meta = &crate::formulas::FORMULAS[code as usize];
+            for param in meta.params {
+                let path = format!("/formula/{}/{}", meta.variant, param.name);
+                let attr = attrs
+                    .iter()
+                    .find(|a| a.path == path)
+                    .unwrap_or_else(|| panic!("missing attribute {path}"));
+                assert!(!attr.label.is_empty());
+                assert!(
+                    crate::world::attribute_hint(&path).is_some(),
+                    "missing hint for {path}"
+                );
+                if param.range.is_some() {
+                    assert_eq!(attr.range, param.range, "range mismatch on {path}");
+                }
+                if !param.choices.is_empty() {
+                    assert_eq!(
+                        attr.choices.len(),
+                        param.choices.len(),
+                        "choices mismatch on {path}"
+                    );
+                }
+            }
+            let snap = doc.snapshot(0.0).unwrap();
+            assert_eq!(snap.objects[0].formula, preset.formula);
+
+            // Verify animating every numeric & integer parameter on this formula evaluates cleanly
+            let mut editor = crate::world::WorldEditor::new(doc);
+            for param in meta.params {
+                let path = format!("/formula/{}/{}", meta.variant, param.name);
+                let attr = attrs.iter().find(|a| a.path == path).unwrap();
+                if let Some((lo, hi)) = param.slider.or(param.range) {
+                    let s0 = lo.ceil().clamp(lo, hi);
+                    let s1 = hi.floor().clamp(lo, hi);
+                    let (v0, v1) = if let Some(arr) = attr.value.as_array() {
+                        (
+                            serde_json::Value::Array(vec![serde_json::json!(s0); arr.len()]),
+                            serde_json::Value::Array(vec![serde_json::json!(s1); arr.len()]),
+                        )
+                    } else {
+                        (serde_json::json!(s0), serde_json::json!(s1))
+                    };
+                    editor
+                        .execute(crate::world::WorldCommand::SetAnimation {
+                            id: fractal_id,
+                            path: path.clone(),
+                            enabled: true,
+                            frame: 0.0,
+                        })
+                        .unwrap_or_else(|e| panic!("enable anim failed on {path}: {e}"));
+                    editor
+                        .execute(crate::world::WorldCommand::SetAttribute {
+                            id: fractal_id,
+                            path: path.clone(),
+                            value: v0,
+                            frame: 0.0,
+                        })
+                        .unwrap_or_else(|e| panic!("key0 failed on {path}: {e}"));
+                    editor
+                        .execute(crate::world::WorldCommand::SetAttribute {
+                            id: fractal_id,
+                            path: path.clone(),
+                            value: v1,
+                            frame: 10.0,
+                        })
+                        .unwrap_or_else(|e| panic!("key10 failed on {path}: {e}"));
+                }
+            }
+            let mid_snap = editor
+                .document
+                .snapshot(5.0)
+                .unwrap_or_else(|e| panic!("animated snapshot failed for {}: {e}", meta.variant));
+            assert_eq!(mid_snap.objects[0].formula.code(), code);
+        }
+
+        // Verify the 38-preset gallery and 18-preset classic gallery
+        assert_eq!(Scene::classic_gallery().len(), 18);
+        assert_eq!(Scene::gallery().len(), 38);
+
+        if std::env::var_os("WARPBRO_RENDER_DOCS").is_some() {
+            let out_dir = std::path::Path::new("target/gallery-renders");
+            std::fs::create_dir_all(out_dir).unwrap();
+            let mut wgpu = crate::render_wgpu::WgpuEngine::new().expect("wgpu engine");
+            let mut prep = PreparationCache::default();
+            let mut stats = PreparationStats::default();
+            let mut colour = crate::color::ColorPipeline::new();
+            let (w, h, spp) = (400usize, 225usize, 16u32);
+            let wt = wgpu.create_target(w, h);
+            let mut raw = Vec::new();
+            let mut light = Vec::new();
+            let mut pixels = Vec::new();
+            for (idx, mut scene) in Scene::gallery().into_iter().enumerate() {
+                scene.render.backend = crate::render_profiles::Backend::Wgpu;
+                scene.render.denoise.enabled = false;
+                let prepared = prep.get(&scene, w as u32, h as u32).unwrap();
+                let mut p = prepared.params(&scene, None);
+                let sun = std::array::from_fn(|c| p[P_LIGHT_COLOR + c] * p[P_LIGHT_INTENSITY]);
+                fractal_env::pack(
+                    &mut p,
+                    None,
+                    scene.environment.intensity.max(0.0),
+                    scene.environment.rotation_degrees,
+                    sun,
+                );
+                p[P_SAMPLE_BEGIN] = 0.0;
+                p[P_SPP] = spp as f32;
+                p[P_SEED] = 7.0;
+                wgpu.clear_target(&wt);
+                wgpu.upload_prepared(&prepared, None, scene.world_render, &mut stats)
+                    .unwrap();
+                wgpu.set_params(&p);
+                let full = p[P_MATERIAL_MODEL] != 0.0;
+                wgpu.launch_trace(&wt, &scene, &prepared, full, false);
+                wgpu.tonemap(&wt, w, h, &mut raw);
+                colour
+                    .apply_into(
+                        (w, h),
+                        &raw,
+                        &scene.colour,
+                        scene.render.reinhard,
+                        &mut light,
+                        &mut pixels,
+                    )
+                    .unwrap();
+                let path = out_dir.join(format!(
+                    "{idx:02}_{}.png",
+                    crate::fs_name::stem(&scene.name)
+                ));
+                let file = std::fs::File::create(&path).unwrap();
+                let mut enc = png::Encoder::new(file, w as u32, h as u32);
+                enc.set_color(png::ColorType::Rgba);
+                enc.set_depth(png::BitDepth::Eight);
+                let mut writer = enc.write_header().unwrap();
+                writer
+                    .write_image_data(bytemuck::cast_slice(&pixels))
+                    .unwrap();
+                eprintln!(
+                    "Rendered [{idx:02}/38] {} -> {}",
+                    scene.name,
+                    path.display()
+                );
+            }
         }
     }
 
@@ -4313,6 +4503,225 @@ mod tests {
             ms_old_scene,
             ms_new_scene,
             ms_old_scene / ms_new_scene
+        );
+
+        let inv_linear = |row: usize, v: [f32; 3]| -> [f32; 3] {
+            let base = row + O_INVERSE;
+            [
+                objs[base] * v[0] + objs[base + 1] * v[1] + objs[base + 2] * v[2],
+                objs[base + 4] * v[0] + objs[base + 5] * v[1] + objs[base + 6] * v[2],
+                objs[base + 8] * v[0] + objs[base + 9] * v[1] + objs[base + 10] * v[2],
+            ]
+        };
+        let dot3 = |a: [f32; 3], b: [f32; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        let max_distance = p[P_MAX_DISTANCE];
+        let clip_r_global = p[P_CLIP_RADIUS];
+        let clip_c_global = [p[P_CLIP_CENTER], p[P_CLIP_CENTER + 1], p[P_CLIP_CENTER + 2]];
+        let global_span = |origin: [f32; 3], dir: [f32; 3]| -> [f32; 2] {
+            let oc = [
+                origin[0] - clip_c_global[0],
+                origin[1] - clip_c_global[1],
+                origin[2] - clip_c_global[2],
+            ];
+            let b = dot3(oc, dir);
+            let disc = b * b - (dot3(oc, oc) - clip_r_global * clip_r_global);
+            if disc <= 0.0 {
+                return [1.0, 0.0];
+            }
+            let root = disc.sqrt();
+            let t_exit = -b + root;
+            if t_exit <= 0.0 {
+                return [1.0, 0.0];
+            }
+            [(-b - root).max(0.0), t_exit.min(max_distance)]
+        };
+        let multi_span = |origin: [f32; 3], dir: [f32; 3]| -> [f32; 2] {
+            let gs = global_span(origin, dir);
+            if gs[0] > gs[1] {
+                return gs;
+            }
+            let mut min_enter = max_distance + 1.0;
+            let mut max_exit = -1.0f32;
+            for i in 0..count {
+                let row = i * OBJECT_STRIDE;
+                let obj_r = objs[row + O_CLIP_RADIUS];
+                let q0 = inv_affine(row, origin);
+                let qd = inv_linear(row, dir);
+                let a = dot3(qd, qd);
+                if a <= 1.0e-20 {
+                    continue;
+                }
+                let hb = dot3(q0, qd);
+                let c = dot3(q0, q0) - obj_r * obj_r;
+                let d_disc = hb * hb - a * c;
+                if d_disc <= 0.0 {
+                    continue;
+                }
+                let inv_a = 1.0 / a;
+                let d_root = d_disc.sqrt();
+                let t1 = (-hb + d_root) * inv_a;
+                if t1 <= 0.0 {
+                    continue;
+                }
+                let t0 = ((-hb - d_root) * inv_a).max(0.0);
+                if t0 <= max_distance {
+                    min_enter = min_enter.min(t0);
+                    max_exit = max_exit.max(t1.min(max_distance));
+                }
+            }
+            if min_enter > max_exit {
+                return [1.0, 0.0];
+            }
+            [gs[0].max(min_enter), gs[1].min(max_exit)]
+        };
+
+        // Benchmark Part A: Global span + recomputed object_point + 6-probe normal vs
+        // Multi-object span + cached qs/len_qs + 4-probe tetrahedral normal
+        let t_part_a_old = Instant::now();
+        let mut checksum_a_old = 0.0f32;
+        for dir in &rays {
+            let span = global_span(cam_origin, *dir);
+            if span[0] > span[1] {
+                continue;
+            }
+            let mut t = span[0];
+            let mut hit_obj = None;
+            for _step in 0..24 {
+                if t > span[1] {
+                    break;
+                }
+                let pt = [
+                    cam_origin[0] + dir[0] * t,
+                    cam_origin[1] + dir[1] * t,
+                    cam_origin[2] + dir[2] * t,
+                ];
+                let mut first = 0usize;
+                let mut min_reach = f32::INFINITY;
+                for i in 0..count {
+                    let row = i * OBJECT_STRIDE;
+                    let q = inv_affine(row, pt);
+                    let reach =
+                        (len3(q) - objs[row + O_CLIP_RADIUS]) * objs[row + O_DISTANCE_SCALE];
+                    if reach < min_reach {
+                        min_reach = reach;
+                        first = i;
+                    }
+                }
+                let q_first = inv_affine(first * OBJECT_STRIDE, pt);
+                let mut best = eval_de_hoisted(first, q_first);
+                let mut best_obj = first;
+                for i in 0..count {
+                    if i == first {
+                        continue;
+                    }
+                    let row = i * OBJECT_STRIDE;
+                    let q = inv_affine(row, pt);
+                    let reach =
+                        (len3(q) - objs[row + O_CLIP_RADIUS]) * objs[row + O_DISTANCE_SCALE];
+                    if reach >= best {
+                        continue;
+                    }
+                    let d = eval_de_hoisted(i, q);
+                    if d < best {
+                        best = d;
+                        best_obj = i;
+                    }
+                }
+                if best < 2.0e-2 {
+                    hit_obj = Some((best_obj, pt));
+                    break;
+                }
+                t += best;
+            }
+            if let Some((obj, pt)) = hit_obj {
+                let h = 1.0e-3f32;
+                let row = obj * OBJECT_STRIDE;
+                let px = eval_de_hoisted(obj, inv_affine(row, [pt[0] + h, pt[1], pt[2]]));
+                let mx = eval_de_hoisted(obj, inv_affine(row, [pt[0] - h, pt[1], pt[2]]));
+                let py = eval_de_hoisted(obj, inv_affine(row, [pt[0], pt[1] + h, pt[2]]));
+                let my = eval_de_hoisted(obj, inv_affine(row, [pt[0], pt[1] - h, pt[2]]));
+                let pz = eval_de_hoisted(obj, inv_affine(row, [pt[0], pt[1], pt[2] + h]));
+                let mz = eval_de_hoisted(obj, inv_affine(row, [pt[0], pt[1], pt[2] - h]));
+                let g = [px - mx, py - my, pz - mz];
+                checksum_a_old += len3(g).min(1.0) * 1.0e-6 + t;
+            } else {
+                checksum_a_old += t * 1.0e-6;
+            }
+        }
+        let ms_part_a_old = t_part_a_old.elapsed().as_secs_f64() * 1000.0;
+
+        let t_part_a_new = Instant::now();
+        let mut checksum_a_new = 0.0f32;
+        for dir in &rays {
+            let span = multi_span(cam_origin, *dir);
+            if span[0] > span[1] {
+                continue;
+            }
+            let mut t = span[0];
+            let mut hit_obj = None;
+            for _step in 0..24 {
+                if t > span[1] {
+                    break;
+                }
+                let pt = [
+                    cam_origin[0] + dir[0] * t,
+                    cam_origin[1] + dir[1] * t,
+                    cam_origin[2] + dir[2] * t,
+                ];
+                let mut qs = [[0.0f32; 3]; 8];
+                let mut reaches = [0.0f32; 8];
+                let mut first = 0usize;
+                let mut min_reach = f32::INFINITY;
+                for i in 0..count {
+                    let row = i * OBJECT_STRIDE;
+                    let q = inv_affine(row, pt);
+                    let reach =
+                        (len3(q) - objs[row + O_CLIP_RADIUS]) * objs[row + O_DISTANCE_SCALE];
+                    qs[i] = q;
+                    reaches[i] = reach;
+                    if reach < min_reach {
+                        min_reach = reach;
+                        first = i;
+                    }
+                }
+                let mut best = eval_de_hoisted(first, qs[first]);
+                let mut best_obj = first;
+                for i in 0..count {
+                    if i == first || reaches[i] >= best {
+                        continue;
+                    }
+                    let d = eval_de_hoisted(i, qs[i]);
+                    if d < best {
+                        best = d;
+                        best_obj = i;
+                    }
+                }
+                if best < 2.0e-2 {
+                    hit_obj = Some((best_obj, pt));
+                    break;
+                }
+                t += best;
+            }
+            if let Some((obj, pt)) = hit_obj {
+                let s = 1.0e-3f32 * 0.57735027;
+                let row = obj * OBJECT_STRIDE;
+                let d0 = eval_de_hoisted(obj, inv_affine(row, [pt[0] + s, pt[1] - s, pt[2] - s]));
+                let d1 = eval_de_hoisted(obj, inv_affine(row, [pt[0] - s, pt[1] - s, pt[2] + s]));
+                let d2 = eval_de_hoisted(obj, inv_affine(row, [pt[0] - s, pt[1] + s, pt[2] - s]));
+                let d3 = eval_de_hoisted(obj, inv_affine(row, [pt[0] + s, pt[1] + s, pt[2] + s]));
+                let g = [d0 - d1 - d2 + d3, -d0 - d1 + d2 + d3, -d0 + d1 - d2 + d3];
+                checksum_a_new += len3(g).min(1.0) * 1.0e-6 + t;
+            } else {
+                checksum_a_new += t * 1.0e-6;
+            }
+        }
+        let ms_part_a_new = t_part_a_new.elapsed().as_secs_f64() * 1000.0;
+        assert!(checksum_a_old.is_finite() && checksum_a_new.is_finite());
+        eprintln!(
+            "PART A FULL PIPELINE BENCH (multi-span + cached q + 4-probe normal): {:.2}ms -> {:.2}ms ({:.2}x speedup)",
+            ms_part_a_old,
+            ms_part_a_new,
+            ms_part_a_old / ms_part_a_new,
         );
     }
 

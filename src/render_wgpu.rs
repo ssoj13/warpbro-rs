@@ -227,6 +227,7 @@ pub fn shader_source() -> String {
         WORLD_ABI_VERSION,
         PALETTE_SAMPLES,
     );
+    s.push_str(include_str!("formulas.wgsl"));
     s.push_str(include_str!("render_wgpu.wgsl"));
     s
 }
@@ -269,6 +270,9 @@ struct WgpuShared {
     world_fast: OnceLock<wgpu::ComputePipeline>,
     world_fast_bulb: OnceLock<wgpu::ComputePipeline>,
     world_direct: OnceLock<wgpu::ComputePipeline>,
+    single_fast: OnceLock<wgpu::ComputePipeline>,
+    single_full: OnceLock<wgpu::ComputePipeline>,
+    single_direct: OnceLock<wgpu::ComputePipeline>,
     fast_family: [OnceLock<wgpu::ComputePipeline>; 8],
     full_family: [OnceLock<wgpu::ComputePipeline>; 8],
     direct_family: [OnceLock<wgpu::ComputePipeline>; 8],
@@ -413,6 +417,9 @@ fn shared_wgpu() -> Result<Arc<WgpuShared>, String> {
                     world_fast: OnceLock::new(),
                     world_fast_bulb: OnceLock::new(),
                     world_direct: OnceLock::new(),
+                    single_fast: OnceLock::new(),
+                    single_full: OnceLock::new(),
+                    single_direct: OnceLock::new(),
                     fast_family: std::array::from_fn(|_| OnceLock::new()),
                     full_family: std::array::from_fn(|_| OnceLock::new()),
                     direct_family: std::array::from_fn(|_| OnceLock::new()),
@@ -905,14 +912,17 @@ impl WgpuEngine {
             "direct_apollonian",
             "direct_hybrid",
         ];
-        let fam = (scene.formula.code() as usize).min(7);
+        let code = scene.formula.code() as usize;
         let pipe = if scene.direct.is_some() {
             if scene.world_render {
                 self.shared
                     .trace_pipe(&self.shared.world_direct, "world_direct")
+            } else if code < 8 {
+                self.shared
+                    .trace_pipe(&self.shared.direct_family[code], DIRECT_NAMES[code])
             } else {
                 self.shared
-                    .trace_pipe(&self.shared.direct_family[fam], DIRECT_NAMES[fam])
+                    .trace_pipe(&self.shared.single_direct, "single_direct")
             }
         } else if scene.world_render {
             let wm = if force_mixed_world {
@@ -932,11 +942,19 @@ impl WgpuEngine {
                 }
             }
         } else if full_material {
+            if code < 8 {
+                self.shared
+                    .trace_pipe(&self.shared.full_family[code], FULL_NAMES[code])
+            } else {
+                self.shared
+                    .trace_pipe(&self.shared.single_full, "single_full")
+            }
+        } else if code < 8 {
             self.shared
-                .trace_pipe(&self.shared.full_family[fam], FULL_NAMES[fam])
+                .trace_pipe(&self.shared.fast_family[code], FAST_NAMES[code])
         } else {
             self.shared
-                .trace_pipe(&self.shared.fast_family[fam], FAST_NAMES[fam])
+                .trace_pipe(&self.shared.single_fast, "single_fast")
         };
 
         let bg = self.trace_bind_group(wt);

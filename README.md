@@ -9,16 +9,14 @@ The project repository is [WarpBro](https://github.com/ssoj13/WarpBro), with SSH
 
 ![WarpBro browsing the Menger sponge](docs/ui-menger.jpg)
 
-Documentation: [render and quality profiles](docs/render-profiles.md), [workspace, materials and cached playback](docs/workspace.md), [colour](docs/color.md), [transparent and absorbing glass](docs/glass.md), [changelog](CHANGELOG.md). Open work: [PLAN.md](PLAN.md).
+Documentation: [fractals and procedural shapes](docs/formulas.md), [render and quality profiles](docs/render-profiles.md), [workspace, materials and cached playback](docs/workspace.md), [colour](docs/color.md), [transparent and absorbing glass](docs/glass.md), [changelog](CHANGELOG.md). Open work: [PLAN.md](PLAN.md).
 
 ## What it does
 
-- **Eight distance-estimated families:** Mandelbulb (a keyable Mandelbrot-to-Julia mix and
-  orbit offset, angle scales, phases and per-iteration rotation), Mandelbox, quaternion Julia (a
-  rotated 4D slice), KIFS (tetrahedron, octahedron, Menger), Kleinian, pseudo-Kleinian,
-  Apollonian, and Hybrid (up to four bulb / box / KIFS-fold / inversion steps, repeated). Every
-  family takes fractional iteration counts (smooth growth when keyed) and a spherical inversion
-  pre-transform with a strength.
+- **28 distance-estimated fractal & procedural shape families ([full catalog](docs/formulas.md)):**
+  - *8 classic families (`0..8`):* Mandelbulb (keyable Mandelbrot-to-Julia mix and orbit offset, angle scales, phases and per-iteration rotation), Mandelbox, quaternion Julia (rotated 4D slice), KIFS (tetrahedron, octahedron, Menger), Kleinian, pseudo-Kleinian, Apollonian, and Hybrid (up to four bulb / box / KIFS-fold / inversion steps, repeated).
+  - *20 extended fractal & procedural families (`8..28`, driven by declarative metadata in `src/formulas.rs` & `src/formulas.wgsl`):* Amazing Surface (KaliBox), Bristorbrot, Burning Ship 3D, Kaleido Twist IFS (Marble Marcher), Polyhedral KIFS (Icosahedron / Dodecahedron), Harmonic Bulb, Mandelbar 3D (Tricorn), M?bius Sphere IFS, Gyroid / Schwarz TPMS (Gyroid, Schwarz P, Schwarz D, Neovius with multi-octave FBM), Lidinoid / Fischer?Koch TPMS, Strange Attractor Flow (Aizawa, Halvorsen, Thomas), Torus Knot Braid, Hopf Fibration Tori, Dupin Cyclide, 3D Gielis Superformula (Radiolaria), Fibonacci Phyllotaxis (Romanesco), Nautilus / Ammonite Shell, Voronoi Trabecular Foam, Quartz Crystal Cluster (Geode), and Mechanical Astrolabe (Gimbal).
+  - Every iterative family supports fractional iteration counts (smooth growth when keyed), and every family supports spherical inversion with strength, radius, and center.
 - **World objects:** Playa UUID nodes for fractals, cameras, directional lights, HDR environments,
   groups, masks and materials, with parent transforms, visibility, layer spans, lock and solo.
   A **Mask** node (sphere, box or cells, optionally inverted) sections the fractals of its
@@ -106,7 +104,7 @@ Documentation: [render and quality profiles](docs/render-profiles.md), [workspac
   - The Timeline shows a take as a lane under its node with the take's bar, and as a band on
     the node's bar; both pick and slide it.
 - **The browser:**
-  - an 18-preset gallery with GPU-rendered thumbnails;
+  - a 38-preset gallery (18 classic + 20 extended fractal & procedural presets) with GPU-rendered thumbnails;
   - bookmarks (scenes saved as JSON);
   - an Attribute Editor for object parameters;
   - a progressive viewport that switches to a half-resolution, 2-bounce preview while you drag;
@@ -539,7 +537,9 @@ The timings above predate this bridge, the World tracer and OIDN integration.
 
 ```text
 fractal-rs        (dependency) fractal-kernels: the #[cuda_module] kernels; fractal-core: parameter ABI, sampler
-src/scene.rs      evaluated Scene, legacy serde, formulas, presets and parameter packing
+src/formulas.rs   declarative metadata catalog (FormulaMeta, ParamMeta) and parameter packing for all 28 families
+src/formulas.wgsl WGSL distance estimators for the 20 extended fractal and procedural families (8..28)
+src/scene.rs      evaluated Scene, legacy serde, formulas, 38-preset gallery and parameter packing
 src/world.rs      Playa World document, canonical settings nodes, evaluator, commands and undo/redo
 src/render_profiles.rs   evaluated render/quality and viewport-policy contracts
 src/render_profiles_ui.rs   named profile/template catalog and shared viewport bindings

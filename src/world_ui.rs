@@ -3424,11 +3424,21 @@ fn schema_editor(
             .selected_text(label(value))
             .show_ui(ui, |ui| {
                 for choice in &attr.choices {
-                    if ui
-                        .selectable_label(choice_selected(&attr.path, value, choice), label(choice))
-                        .clicked()
-                        && !choice_selected(&attr.path, value, choice)
+                    let mut resp = ui.selectable_label(
+                        choice_selected(&attr.path, value, choice),
+                        label(choice),
+                    );
+                    if attr.path == "/formula"
+                        && let Ok(formula) =
+                            serde_json::from_value::<crate::scene::Formula>(choice.clone())
                     {
+                        resp = resp.on_hover_text(format!(
+                            "{}: {}",
+                            formula.display_name(),
+                            formula.hint()
+                        ));
+                    }
+                    if resp.clicked() && !choice_selected(&attr.path, value, choice) {
                         apply_choice(&attr.path, value, choice);
                         changed = true;
                     }
