@@ -1971,6 +1971,13 @@ fn attribute_slider(path: &str) -> Option<Slider> {
     }
     if let Some(rest) = path.strip_prefix("/formula/") {
         let (family, param) = rest.split_once('/')?;
+        if crate::formulas::find_formula_meta_by_variant(family).is_some_and(|m| m.code >= 8) {
+            return crate::formulas::formula_param_slider(path).map(|(min, max)| Slider {
+                min,
+                max,
+                log: false,
+            });
+        }
         let (family, param) = match (family, param.split_once('/')) {
             ("Hybrid", Some(("bulb", p))) => ("Mandelbulb", p),
             ("Hybrid", Some(("mandelbox", p))) => ("Mandelbox", p),

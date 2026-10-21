@@ -1048,7 +1048,7 @@ fn set(e: &mut WorldEditor, id: NodeId, path: &str, value: Value, frame: f64) {
 }
 #[test]
 fn constructs_all_formula_families_without_dropping_parameters() {
-    for family in 0..8 {
+    for family in 0..crate::scene::Formula::COUNT {
         let s = Scene::preset(family);
         let world = WorldDocument::from_scene(&s);
         let snapshot = world.snapshot(0.0).unwrap();
@@ -1550,7 +1550,10 @@ fn fractal_schema_offers_all_formula_defaults_and_keeps_custom_values() {
         .into_iter()
         .find(|a| a.path == "/formula")
         .unwrap();
-    assert_eq!(descriptor.choices.len(), 8);
+    assert_eq!(
+        descriptor.choices.len(),
+        crate::scene::Formula::COUNT as usize
+    );
     for (family, choice) in descriptor.choices.into_iter().enumerate() {
         assert_eq!(
             choice,
@@ -1757,7 +1760,7 @@ fn clipboard_copy_paste_and_duplicate_remap_ids_in_one_undo_step() {
 
 #[test]
 fn fractal_slider_endpoints_pack_finite_and_hybrid_spans_match_standalone() {
-    for family in 0..8 {
+    for family in 0..crate::scene::Formula::COUNT {
         let scene = crate::scene::Scene::preset(family);
         let document = WorldDocument::from_scene(&scene);
         let id = document
@@ -1818,7 +1821,7 @@ fn fractal_slider_endpoints_pack_finite_and_hybrid_spans_match_standalone() {
 #[test]
 fn every_numeric_parameter_has_a_slider_and_hard_limits_hold_in_the_document() {
     let mut colors = std::collections::BTreeSet::new();
-    for family in 0..8 {
+    for family in 0..crate::scene::Formula::COUNT {
         let doc = WorldDocument::from_scene(&crate::scene::Scene::preset(family));
         for node in doc.nodes() {
             for a in doc.attributes(node.id, 0.0).unwrap() {
@@ -2082,7 +2085,10 @@ fn every_attribute_has_a_hover_hint() {
         metallic: 0.5,
         exponent: 2.0,
     });
-    for scene in (0..8).map(Scene::preset).chain([optional]) {
+    for scene in (0..crate::scene::Formula::COUNT)
+        .map(Scene::preset)
+        .chain([optional])
+    {
         let doc = WorldDocument::from_scene(&scene);
         for node in doc.nodes() {
             for attr in doc.attributes(node.id, 0.0).unwrap() {
