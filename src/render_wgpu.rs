@@ -227,8 +227,44 @@ pub fn shader_source() -> String {
         WORLD_ABI_VERSION,
         PALETTE_SAMPLES,
     );
+    let c0 = crate::color::to_709([1.0, 0.0, 0.0]);
+    let c1 = crate::color::to_709([0.0, 1.0, 0.0]);
+    let c2 = crate::color::to_709([0.0, 0.0, 1.0]);
+    let _ = writeln!(
+        s,
+        "const TO_709_ROW0: vec3<f32> = vec3<f32>({:.9}, {:.9}, {:.9});",
+        c0[0], c1[0], c2[0]
+    );
+    let _ = writeln!(
+        s,
+        "const TO_709_ROW1: vec3<f32> = vec3<f32>({:.9}, {:.9}, {:.9});",
+        c0[1], c1[1], c2[1]
+    );
+    let _ = writeln!(
+        s,
+        "const TO_709_ROW2: vec3<f32> = vec3<f32>({:.9}, {:.9}, {:.9});",
+        c0[2], c1[2], c2[2]
+    );
     s.push_str(include_str!("formulas.wgsl"));
     s.push_str(include_str!("render_wgpu.wgsl"));
+    let _ = writeln!(
+        s,
+        "@compute @workgroup_size(128, 1, 1) fn world_full(@builtin(global_invocation_id) gid: vec3<u32>) {{ trace_pixel(gid.x, true, FAMILY_WORLD, MAT_FULL, false); }}"
+    );
+    for code in 0..crate::scene::Formula::COUNT {
+        let _ = writeln!(
+            s,
+            "@compute @workgroup_size(128, 1, 1) fn world_fast_f{code}(@builtin(global_invocation_id) gid: vec3<u32>) {{ trace_pixel(gid.x, true, {code}u, MAT_FAST, false); }}"
+        );
+        let _ = writeln!(
+            s,
+            "@compute @workgroup_size(128, 1, 1) fn world_full_f{code}(@builtin(global_invocation_id) gid: vec3<u32>) {{ trace_pixel(gid.x, true, {code}u, MAT_FULL, false); }}"
+        );
+        let _ = writeln!(
+            s,
+            "@compute @workgroup_size(128, 1, 1) fn world_direct_f{code}(@builtin(global_invocation_id) gid: vec3<u32>) {{ trace_pixel(gid.x, true, {code}u, MAT_FULL, true); }}"
+        );
+    }
     s
 }
 
@@ -267,9 +303,13 @@ struct WgpuShared {
     pick_bgl: wgpu::BindGroupLayout,
     trace_layout: wgpu::PipelineLayout,
     world: OnceLock<wgpu::ComputePipeline>,
+    world_full: OnceLock<wgpu::ComputePipeline>,
     world_fast: OnceLock<wgpu::ComputePipeline>,
     world_fast_bulb: OnceLock<wgpu::ComputePipeline>,
     world_direct: OnceLock<wgpu::ComputePipeline>,
+    world_fast_family: [OnceLock<wgpu::ComputePipeline>; crate::scene::Formula::COUNT as usize],
+    world_full_family: [OnceLock<wgpu::ComputePipeline>; crate::scene::Formula::COUNT as usize],
+    world_direct_family: [OnceLock<wgpu::ComputePipeline>; crate::scene::Formula::COUNT as usize],
     single_fast: OnceLock<wgpu::ComputePipeline>,
     single_full: OnceLock<wgpu::ComputePipeline>,
     single_direct: OnceLock<wgpu::ComputePipeline>,
@@ -279,6 +319,7 @@ struct WgpuShared {
     tally: wgpu::ComputePipeline,
     adapt: wgpu::ComputePipeline,
     tonemap: wgpu::ComputePipeline,
+    tonemap_display: wgpu::ComputePipeline,
     pick: wgpu::ComputePipeline,
 }
 
@@ -286,7 +327,7 @@ impl WgpuShared {
     fn trace_pipe<'a>(
         &self,
         cell: &'a OnceLock<wgpu::ComputePipeline>,
-        entry: &'static str,
+        entry: &str,
     ) -> &'a wgpu::ComputePipeline {
         cell.get_or_init(|| {
             self.device
@@ -377,6 +418,8 @@ fn shared_wgpu() -> Result<Arc<WgpuShared>, String> {
                         bgl_entry(8, false),
                         bgl_entry(9, false),
                         bgl_entry(10, false),
+                        bgl_entry(11, false),
+                        bgl_entry(12, false),
                     ],
                 });
 
@@ -414,9 +457,13 @@ fn shared_wgpu() -> Result<Arc<WgpuShared>, String> {
 
                 Arc::new(WgpuShared {
                     world: OnceLock::new(),
+                    world_full: OnceLock::new(),
                     world_fast: OnceLock::new(),
                     world_fast_bulb: OnceLock::new(),
                     world_direct: OnceLock::new(),
+                    world_fast_family: std::array::from_fn(|_| OnceLock::new()),
+                    world_full_family: std::array::from_fn(|_| OnceLock::new()),
+                    world_direct_family: std::array::from_fn(|_| OnceLock::new()),
                     single_fast: OnceLock::new(),
                     single_full: OnceLock::new(),
                     single_direct: OnceLock::new(),
@@ -426,6 +473,7 @@ fn shared_wgpu() -> Result<Arc<WgpuShared>, String> {
                     tally: make_pipe(&post_layout, "tally"),
                     adapt: make_pipe(&post_layout, "adapt"),
                     tonemap: make_pipe(&post_layout, "tonemap"),
+                    tonemap_display: make_pipe(&post_layout, "tonemap_display"),
                     pick: make_pipe(&pick_layout, "pick"),
                     module,
                     trace_layout,
@@ -449,6 +497,8 @@ pub struct WgpuTarget {
     pub stats: wgpu::Buffer,
     pub active: wgpu::Buffer,
     pub out: wgpu::Buffer,
+    pub sdr: wgpu::Buffer,
+    pub summary: wgpu::Buffer,
     pub staging: wgpu::Buffer,
     bind_groups: std::sync::Mutex<Option<(u64, wgpu::BindGroup, wgpu::BindGroup)>>,
 }
@@ -570,7 +620,16 @@ impl WgpuEngine {
         self.shared
             .queue
             .write_buffer(&active, 0, bytemuck::cast_slice(&ones));
-        let staging_bytes = (padded.max(out_len).max(1) as u64) * vec4_bytes;
+        let sdr_bytes = (out_len.max(1) * std::mem::size_of::<u32>()) as u64;
+        let sdr = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("warpbro_wgpu_sdr"),
+            size: sdr_bytes,
+            usage: rw,
+            mapped_at_creation: false,
+        });
+        let summary = make_vec4("warpbro_wgpu_summary", 1);
+        let staging_bytes =
+            vec4_bytes + (padded.max(out_len).max(1) as u64) * vec4_bytes + sdr_bytes;
         let staging = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("warpbro_wgpu_staging"),
             size: staging_bytes,
@@ -585,6 +644,8 @@ impl WgpuEngine {
             stats: make_vec4("warpbro_wgpu_stats", padded),
             active,
             out: make_vec4("warpbro_wgpu_out", out_len),
+            sdr,
+            summary,
             staging,
             bind_groups: std::sync::Mutex::new(None),
         }
@@ -849,6 +910,14 @@ impl WgpuEngine {
                         binding: 10,
                         resource: wt.out.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 11,
+                        resource: wt.sdr.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 12,
+                        resource: wt.summary.as_entire_binding(),
+                    },
                 ],
             })
     }
@@ -874,14 +943,13 @@ impl WgpuEngine {
         self.bind_groups(wt).1
     }
 
-    pub(crate) fn launch_trace(
+    fn select_trace_pipeline(
         &self,
-        wt: &WgpuTarget,
         scene: &Scene,
         prepared: &PreparedScene,
         full_material: bool,
         force_mixed_world: bool,
-    ) {
+    ) -> &wgpu::ComputePipeline {
         const FAST_NAMES: [&str; 8] = [
             "fast_bulb",
             "fast_box",
@@ -913,10 +981,21 @@ impl WgpuEngine {
             "direct_hybrid",
         ];
         let code = scene.formula.code() as usize;
-        let pipe = if scene.direct.is_some() {
+        let homo = (!force_mixed_world)
+            .then_some(prepared.homogeneous_family)
+            .flatten()
+            .filter(|&f| (f as usize) < crate::scene::Formula::COUNT as usize);
+        if scene.direct.is_some() {
             if scene.world_render {
-                self.shared
-                    .trace_pipe(&self.shared.world_direct, "world_direct")
+                if let Some(fam) = homo {
+                    let f = fam as usize;
+                    let name = format!("world_direct_f{f}");
+                    self.shared
+                        .trace_pipe(&self.shared.world_direct_family[f], &name)
+                } else {
+                    self.shared
+                        .trace_pipe(&self.shared.world_direct, "world_direct")
+                }
             } else if code < 8 {
                 self.shared
                     .trace_pipe(&self.shared.direct_family[code], DIRECT_NAMES[code])
@@ -930,16 +1009,29 @@ impl WgpuEngine {
             } else {
                 prepared.world_material
             };
-            match wm {
-                WorldMaterial::Fast if prepared.single_fast_bulb => self
+            match (wm, homo) {
+                (WorldMaterial::Fast, _) if prepared.single_fast_bulb => self
                     .shared
                     .trace_pipe(&self.shared.world_fast_bulb, "world_fast_bulb"),
-                WorldMaterial::Fast => self
+                (WorldMaterial::Fast, Some(fam)) => {
+                    let f = fam as usize;
+                    let name = format!("world_fast_f{f}");
+                    self.shared
+                        .trace_pipe(&self.shared.world_fast_family[f], &name)
+                }
+                (WorldMaterial::Fast, None) => self
                     .shared
                     .trace_pipe(&self.shared.world_fast, "world_fast"),
-                WorldMaterial::Full | WorldMaterial::Mixed => {
-                    self.shared.trace_pipe(&self.shared.world, "world")
+                (WorldMaterial::Full, Some(fam)) => {
+                    let f = fam as usize;
+                    let name = format!("world_full_f{f}");
+                    self.shared
+                        .trace_pipe(&self.shared.world_full_family[f], &name)
                 }
+                (WorldMaterial::Full, None) => self
+                    .shared
+                    .trace_pipe(&self.shared.world_full, "world_full"),
+                (WorldMaterial::Mixed, _) => self.shared.trace_pipe(&self.shared.world, "world"),
             }
         } else if full_material {
             if code < 8 {
@@ -955,8 +1047,18 @@ impl WgpuEngine {
         } else {
             self.shared
                 .trace_pipe(&self.shared.single_fast, "single_fast")
-        };
+        }
+    }
 
+    pub(crate) fn launch_trace(
+        &self,
+        wt: &WgpuTarget,
+        scene: &Scene,
+        prepared: &PreparedScene,
+        full_material: bool,
+        force_mixed_world: bool,
+    ) {
+        let pipe = self.select_trace_pipeline(scene, prepared, full_material, force_mixed_world);
         let bg = self.trace_bind_group(wt);
         let mut encoder =
             self.shared
@@ -976,6 +1078,137 @@ impl WgpuEngine {
         self.shared.queue.submit(Some(encoder.finish()));
     }
 
+    /// Fused single-encoder `trace` + optional `adapt` + 1-workgroup `tally` reduction,
+    /// reading back a single 16-byte `[unresolved, samples, active_tiles, 0]` summary.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn launch_trace_and_tally(
+        &self,
+        wt: &WgpuTarget,
+        scene: &Scene,
+        prepared: &PreparedScene,
+        full_material: bool,
+        force_mixed_world: bool,
+        run_adapt: bool,
+        total_tiles: usize,
+    ) -> (f32, usize, bool) {
+        let pipe = self.select_trace_pipeline(scene, prepared, full_material, force_mixed_world);
+        let (trace_bg, post_bg) = self.bind_groups(wt);
+        let mut encoder =
+            self.shared
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("warpbro_wgpu_trace_tally"),
+                });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("warpbro_wgpu_trace_tally_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(pipe);
+            pass.set_bind_group(0, &trace_bg, &[]);
+            pass.dispatch_workgroups((wt.padded as u32).div_ceil(BLOCK), 1, 1);
+
+            pass.set_bind_group(0, &post_bg, &[]);
+            if run_adapt {
+                pass.set_pipeline(&self.shared.adapt);
+                pass.dispatch_workgroups((total_tiles as u32).div_ceil(BLOCK), 1, 1);
+            }
+            pass.set_pipeline(&self.shared.tally);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&wt.summary, 0, &wt.staging, 0, 16);
+        self.shared.queue.submit(Some(encoder.finish()));
+
+        let device = &self.shared.device;
+        let slice = wt.staging.slice(..16);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        let mapped = slice.get_mapped_range().expect("WGPU summary map");
+        let summary: &[f32; 4] = bytemuck::from_bytes(&mapped[..16]);
+        let [unresolved, samples, active_f, _] = *summary;
+        drop(mapped);
+        wt.staging.unmap();
+
+        let unresolved_ratio = if samples > 0.0 {
+            unresolved / samples
+        } else {
+            0.0
+        };
+        let active = (active_f.round().max(0.0) as usize).min(total_tiles);
+        (unresolved_ratio, active, active == 0)
+    }
+
+    /// Fused single-encoder `trace` + `tally` + `tonemap_display` with a single `map_async`
+    /// readback of `summary` (16 B) + `light` (`vec4<f32>`) + `pixels` (`u32` sRGB).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn launch_fused_step_display(
+        &self,
+        wt: &WgpuTarget,
+        scene: &Scene,
+        prepared: &PreparedScene,
+        full_material: bool,
+        force_mixed_world: bool,
+        width: usize,
+        height: usize,
+        light: &mut Vec<[f32; 4]>,
+        pixels: &mut [u32],
+    ) -> f32 {
+        let n = width * height;
+        light.resize(n, [0.0; 4]);
+        let pipe = self.select_trace_pipeline(scene, prepared, full_material, force_mixed_world);
+        let (trace_bg, post_bg) = self.bind_groups(wt);
+        let out_bytes = (n * std::mem::size_of::<[f32; 4]>()) as u64;
+        let sdr_bytes = (n * std::mem::size_of::<u32>()) as u64;
+        let total_bytes = 16 + out_bytes + sdr_bytes;
+
+        let mut encoder =
+            self.shared
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("warpbro_wgpu_fused_step"),
+                });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("warpbro_wgpu_fused_step_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(pipe);
+            pass.set_bind_group(0, &trace_bg, &[]);
+            pass.dispatch_workgroups((wt.padded as u32).div_ceil(BLOCK), 1, 1);
+
+            pass.set_bind_group(0, &post_bg, &[]);
+            pass.set_pipeline(&self.shared.tally);
+            pass.dispatch_workgroups(1, 1, 1);
+
+            pass.set_pipeline(&self.shared.tonemap_display);
+            pass.dispatch_workgroups((n as u32).div_ceil(BLOCK), 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&wt.summary, 0, &wt.staging, 0, 16);
+        encoder.copy_buffer_to_buffer(&wt.out, 0, &wt.staging, 16, out_bytes);
+        encoder.copy_buffer_to_buffer(&wt.sdr, 0, &wt.staging, 16 + out_bytes, sdr_bytes);
+        self.shared.queue.submit(Some(encoder.finish()));
+
+        let device = &self.shared.device;
+        let slice = wt.staging.slice(..total_bytes);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        let mapped = slice.get_mapped_range().expect("WGPU fused step map");
+        let summary: &[f32; 4] = bytemuck::from_bytes(&mapped[..16]);
+        let [unresolved, samples, _, _] = *summary;
+        let out_end = 16 + out_bytes as usize;
+        bytemuck::cast_slice_mut::<[f32; 4], u8>(light).copy_from_slice(&mapped[16..out_end]);
+        bytemuck::cast_slice_mut::<u32, u8>(pixels)
+            .copy_from_slice(&mapped[out_end..out_end + sdr_bytes as usize]);
+        drop(mapped);
+        wt.staging.unmap();
+
+        if samples > 0.0 {
+            unresolved / samples
+        } else {
+            0.0
+        }
+    }
+
     pub fn tally(&self, wt: &WgpuTarget) -> f32 {
         let bg = self.post_bind_group(wt);
         let mut encoder =
@@ -991,24 +1224,21 @@ impl WgpuEngine {
             });
             pass.set_pipeline(&self.shared.tally);
             pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups((TALLY_THREADS as u32).div_ceil(BLOCK), 1, 1);
+            pass.dispatch_workgroups(1, 1, 1);
         }
         self.shared.queue.submit(Some(encoder.finish()));
 
-        let mut sums = vec![[0.0f32; 4]; TALLY_THREADS];
-        let bytes = (TALLY_THREADS * std::mem::size_of::<[f32; 4]>()) as u64;
+        let mut summary = [[0.0f32; 4]];
         self.readback_bytes(
-            &wt.out,
+            &wt.summary,
             &wt.staging,
-            bytes,
-            bytemuck::cast_slice_mut(&mut sums),
+            16,
+            bytemuck::cast_slice_mut(&mut summary),
         )
         .expect("WGPU tally readback");
-        let (unresolved, samples) = sums.iter().fold((0.0f64, 0.0f64), |(u, s), v| {
-            (u + v[0] as f64, s + v[1] as f64)
-        });
+        let [unresolved, samples, _, _] = summary[0];
         if samples > 0.0 {
-            (unresolved / samples) as f32
+            unresolved / samples
         } else {
             0.0
         }
@@ -1031,18 +1261,20 @@ impl WgpuEngine {
             pass.set_pipeline(&self.shared.adapt);
             pass.set_bind_group(0, &bg, &[]);
             pass.dispatch_workgroups(tiles.div_ceil(BLOCK), 1, 1);
+            pass.set_pipeline(&self.shared.tally);
+            pass.dispatch_workgroups(1, 1, 1);
         }
         self.shared.queue.submit(Some(encoder.finish()));
 
-        let bytes = std::mem::size_of_val(active_host) as u64;
+        let mut summary = [[0.0f32; 4]];
         self.readback_bytes(
-            &wt.active,
+            &wt.summary,
             &wt.staging,
-            bytes,
-            bytemuck::cast_slice_mut(active_host),
+            16,
+            bytemuck::cast_slice_mut(&mut summary),
         )
-        .expect("WGPU active tiles readback");
-        let active = active_host.iter().filter(|&&a| a != 0).count();
+        .expect("WGPU active tiles summary readback");
+        let active = (summary[0][2].round().max(0.0) as usize).min(active_host.len());
         (active, active == 0)
     }
 
@@ -1069,6 +1301,53 @@ impl WgpuEngine {
         let bytes = std::mem::size_of_val(raw) as u64;
         self.readback_bytes(&wt.out, &wt.staging, bytes, bytemuck::cast_slice_mut(raw))
             .expect("WGPU tonemap readback");
+    }
+
+    pub fn tonemap_display(
+        &self,
+        wt: &WgpuTarget,
+        width: usize,
+        height: usize,
+        light: &mut Vec<[f32; 4]>,
+        pixels: &mut [u32],
+    ) {
+        let n = width * height;
+        light.resize(n, [0.0; 4]);
+        let bg = self.post_bind_group(wt);
+        let out_bytes = (n * std::mem::size_of::<[f32; 4]>()) as u64;
+        let sdr_bytes = (n * std::mem::size_of::<u32>()) as u64;
+        let total_bytes = out_bytes + sdr_bytes;
+
+        let mut encoder =
+            self.shared
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("warpbro_wgpu_tonemap_display"),
+                });
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("warpbro_wgpu_tonemap_display_pass"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.shared.tonemap_display);
+            pass.set_bind_group(0, &bg, &[]);
+            pass.dispatch_workgroups((n as u32).div_ceil(BLOCK), 1, 1);
+        }
+        encoder.copy_buffer_to_buffer(&wt.out, 0, &wt.staging, 0, out_bytes);
+        encoder.copy_buffer_to_buffer(&wt.sdr, 0, &wt.staging, out_bytes, sdr_bytes);
+        self.shared.queue.submit(Some(encoder.finish()));
+
+        let device = &self.shared.device;
+        let slice = wt.staging.slice(..total_bytes);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let _ = device.poll(wgpu::PollType::wait_indefinitely());
+        let mapped = slice.get_mapped_range().expect("WGPU tonemap_display map");
+        let out_end = out_bytes as usize;
+        bytemuck::cast_slice_mut::<[f32; 4], u8>(light).copy_from_slice(&mapped[..out_end]);
+        bytemuck::cast_slice_mut::<u32, u8>(pixels)
+            .copy_from_slice(&mapped[out_end..out_end + sdr_bytes as usize]);
+        drop(mapped);
+        wt.staging.unmap();
     }
 
     pub fn pick(&self, ndc: [f32; 2]) -> Result<Option<(usize, f32)>, String> {

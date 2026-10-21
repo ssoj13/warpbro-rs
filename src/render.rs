@@ -866,113 +866,209 @@ impl Gpu {
         }
 
         let t0 = Instant::now();
-        if spp > 0 {
+        let gpu_display_fast = !scene.colour.on || scene.render.reinhard;
+        if resolved_backend == crate::render_profiles::Backend::Wgpu && spp > 0 {
             let full = p[P_MATERIAL_MODEL] != 0.0;
-            if resolved_backend == crate::render_profiles::Backend::Wgpu {
-                #[cfg(test)]
-                let force_mixed = self.force_mixed_world;
-                #[cfg(not(test))]
-                let force_mixed = false;
-                if let (Some(Ok(wgpu)), Some(wt)) = (&self.wgpu, &target.wgpu) {
-                    wgpu.launch_trace(wt, scene, &prepared, full, force_mixed);
+            #[cfg(test)]
+            let force_mixed = self.force_mixed_world;
+            #[cfg(not(test))]
+            let force_mixed = false;
+            let adaptive = scene.render.adaptive;
+            if !adaptive.enabled && target.active_tiles.0 != target.active_tiles.1 {
+                self.activate_all(target);
+            }
+            let next_samples = target.samples + spp;
+            let run_adapt = adaptive.enabled && next_samples >= adaptive.min();
+            let total_tiles = target.active_host.len();
+            if !run_adapt {
+                target.samples = next_samples;
+                target.display_key = None;
+                target.tally_dirty = true;
+                if !display(target) {
+                    if let (Some(Ok(wgpu)), Some(wt)) = (&self.wgpu, &target.wgpu) {
+                        wgpu.launch_trace(wt, scene, &prepared, full, force_mixed);
+                    }
+                    target.last_ms = t0.elapsed().as_secs_f32() * 1000.0;
+                    target.last_spp = spp;
+                    return;
                 }
-            } else if let (Ok(cuda), Some(ct)) = (&self.cuda, &mut target.cuda) {
-                let padded = ct.accum.len() as u32;
-                let cfg = LaunchConfig1D::new(padded.div_ceil(BLOCK), BLOCK, 0);
-                let (m, s, lut, acc) = (&cuda.module, &cuda.stream, &cuda.lut, &mut ct.accum);
-                macro_rules! launch {
-                    ($prep:ident, $run:ident) => {{
-                        let prepared = m.$prep(cfg).expect(stringify!($prep));
-                        m.$run(
-                            s,
+                let final_now = final_pass || target.converged;
+                let denoise_due =
+                    target
+                        .denoise
+                        .due(&scene.render.denoise, target.samples, final_now);
+                let will_show_denoise = scene.render.denoise.enabled
+                    && (denoise_due || target.denoise.output.is_some())
+                    && !target.raw_view;
+                if !denoise_due && !will_show_denoise && gpu_display_fast {
+                    if let (Some(Ok(wgpu)), Some(wt)) = (&self.wgpu, &target.wgpu) {
+                        target.unresolved = wgpu.launch_fused_step_display(
+                            wt,
+                            scene,
                             &prepared,
-                            lut,
-                            &cuda.objects,
-                            &cuda.lights,
-                            acc,
-                            &mut ct.albedo,
-                            &mut ct.normal,
-                            &ct.active,
-                            &mut ct.stats,
-                        )
-                        .expect(stringify!($run));
-                    }};
+                            full,
+                            force_mixed,
+                            target.width,
+                            target.height,
+                            &mut target.light,
+                            &mut target.pixels,
+                        );
+                    }
+                    target.tally_dirty = false;
+                    target.denoise_selected = false;
+                    target.light_kind = crate::color::DisplayLight::Relative;
+                    target.colour_error = None;
+                    target.display_key = Some(DisplayKey::new(scene, self.colour_revision));
+                    target.last_ms = t0.elapsed().as_secs_f32() * 1000.0;
+                    target.last_spp = spp;
+                    return;
                 }
-                if scene.direct.is_some() {
-                    if scene.world_render {
-                        launch!(prepare_world_direct, world_direct)
-                    } else {
-                        match scene.formula.code() {
-                            FAMILY_BULB => launch!(prepare_direct_bulb, direct_bulb),
-                            FAMILY_BOX => launch!(prepare_direct_box, direct_box),
-                            FAMILY_QUAT => launch!(prepare_direct_quat, direct_quat),
-                            FAMILY_KIFS => launch!(prepare_direct_kifs, direct_kifs),
-                            FAMILY_KLEINIAN => launch!(prepare_direct_kleinian, direct_kleinian),
-                            FAMILY_PSEUDO_KLEINIAN => {
-                                launch!(prepare_direct_pseudo_kleinian, direct_pseudo_kleinian)
-                            }
-                            FAMILY_APOLLONIAN => {
-                                launch!(prepare_direct_apollonian, direct_apollonian)
-                            }
-                            _ => launch!(prepare_direct_hybrid, direct_hybrid),
-                        }
-                    }
-                } else if scene.world_render {
-                    #[cfg(test)]
-                    let world_material = if self.force_mixed_world {
-                        WorldMaterial::Mixed
-                    } else {
-                        prepared.world_material
-                    };
-                    #[cfg(not(test))]
-                    let world_material = prepared.world_material;
-                    match world_material {
-                        WorldMaterial::Fast if prepared.single_fast_bulb => {
-                            launch!(prepare_world_fast_bulb, world_fast_bulb)
-                        }
-                        WorldMaterial::Fast => launch!(prepare_world_fast, world_fast),
-                        WorldMaterial::Full | WorldMaterial::Mixed => launch!(prepare_world, world),
-                    }
-                } else {
-                    match (full, scene.formula.code()) {
-                        (false, FAMILY_BULB) => launch!(prepare_fast_bulb, fast_bulb),
-                        (false, FAMILY_BOX) => launch!(prepare_fast_box, fast_box),
-                        (false, FAMILY_QUAT) => launch!(prepare_fast_quat, fast_quat),
-                        (false, FAMILY_KIFS) => launch!(prepare_fast_kifs, fast_kifs),
-                        (false, FAMILY_KLEINIAN) => launch!(prepare_fast_kleinian, fast_kleinian),
-                        (false, FAMILY_PSEUDO_KLEINIAN) => {
-                            launch!(prepare_fast_pseudo_kleinian, fast_pseudo_kleinian)
-                        }
-                        (false, FAMILY_APOLLONIAN) => {
-                            launch!(prepare_fast_apollonian, fast_apollonian)
-                        }
-                        (false, _) => launch!(prepare_fast_hybrid, fast_hybrid),
-                        (true, FAMILY_BULB) => launch!(prepare_full_bulb, full_bulb),
-                        (true, FAMILY_BOX) => launch!(prepare_full_box, full_box),
-                        (true, FAMILY_QUAT) => launch!(prepare_full_quat, full_quat),
-                        (true, FAMILY_KIFS) => launch!(prepare_full_kifs, full_kifs),
-                        (true, FAMILY_KLEINIAN) => launch!(prepare_full_kleinian, full_kleinian),
-                        (true, FAMILY_PSEUDO_KLEINIAN) => {
-                            launch!(prepare_full_pseudo_kleinian, full_pseudo_kleinian)
-                        }
-                        (true, FAMILY_APOLLONIAN) => {
-                            launch!(prepare_full_apollonian, full_apollonian)
-                        }
-                        (true, _) => launch!(prepare_full_hybrid, full_hybrid),
-                    }
+                if let (Some(Ok(wgpu)), Some(wt)) = (&self.wgpu, &target.wgpu) {
+                    let (unresolved, _, _) = wgpu.launch_trace_and_tally(
+                        wt,
+                        scene,
+                        &prepared,
+                        full,
+                        force_mixed,
+                        false,
+                        total_tiles,
+                    );
+                    target.unresolved = unresolved;
+                    target.tally_dirty = false;
+                }
+            } else {
+                if let (Some(Ok(wgpu)), Some(wt)) = (&self.wgpu, &target.wgpu) {
+                    let (unresolved, active, converged) = wgpu.launch_trace_and_tally(
+                        wt,
+                        scene,
+                        &prepared,
+                        full,
+                        force_mixed,
+                        true,
+                        total_tiles,
+                    );
+                    target.unresolved = unresolved;
+                    target.tally_dirty = false;
+                    target.active_tiles = (active, total_tiles);
+                    target.converged = converged;
+                }
+                target.samples = next_samples;
+                target.display_key = None;
+                if !display(target) {
+                    target.last_ms = t0.elapsed().as_secs_f32() * 1000.0;
+                    target.last_spp = spp;
+                    return;
                 }
             }
-            target.samples += spp;
-            target.display_key = None;
-            target.tally_dirty = true;
-            self.adapt(target, scene);
-        }
-        if !display(target) {
+        } else {
             if spp > 0 {
-                target.last_ms = t0.elapsed().as_secs_f32() * 1000.0;
-                target.last_spp = spp;
+                let full = p[P_MATERIAL_MODEL] != 0.0;
+                if let (Ok(cuda), Some(ct)) = (&self.cuda, &mut target.cuda) {
+                    let padded = ct.accum.len() as u32;
+                    let cfg = LaunchConfig1D::new(padded.div_ceil(BLOCK), BLOCK, 0);
+                    let (m, s, lut, acc) = (&cuda.module, &cuda.stream, &cuda.lut, &mut ct.accum);
+                    macro_rules! launch {
+                        ($prep:ident, $run:ident) => {{
+                            let prepared = m.$prep(cfg).expect(stringify!($prep));
+                            m.$run(
+                                s,
+                                &prepared,
+                                lut,
+                                &cuda.objects,
+                                &cuda.lights,
+                                acc,
+                                &mut ct.albedo,
+                                &mut ct.normal,
+                                &ct.active,
+                                &mut ct.stats,
+                            )
+                            .expect(stringify!($run));
+                        }};
+                    }
+                    if scene.direct.is_some() {
+                        if scene.world_render {
+                            launch!(prepare_world_direct, world_direct)
+                        } else {
+                            match scene.formula.code() {
+                                FAMILY_BULB => launch!(prepare_direct_bulb, direct_bulb),
+                                FAMILY_BOX => launch!(prepare_direct_box, direct_box),
+                                FAMILY_QUAT => launch!(prepare_direct_quat, direct_quat),
+                                FAMILY_KIFS => launch!(prepare_direct_kifs, direct_kifs),
+                                FAMILY_KLEINIAN => {
+                                    launch!(prepare_direct_kleinian, direct_kleinian)
+                                }
+                                FAMILY_PSEUDO_KLEINIAN => {
+                                    launch!(prepare_direct_pseudo_kleinian, direct_pseudo_kleinian)
+                                }
+                                FAMILY_APOLLONIAN => {
+                                    launch!(prepare_direct_apollonian, direct_apollonian)
+                                }
+                                _ => launch!(prepare_direct_hybrid, direct_hybrid),
+                            }
+                        }
+                    } else if scene.world_render {
+                        #[cfg(test)]
+                        let world_material = if self.force_mixed_world {
+                            WorldMaterial::Mixed
+                        } else {
+                            prepared.world_material
+                        };
+                        #[cfg(not(test))]
+                        let world_material = prepared.world_material;
+                        match world_material {
+                            WorldMaterial::Fast if prepared.single_fast_bulb => {
+                                launch!(prepare_world_fast_bulb, world_fast_bulb)
+                            }
+                            WorldMaterial::Fast => launch!(prepare_world_fast, world_fast),
+                            WorldMaterial::Full | WorldMaterial::Mixed => {
+                                launch!(prepare_world, world)
+                            }
+                        }
+                    } else {
+                        match (full, scene.formula.code()) {
+                            (false, FAMILY_BULB) => launch!(prepare_fast_bulb, fast_bulb),
+                            (false, FAMILY_BOX) => launch!(prepare_fast_box, fast_box),
+                            (false, FAMILY_QUAT) => launch!(prepare_fast_quat, fast_quat),
+                            (false, FAMILY_KIFS) => launch!(prepare_fast_kifs, fast_kifs),
+                            (false, FAMILY_KLEINIAN) => {
+                                launch!(prepare_fast_kleinian, fast_kleinian)
+                            }
+                            (false, FAMILY_PSEUDO_KLEINIAN) => {
+                                launch!(prepare_fast_pseudo_kleinian, fast_pseudo_kleinian)
+                            }
+                            (false, FAMILY_APOLLONIAN) => {
+                                launch!(prepare_fast_apollonian, fast_apollonian)
+                            }
+                            (false, _) => launch!(prepare_fast_hybrid, fast_hybrid),
+                            (true, FAMILY_BULB) => launch!(prepare_full_bulb, full_bulb),
+                            (true, FAMILY_BOX) => launch!(prepare_full_box, full_box),
+                            (true, FAMILY_QUAT) => launch!(prepare_full_quat, full_quat),
+                            (true, FAMILY_KIFS) => launch!(prepare_full_kifs, full_kifs),
+                            (true, FAMILY_KLEINIAN) => {
+                                launch!(prepare_full_kleinian, full_kleinian)
+                            }
+                            (true, FAMILY_PSEUDO_KLEINIAN) => {
+                                launch!(prepare_full_pseudo_kleinian, full_pseudo_kleinian)
+                            }
+                            (true, FAMILY_APOLLONIAN) => {
+                                launch!(prepare_full_apollonian, full_apollonian)
+                            }
+                            (true, _) => launch!(prepare_full_hybrid, full_hybrid),
+                        }
+                    }
+                }
+                target.samples += spp;
+                target.display_key = None;
+                target.tally_dirty = true;
+                self.adapt(target, scene);
             }
-            return;
+            if !display(target) {
+                if spp > 0 {
+                    target.last_ms = t0.elapsed().as_secs_f32() * 1000.0;
+                    target.last_spp = spp;
+                }
+                return;
+            }
         }
         if target.tally_dirty {
             self.tally(target);
@@ -986,6 +1082,30 @@ impl Gpu {
             .as_ref()
             .is_some_and(|key| key.matches(scene, self.colour_revision));
         if spp == 0 && !denoise_changed && !display_changed {
+            return;
+        }
+        if !target.denoise_selected
+            && resolved_backend == crate::render_profiles::Backend::Wgpu
+            && gpu_display_fast
+        {
+            if let (Some(Ok(wgpu)), Some(wt)) = (&self.wgpu, &target.wgpu) {
+                wgpu.tonemap_display(
+                    wt,
+                    target.width,
+                    target.height,
+                    &mut target.light,
+                    &mut target.pixels,
+                );
+            }
+            target.light_kind = crate::color::DisplayLight::Relative;
+            target.colour_error = None;
+            if display_changed {
+                target.display_key = Some(DisplayKey::new(scene, self.colour_revision));
+            }
+            if spp > 0 {
+                target.last_ms = t0.elapsed().as_secs_f32() * 1000.0;
+                target.last_spp = spp;
+            }
             return;
         }
         if target.denoise_selected {
@@ -3932,6 +4052,7 @@ mod tests {
 
         let expected = [
             "world",
+            "world_full",
             "world_fast",
             "world_fast_bulb",
             "world_direct",
@@ -3965,6 +4086,7 @@ mod tests {
             "tally",
             "adapt",
             "tonemap",
+            "tonemap_display",
             "pick",
         ];
         for name in expected {
@@ -3975,6 +4097,18 @@ mod tests {
                     .any(|ep| ep.name == name && ep.stage == naga::ShaderStage::Compute),
                 "missing compute entry point {name}"
             );
+        }
+        for code in 0..crate::scene::Formula::COUNT {
+            for prefix in ["world_fast_f", "world_full_f", "world_direct_f"] {
+                let name = format!("{prefix}{code}");
+                assert!(
+                    module
+                        .entry_points
+                        .iter()
+                        .any(|ep| ep.name == name && ep.stage == naga::ShaderStage::Compute),
+                    "missing specialized world compute entry point {name}"
+                );
+            }
         }
 
         // Verify all 28 formula families round-trip through WorldDocument, metadata, and Scene::pack
@@ -4022,6 +4156,8 @@ mod tests {
             }
             let snap = doc.snapshot(0.0).unwrap();
             assert_eq!(snap.objects[0].formula, preset.formula);
+            let prep_snap = PreparedScene::new(&snap, 64, 64).unwrap();
+            assert_eq!(prep_snap.homogeneous_family, Some(code));
 
             // Verify animating every numeric & integer parameter on this formula evaluates cleanly
             let mut editor = crate::world::WorldEditor::new(doc);
@@ -4085,9 +4221,9 @@ mod tests {
             let mut colour = crate::color::ColorPipeline::new();
             let (w, h, spp) = (400usize, 225usize, 16u32);
             let wt = wgpu.create_target(w, h);
-            let mut raw = Vec::new();
-            let mut light = Vec::new();
-            let mut pixels = Vec::new();
+            let mut raw = vec![[0.0; 4]; w * h];
+            let mut light = vec![[0.0; 4]; w * h];
+            let mut pixels = vec![0u32; w * h];
             for (idx, mut scene) in Scene::gallery().into_iter().enumerate() {
                 scene.render.backend = crate::render_profiles::Backend::Wgpu;
                 scene.render.denoise.enabled = false;
@@ -4109,18 +4245,32 @@ mod tests {
                     .unwrap();
                 wgpu.set_params(&p);
                 let full = p[P_MATERIAL_MODEL] != 0.0;
-                wgpu.launch_trace(&wt, &scene, &prepared, full, false);
-                wgpu.tonemap(&wt, w, h, &mut raw);
-                colour
-                    .apply_into(
-                        (w, h),
-                        &raw,
-                        &scene.colour,
-                        scene.render.reinhard,
+                if !scene.colour.on || scene.render.reinhard {
+                    wgpu.launch_fused_step_display(
+                        &wt,
+                        &scene,
+                        &prepared,
+                        full,
+                        false,
+                        w,
+                        h,
                         &mut light,
                         &mut pixels,
-                    )
-                    .unwrap();
+                    );
+                } else {
+                    wgpu.launch_trace(&wt, &scene, &prepared, full, false);
+                    wgpu.tonemap(&wt, w, h, &mut raw);
+                    colour
+                        .apply_into(
+                            (w, h),
+                            &raw,
+                            &scene.colour,
+                            scene.render.reinhard,
+                            &mut light,
+                            &mut pixels,
+                        )
+                        .unwrap();
+                }
                 let path = out_dir.join(format!(
                     "{idx:02}_{}.png",
                     crate::fs_name::stem(&scene.name)

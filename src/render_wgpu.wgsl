@@ -15,6 +15,8 @@
 @group(0) @binding(8) var<storage, read_write> stats: array<vec4<f32>>;
 @group(0) @binding(9) var<storage, read_write> active_rw: array<u32>;
 @group(0) @binding(10) var<storage, read_write> aux_out: array<vec4<f32>>;
+@group(0) @binding(11) var<storage, read_write> sdr_out: array<u32>;
+@group(0) @binding(12) var<storage, read_write> summary_out: array<vec4<f32>>;
 
 const TRAP_START: f32 = 3.40282347e38;
 const DERIVATIVE_LIMIT: f32 = 1.0e38;
@@ -1334,64 +1336,49 @@ fn march_sample(
             let dt = clipped_distance_and_trap(true, 0u, family_override, x, trap_mode, -1.0);
             return SceneSample(max(dt.x, 0.0), dt.y, 0u);
         }
-        var qs: array<vec3<f32>, 16>;
-        var len_qs: array<f32, 16>;
-        var reaches: array<f32, 16>;
-        let q0 = object_point(true, 0u, x);
-        let len_q0 = length(q0);
-        let row0 = 0u;
-        var min_reach = (len_q0 - objects[row0 + O_CLIP_RADIUS]) * objects[row0 + O_DISTANCE_SCALE];
-        qs[0] = q0;
-        len_qs[0] = len_q0;
-        reaches[0] = min_reach;
+        var first_q = object_point(true, 0u, x);
+        var first_len_q = length(first_q);
+        var min_reach = (first_len_q - objects[O_CLIP_RADIUS]) * objects[O_DISTANCE_SCALE];
         var first = 0u;
         for (var i = 1u; i < count; i = i + 1u) {
             let row = i * OBJECT_STRIDE;
             let q = object_point(true, i, x);
             let len_q = length(q);
             let reach = (len_q - objects[row + O_CLIP_RADIUS]) * objects[row + O_DISTANCE_SCALE];
-            if i < 16u {
-                qs[i] = q;
-                len_qs[i] = len_q;
-                reaches[i] = reach;
-            }
             if reach < min_reach {
                 min_reach = reach;
                 first = i;
+                first_q = q;
+                first_len_q = len_q;
             }
         }
         let first_color_mode = u32(pr(true, first, P_COLOR_MODE));
         let first_trap_mode = select(first_color_mode, 0u, kind == RAY_VISIBILITY);
-        var first_dt: vec2<f32>;
-        if first < 16u {
-            first_dt = clipped_distance_and_trap_q(true, first, family_override, x, qs[first], len_qs[first], first_trap_mode, -1.0);
-        } else {
-            first_dt = clipped_distance_and_trap(true, first, family_override, x, first_trap_mode, -1.0);
-        }
+        let first_dt = clipped_distance_and_trap_q(
+            true,
+            first,
+            family_override,
+            x,
+            first_q,
+            first_len_q,
+            first_trap_mode,
+            -1.0,
+        );
         var best = SceneSample(max(first_dt.x, 0.0), first_dt.y, first);
         for (var i = 0u; i < count; i = i + 1u) {
             if i == first {
                 continue;
             }
-            var q: vec3<f32>;
-            var len_q: f32;
-            var reach: f32;
-            if i < 16u {
-                reach = reaches[i];
-                if reach >= best.d {
-                    continue;
-                }
-                q = qs[i];
-                len_q = len_qs[i];
-            } else {
-                let row = i * OBJECT_STRIDE;
-                q = object_point(true, i, x);
-                len_q = length(q);
-                reach = (len_q - objects[row + O_CLIP_RADIUS]) * objects[row + O_DISTANCE_SCALE];
-                if reach >= best.d {
-                    continue;
-                }
+            let row = i * OBJECT_STRIDE;
+            let q = object_point(true, i, x);
+            let scale = max(objects[row + O_DISTANCE_SCALE], 1.0e-30);
+            let clip_r = objects[row + O_CLIP_RADIUS];
+            let rhs = clip_r + best.d / scale;
+            let q2 = dot(q, q);
+            if rhs >= 0.0 && q2 >= rhs * rhs {
+                continue;
             }
+            let len_q = sqrt(q2);
             let color_mode = u32(pr(true, i, P_COLOR_MODE));
             let trap_mode = select(color_mode, 0u, kind == RAY_VISIBILITY);
             let dt = clipped_distance_and_trap_q(true, i, family_override, x, q, len_q, trap_mode, -1.0);
@@ -1627,6 +1614,10 @@ fn march_visibility(
     let step_factor = param(P_STEP_FACTOR);
     let frac_bulb = has_fractional_bulb(is_world, family_override);
     var t = t_enter;
+    var prev_t = t_enter;
+    var prev_rad = 0.0;
+    var last_step = 0.0;
+    var relax = select(1.25, 1.0, frac_bulb);
     for (var i = 0u; i < max_steps; i = i + 1u) {
         if t > t_exit {
             return march_miss(origin);
@@ -1635,6 +1626,13 @@ fn march_visibility(
         let eps = footprint(base, 0.0, t, point);
         let s = march_sample(is_world, family_override, point, RAY_VISIBILITY);
         var d = s.d;
+        let curr_rad = step_factor * d;
+        if prev_rad > 0.0 && prev_rad + curr_rad < last_step {
+            t = prev_t + prev_rad;
+            prev_rad = 0.0;
+            relax = 1.0;
+            continue;
+        }
         if d < eps {
             return MarchResult(true, false, point, TRAP_START, eps, 0.0, i == 0u, 0u);
         }
@@ -1642,7 +1640,16 @@ fn march_visibility(
         if frac_bulb && d < 4.0 * eps {
             march_d = min(d, fractional_march_distance(is_world, family_override, point, d, s.object));
         }
-        t = t + min(max(step_factor * march_d, 0.5 * eps), step_cap);
+        let unrelaxed = min(max(step_factor * march_d, 0.5 * eps), step_cap);
+        prev_t = t;
+        if d > 4.0 * eps && relax > 1.0 {
+            prev_rad = unrelaxed;
+            last_step = min(unrelaxed * relax, step_cap);
+        } else {
+            prev_rad = 0.0;
+            last_step = unrelaxed;
+        }
+        t = t + last_step;
     }
     if t > t_exit {
         return march_miss(origin);
@@ -1710,6 +1717,9 @@ fn march(
     var t = max(start, t_enter);
     var prev_t = 0.0;
     var has_prev = false;
+    var prev_rad = 0.0;
+    var last_step = 0.0;
+    var relax = select(1.25, 1.0, frac_bulb);
     var best = MarchResult(false, true, origin, TRAP_START, 0.0, 0.0, false, 0u);
     var has_best = false;
     var first = true;
@@ -1723,6 +1733,13 @@ fn march(
         let eps = footprint(base, slope, t, point);
         let s = march_sample(is_world, family_override, point, kind);
         var d = s.d;
+        let curr_rad = step_factor * max(d, 0.0);
+        if prev_rad > 0.0 && prev_rad + curr_rad < last_step {
+            t = prev_t + prev_rad;
+            prev_rad = 0.0;
+            relax = 1.0;
+            continue;
+        }
         var trap = s.trap;
         var hit_object = s.object;
         if d <= 0.0 && kind != RAY_VISIBILITY {
@@ -1769,7 +1786,15 @@ fn march(
         if frac_bulb && d < 4.0 * eps {
             march_d = min(d, fractional_march_distance(is_world, family_override, point, d, hit_object));
         }
-        t = t + min(max(step_factor * march_d, 0.5 * eps), step_cap);
+        let unrelaxed = min(max(step_factor * march_d, 0.5 * eps), step_cap);
+        if d > 4.0 * eps && relax > 1.0 {
+            prev_rad = unrelaxed;
+            last_step = min(unrelaxed * relax, step_cap);
+        } else {
+            prev_rad = 0.0;
+            last_step = unrelaxed;
+        }
+        t = t + last_step;
     }
     if t > t_exit {
         return march_miss(origin);
@@ -3080,6 +3105,21 @@ fn direct_shadow(
             return 1.0;
         }
         limit = span.y;
+    } else if !single_no_clip() {
+        let r = param(P_CLIP_RADIUS);
+        if r > 0.0 {
+            let oc = origin - param3(P_CLIP_CENTER);
+            let b = dot(oc, l);
+            let disc = b * b - (dot(oc, oc) - r * r);
+            if disc <= 0.0 {
+                return 1.0;
+            }
+            let t_exit = -b + sqrt(disc);
+            if t_exit <= 0.0 {
+                return 1.0;
+            }
+            limit = min(t_exit, max_distance);
+        }
     }
     let sharpness = select(0.0, 1.0 / tan(angle), angle > 0.0);
     var visibility = 1.0;
@@ -3116,6 +3156,7 @@ fn direct_ao(is_world: bool, family_override: u32, point: vec3<f32>, n: vec3<f32
     );
     let radius = param(P_AO_RADIUS);
     let inv_steps = radius / f32(steps);
+    let max_sum = f32(steps * 5u);
     var sum = 0.0;
     for (var j = 0u; j < 5u; j = j + 1u) {
         let component = select(0.6, 1.0, j == 0u);
@@ -3125,8 +3166,11 @@ fn direct_ao(is_world: bool, family_override: u32, point: vec3<f32>, n: vec3<f32
             let d = march_sample(is_world, family_override, point + directions[j] * t, RAY_VISIBILITY).d;
             sum = sum + clamp((clearance - d) / clearance, 0.0, 1.0);
         }
+        if strength * sum >= max_sum {
+            return 0.0;
+        }
     }
-    return max(1.0 - strength * sum / f32(steps * 5u), 0.0);
+    return max(1.0 - strength * sum / max_sum, 0.0);
 }
 
 fn direct_specular_ao(nv: f32, ao: f32, roughness: f32) -> f32 {
@@ -3510,13 +3554,12 @@ fn single_direct(@builtin(global_invocation_id) gid: vec3<u32>) {
     trace_pixel(gid.x, false, FAMILY_WORLD, MAT_FULL, true);
 }
 
+var<workgroup> wg_tally: array<vec4<f32>, 128>;
+
 @compute @workgroup_size(128, 1, 1)
-fn tally(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let tid = gid.x;
+fn tally(@builtin(local_invocation_id) lid: vec3<u32>) {
+    let tid = lid.x;
     let threads = 128u;
-    if tid >= threads {
-        return;
-    }
     let n = arrayLength(&accum);
     var unresolved = 0.0;
     var samples = 0.0;
@@ -3526,7 +3569,29 @@ fn tally(@builtin(global_invocation_id) gid: vec3<u32>) {
         samples = samples + accum[k].w;
         k = k + threads;
     }
-    aux_out[tid] = vec4<f32>(unresolved, samples, 0.0, 0.0);
+    let size = tile_size();
+    let tiles_x = (size.x + 7u) / 8u;
+    let tiles_y = (size.y + 3u) / 4u;
+    let total_tiles = tiles_x * tiles_y;
+    var active_count = 0u;
+    var t = tid;
+    while t < total_tiles {
+        if active_rw[t] != 0u {
+            active_count = active_count + 1u;
+        }
+        t = t + threads;
+    }
+    wg_tally[tid] = vec4<f32>(unresolved, samples, f32(active_count), 0.0);
+    workgroupBarrier();
+    for (var stride = 64u; stride > 0u; stride = stride >> 1u) {
+        if tid < stride {
+            wg_tally[tid] = wg_tally[tid] + wg_tally[tid + stride];
+        }
+        workgroupBarrier();
+    }
+    if tid == 0u {
+        summary_out[0] = wg_tally[0];
+    }
 }
 
 @compute @workgroup_size(128, 1, 1)
@@ -3567,6 +3632,35 @@ fn adapt(@builtin(global_invocation_id) gid: vec3<u32>) {
     active_rw[tile] = select(1u, 0u, done);
 }
 
+fn to_709_rgb(c: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(
+        dot(TO_709_ROW0, c),
+        dot(TO_709_ROW1, c),
+        dot(TO_709_ROW2, c),
+    );
+}
+
+fn srgb_u8_channel(v: f32) -> u32 {
+    let c = clamp(v, 0.0, 1.0);
+    if c <= 0.0 {
+        return 0u;
+    }
+    if c >= 1.0 {
+        return 255u;
+    }
+    if c <= 0.0031308 {
+        return u32(c * (12.92 * 255.0) + 0.5);
+    }
+    return u32((1.055 * pow(c, 1.0 / 2.4) - 0.055) * 255.0 + 0.5);
+}
+
+fn pack_srgb_rgba8(rgb: vec3<f32>) -> u32 {
+    let r = srgb_u8_channel(rgb.x);
+    let g = srgb_u8_channel(rgb.y);
+    let b = srgb_u8_channel(rgb.z);
+    return r | (g << 8u) | (b << 16u) | (255u << 24u);
+}
+
 @compute @workgroup_size(128, 1, 1)
 fn tonemap(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
@@ -3586,6 +3680,34 @@ fn tonemap(@builtin(global_invocation_id) gid: vec3<u32>) {
     let l = luminance(c);
     let sat = param(P_SATURATION);
     aux_out[i] = vec4<f32>(l + (c - vec3<f32>(l)) * sat, 1.0);
+}
+
+@compute @workgroup_size(128, 1, 1)
+fn tonemap_display(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    let size = tile_size();
+    let width = size.x;
+    let height = size.y;
+    if i >= width * height {
+        return;
+    }
+    let x = i % width;
+    let y = i / width;
+    let tiles_x = (width + 7u) / 8u;
+    let tile = (y / 4u) * tiles_x + (x / 8u);
+    let a = accum[tile * 32u + (y % 4u) * 8u + (x % 8u)];
+    let inv = select(0.0, param(P_EXPOSURE) / a.w, a.w > 0.0);
+    let c = a.xyz * inv;
+    let l = luminance(c);
+    let sat = param(P_SATURATION);
+    let raw = l + (c - vec3<f32>(l)) * sat;
+    var rgb = to_709_rgb(raw);
+    if param(P_TONEMAP) != 0.0 {
+        let m = max(rgb, vec3<f32>(0.0));
+        rgb = m / (vec3<f32>(1.0) + m);
+    }
+    aux_out[i] = vec4<f32>(rgb, 1.0);
+    sdr_out[i] = pack_srgb_rgba8(rgb);
 }
 
 @compute @workgroup_size(1, 1, 1)

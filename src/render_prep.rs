@@ -291,6 +291,9 @@ pub(crate) struct PreparedScene {
     pub(crate) world_material: WorldMaterial,
     /// Inline the known DE only for one actual Fast Mandelbulb object.
     pub(crate) single_fast_bulb: bool,
+    /// When every world object uses the same formula family (`0..Formula::COUNT`), WGPU can
+    /// dispatch a family-specialized world pipeline instead of the 28-way dynamic switch.
+    pub(crate) homogeneous_family: Option<u32>,
     pub(crate) trace: Vec<f32>,
     pub(crate) palettes: Vec<PaletteScheme>,
     pub(crate) environment: Option<(String, u64)>,
@@ -302,10 +305,26 @@ impl PreparedScene {
         let single_fast_bulb = world_material == WorldMaterial::Fast
             && upload.objects.len() == OBJECT_STRIDE
             && upload.objects[P_FAMILY] as u32 == FAMILY_BULB;
+        let homogeneous_family = {
+            let mut objects = upload.objects.as_chunks::<OBJECT_STRIDE>().0.iter();
+            if let Some(first) = objects.next() {
+                let fam = first[P_FAMILY] as u32;
+                if fam < crate::scene::Formula::COUNT
+                    && objects.all(|obj| obj[P_FAMILY] as u32 == fam)
+                {
+                    Some(fam)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
         Ok(Self {
             upload,
             world_material,
             single_fast_bulb,
+            homogeneous_family,
             trace: scene_trace_data(scene),
             palettes: std::iter::once(scene.palette)
                 .chain(
