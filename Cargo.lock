@@ -1421,7 +1421,7 @@ dependencies = [
 [[package]]
 name = "blosc-rs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/openvdb-rs.git?branch=main#a707f896e80fee7f8061560954ec00b6fc9966ff"
+source = "git+ssh://git@github.com/ssoj13/openvdb-rs.git?branch=main#d9e9e865a2c7b25e5aa37d2a2c237a52842be35a"
 dependencies = [
  "lz4-rs",
 ]
@@ -4179,7 +4179,7 @@ checksum = "6e634e2e0ebac1ee034020da1ca582e17ffe4e0f5e985823721e168928136dcb"
 dependencies = [
  "crc32fast",
  "miniz_oxide 0.9.1",
- "zlib-rs 0.6.8",
+ "zlib-rs",
 ]
 
 [[package]]
@@ -5844,6 +5844,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "libz-rs"
+version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/libz-rs.git?branch=main#aa7731ca4fcaaee9d7f3ca9ead30d0f26dfe76ca"
+
+[[package]]
 name = "linebender_resource_handle"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5956,7 +5961,7 @@ dependencies = [
 [[package]]
 name = "lz4-rs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/openvdb-rs.git?branch=main#a707f896e80fee7f8061560954ec00b6fc9966ff"
+source = "git+ssh://git@github.com/ssoj13/openvdb-rs.git?branch=main#d9e9e865a2c7b25e5aa37d2a2c237a52842be35a"
 
 [[package]]
 name = "lzma-rust2"
@@ -6885,15 +6890,15 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 [[package]]
 name = "openvdb"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/openvdb-rs.git?branch=main#a707f896e80fee7f8061560954ec00b6fc9966ff"
+source = "git+ssh://git@github.com/ssoj13/openvdb-rs.git?branch=main#d9e9e865a2c7b25e5aa37d2a2c237a52842be35a"
 dependencies = [
  "blosc-rs",
  "bytemuck",
  "half",
+ "libz-rs",
  "lz4-rs",
  "memmap2",
  "rayon",
- "zlib-rs 0.1.0",
 ]
 
 [[package]]
@@ -11421,11 +11426,6 @@ dependencies = [
  "zopfli",
  "zstd",
 ]
-
-[[package]]
-name = "zlib-rs"
-version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/zlib-rs.git?branch=main#1cb3f42c355c0249b54d48b3134a75f0db615f1a"
 
 [[package]]
 name = "zlib-rs"
