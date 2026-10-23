@@ -365,9 +365,28 @@ First build the safety net, then fix each divergence against the pinned fractal-
   sites per trace pipeline. Next: 7.5.
 - [ ] **7.5 M. WGPU trace code size: one estimator call site per loop** (operator approved
   2026-10-23; all tests at the very end, GPU tests only with the operator's go).
-  1. [ ] Static breakdown (CPU only, no GPU): count `family_distance` call sites reachable from
-     each trace / pick entry, grouped by caller (naga IR call graph of `shader_source(Some(0))`),
-     as an ignored test or xtask that prints the table. Record the table here.
+  1. [x] Static breakdown (CPU only): session scratchpad `callsites.py TARGET ENTRY.. -- FILES`
+     (regex call graph, copies = sum of sites x callee copies). Before: trace_pixel 169, pick_ray
+     18. Main multipliers: surface_normal -> endpoint_ray_normal x2 (82), endpoint_ray_normal 41
+     (march_leaving 28 + endpoint_normal 6 + cone_start 4 + march_exit 3), march_leaving ->
+     march x2, march -> march_sample x3 (+ fractional 2), march_sample 4, stencil_normal 6,
+     visibility_leaving -> march_visibility x2, trace_direct 38 (march 14, stencil x2, direct_shade
+     12). Target after step 2: ~25.
+     **WIP 2026-10-23 (uncommitted -> committed as WIP on fix/plan1 only):** `march_sample` done
+     (4 -> 1 site; `world_sample` removed; k==0 always takes its sample, k>0 reach-skip; same
+     order and ties). NEXT, in order, each bit-identical:
+     a. `march`: one `loop` with `phase` 0 step / 1 accelerated bisection / 2 inside bisection,
+        ONE `march_sample` (point = origin + dir * st, st = t or 0.5*(lo+hi)); every phase-0 path
+        that loops again does `i = i + 1u` (the old `continue` too); phases 1/2 count `k` against
+        HIT_REFINEMENTS and return `best` on `k >= HIT_REFINEMENTS || hi - lo <= 0.5*best.eps`.
+     b. `march_leaving` / `visibility_leaving`: a 2-pass loop, origin then retreat, one call.
+     c. `surface_normal`: `for k in 0..2` filling `array<vec3<f32>,2>` from ONE
+        `endpoint_ray_normal(.., whole + k)`.
+     d. `stencil_normal`: per halving, a loop over 6 taps j: axis j/2, `off[axis] = h`,
+        `p = select(center + off, center - off, (j & 1u) == 1u)` (exactly the old +/- forms,
+        signed zeros included), values into `array<f32,6>`, then the old checks.
+     e. Re-run callsites.py (record), naga validate via the GPU-free test, clippy; GPU tests
+        only with the operator's go (see step 4).
   2. [ ] For the largest callers, restructure so each loop has ONE estimator call site, with
      bit-identical math (same points, same order, same results): the normal stencil (6 taps x
      halvings -> a loop over the 6 offsets), `march` (step + two bisection loops -> one loop

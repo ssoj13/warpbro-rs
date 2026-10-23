@@ -1308,58 +1308,57 @@ fn footprint(base: f32, slope: f32, t: f32, x: vec3<f32>) -> f32 {
     return max(base + slope * t, length(x) * FOOTPRINT_RELATIVE_FLOOR);
 }
 
-// World object `obj`'s estimate at `x` clamped at 0, with its orbit trap when `traps`.
-fn world_sample(obj: u32, family_override: u32, x: vec3<f32>, traps: bool) -> SceneSample {
-    let mode = select(0u, u32(pr(true, obj, P_COLOR_MODE)), traps);
-    let dt = clipped_distance_and_trap(true, obj, family_override, x, mode);
-    return SceneSample(max(dt.x, 0.0), dt.y, obj);
-}
-
 // The scene estimate at `x` clamped at 0, its orbit trap (each object's `P_COLOR_MODE` when
 // `traps`, else trap mode 0) and its object (fractal-kernels `march_sample`). A world evaluates
 // the object whose clip sphere is nearest first, then skips every object whose sphere lies
 // beyond the best estimate: its estimate cannot be lower, so the result is the full minimum,
 // the lower index winning ties.
+//
+// ONE estimate call site serves every case (a single scene, one world object, the nearest
+// object, the rest): the driver inlines the family's estimator into each call site, so the
+// former four sites cost four copies in every caller (plan1 7.5). The order and the results
+// are those of the four-site form.
 fn march_sample(is_world: bool, family_override: u32, x: vec3<f32>, traps: bool) -> SceneSample {
-    if !is_world {
-        let mode = select(0u, u32(param(P_COLOR_MODE)), traps);
-        let dt = clipped_distance_and_trap(false, 0u, family_override, x, mode);
-        return SceneSample(max(dt.x, 0.0), dt.y, 0u);
-    }
-    let count = u32(param(P_OBJECT_COUNT));
+    let count = select(1u, u32(param(P_OBJECT_COUNT)), is_world);
     if count == 0u {
         return SceneSample(F32_MAX, TRAP_START, 0u);
     }
-    if count == 1u {
-        return world_sample(0u, family_override, x, traps);
-    }
     var first = 0u;
-    var min_reach = (length(object_point(true, 0u, x)) - objects[O_CLIP_RADIUS]) * objects[O_DISTANCE_SCALE];
-    for (var i = 1u; i < count; i = i + 1u) {
-        let row = i * OBJECT_STRIDE;
-        let reach = (length(object_point(true, i, x)) - objects[row + O_CLIP_RADIUS])
-            * objects[row + O_DISTANCE_SCALE];
-        if reach < min_reach {
-            min_reach = reach;
-            first = i;
+    if count > 1u {
+        var min_reach = (length(object_point(true, 0u, x)) - objects[O_CLIP_RADIUS]) * objects[O_DISTANCE_SCALE];
+        for (var i = 1u; i < count; i = i + 1u) {
+            let row = i * OBJECT_STRIDE;
+            let reach = (length(object_point(true, i, x)) - objects[row + O_CLIP_RADIUS])
+                * objects[row + O_DISTANCE_SCALE];
+            if reach < min_reach {
+                min_reach = reach;
+                first = i;
+            }
         }
     }
-    var best = world_sample(first, family_override, x, traps);
-    for (var i = 0u; i < count; i = i + 1u) {
-        if i == first {
-            continue;
+    var best = SceneSample(F32_MAX, TRAP_START, 0u);
+    for (var k = 0u; k < count; k = k + 1u) {
+        // The nearest object first, then the others in index order.
+        var i = first;
+        if k > 0u {
+            i = k - 1u;
+            if i >= first {
+                i = i + 1u;
+            }
         }
-        let row = i * OBJECT_STRIDE;
-        let q = object_point(true, i, x);
-        let len_q = length(q);
-        let reach = (len_q - objects[row + O_CLIP_RADIUS]) * objects[row + O_DISTANCE_SCALE];
-        if select(reach >= best.d, reach > best.d, i < best.object) {
-            continue;
+        let q = object_point(is_world, i, x);
+        let len_q = select(0.0, length(q), is_world);
+        if k > 0u {
+            let row = i * OBJECT_STRIDE;
+            let reach = (len_q - objects[row + O_CLIP_RADIUS]) * objects[row + O_DISTANCE_SCALE];
+            if select(reach >= best.d, reach > best.d, i < best.object) {
+                continue;
+            }
         }
-        let mode = select(0u, u32(pr(true, i, P_COLOR_MODE)), traps);
-        let dt = clipped_distance_and_trap_q(true, i, family_override, x, q, len_q, mode);
+        let mode = select(0u, u32(pr(is_world, i, P_COLOR_MODE)), traps);
+        let dt = clipped_distance_and_trap_q(is_world, i, family_override, x, q, len_q, mode);
         let d = max(dt.x, 0.0);
-        if d < best.d || (d == best.d && i < best.object) {
+        if k == 0u || d < best.d || (d == best.d && i < best.object) {
             best = SceneSample(d, dt.y, i);
         }
     }
