@@ -2854,8 +2854,12 @@ mod tests {
         let failed = gpu.preparation_stats();
         assert_eq!(failed.environment_decodes, before.environment_decodes + 1);
         assert_eq!(failed.lut_uploads, before.lut_uploads);
+        // A new revision retries the decode once; the file is still missing, so it fails again.
         scene.environment.revision += 1;
-        gpu.step(&mut target, &scene, 1, 1, false).unwrap();
+        assert!(matches!(
+            gpu.step(&mut target, &scene, 1, 1, false),
+            Err(RenderError::Scene(_))
+        ));
         assert_eq!(
             gpu.preparation_stats().environment_decodes,
             failed.environment_decodes + 1

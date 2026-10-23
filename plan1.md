@@ -386,6 +386,19 @@ First build the safety net, then fix each divergence against the pinned fractal-
 
 ## Execution state (2026-10-23)
 
+**Current:** wave 1 = e75a8c6, wave 2 = 621baa6 on `fix/plan1`. GPU-free suite green (333/0/7),
+clippy `-D warnings` and fmt clean. **Wave 2's render changes are NOT verified on the GPU:** the
+WGSL rewrite (CUDA ports, two-pass tally, glass absorption, generated entries) has not run, and
+`parity_tests::cuda_wgpu_primary_guides_agree_per_pixel` has never run (its tolerances are a
+guess). Blocked by 7.4: every WGPU test first compiles pipelines for 15+ min. Order: (1) CUDA-only
+`cuda_` tests (`--skip wgpu`) now; (2) fix 7.4 without touching the WGSL structure (the
+inlined 28-family union and unrolled loops are deliberate, for runtime speed - operator
+2026-10-23): every pipeline through `gpu_info::create_compute_pipeline` (persistent disk cache,
+Vulkan only in wgpu 30) and `--warmup` compiling all WGPU pipelines in bootstrap, like CUDA; (3) the WGPU and
+parity tests, tolerances tuned from measured numbers. Wave 2 does not merge to main before (3).
+Pending: warpbro window.rs -> `soluwell-window` migration (egui-widgets-rs), done by this branch
+after it lands, when colmap-rs pings the rev with present queue + gui_fps throttle.
+
 Approved by the operator ("unification, dedup, SSOT everywhere, fix everything systemically").
 Decisions taken by the lead: Q1 delete migrations after a one-time conversion (`#[ignore]` test
 `convert_documents_once`, backups `*.bak`); Q2 keep `conn`, one resolver; Q3 typed admission
