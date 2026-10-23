@@ -591,7 +591,8 @@ struct ColourWorker {
     latest: Arc<AtomicU64>,
 }
 impl ColourWorker {
-    fn new() -> std::io::Result<Self> {
+    /// Start the colour worker; `ui` is woken when a load or check result is ready.
+    fn new(ui: crate::render_service::Wake) -> std::io::Result<Self> {
         let mailbox = Arc::new((
             Mutex::new(ColourMailbox::default()),
             std::sync::Condvar::new(),
@@ -629,20 +630,28 @@ impl ColourWorker {
                     } else {
                         Ok(())
                     };
-                    let mut slot = worker_mailbox
-                        .0
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner);
-                    if slot.stop {
-                        return;
-                    }
-                    if worker_latest.load(Ordering::Acquire) == request.generation {
-                        slot.result = Some(ColourResult {
-                            generation: request.generation,
-                            src: request.src,
-                            config,
-                            check,
-                        });
+                    // The UI is woken after the mailbox lock is released (`Wake::wake`).
+                    let stored = {
+                        let mut slot = worker_mailbox
+                            .0
+                            .lock()
+                            .unwrap_or_else(PoisonError::into_inner);
+                        if slot.stop {
+                            return;
+                        }
+                        let current = worker_latest.load(Ordering::Acquire) == request.generation;
+                        if current {
+                            slot.result = Some(ColourResult {
+                                generation: request.generation,
+                                src: request.src,
+                                config,
+                                check,
+                            });
+                        }
+                        current
+                    };
+                    if stored {
+                        ui.wake();
                     }
                 }
             })?;
@@ -693,8 +702,9 @@ pub struct State {
 }
 
 impl State {
-    pub fn new(sel: Sel) -> Self {
-        let (worker, err) = match ColourWorker::new() {
+    /// The colour state of `sel`, its config loading on a worker that wakes `ui` when ready.
+    pub fn new(sel: Sel, ui: crate::render_service::Wake) -> Self {
+        let (worker, err) = match ColourWorker::new(ui) {
             Ok(worker) => (Some(worker), None),
             Err(error) => (
                 None,
@@ -914,10 +924,9 @@ impl State {
                 self.rebuild();
             }
         }
+        // The worker wakes the UI when the load is done (`State::new`).
         if self.pending {
             ui.label("Preparing colour configuration…");
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(33));
         } else if let Some(e) = &self.err {
             ui.add_space(4.0);
             ui.colored_label(ui.visuals().error_fg_color, format!("OCIO not shown: {e}"));
@@ -1340,7 +1349,13 @@ mod tests {
         assert_eq!(n.display, "Display P3 HDR - Display");
         assert_eq!(n.view, "ACES 2.0 - HDR 1000 nits (P3 D65)");
         assert_eq!(n.look, "ACES 1.3 Reference Gamut Compression");
-        assert!(o.transform(&n, true).unwrap().light().unwrap().hdr());
+        // Display P3 HDR is an EDR display: its light is relative to SDR white (1.0 = SDR
+        // white), not absolute nits, and HDR highlights extend above 1.0.
+        let t = o.transform(&n, true).unwrap();
+        assert_eq!(t.light().unwrap(), crate::color::DisplayLight::Relative);
+        let mut px = [[64.0, 64.0, 64.0, 1.0]];
+        t.processor().apply_rgba(&mut px);
+        assert!(px[0][1] > 5.0, "EDR highlight {}", px[0][1]);
     }
 
     fn cg() -> Ocio {
@@ -1628,11 +1643,14 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(2));
             }
         }
-        let mut s = State::new(Sel {
-            on: true,
-            config: "ocio://default".into(),
-            ..Sel::default()
-        });
+        let mut s = State::new(
+            Sel {
+                on: true,
+                config: "ocio://default".into(),
+                ..Sel::default()
+            },
+            crate::render_service::Wake::default(),
+        );
         ready(&mut s);
         assert!(s.err.is_none() && s.config().is_ok(), "{:?}", s.err);
         let generation = s.generation;
@@ -1665,7 +1683,7 @@ mod tests {
 
     #[test]
     fn colour_panel_draws_while_the_worker_mailbox_is_busy() {
-        let mut state = State::new(Sel::default());
+        let mut state = State::new(Sel::default(), crate::render_service::Wake::default());
         let mailbox = state.worker.as_ref().unwrap().mailbox.clone();
         let _busy = mailbox.0.lock().unwrap();
         assert!(!state.poll());
@@ -1682,10 +1700,13 @@ mod tests {
 
     #[test]
     fn colour_worker_keeps_only_the_latest_selection() {
-        let mut state = State::new(Sel {
-            on: true,
-            ..Default::default()
-        });
+        let mut state = State::new(
+            Sel {
+                on: true,
+                ..Default::default()
+            },
+            crate::render_service::Wake::default(),
+        );
         for _ in 0..20 {
             state.sel.view = "superseded invalid view".into();
             state.rebuild();

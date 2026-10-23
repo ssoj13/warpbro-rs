@@ -4157,44 +4157,16 @@ mod tests {
             .unwrap_or_else(|e| panic!("WGSL validation error:\n{}", e.emit_to_string(&src)));
 
         let expected = [
-            "world",
-            "world_full",
-            "world_fast",
-            "world_fast_bulb",
-            "world_direct",
-            "fast_bulb",
-            "fast_box",
-            "fast_quat",
-            "fast_kifs",
-            "fast_kleinian",
-            "fast_pseudo_kleinian",
-            "fast_apollonian",
-            "fast_hybrid",
-            "full_bulb",
-            "full_box",
-            "full_quat",
-            "full_kifs",
-            "full_kleinian",
-            "full_pseudo_kleinian",
-            "full_apollonian",
-            "full_hybrid",
-            "direct_bulb",
-            "direct_box",
-            "direct_quat",
-            "direct_kifs",
-            "direct_kleinian",
-            "direct_pseudo_kleinian",
-            "direct_apollonian",
-            "direct_hybrid",
-            "single_fast",
-            "single_full",
-            "single_direct",
             "tally",
+            "tally_sum",
             "adapt",
             "tonemap",
             "tonemap_display",
             "pick",
-        ];
+        ]
+        .map(String::from)
+        .into_iter()
+        .chain(crate::render_wgpu::TraceEntry::all().map(|entry| entry.name()));
         for name in expected {
             assert!(
                 module
@@ -4203,18 +4175,6 @@ mod tests {
                     .any(|ep| ep.name == name && ep.stage == naga::ShaderStage::Compute),
                 "missing compute entry point {name}"
             );
-        }
-        for code in 0..crate::scene::Formula::COUNT {
-            for prefix in ["world_fast_f", "world_full_f", "world_direct_f"] {
-                let name = format!("{prefix}{code}");
-                assert!(
-                    module
-                        .entry_points
-                        .iter()
-                        .any(|ep| ep.name == name && ep.stage == naga::ShaderStage::Compute),
-                    "missing specialized world compute entry point {name}"
-                );
-            }
         }
 
         // Verify all 28 formula families round-trip through WorldDocument, metadata, and Scene::pack

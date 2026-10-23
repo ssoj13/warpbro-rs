@@ -338,6 +338,18 @@ First build the safety net, then fix each divergence against the pinned fractal-
   (`world.rs:481-483`).
 - [ ] **7.3 L.** WGPU display does GPU -> CPU -> GPU (`render_wgpu.rs:1186-1201`, `app.rs:4255`);
   same device as egui. Displaying from the GPU buffer removes 2 copies: design change, measure.
+- [ ] **7.4 M. WGPU first-use pipeline compile takes minutes** (found in wave 2 integration,
+  2026-10-23). `render::tests::cuda_wgpu_renders_mandelbulb_world_and_picks_object`: the first
+  `gpu.pick` took 908.8 s with one CPU core at 100 % and the GPU at 0-1 % (driver compiling the
+  dynamic-family pick pipeline); the following `step` (trace pipelines) did not finish within the
+  remaining run. The same test at e75a8c6 had not finished its pick after ~49 min, but both runs
+  were on a heavily loaded machine, so the absolute times prove nothing. A static estimate of the
+  inlined WGSL (call graph expanded per call site) puts the new pick at ~73k statements vs ~110k
+  at e75a8c6: the module is not larger. Fix directions: a persistent wgpu `PipelineCache`
+  (compiled pipelines stored on disk, reused across runs); measure the pick module size (naga ->
+  SPIR-V per entry) and `create_compute_pipeline` time per entry; suspect constructs are the
+  constant-trip refinement loops in `march` that inline the 28-family dynamic union. **Measure
+  on an idle machine.**
 
 ---
 

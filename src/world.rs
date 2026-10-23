@@ -110,11 +110,25 @@ pub enum WorldKind {
     /// (Outliner parent) it sections that fractal, at the root every fractal.
     Mask,
 }
+/// Deserialize a persisted `Option` field that must be present: serde fills a missing `Option`
+/// with `None` on its own, but with `deserialize_with` a missing field is an error (strict
+/// decode: nothing is filled in), while `null` still reads as `None`. Use as
+/// `#[serde(deserialize_with = "present")]` (`crate::world::present` outside this module).
+pub(crate) fn present<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::deserialize(d)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorldDocument {
     pub graph: SubnetFile,
+    #[serde(deserialize_with = "present")]
     pub active_camera: Option<NodeId>,
+    #[serde(deserialize_with = "present")]
     pub active_environment: Option<NodeId>,
     pub first: u32,
     pub last: u32,
@@ -488,6 +502,23 @@ impl WorldEditor {
             Ok(())
         })?;
         Ok(pasted)
+    }
+    /// Replace the document by `document` as one undoable edit (Edit > Reset scene). Live state
+    /// stays as undo keeps it (`keep_live`: takes, CamClip, identity); the selection becomes the
+    /// first fractal, as `new` picks it.
+    pub fn reset(&mut self, document: WorldDocument) -> Result<(), String> {
+        let document = self.keep_live(document);
+        let selection = document
+            .nodes()
+            .iter()
+            .find(|n| n.kind == WorldKind::Fractal)
+            .map(|n| n.id);
+        self.apply_edit(None, |editor| {
+            editor.document = document;
+            editor.selection = selection;
+            editor.selected = selection.into_iter().collect();
+            Ok(())
+        })
     }
     /// Cache invalidation token, combined with the document UUID by consumers.
     pub fn revision(&self) -> u64 {
@@ -2695,18 +2726,58 @@ fn numeric(v: &Value) -> bool {
         || v.as_array()
             .is_some_and(|a| !a.is_empty() && a.iter().all(Value::is_number))
 }
-/// Stored node data has this shape before anything indexes into it: an object whose `host`,
-/// `gpu`, `metadata` and `discrete` (where present) are objects. Decoding
-/// (`WorldDocument::decode_json`) and pasting (`WorldEditor::insert_fragment`) check it, so a
-/// malformed or hand-edited node is an error instead of a panic on assignment.
+/// The fields of stored node data, as `WorldDocument::insert` writes them; a node that plays a
+/// take also has `take` (`attach_take`).
+const NODE_FIELDS: [&str; 10] = [
+    "type",
+    "name",
+    "parent",
+    "children",
+    "host",
+    "gpu",
+    "discrete",
+    "metadata",
+    "material",
+    "environment_revision",
+];
+
+/// Stored node data has this shape before anything indexes into it: an object with exactly the
+/// `NODE_FIELDS` (and an optional `take`), a known `type`, `host`, `gpu`, `metadata` and
+/// `discrete` objects, `children` an array, and a `gpu` holding exactly its kind's
+/// `branches`. Decoding (`WorldDocument::decode_json`) and pasting
+/// (`WorldEditor::insert_fragment`) check it, so a malformed, hand-edited or old-format node is
+/// an error instead of a panic on assignment or a silently missing value.
 fn node_shape(key: &str, data: &Value) -> Result<(), String> {
     let node = data
         .as_object()
         .ok_or_else(|| format!("Node {key} is not an object"))?;
+    if let Some(field) = NODE_FIELDS.iter().find(|f| !node.contains_key(**f)) {
+        return Err(format!("Node {key}: missing {field}"));
+    }
+    if let Some(field) = node
+        .keys()
+        .find(|k| k.as_str() != "take" && !NODE_FIELDS.contains(&k.as_str()))
+    {
+        return Err(format!("Node {key}: unknown field {field}"));
+    }
     for field in ["host", "gpu", "metadata", "discrete"] {
-        if node.get(field).is_some_and(|v| !v.is_object()) {
+        if !node.get(field).is_some_and(Value::is_object) {
             return Err(format!("Node {key}: {field} must be an object"));
         }
+    }
+    if !node.get("children").is_some_and(Value::is_array) {
+        return Err(format!("Node {key}: children must be an array"));
+    }
+    let kind: WorldKind = serde_json::from_value(node.get("type").cloned().unwrap_or_default())
+        .map_err(|e| format!("Node {key}: type: {e}"))?;
+    let expected = branches(kind);
+    let gpu = node.get("gpu").and_then(Value::as_object);
+    if gpu.is_none_or(|gpu| {
+        gpu.len() != expected.len() || expected.iter().any(|b| !gpu.contains_key(*b))
+    }) {
+        return Err(format!(
+            "Node {key}: gpu must hold exactly the {kind:?} branches {expected:?}"
+        ));
     }
     Ok(())
 }
@@ -3857,7 +3928,8 @@ impl WorldDocument {
     /// The stored `gpu` template of a new `kind` node made from `scene`: exactly its `branches`
     /// (a fractal's `render` holds only its iterations: the profile renders it). Every node
     /// evaluates onto this (`evaluated_node`); a snapshot lays a fractal's branches over the
-    /// world's (`snapshot_with_render_profile`). One template for `insert` and `hydrate_schema`.
+    /// world's (`snapshot_with_render_profile`). Used by `insert`; `node_shape` requires a
+    /// stored `gpu` to hold exactly these branches.
     fn node_template(&self, kind: WorldKind, scene: &Scene) -> Result<Value, String> {
         if crate::render_profiles::setting_kind(kind) {
             return self.settings_template(kind, scene);
@@ -3879,7 +3951,7 @@ impl WorldDocument {
     /// The attributes a new `kind` node made from `scene` starts with besides its branches: the
     /// layer flags, its span over the work area, the transform (a fractal's from the scene's
     /// object), and a camera's orbit and framing radius (the scene's fractal as it is now,
-    /// `CAMERA_FRAMING`). One list for `insert` and `hydrate_schema`.
+    /// `CAMERA_FRAMING`). Used by `insert`.
     fn base_attrs(&self, kind: WorldKind, scene: &Scene) -> Attrs {
         let mut attrs = Attrs::new();
         for (path, value) in [
@@ -4492,9 +4564,8 @@ impl WorldDocument {
     /// component ("/a/1" connected through "/a" reads "<source>/1"). None: not connected.
     ///
     /// Connections (Playa `conn`) are an unfinished feature: nothing in the app makes one yet,
-    /// only tests and the legacy migrations. This is the ONE place that reads them: evaluation
-    /// (`resolve_attribute_with`), integration (`integrated_scalar`) and the "static" test
-    /// ([`Self::driven`]) all follow it.
+    /// only tests. This is the ONE place that reads them: evaluation (`resolve_attribute_with`),
+    /// integration (`integrated_scalar`) and the "static" test ([`Self::driven`]) all follow it.
     fn connection(attrs: &Attrs, path: &str) -> Option<(NodeId, String)> {
         let (attr, channel) = Self::lane(attrs, path);
         let conn = attrs.conn(&attr)?;
@@ -5714,944 +5785,18 @@ impl WorldDocument {
         Ok(())
     }
 
-    /// Decode a persisted `WorldDocument` from JSON text: a document of this build's graph format
-    /// whose nodes have the stored shape before anything reads them, and that passes `validate`.
-    ///
-    /// LEGACY, deleted in wave 2 of plan1 once `convert_documents_once` has converted the
-    /// checked-in templates and the user's documents: the dropping of unknown top-level fields and
-    /// the defaults below, and `hydrate_schema`, which upgrades older layouts on the way in (so
-    /// until then a decoded document can differ from its text).
+    /// Decode a persisted `WorldDocument` from JSON text, strictly: an unknown or missing field
+    /// is an error (`deny_unknown_fields`, `node_shape`), the graph is of this build's format
+    /// (`check_format`) and the document passes `validate`. Nothing is upgraded or filled in, so
+    /// a decoded document re-encodes to its text: older layouts were converted once (plan1 Q1)
+    /// and are not read. The one reader of saved documents (`io_service::decode_scene`).
     pub fn decode_json(text: &str) -> Result<Self, String> {
-        let mut raw: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
-        let Some(top) = raw.as_object_mut() else {
-            return Err("Expected world document object".into());
-        };
-        let Some(nodes) = top
-            .get("graph")
-            .and_then(|graph| graph.get("nodes"))
-            .and_then(Value::as_object)
-        else {
-            return Err("Missing world graph".into());
-        };
-        for (key, data) in nodes {
-            node_shape(key, data)?;
-        }
-        top.retain(|k, _| {
-            matches!(
-                k.as_str(),
-                "graph"
-                    | "active_camera"
-                    | "active_environment"
-                    | "first"
-                    | "last"
-                    | "fps"
-                    | "marks"
-                    | "takes"
-                    | "camera_slots"
-            )
-        });
-        top.entry("active_camera").or_insert(Value::Null);
-        top.entry("active_environment").or_insert(Value::Null);
-        top.entry("first").or_insert_with(|| json!(0));
-        top.entry("last").or_insert_with(|| json!(120));
-        top.entry("fps").or_insert_with(|| json!(24.0));
-        top.entry("marks").or_insert_with(|| json!({}));
-        let mut document: Self = serde_json::from_value(raw).map_err(|e| e.to_string())?;
+        let document: Self = serde_json::from_str(text).map_err(|e| e.to_string())?;
         document.check_format()?;
-        document.hydrate_schema()?;
         document.validate()?;
         Ok(document)
     }
-
-    /// LEGACY, deleted whole in wave 2 of plan1 (see `decode_json`): upgrades every older layout
-    /// on the way in. In order: pre-Track animation channels, pre-render-profile documents,
-    /// QualitySettings nodes, the single `lighting` block (split into the Sun's `sun` and the
-    /// Environment's `sky`), the camera's frozen formula copy (now `CAMERA_FRAMING`), a fractal's
-    /// frozen material copy (now a Material node when it differs from the world's), then the
-    /// generic merge that fills missing parameters from the current schema, strips removed ones,
-    /// slims every node's `gpu` to its branches (`node_template`) and aligns numeric types.
-    /// Documents this build writes need none of it: `insert` writes them complete.
-    pub fn hydrate_schema(&mut self) -> Result<(), String> {
-        // 1. Upgrade legacy pre-Track animation channels (`{"keys": [...]}`) before deserializing `Attrs`.
-        for node in self.graph.nodes.values_mut() {
-            let Some(map) = node
-                .get_mut("host")
-                .and_then(|h| h.get_mut("map"))
-                .and_then(Value::as_object_mut)
-            else {
-                continue;
-            };
-            for slot in map.values_mut() {
-                let Some(channels) = slot
-                    .get_mut("anim")
-                    .and_then(|a| a.get_mut("channels"))
-                    .and_then(Value::as_array_mut)
-                else {
-                    continue;
-                };
-                for ch in channels {
-                    if ch.get("track").is_some() {
-                        continue;
-                    }
-                    let Some(legacy_keys) = ch.get("keys").and_then(Value::as_array) else {
-                        continue;
-                    };
-                    let mut converted = Channel::new();
-                    for k in legacy_keys {
-                        if let (Some(frame), Some(val)) = (
-                            k.get("frame").and_then(Value::as_f64),
-                            k.get("value").and_then(Value::as_f64),
-                        ) {
-                            let tan =
-                                match k.get("interp").and_then(Value::as_str).unwrap_or("Smooth") {
-                                    "Constant" | "constant" | "Step" | "step" => Tan::Constant,
-                                    "Linear" | "linear" => Tan::Linear,
-                                    _ => Tan::Smooth,
-                                };
-                            converted.upsert_key(Keyframe::with_tan(frame, val as f32, tan));
-                        }
-                    }
-                    *ch = serde_json::to_value(converted).map_err(|e| e.to_string())?;
-                }
-            }
-        }
-
-        let default_scene = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
-        let mut default_world = scene_json(&default_scene)?;
-        if let Some(obj) = default_world.as_object_mut() {
-            obj.remove("render");
-        }
-        let formula_presets: Vec<Value> = crate::scene::Formula::PRESETS
-            .iter()
-            .filter_map(|formula| serde_json::to_value(formula).ok())
-            .collect();
-        let facing_schema = json!({
-            "color": [1.0, 1.0, 1.0],
-            "roughness": 0.3,
-            "metallic": 0.0,
-            "exponent": 2.3,
-        });
-
-        // 2. Upgrade pre-render-profiles documents (single `settings_node` / `world.render`).
-        let needs_render_profiles = ["output_render", "viewport_settings", "output_settings"]
-            .iter()
-            .any(|k| {
-                !self
-                    .graph
-                    .bus_slots
-                    .get(*k)
-                    .and_then(Value::as_str)
-                    .and_then(NodeId::parse)
-                    .is_some_and(|id| self.graph.nodes.contains_key(&id.to_string()))
-            });
-        if needs_render_profiles {
-            let mut seed_scene = default_scene.clone();
-            let mut render_val =
-                serde_json::to_value(seed_scene.render).map_err(|e| e.to_string())?;
-            let mut legacy_samples = None;
-            if let Some(world_render) = self
-                .graph
-                .bus_slots
-                .get("world")
-                .and_then(|w| w.get("render"))
-            {
-                legacy_samples = world_render.get("samples").and_then(Value::as_u64);
-                if let (Some(rmap), Some(wmap)) =
-                    (render_val.as_object_mut(), world_render.as_object())
-                {
-                    for (k, v) in wmap {
-                        if rmap.contains_key(k) {
-                            rmap.insert(k.clone(), v.clone());
-                        }
-                    }
-                }
-            }
-            if let Some(settings_id) = self
-                .graph
-                .bus_slots
-                .remove("settings_node")
-                .and_then(|v| v.as_str().map(str::to_owned))
-            {
-                if let Some(settings_node) = self.graph.nodes.remove(&settings_id)
-                    && let Ok(settings_attrs) =
-                        serde_json::from_value::<Attrs>(settings_node["host"].clone())
-                {
-                    for (path, val) in settings_attrs.iter() {
-                        if path == "/render/samples" {
-                            legacy_samples = attr_json(val.clone()).as_u64().or(legacy_samples);
-                        } else if let Some(tail) = path.strip_prefix("/render")
-                            && render_val.pointer(tail).is_some()
-                        {
-                            set_pointer(&mut render_val, tail, attr_json(val.clone()), false)
-                                .map_err(|e| format!("Legacy render setting {path}: {e}"))?;
-                        }
-                    }
-                }
-                if let Some(order) = self
-                    .graph
-                    .bus_slots
-                    .get_mut("layer_order")
-                    .and_then(Value::as_array_mut)
-                {
-                    order.retain(|v| v.as_str() != Some(settings_id.as_str()));
-                }
-            }
-            let render_schema =
-                serde_json::to_value(default_scene.render).map_err(|e| e.to_string())?;
-            Self::merge_schema_value(
-                &mut render_val,
-                &render_schema,
-                &formula_presets,
-                &facing_schema,
-            );
-            seed_scene.render = serde_json::from_value(render_val)
-                .map_err(|e| format!("Legacy render settings: {e}"))?;
-            self.seed_settings(&seed_scene)?;
-            if let Some(samples) = legacy_samples {
-                let render_ids: Vec<NodeId> = self
-                    .nodes()
-                    .into_iter()
-                    .filter(|n| n.kind == WorldKind::RenderSettings && n.name != "Moving")
-                    .map(|n| n.id)
-                    .collect();
-                for rid in render_ids {
-                    self.set_attribute(
-                        rid,
-                        "/quality/samples",
-                        json!(samples),
-                        0.0,
-                        false,
-                        Tan::Constant,
-                    )
-                    .map_err(|e| format!("Legacy sample count {samples}: {e}"))?;
-                }
-            }
-        }
-
-        // 2.5. Fold legacy `QualitySettings` nodes into `RenderSettings` and migrate look fields
-        // (`exposure_stops`, `saturation`, `reinhard`) from `output_render` onto `ViewportSettings`.
-        let quality_nodes: HashMap<String, Value> = self
-            .graph
-            .nodes
-            .iter()
-            .filter(|(_, n)| n["type"].as_str() == Some("QualitySettings"))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        if !quality_nodes.is_empty() {
-            for k in quality_nodes.keys() {
-                self.graph.nodes.remove(k);
-            }
-            if let Some(order) = self
-                .graph
-                .bus_slots
-                .get_mut("layer_order")
-                .and_then(Value::as_array_mut)
-            {
-                order.retain(|v| v.as_str().is_none_or(|s| !quality_nodes.contains_key(s)));
-            }
-        }
-        let render_keys: Vec<String> = self
-            .graph
-            .nodes
-            .iter()
-            .filter(|(_, n)| n["type"].as_str() == Some("RenderSettings"))
-            .map(|(k, _)| k.clone())
-            .collect();
-        for key in &render_keys {
-            let Some(id) = NodeId::parse(key) else {
-                continue;
-            };
-            let Ok(mut r_attrs) = self.attrs(id) else {
-                continue;
-            };
-            let qid_str = r_attrs
-                .get("/render/quality_id")
-                .cloned()
-                .map(attr_json)
-                .and_then(|v| v.as_str().map(str::to_owned))
-                .or_else(|| {
-                    self.graph
-                        .nodes
-                        .get(key)?
-                        .pointer("/gpu/render/quality_id")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned)
-                });
-            if let Some(qid) = qid_str
-                && let Some(qnode) = quality_nodes.get(&qid)
-            {
-                if let Some(q_gpu) = qnode["gpu"].get("quality").cloned()
-                    && let Some(r_node) = self.graph.nodes.get_mut(key)
-                {
-                    r_node["gpu"]["quality"] = q_gpu;
-                }
-                if let Some(q_disc) = qnode["discrete"].as_object()
-                    && let Some(r_disc) = self
-                        .graph
-                        .nodes
-                        .get_mut(key)
-                        .and_then(|r_node| r_node["discrete"].as_object_mut())
-                {
-                    for (dk, dv) in q_disc {
-                        if dk.starts_with("/quality/") {
-                            r_disc.insert(dk.clone(), dv.clone());
-                        }
-                    }
-                }
-                if let Ok(q_attrs) = serde_json::from_value::<Attrs>(qnode["host"].clone()) {
-                    for (path, val) in q_attrs.iter() {
-                        if path.starts_with("/quality/") {
-                            r_attrs.set(path, val.clone());
-                            if let Some(anim) = q_attrs.anim(path).cloned() {
-                                r_attrs.set_anim(path, Some(anim));
-                            }
-                            if let Some(conn) = q_attrs.conn(path).cloned() {
-                                r_attrs.set_conn(path, Some(conn));
-                            }
-                        }
-                    }
-                    self.store_attrs(id, &r_attrs)?;
-                }
-            }
-        }
-        if let Some(vp_key) = self
-            .graph
-            .bus_slots
-            .get("viewport_settings")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            && let Some(vp_id) = NodeId::parse(&vp_key)
-            && let Ok(mut vp_attrs) = self.attrs(vp_id)
-            && !vp_attrs.contains("/render/exposure_stops")
-            && let Some(out_key) = self
-                .graph
-                .bus_slots
-                .get("output_render")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-            && let Some(out_node) = self.graph.nodes.get(&out_key).cloned()
-        {
-            if let Some(vp_node) = self.graph.nodes.get_mut(&vp_key) {
-                let mut look_gpu = serde_json::Map::new();
-                for field in crate::render_profiles::LOOK_RENDER_FIELDS {
-                    if let Some(v) = out_node["gpu"]["render"].get(*field).cloned() {
-                        look_gpu.insert((*field).into(), v);
-                    }
-                }
-                if !look_gpu.is_empty() {
-                    vp_node["gpu"]["render"] = Value::Object(look_gpu);
-                }
-            }
-            if let Ok(out_attrs) = serde_json::from_value::<Attrs>(out_node["host"].clone()) {
-                for field in crate::render_profiles::LOOK_RENDER_FIELDS {
-                    let path = format!("/render/{field}");
-                    if let Some(val) = out_attrs.get(&path).cloned() {
-                        vp_attrs.set(&path, val);
-                        if let Some(anim) = out_attrs.anim(&path).cloned() {
-                            vp_attrs.set_anim(&path, Some(anim));
-                        }
-                        if let Some(conn) = out_attrs.conn(&path).cloned() {
-                            vp_attrs.set_conn(&path, Some(conn));
-                        }
-                    }
-                }
-                self.store_attrs(vp_id, &vp_attrs)?;
-            }
-        }
-
-        // 2.6. Split `/lighting/*` attributes into the Sun's `/sun/*` and the Environment's
-        // `/sky/*` (the JSON blobs split in `migrate_legacy_json`); the merge below strips each
-        // kind's foreign half. The disc switch was read from the first Sun: every Environment
-        // takes that one.
-        self.split_lighting_attrs()?;
-
-        // 3. Hydrate `bus_slots["world"]`.
-        let world_slot = self
-            .graph
-            .bus_slots
-            .entry("world".into())
-            .or_insert_with(|| default_world.clone());
-        Self::migrate_legacy_json(world_slot);
-        Self::merge_schema_value(world_slot, &default_world, &formula_presets, &facing_schema);
-
-        // 3.5. Frozen copies in the old full-scene `gpu` blobs become explicit data before the
-        // merge slims every blob to its branches.
-        self.thaw_frozen_copies(&formula_presets, &facing_schema)?;
-
-        // Precompute all valid `/formula/<Family>/*` attributes across every formula family.
-        let mut all_formula_attrs = Attrs::new();
-        for preset in &formula_presets {
-            discover(preset, "/formula", &mut all_formula_attrs);
-        }
-
-        // 4. Hydrate every node's `gpu`, `metadata`, and `host` (`Attrs`).
-        let node_keys: Vec<String> = self.graph.nodes.keys().cloned().collect();
-        for key in node_keys {
-            let Some(id) = NodeId::parse(&key) else {
-                continue;
-            };
-            let Ok(kind) = serde_json::from_value::<WorldKind>(self.node(id)?["type"].clone())
-            else {
-                continue;
-            };
-            let gpu_schema = if crate::render_profiles::setting_kind(kind) {
-                let mut schema = self.node_template(kind, &default_scene)?;
-                for ref_path in [
-                    "/viewport/moving_id",
-                    "/viewport/still_id",
-                    "/viewport/manual_id",
-                ] {
-                    if let Some(existing) = self.node(id)?["gpu"].pointer(ref_path).cloned()
-                        && existing.is_string()
-                        && let Some(slot) = schema.pointer_mut(ref_path)
-                    {
-                        *slot = existing;
-                    }
-                }
-                schema
-            } else {
-                self.node_template(kind, &default_scene)?
-            };
-
-            {
-                let node_val = self.node_mut(id)?;
-                if let Some(node_obj) = node_val.as_object_mut() {
-                    node_obj.entry("children").or_insert_with(|| json!([]));
-                    node_obj.entry("discrete").or_insert_with(|| json!({}));
-                    node_obj.entry("metadata").or_insert_with(|| json!({}));
-                    node_obj.entry("material").or_insert(Value::Null);
-                    node_obj
-                        .entry("environment_revision")
-                        .or_insert_with(|| json!(0));
-                }
-                if crate::render_profiles::setting_kind(kind)
-                    && node_val["metadata"]["catalog_role"].is_null()
-                {
-                    node_val["metadata"]["catalog_role"] =
-                        json!(crate::render_profiles::CatalogRole::Profile);
-                }
-                let gpu = &mut node_val["gpu"];
-                Self::migrate_legacy_json(gpu);
-                Self::merge_schema_value(gpu, &gpu_schema, &formula_presets, &facing_schema);
-                if let Some(arr) = node_val["discrete"]
-                    .get_mut("/formula")
-                    .and_then(Value::as_array_mut)
-                {
-                    for item in arr {
-                        let f_schema = Self::formula_schema(item, &formula_presets);
-                        Self::merge_schema_value(item, &f_schema, &formula_presets, &facing_schema);
-                    }
-                }
-                if let Some(arr) = node_val["discrete"]
-                    .get_mut("/material/facing")
-                    .and_then(Value::as_array_mut)
-                {
-                    for item in arr {
-                        if item.is_object() {
-                            Self::merge_schema_value(
-                                item,
-                                &facing_schema,
-                                &formula_presets,
-                                &facing_schema,
-                            );
-                        }
-                    }
-                }
-            }
-
-            // Build `canonical_attrs` for this node and hydrate `attrs`.
-            let mut attrs = self.attrs(id)?;
-            let mut attrs_changed = false;
-
-            // Legacy `/camera/aperture` -> `/camera/f_number` migration in `Attrs`.
-            if kind == WorldKind::Camera && !attrs.contains("/camera/f_number") {
-                if let Some(ap) = attrs.get("/camera/aperture").cloned() {
-                    attrs.set("/camera/f_number", ap);
-                    if let Some(anim) = attrs.anim("/camera/aperture").cloned() {
-                        attrs.set_anim("/camera/f_number", Some(anim));
-                    }
-                    if let Some(conn) = attrs.conn("/camera/aperture").cloned() {
-                        attrs.set_conn("/camera/f_number", Some(conn));
-                    }
-                    attrs_changed = true;
-                }
-                if let Some(nav_ap) = attrs.get("/_navigation/camera/aperture").cloned() {
-                    attrs.set("/_navigation/camera/f_number", nav_ap);
-                    attrs.remove("/_navigation/camera/aperture");
-                    attrs_changed = true;
-                }
-            }
-            // Legacy `/julia` Vec3 without `/julia_mix`: preserve active Julia constant (`julia_mix = 1.0`).
-            if kind == WorldKind::Fractal
-                && !attrs.contains("/julia_mix")
-                && matches!(attrs.get("/julia"), Some(AttrValue::Vec3(_)))
-            {
-                attrs.set("/julia_mix", AttrValue::Float(1.0));
-                attrs_changed = true;
-            }
-
-            let mut canonical_attrs = Attrs::new();
-            let gpu_snapshot = self.node(id)?["gpu"].clone();
-            for branch in branches(kind) {
-                if let Some(v) = gpu_snapshot.get(*branch) {
-                    discover(v, &format!("/{branch}"), &mut canonical_attrs);
-                }
-            }
-            for (path, value) in self.base_attrs(kind, &default_scene).iter() {
-                canonical_attrs.set(path, value.clone());
-            }
-
-            // Hydrate JSON blobs stored in `attrs` (`/formula`, `/material/facing`) and discover their children.
-            if let Some(AttrValue::Json(s)) = attrs.get("/formula").cloned()
-                && let Ok(mut f_val) = serde_json::from_str::<Value>(&s)
-            {
-                let before = f_val.clone();
-                let f_schema = Self::formula_schema(&f_val, &formula_presets);
-                Self::merge_schema_value(&mut f_val, &f_schema, &formula_presets, &facing_schema);
-                if f_val != before {
-                    attrs.set("/formula", to_attr(&f_val));
-                    attrs_changed = true;
-                }
-                discover(&f_val, "/formula", &mut canonical_attrs);
-            }
-            if let Some(AttrValue::Json(s)) = attrs.get("/material/facing").cloned()
-                && let Ok(mut facing_val) = serde_json::from_str::<Value>(&s)
-                && facing_val.is_object()
-            {
-                let before = facing_val.clone();
-                Self::merge_schema_value(
-                    &mut facing_val,
-                    &facing_schema,
-                    &formula_presets,
-                    &facing_schema,
-                );
-                if facing_val != before {
-                    attrs.set("/material/facing", to_attr(&facing_val));
-                    attrs_changed = true;
-                }
-                discover(&facing_val, "/material/facing", &mut canonical_attrs);
-            }
-
-            // Add missing attributes from `canonical_attrs`, or replace legacy `Json("null")` when non-null now.
-            for (path, default_val) in canonical_attrs.iter() {
-                match attrs.get(path) {
-                    None => {
-                        attrs.set(path, default_val.clone());
-                        attrs_changed = true;
-                    }
-                    Some(AttrValue::Json(s))
-                        if s == "null"
-                            && !matches!(default_val, AttrValue::Json(ds) if ds == "null") =>
-                    {
-                        attrs.set(path, default_val.clone());
-                        attrs_changed = true;
-                    }
-                    _ => {}
-                }
-            }
-
-            // Remove obsolete paths and align `Int64 <-> Float` numeric types with current schema.
-            let existing_paths: Vec<String> = attrs.iter().map(|(p, _)| p.clone()).collect();
-            let discrete_obj = self.node(id)?["discrete"].clone();
-            for path in existing_paths {
-                let expected = canonical_attrs.get(&path).or_else(|| {
-                    (kind == WorldKind::Fractal && path.starts_with("/formula/"))
-                        .then(|| all_formula_attrs.get(&path))
-                        .flatten()
-                });
-                if let Some(expected_val) = expected {
-                    if discrete_obj.get(&path).is_none() {
-                        match (attrs.get(&path), expected_val) {
-                            (Some(AttrValue::Int64(v)), AttrValue::Float(_)) => {
-                                attrs.set(&path, AttrValue::Float(*v as f32));
-                                attrs_changed = true;
-                            }
-                            (Some(AttrValue::Float(v)), AttrValue::Int64(_)) => {
-                                attrs.set(&path, AttrValue::Int64(v.round() as i64));
-                                attrs_changed = true;
-                            }
-                            _ => {}
-                        }
-                    }
-                } else if !path.starts_with("/_navigation/")
-                    && !path.starts_with("/custom/")
-                    && !matches!(path.as_str(), TAKE_OFFSET | TAKE_SPEED)
-                {
-                    attrs.remove(&path);
-                    if let Some(dmap) = self.node_mut(id)?["discrete"].as_object_mut() {
-                        dmap.remove(&path);
-                    }
-                    attrs_changed = true;
-                }
-            }
-
-            if attrs_changed {
-                self.store_attrs(id, &attrs)?;
-            }
-        }
-        if !quality_nodes.is_empty()
-            && let Ok(vp_id) = self.viewport_settings_id()
-            && let Ok(vp_attrs) = self.attrs(vp_id)
-            && let Some(AttrValue::Str(still_key)) = vp_attrs.get("/viewport/still_id").cloned()
-            && let Some(AttrValue::Str(moving_key)) = vp_attrs.get("/viewport/moving_id").cloned()
-            && let Some(AttrValue::Str(manual_key)) = vp_attrs.get("/viewport/manual_id").cloned()
-        {
-            if let Some(out_key) = self
-                .graph
-                .bus_slots
-                .get("output_render")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                && out_key != still_key
-                && out_key != moving_key
-                && out_key != manual_key
-                && let Some(out_node) = self.graph.nodes.get(&out_key)
-                && out_node["name"].as_str() == Some("Output")
-                && out_node["metadata"]["catalog_role"].as_str() == Some("Profile")
-            {
-                self.graph
-                    .bus_slots
-                    .insert("output_render".into(), json!(still_key));
-                self.graph.nodes.remove(&out_key);
-                if let Some(order) = self
-                    .graph
-                    .bus_slots
-                    .get_mut("layer_order")
-                    .and_then(Value::as_array_mut)
-                {
-                    order.retain(|v| v.as_str() != Some(out_key.as_str()));
-                }
-            }
-            if moving_key != still_key
-                && let Some(moving_id) = NodeId::parse(&moving_key)
-                && let Some(moving_node) = self.graph.nodes.get(&moving_key)
-                && moving_node["name"].as_str() == Some("Moving")
-                && moving_node["metadata"]["catalog_role"].as_str() == Some("Profile")
-                && let Ok(mut m_attrs) = self.attrs(moving_id)
-            {
-                if let Some(m_node) = self.graph.nodes.get_mut(&moving_key) {
-                    m_node["gpu"]["render"]["method"] = json!("Fast");
-                    m_node["gpu"]["render"]["display"] = json!("PathTraced");
-                    m_node["gpu"]["quality"]["samples"] = json!(8);
-                    m_node["gpu"]["quality"]["resolution_scale"] = json!(1.0);
-                    m_node["gpu"]["quality"]["max_bounces"] = json!(2);
-                    m_node["gpu"]["quality"]["adaptive"]["enabled"] = json!(false);
-                }
-                m_attrs.set("/render/method", AttrValue::Str("Fast".into()));
-                m_attrs.set("/render/display", AttrValue::Str("PathTraced".into()));
-                m_attrs.set("/quality/samples", AttrValue::Int64(8));
-                m_attrs.set("/quality/resolution_scale", AttrValue::Float(1.0));
-                m_attrs.set("/quality/max_bounces", AttrValue::Int64(2));
-                m_attrs.set("/quality/adaptive/enabled", AttrValue::Bool(false));
-                self.store_attrs(moving_id, &m_attrs)?;
-            }
-        }
-        Ok(())
-    }
-
-    /// LEGACY step of `hydrate_schema`: every `/lighting/<field>` attribute (value, keys,
-    /// connection, discrete values) moves to its `/sun/..` or `/sky/..` path
-    /// ([`LIGHTING_SPLIT`]). The Environment's disc switch becomes the first Sun's, the one the
-    /// renderer read.
-    fn split_lighting_attrs(&mut self) -> Result<(), String> {
-        const DISC: &str = "/lighting/sun_disc";
-        let mut disc = None;
-        if let Some(sun) = self
-            .nodes()
-            .into_iter()
-            .find(|n| n.kind == WorldKind::DirectionalLight)
-        {
-            let attrs = self.attrs(sun.id)?;
-            if let Some(value) = attrs.get(DISC).cloned() {
-                let values = self.node(sun.id)?["discrete"].get(DISC).cloned();
-                disc = Some((value, attrs.anim(DISC).cloned(), values));
-            }
-        }
-        let keys: Vec<String> = self.graph.nodes.keys().cloned().collect();
-        for key in keys {
-            let Some(id) = NodeId::parse(&key) else {
-                continue;
-            };
-            let mut attrs = self.attrs(id)?;
-            let mut moved = false;
-            let mut renames = Vec::new();
-            for (old, branch, field) in LIGHTING_SPLIT {
-                let (from, to) = (format!("/lighting/{old}"), format!("/{branch}/{field}"));
-                let Some(value) = attrs.get(&from).cloned() else {
-                    continue;
-                };
-                let (anim, conn) = (attrs.anim(&from).cloned(), attrs.conn(&from).cloned());
-                attrs.remove(&from);
-                attrs.set(&to, value);
-                attrs.set_anim(&to, anim);
-                if conn.is_some() {
-                    attrs.set_conn(&to, conn);
-                }
-                renames.push((from, to));
-                moved = true;
-            }
-            let environment = self.node(id)?["type"].as_str() == Some("Environment");
-            if environment && let Some((value, anim, _)) = &disc {
-                attrs.set("/sky/sun_disc", value.clone());
-                attrs.set_anim("/sky/sun_disc", anim.clone());
-                moved = true;
-            }
-            if !moved {
-                continue;
-            }
-            self.store_attrs(id, &attrs)?;
-            let dict = self
-                .node_mut(id)?
-                .get_mut("discrete")
-                .and_then(Value::as_object_mut)
-                .ok_or_else(|| format!("Node {key} has no discrete values"))?;
-            for (from, to) in renames {
-                if let Some(values) = dict.remove(&from) {
-                    dict.insert(to, values);
-                }
-            }
-            if environment && let Some((_, _, values)) = &disc {
-                dict.remove("/sky/sun_disc");
-                if let Some(values) = values {
-                    dict.insert("/sky/sun_disc".into(), values.clone());
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// LEGACY step of `hydrate_schema`, run before the merge slims every node's `gpu` to its
-    /// branches: what a node read from its old full-scene blob becomes explicit data. A camera
-    /// without `CAMERA_FRAMING` takes the framing radius of its frozen formula; a fractal
-    /// without a material whose frozen material differs from the world's (which it renders now,
-    /// `snapshot_with_render_profile`) gets a Material node holding it.
-    fn thaw_frozen_copies(
-        &mut self,
-        formula_presets: &[Value],
-        facing_schema: &Value,
-    ) -> Result<(), String> {
-        let default_scene = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
-        let material_schema =
-            serde_json::to_value(&default_scene.material).map_err(|e| e.to_string())?;
-        let world_material: crate::scene::Material = serde_json::from_value(
-            self.graph
-                .bus_slots
-                .get("world")
-                .and_then(|w| w.get("material"))
-                .cloned()
-                .ok_or("World settings have no material")?,
-        )
-        .map_err(|e| format!("World material: {e}"))?;
-        let keys: Vec<String> = self.graph.nodes.keys().cloned().collect();
-        for key in keys {
-            let Some(id) = NodeId::parse(&key) else {
-                continue;
-            };
-            let (kind, name, assigned, formula, material) = {
-                let node = self.node(id)?;
-                (
-                    node["type"].as_str().map(str::to_owned),
-                    node["name"].as_str().unwrap_or("Fractal").to_owned(),
-                    !node["material"].is_null(),
-                    node["gpu"].get("formula").cloned(),
-                    node["gpu"].get("material").cloned(),
-                )
-            };
-            match kind.as_deref() {
-                Some("Camera") => {
-                    let mut attrs = self.attrs(id)?;
-                    if attrs.contains(CAMERA_FRAMING) {
-                        continue;
-                    }
-                    let mut formula = formula.ok_or_else(|| {
-                        format!("Camera {key} has neither a framing radius nor a formula")
-                    })?;
-                    let schema = Self::formula_schema(&formula, formula_presets);
-                    Self::merge_schema_value(&mut formula, &schema, formula_presets, facing_schema);
-                    let formula: crate::scene::Formula = serde_json::from_value(formula)
-                        .map_err(|e| format!("Camera {key} formula: {e}"))?;
-                    attrs.set(CAMERA_FRAMING, to_attr(&json!(formula.framing_radius())));
-                    self.store_attrs(id, &attrs)?;
-                }
-                Some("Fractal") if !assigned => {
-                    let Some(mut material) = material else {
-                        continue;
-                    };
-                    Self::merge_schema_value(
-                        &mut material,
-                        &material_schema,
-                        formula_presets,
-                        facing_schema,
-                    );
-                    let material: crate::scene::Material = serde_json::from_value(material)
-                        .map_err(|e| format!("Fractal {key} material: {e}"))?;
-                    if material != world_material {
-                        let scene = Scene {
-                            material,
-                            ..default_scene.clone()
-                        };
-                        let created = self.insert(
-                            WorldKind::Material,
-                            &format!("{name} material"),
-                            &scene,
-                            None,
-                        )?;
-                        self.node_mut(id)?["material"] = json!(created);
-                    }
-                }
-                _ => {}
-            }
-        }
-        Ok(())
-    }
-
-    fn formula_schema(target_formula: &Value, formula_presets: &[Value]) -> Value {
-        if let Some(variant) = target_formula.as_object().and_then(|map| map.keys().next())
-            && let Some(preset) = formula_presets
-                .iter()
-                .find(|p| p.as_object().is_some_and(|m| m.contains_key(variant)))
-        {
-            return preset.clone();
-        }
-        formula_presets
-            .first()
-            .cloned()
-            .unwrap_or_else(|| json!({}))
-    }
-
-    fn migrate_legacy_json(target: &mut Value) {
-        let Some(map) = target.as_object_mut() else {
-            return;
-        };
-        if let Some(cam) = map.get_mut("camera").and_then(Value::as_object_mut)
-            && !cam.contains_key("f_number")
-            && let Some(aperture) = cam.get("aperture").cloned()
-        {
-            cam.insert("f_number".into(), aperture);
-        }
-        if map.get("julia").is_some_and(Value::is_array) && !map.contains_key("julia_mix") {
-            map.insert("julia_mix".into(), json!(1.0));
-        }
-        // The single `lighting` block splits into `sun` and `sky` ([`LIGHTING_SPLIT`]).
-        if let Some(Value::Object(lighting)) = map.remove("lighting") {
-            let (mut sun, mut sky) = (serde_json::Map::new(), serde_json::Map::new());
-            for (old, branch, field) in LIGHTING_SPLIT {
-                if let Some(value) = lighting.get(old) {
-                    let part = if branch == "sun" { &mut sun } else { &mut sky };
-                    part.insert(field.into(), value.clone());
-                }
-            }
-            map.entry("sun").or_insert(Value::Object(sun));
-            map.entry("sky").or_insert(Value::Object(sky));
-        }
-    }
-
-    fn merge_schema_value(
-        target: &mut Value,
-        schema: &Value,
-        formula_presets: &[Value],
-        facing_schema: &Value,
-    ) {
-        match schema {
-            Value::Object(smap) => {
-                if !target.is_object() {
-                    *target = schema.clone();
-                    return;
-                }
-                let Some(tmap) = target.as_object_mut() else {
-                    return;
-                };
-                tmap.retain(|k, _| smap.contains_key(k));
-                for (k, sv) in smap {
-                    if k == "formula" {
-                        if let Some(tv) = tmap.get_mut(k) {
-                            let f_schema = Self::formula_schema(tv, formula_presets);
-                            Self::merge_schema_value(tv, &f_schema, formula_presets, facing_schema);
-                        } else {
-                            tmap.insert(k.clone(), sv.clone());
-                        }
-                    } else if k == "facing" {
-                        if let Some(tv) = tmap.get_mut(k) {
-                            if tv.is_object() {
-                                Self::merge_schema_value(
-                                    tv,
-                                    facing_schema,
-                                    formula_presets,
-                                    facing_schema,
-                                );
-                            } else if !tv.is_null() {
-                                *tv = Value::Null;
-                            }
-                        } else {
-                            tmap.insert(k.clone(), Value::Null);
-                        }
-                    } else if k == "preset" && sv.is_null() {
-                        if let Some(tv) = tmap.get_mut(k) {
-                            if !tv.is_string() && !tv.is_null() {
-                                *tv = Value::Null;
-                            }
-                        } else {
-                            tmap.insert(k.clone(), Value::Null);
-                        }
-                    } else if let Some(tv) = tmap.get_mut(k) {
-                        Self::merge_schema_value(tv, sv, formula_presets, facing_schema);
-                    } else {
-                        tmap.insert(k.clone(), sv.clone());
-                    }
-                }
-            }
-            Value::Array(sarr) => {
-                if let Value::Array(tarr) = target {
-                    if tarr.len() != sarr.len() {
-                        *target = schema.clone();
-                    } else {
-                        for (tv, sv) in tarr.iter_mut().zip(sarr.iter()) {
-                            Self::merge_schema_value(tv, sv, formula_presets, facing_schema);
-                        }
-                    }
-                } else {
-                    *target = schema.clone();
-                }
-            }
-            Value::Number(sn) => match target.as_f64() {
-                Some(v) if sn.is_f64() != target.is_f64() => *target = numeric_like(schema, v),
-                Some(_) => {}
-                None => *target = schema.clone(),
-            },
-            Value::Bool(_) => {
-                if !target.is_boolean() {
-                    *target = schema.clone();
-                }
-            }
-            Value::String(_) => {
-                if !target.is_string() {
-                    *target = schema.clone();
-                }
-            }
-            Value::Null => {
-                if !target.is_null() {
-                    *target = Value::Null;
-                }
-            }
-        }
-    }
 }
-
-/// LEGACY (deleted with `hydrate_schema` in wave 2 of plan1): where each field of the old single
-/// `lighting` block went, `(old field, branch, field)`: the Sun's `sun` or the Environment's
-/// `sky` (`scene::Sun`, `scene::Sky`).
-const LIGHTING_SPLIT: [(&str, &str, &str); 10] = [
-    ("sun_azimuth", "sun", "azimuth"),
-    ("sun_elevation", "sun", "elevation"),
-    ("sun_color", "sun", "color"),
-    ("sun_intensity", "sun", "intensity"),
-    ("sun_angle", "sun", "angle"),
-    ("sky_intensity", "sky", "intensity"),
-    ("sky_horizon", "sky", "horizon"),
-    ("sky_zenith", "sky", "zenith"),
-    ("background", "sky", "background"),
-    ("sun_disc", "sky", "sun_disc"),
-];
 
 fn attribute_base_path(path: &str) -> &str {
     match path.rsplit_once('/') {

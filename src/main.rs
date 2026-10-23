@@ -38,6 +38,8 @@ mod materials;
 mod ocio;
 mod overlay;
 mod palette;
+#[cfg(test)]
+mod parity_tests;
 // Unwired roulette / clamp policies awaiting a decision (plan1 Q4): no kernel uses them yet.
 #[allow(dead_code)]
 mod path_convergence;

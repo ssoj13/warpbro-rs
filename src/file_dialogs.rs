@@ -15,7 +15,6 @@ pub const TAKE_EXPORT: &str = "take.export";
 pub const TAKE_IMPORT: &str = "take.import";
 
 #[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-
 pub struct History {
     pub directories: HashMap<String, PathBuf>,
     /// Missing key uses the control's default; explicit None means All files.

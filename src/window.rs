@@ -1,5 +1,8 @@
 //! Native window shell. egui renders to egui-display's float canvas; presentation
 //! selects BOTH the swapchain format and colour space (eframe only offered SDR).
+//! Frames are drawn on demand: on input and when egui asks for one (`repaint_delay`, which the
+//! app requests while something animates: `App::animating`), at most `App::gui_fps` per
+//! second; an idle window sleeps.
 use anyhow::{Context, Result};
 use soluwell_viewport::display::{Output, PresentPass};
 use std::sync::Arc;
@@ -41,7 +44,10 @@ struct Native {
     present: PresentPass,
     output: Output,
     error: Option<String>,
-    next_redraw: Instant,
+    /// When the next frame is due (input, or egui's repaint request); None: idle until input.
+    next_redraw: Option<Instant>,
+    /// When the last frame was drawn: frames are at least one GUI frame (`App::gui_fps`) apart.
+    last_redraw: Instant,
     cursor_grab: egui::CursorGrab,
 }
 impl Native {
@@ -117,16 +123,36 @@ impl Native {
             present,
             output: Output::Sdr8,
             error: None,
-            next_redraw: Instant::now(),
+            next_redraw: None,
+            last_redraw: Instant::now(),
             cursor_grab: egui::CursorGrab::None,
         })
     }
+
+    /// The shortest time between two frames: one GUI frame (`App::gui_fps`).
+    fn frame_interval(&self) -> Duration {
+        Duration::from_secs_f64(1.0 / f64::from(self.app.gui_fps()))
+    }
+
+    /// Ask for a frame `delay` from now (egui's `Duration::MAX`: none), no sooner than one GUI
+    /// frame after the last one; the earliest request wins.
+    fn schedule(&mut self, delay: Duration) {
+        let Some(at) = Instant::now().checked_add(delay) else {
+            return;
+        };
+        let at = at.max(self.last_redraw + self.frame_interval());
+        self.next_redraw = Some(self.next_redraw.map_or(at, |due| due.min(at)));
+    }
+
     fn redraw(&mut self, events: &ActiveEventLoop) -> Result<()> {
         let tick = Instant::now();
-        if tick < self.next_redraw {
+        // A redraw the system asked for sooner than the GUI rate waits for its turn.
+        if tick < self.last_redraw + self.frame_interval() {
+            self.schedule(Duration::ZERO);
             return Ok(());
         }
-        self.next_redraw = tick + Duration::from_secs_f64(1.0 / self.app.gui_fps() as f64);
+        self.next_redraw = None;
+        self.last_redraw = tick;
         let size = self.window.inner_size();
         if size.width == 0 || size.height == 0 {
             return Ok(());
@@ -158,9 +184,13 @@ impl Native {
                 self.app.display.output = self.output;
             }
         }
-        if size.width != self.config.width || size.height != self.config.height {
-            self.config.width = size.width;
-            self.config.height = size.height;
+        // A surface larger than the device's textures is a validation error (a panic in wgpu's
+        // default handler): clamp it; the canvas then reports `TooLarge` and skips the frame.
+        let max = self.device.limits().max_texture_dimension_2d;
+        let (width, height) = (size.width.min(max), size.height.min(max));
+        if width != self.config.width || height != self.config.height {
+            self.config.width = width;
+            self.config.height = height;
             self.surface.configure(&self.device, &self.config);
         }
         let info = self.surface.display_hdr_info(&self.adapter);
@@ -182,7 +212,10 @@ impl Native {
         if let Some(error) = self.app.take_fatal() {
             anyhow::bail!(error);
         }
-        self.next_redraw = tick + Duration::from_secs_f64(1.0 / self.app.gui_fps() as f64);
+        // The one place the next frame is planned: what egui (and through it the app) asked for.
+        if let Some(output) = full.viewport_output.get(&egui::ViewportId::ROOT) {
+            self.schedule(output.repaint_delay);
+        }
         self.input
             .handle_platform_output(&self.window, full.platform_output);
         for out in full.viewport_output.values() {
@@ -226,13 +259,17 @@ impl Native {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame)
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            // Not presented: the frame is drawn again (an occluded window waits for an event).
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface.configure(&self.device, &self.config);
+                self.schedule(Duration::ZERO);
                 return Ok(());
             }
-            wgpu::CurrentSurfaceTexture::Timeout | wgpu::CurrentSurfaceTexture::Occluded => {
+            wgpu::CurrentSurfaceTexture::Timeout => {
+                self.schedule(Duration::ZERO);
                 return Ok(());
             }
+            wgpu::CurrentSurfaceTexture::Occluded => return Ok(()),
             other => anyhow::bail!("surface acquisition: {other:?}"),
         };
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -331,11 +368,13 @@ impl ApplicationHandler for Host {
         _: winit::event::DeviceId,
         event: winit::event::DeviceEvent,
     ) {
+        // Raw motion drives flight look while the cursor is locked: egui takes it when the
+        // pointer is in the window or a button is held, and a frame consumes it.
         if let Some(native) = &mut self.window
             && let winit::event::DeviceEvent::MouseMotion { delta } = event
+            && native.input.on_mouse_motion(delta)
         {
-            let _ = native.input.on_mouse_motion(delta);
-            // Input is consumed at the next GUI tick; CUDA completion never schedules it.
+            native.schedule(Duration::ZERO);
         }
     }
     fn resumed(&mut self, events: &ActiveEventLoop) {
@@ -353,20 +392,29 @@ impl ApplicationHandler for Host {
         }
     }
     fn about_to_wait(&mut self, events: &ActiveEventLoop) {
-        if let Some(native) = &self.window {
-            if Instant::now() >= native.next_redraw {
+        let Some(native) = &self.window else {
+            return;
+        };
+        match native.next_redraw {
+            Some(due) if Instant::now() >= due => {
                 native.window.request_redraw();
                 events.set_control_flow(ControlFlow::Wait);
-            } else {
-                events.set_control_flow(ControlFlow::WaitUntil(native.next_redraw));
             }
+            Some(due) => events.set_control_flow(ControlFlow::WaitUntil(due)),
+            // Idle: nothing animates, the next input wakes the loop.
+            None => events.set_control_flow(ControlFlow::Wait),
         }
     }
     fn window_event(&mut self, events: &ActiveEventLoop, _: WindowId, event: WindowEvent) {
         let Some(native) = &mut self.window else {
             return;
         };
-        let _ = native.input.on_window_event(&native.window, &event);
+        // egui says whether the event needs a frame (input, resize, focus, ...).
+        if native.input.on_window_event(&native.window, &event).repaint
+            || matches!(event, WindowEvent::Occluded(false))
+        {
+            native.schedule(Duration::ZERO);
+        }
         match event {
             WindowEvent::CloseRequested => events.exit(),
             WindowEvent::RedrawRequested => {

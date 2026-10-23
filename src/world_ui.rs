@@ -5737,10 +5737,8 @@ mod tests {
         let _ = ctx.run_ui(Default::default(), |ui| {
             state.attribute_metrics.apply(ui);
             let font = ui.style().override_font_id.clone().unwrap();
-            for family in 0..=crate::params::FAMILY_WORLD {
-                let e = WorldEditor::new(WorldDocument::from_scene(&Scene::preset(
-                    Formula::PRESETS[family as usize],
-                )));
+            for formula in Formula::PRESETS {
+                let e = WorldEditor::new(WorldDocument::from_scene(&Scene::preset(formula)));
                 for node in e.document.nodes() {
                     for attr in e.document.attributes(node.id, 0.0).unwrap() {
                         let label = crate::world::attribute_label(&attr.path);

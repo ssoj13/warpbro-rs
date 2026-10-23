@@ -311,7 +311,8 @@ fn resolve(
 /// The chord presses of this frame that are double taps, and the last press before them.
 #[derive(Clone, Default)]
 struct Taps {
-    frame: u64,
+    /// The frame `doubles` were settled for; None before the first.
+    frame: Option<u64>,
     last: Option<(Key, Modifiers, f64)>,
     doubles: Vec<(Key, Modifiers)>,
 }
@@ -326,8 +327,8 @@ fn double_taps(ctx: &Context) -> Vec<(Key, Modifiers)> {
     let mut taps = ctx
         .data(|d| d.get_temp::<Taps>(taps_id()))
         .unwrap_or_default();
-    if taps.frame != frame || frame == 0 && taps.last.is_none() && taps.doubles.is_empty() {
-        taps.frame = frame;
+    if taps.frame != Some(frame) {
+        taps.frame = Some(frame);
         taps.doubles.clear();
         let (now, presses) = ctx.input(|input| {
             let presses: Vec<(Key, Modifiers)> = input
@@ -483,15 +484,17 @@ fn text_input_active(ctx: &Context) -> bool {
     }
 }
 
-/// Consume exactly one non-repeated command event, only in its owning scope.
-pub fn consume(ctx: &Context, scope: Scope, command: Command) -> bool {
+/// The index of this frame's first non-repeated key event that resolves to one of `commands`
+/// in `scope`, under the rules every lookup shares: no text editor has focus and `scope` owns
+/// the keyboard (Global always does).
+fn find(ctx: &Context, scope: Scope, commands: &[Command]) -> Option<usize> {
     if text_input_active(ctx) || (scope != Scope::Global && active(ctx) != Some(scope)) {
-        return false;
+        return None;
     }
     let doubles = double_taps(ctx);
-    ctx.input_mut(|input| {
-        // Remove the exact event: a physical binding's logical key may be any character.
-        let index = input.events.iter().position(|event| {
+    ctx.input(|input| {
+        // The exact event: a physical binding's logical key may be any character.
+        input.events.iter().position(|event| {
             matches!(event, egui::Event::Key {
                 key,
                 physical_key,
@@ -504,10 +507,27 @@ pub fn consume(ctx: &Context, scope: Scope, command: Command) -> bool {
                 *physical_key,
                 *modifiers,
                 doubles.contains(&(*key, *modifiers)),
-            ) == Some((scope, command)))
-        });
-        index.map(|i| input.events.remove(i)).is_some()
+            ).is_some_and(|(found, command)| found == scope && commands.contains(&command)))
+        })
     })
+}
+
+/// Consume exactly one non-repeated command event, only in its owning scope.
+pub fn consume(ctx: &Context, scope: Scope, command: Command) -> bool {
+    let Some(index) = find(ctx, scope, &[command]) else {
+        return false;
+    };
+    ctx.input_mut(|input| {
+        input.events.remove(index);
+    });
+    true
+}
+
+/// Whether one of `commands` is pressed this frame in `scope` (the rules of [`consume`]),
+/// without consuming it: for a reaction beside the command's own (a played preview stops when
+/// a viewport key moves the camera).
+pub fn pressed(ctx: &Context, scope: Scope, commands: &[Command]) -> bool {
+    find(ctx, scope, commands).is_some()
 }
 /// The platform Copy request (Ctrl+C / Cmd+C, Ctrl+Insert). egui-winit turns it into
 /// `Event::Copy`, not a key event. Consumed only when `wanted` and no text editor has focus,
@@ -544,6 +564,51 @@ pub fn take_paste(ctx: &Context, accept: impl Fn(&str) -> bool) -> Option<String
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// `pressed` answers under `consume`'s scope rules and leaves the event to its consumer.
+    #[test]
+    fn pressed_sees_a_command_without_consuming_it() {
+        let ctx = Context::default();
+        let viewport = Rect::from_min_max(egui::pos2(20.0, 20.0), egui::pos2(300.0, 200.0));
+        let frame = |key: bool| {
+            let mut events = vec![egui::Event::PointerMoved(viewport.center())];
+            if key {
+                events.push(egui::Event::Key {
+                    key: Key::H,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: Modifiers::NONE,
+                });
+            }
+            let mut seen = (false, false, false);
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(800.0, 600.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |root| {
+                    egui::CentralPanel::default().show(root, |ui| {
+                        register(ui, Scope::Viewport, viewport);
+                        seen = (
+                            pressed(ui.ctx(), Scope::Viewport, &[Command::Fit, Command::Home]),
+                            pressed(ui.ctx(), Scope::Timeline, &[Command::Home]),
+                            consume(ui.ctx(), Scope::Viewport, Command::Home),
+                        );
+                    });
+                },
+            );
+            output.textures_delta.clear();
+            seen
+        };
+        // The viewport's region is known from the frame after it registered.
+        frame(false);
+        assert_eq!(frame(true), (true, false, true));
+        assert_eq!(frame(false), (false, false, false));
+    }
     #[test]
     fn pointer_routes_commands_before_the_hovered_panel_draws() {
         for order in [

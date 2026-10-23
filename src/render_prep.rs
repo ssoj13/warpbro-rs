@@ -7,8 +7,9 @@ use crate::params::*;
 use crate::scene::{Bulb, Formula, Scene};
 
 pub const BLOCK: u32 = 128;
-/// Threads of the `tally` reduction (a multiple of `BLOCK`): the out-of-steps readback is this
-/// many `[f64; 2]` (or `[u32; 2]` in WGSL) partial sums.
+/// Threads of the `tally` reduction (a multiple of `BLOCK`): CUDA reads back this many
+/// `[f64; 2]` partial sums; WGSL sums them per workgroup and then in one more workgroup
+/// (`tally` + `tally_sum`, `render_wgpu::WgpuShared::record_tally`).
 pub const TALLY_THREADS: usize = 4096;
 
 /// Slots that only the tonemap reads: changing them re-tonemaps without restarting the samples.
@@ -345,7 +346,7 @@ impl PreparedScene {
             world_material,
             single_fast_bulb,
             homogeneous_family,
-            trace: scene_trace_data(scene),
+            trace: scene_trace_data(scene)?,
             palettes: std::iter::once(scene.palette)
                 .chain(
                     scene
@@ -539,13 +540,14 @@ impl DisplayKey {
 }
 
 /// Render-relevant runtime data only; hierarchy names and UUIDs never enter this signature.
-pub(crate) fn scene_trace_data(scene: &Scene) -> Vec<f32> {
+/// An unusable mask is the same error [`WorldUpload::new`] reports for it.
+pub(crate) fn scene_trace_data(scene: &Scene) -> Result<Vec<f32>, String> {
     if !scene.world_render {
-        return vec![
+        return Ok(vec![
             scene.world_render as u8 as f32,
             scene.objects.len() as f32,
             scene.lights.len() as f32,
-        ];
+        ]);
     }
     let mut values = Vec::with_capacity(
         3 + scene.objects.len() * (P_COUNT + 18 + MAX_MASKS * MASK_STRIDE)
@@ -556,7 +558,7 @@ pub(crate) fn scene_trace_data(scene: &Scene) -> Vec<f32> {
         scene.objects.len() as f32,
         scene.lights.len() as f32,
     ]);
-    for object in &scene.objects {
+    for (index, object) in scene.objects.iter().enumerate() {
         let p = object.pack(1, 1);
         values.extend_from_slice(&p[P_FAMILY..P_LIGHT_DIR]);
         values.extend_from_slice(&p[P_BASE..P_EXPOSURE]);
@@ -570,7 +572,7 @@ pub(crate) fn scene_trace_data(scene: &Scene) -> Vec<f32> {
         }
         values.push(object.palette as u8 as f32);
         for m in &object.masks {
-            values.extend(mask_row(m).unwrap_or([f32::NAN; MASK_STRIDE]));
+            values.extend(mask_row(m).map_err(|e| format!("World object {index}: {e}"))?);
         }
     }
     let mut light_template = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
@@ -579,7 +581,7 @@ pub(crate) fn scene_trace_data(scene: &Scene) -> Vec<f32> {
         let p = light_template.pack(1, 1);
         values.extend_from_slice(&p[P_LIGHT_DIR..P_SKY_INTENSITY]);
     }
-    values
+    Ok(values)
 }
 
 pub(crate) struct WorldUpload {

@@ -3,1683 +3,11 @@
     "format_version": 2,
     "id": "7f1fda4e-a798-422d-9d33-57e595eeddf2",
     "nodes": {
-      "7903ef62-0b69-41cb-bec4-6e0dd731e489": {
-        "children": [],
-        "discrete": {},
-        "environment_revision": 0,
-        "gpu": {
-          "camera": {
-            "distance": 3.0999999046325684,
-            "f_number": 0.0,
-            "focus_distance": 0.0,
-            "fov_y_degrees": 35.0,
-            "free_flight": false,
-            "pitch_degrees": 20.0,
-            "roll_degrees": 0.0,
-            "sensor_height": 0.024000000208616257,
-            "target": [
-              0.0,
-              0.0,
-              0.0
-            ],
-            "yaw_degrees": 35.0
-          },
-          "coloring": "Radius",
-          "colour": {
-            "config": "ocio://studio-config-latest",
-            "display": "sRGB - Display",
-            "look": "",
-            "on": true,
-            "view": "ACES 2.0 - SDR 100 nits (Rec.709)",
-            "working_input": ""
-          },
-          "environment": {
-            "enabled": true,
-            "intensity": 1.0,
-            "path": "",
-            "rotation_degrees": 0.0
-          },
-          "formula": {
-            "Mandelbox": {
-              "fixed_radius": 1.0,
-              "fold_limit": 1.0,
-              "min_radius_ratio": 0.5,
-              "rotation_degrees": [
-                0.0,
-                0.0,
-                0.0
-              ],
-              "scale": 2.0
-            }
-          },
-          "inversion_center": [
-            0.0,
-            0.0,
-            0.0
-          ],
-          "inversion_radius": 1.0,
-          "inversion_strength": 0.0,
-          "julia": [
-            0.0,
-            0.0,
-            0.0
-          ],
-          "julia_mix": 0.0,
-          "lighting": {
-            "background": true,
-            "sky_horizon": [
-              0.012000000104308128,
-              0.019999999552965164,
-              0.04500000178813934
-            ],
-            "sky_intensity": 8.0,
-            "sky_zenith": [
-              0.04699999839067459,
-              0.07500000298023224,
-              0.14000000059604645
-            ],
-            "sun_angle": 0.5299999713897705,
-            "sun_azimuth": 57.2647705078125,
-            "sun_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "sun_disc": true,
-            "sun_elevation": 48.78280258178711,
-            "sun_intensity": 2.0
-          },
-          "mask": {
-            "array": {
-              "align": true,
-              "axis": "Y",
-              "count": 1,
-              "kind": "Linear",
-              "offset": [
-                0.0,
-                0.0,
-                0.0
-              ],
-              "radius": 1.0,
-              "sweep_degrees": 0.0
-            },
-            "density": 0.5,
-            "invert": false,
-            "seed": 0,
-            "shape": "Sphere",
-            "size": [
-              1.0,
-              1.0,
-              1.0
-            ]
-          },
-          "material": {
-            "base": 1.0,
-            "base_color": [
-              0.800000011920929,
-              0.800000011920929,
-              0.800000011920929
-            ],
-            "base_tint": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "coat": 0.0,
-            "coat_affect_color": 0.0,
-            "coat_affect_roughness": 0.0,
-            "coat_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "coat_ior": 1.5,
-            "coat_roughness": 0.10000000149011612,
-            "color_source": "Palette",
-            "diffuse_roughness": 0.0,
-            "emission": 0.0,
-            "emission_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "facing": null,
-            "metalness": 0.0,
-            "model": "Fast",
-            "preset": null,
-            "sheen": 0.0,
-            "sheen_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "sheen_roughness": 0.30000001192092896,
-            "specular": 1.0,
-            "specular_anisotropy": 0.0,
-            "specular_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "specular_ior": 1.5,
-            "specular_rotation": 0.0,
-            "specular_roughness": 0.20000000298023224,
-            "thin_film_ior": 1.5,
-            "thin_film_thickness": 0.0,
-            "transmission": 0.0,
-            "transmission_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "transmission_depth": 0.0,
-            "transmission_extra_roughness": 0.0
-          },
-          "name": "Mandelbox",
-          "object": {
-            "offset": [
-              0.0,
-              0.0,
-              0.0
-            ],
-            "rotation_degrees": [
-              0.0,
-              0.0,
-              0.0
-            ],
-            "scale": 1.0
-          },
-          "orbit_offset": [
-            0.0,
-            0.0,
-            0.0
-          ],
-          "palette": "Ice",
-          "render": {
-            "adaptive": {
-              "enabled": true,
-              "min_samples": 16,
-              "noise_threshold": 0.009999999776482582
-            },
-            "backend": "Auto",
-            "denoise": {
-              "enabled": true,
-              "interval": 32,
-              "mode": "ColorAlbedoNormal",
-              "quality": "Balanced"
-            },
-            "exposure_stops": 0.0,
-            "glass_probes": 256,
-            "hit_epsilon": 0.003000000026077032,
-            "iterations": 12.0,
-            "max_bounces": 6,
-            "max_steps": 4096,
-            "reinhard": false,
-            "saturation": 1.0,
-            "step_factor": 0.8500000238418579
-          },
-          "trap_axis": 1,
-          "trap_point": [
-            0.0,
-            0.0,
-            0.0
-          ],
-          "trap_scale": 1.5
-        },
-        "host": {
-          "flags": {},
-          "map": {
-            "/camera/distance": {
-              "Float": 3.0999999046325684
-            },
-            "/camera/f_number": {
-              "Float": 0.0
-            },
-            "/camera/focus_distance": {
-              "Float": 0.0
-            },
-            "/camera/fov_y_degrees": {
-              "Float": 35.0
-            },
-            "/camera/free_flight": {
-              "Bool": false
-            },
-            "/camera/orbit_phase_degrees": {
-              "Float": 0.0
-            },
-            "/camera/orbit_speed_degrees": {
-              "Float": 0.0
-            },
-            "/camera/pitch_degrees": {
-              "Float": 20.0
-            },
-            "/camera/roll_degrees": {
-              "Float": 0.0
-            },
-            "/camera/sensor_height": {
-              "Float": 0.024000000208616257
-            },
-            "/camera/target": {
-              "Vec3": [
-                0.0,
-                0.0,
-                0.0
-              ]
-            },
-            "/camera/yaw_degrees": {
-              "Float": 35.0
-            },
-            "/end": {
-              "Float": 240.0
-            },
-            "/locked": {
-              "Bool": false
-            },
-            "/shy": {
-              "Bool": false
-            },
-            "/solo": {
-              "Bool": false
-            },
-            "/start": {
-              "Float": 0.0
-            },
-            "/transform/pivot": {
-              "Vec3": [
-                0.0,
-                0.0,
-                0.0
-              ]
-            },
-            "/transform/position": {
-              "Vec3": [
-                1.4662623405456543,
-                2.7280633449554443,
-                3.01308536529541
-              ]
-            },
-            "/transform/rotation_degrees": {
-              "Vec3": [
-                -228.400146484375,
-                -64.46216583251953,
-                148.3834228515625
-              ]
-            },
-            "/transform/scale": {
-              "Vec3": [
-                1.0,
-                1.0,
-                1.0
-              ]
-            },
-            "/visible": {
-              "Bool": true
-            }
-          }
-        },
-        "material": null,
-        "metadata": {},
-        "name": "Camera",
-        "parent": null,
-        "type": "Camera"
-      },
-      "690843f0-1fbd-4241-8d3b-b03f7bb170fa": {
-        "children": [],
-        "discrete": {},
-        "environment_revision": 0,
-        "gpu": {
-          "camera": {
-            "distance": 3.0999999046325684,
-            "f_number": 0.0,
-            "focus_distance": 0.0,
-            "fov_y_degrees": 35.0,
-            "free_flight": false,
-            "pitch_degrees": 20.0,
-            "roll_degrees": 0.0,
-            "sensor_height": 0.024000000208616257,
-            "target": [
-              0.0,
-              0.0,
-              0.0
-            ],
-            "yaw_degrees": 35.0
-          },
-          "coloring": "Radius",
-          "colour": {
-            "config": "ocio://studio-config-latest",
-            "display": "sRGB - Display",
-            "look": "",
-            "on": true,
-            "view": "ACES 2.0 - SDR 100 nits (Rec.709)",
-            "working_input": ""
-          },
-          "environment": {
-            "enabled": true,
-            "intensity": 1.0,
-            "path": "",
-            "rotation_degrees": 0.0
-          },
-          "formula": {
-            "Mandelbox": {
-              "fixed_radius": 1.0,
-              "fold_limit": 1.0,
-              "min_radius_ratio": 0.5,
-              "rotation_degrees": [
-                0.0,
-                0.0,
-                0.0
-              ],
-              "scale": 2.0
-            }
-          },
-          "inversion_center": [
-            0.0,
-            0.0,
-            0.0
-          ],
-          "inversion_radius": 1.0,
-          "inversion_strength": 0.0,
-          "julia": [
-            0.0,
-            0.0,
-            0.0
-          ],
-          "julia_mix": 0.0,
-          "lighting": {
-            "background": true,
-            "sky_horizon": [
-              0.012000000104308128,
-              0.019999999552965164,
-              0.04500000178813934
-            ],
-            "sky_intensity": 8.0,
-            "sky_zenith": [
-              0.04699999839067459,
-              0.07500000298023224,
-              0.14000000059604645
-            ],
-            "sun_angle": 0.5299999713897705,
-            "sun_azimuth": 57.2647705078125,
-            "sun_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "sun_disc": true,
-            "sun_elevation": 48.78280258178711,
-            "sun_intensity": 2.0
-          },
-          "mask": {
-            "array": {
-              "align": true,
-              "axis": "Y",
-              "count": 1,
-              "kind": "Linear",
-              "offset": [
-                0.0,
-                0.0,
-                0.0
-              ],
-              "radius": 1.0,
-              "sweep_degrees": 0.0
-            },
-            "density": 0.5,
-            "invert": false,
-            "seed": 0,
-            "shape": "Sphere",
-            "size": [
-              1.0,
-              1.0,
-              1.0
-            ]
-          },
-          "material": {
-            "base": 1.0,
-            "base_color": [
-              0.800000011920929,
-              0.800000011920929,
-              0.800000011920929
-            ],
-            "base_tint": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "coat": 0.0,
-            "coat_affect_color": 0.0,
-            "coat_affect_roughness": 0.0,
-            "coat_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "coat_ior": 1.5,
-            "coat_roughness": 0.10000000149011612,
-            "color_source": "Palette",
-            "diffuse_roughness": 0.0,
-            "emission": 0.0,
-            "emission_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "facing": null,
-            "metalness": 0.0,
-            "model": "Fast",
-            "preset": null,
-            "sheen": 0.0,
-            "sheen_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "sheen_roughness": 0.30000001192092896,
-            "specular": 1.0,
-            "specular_anisotropy": 0.0,
-            "specular_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "specular_ior": 1.5,
-            "specular_rotation": 0.0,
-            "specular_roughness": 0.20000000298023224,
-            "thin_film_ior": 1.5,
-            "thin_film_thickness": 0.0,
-            "transmission": 0.0,
-            "transmission_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "transmission_depth": 0.0,
-            "transmission_extra_roughness": 0.0
-          },
-          "name": "Mandelbox",
-          "object": {
-            "offset": [
-              0.0,
-              0.0,
-              0.0
-            ],
-            "rotation_degrees": [
-              0.0,
-              0.0,
-              0.0
-            ],
-            "scale": 1.0
-          },
-          "orbit_offset": [
-            0.0,
-            0.0,
-            0.0
-          ],
-          "palette": "Ice",
-          "render": {
-            "iterations": 12.0
-          },
-          "trap_axis": 1,
-          "trap_point": [
-            0.0,
-            0.0,
-            0.0
-          ],
-          "trap_scale": 1.5
-        },
-        "host": {
-          "flags": {},
-          "map": {
-            "/coloring": {
-              "Str": "Radius"
-            },
-            "/end": {
-              "Float": 240.0
-            },
-            "/formula": {
-              "Json": "{\"Mandelbox\":{\"fixed_radius\":1.0,\"fold_limit\":1.0,\"min_radius_ratio\":0.5,\"rotation_degrees\":[0.0,0.0,0.0],\"scale\":2.0}}"
-            },
-            "/formula/Mandelbox/fixed_radius": {
-              "Float": 1.5704476833343506
-            },
-            "/formula/Mandelbox/fold_limit": {
-              "Float": 1.0
-            },
-            "/formula/Mandelbox/min_radius_ratio": {
-              "Float": 0.5
-            },
-            "/formula/Mandelbox/rotation_degrees": {
-              "Vec3": [
-                0.0,
-                0.0,
-                0.0
-              ]
-            },
-            "/formula/Mandelbox/scale": {
-              "Float": 2.0
-            },
-            "/inversion_center": {
-              "Vec3": [
-                0.0,
-                0.0,
-                0.0
-              ]
-            },
-            "/inversion_radius": {
-              "Float": 1.0
-            },
-            "/inversion_strength": {
-              "Float": 0.0
-            },
-            "/julia": {
-              "Vec3": [
-                0.0,
-                0.0,
-                0.0
-              ]
-            },
-            "/julia_mix": {
-              "Float": 0.0
-            },
-            "/locked": {
-              "Bool": false
-            },
-            "/orbit_offset": {
-              "Vec3": [
-                0.0,
-                0.0,
-                0.0
-              ]
-            },
-            "/palette": {
-              "Str": "Ice"
-            },
-            "/render/iterations": {
-              "Float": 12.0
-            },
-            "/shy": {
-              "Bool": false
-            },
-            "/solo": {
-              "Bool": false
-            },
-            "/start": {
-              "Float": 0.0
-            },
-            "/transform/pivot": {
-              "Vec3": [
-                0.0,
-                0.0,
-                0.0
-              ]
-            },
-            "/transform/position": {
-              "Vec3": [
-                0.0,
-                0.0,
-                0.0
-              ]
-            },
-            "/transform/rotation_degrees": {
-              "Vec3": [
-                -0.0,
-                -0.0,
-                -0.0
-              ]
-            },
-            "/transform/scale": {
-              "Vec3": [
-                1.0,
-                1.0,
-                1.0
-              ]
-            },
-            "/trap_axis": {
-              "Int64": 1
-            },
-            "/trap_point": {
-              "Vec3": [
-                0.0,
-                0.0,
-                0.0
-              ]
-            },
-            "/trap_scale": {
-              "Float": 1.5
-            },
-            "/visible": {
-              "Bool": true
-            }
-          }
-        },
-        "material": "bcabde18-16eb-40c8-a0a2-400e432d279b",
-        "metadata": {},
-        "name": "Mandelbox",
-        "parent": null,
-        "type": "Fractal"
-      },
-      "e54db1cd-6747-4a70-be26-445e253d6732": {
-        "children": [],
-        "discrete": {},
-        "environment_revision": 0,
-        "gpu": {
-          "camera": {
-            "distance": 3.0999999046325684,
-            "f_number": 0.0,
-            "focus_distance": 0.0,
-            "fov_y_degrees": 35.0,
-            "free_flight": false,
-            "pitch_degrees": 20.0,
-            "roll_degrees": 0.0,
-            "sensor_height": 0.024000000208616257,
-            "target": [
-              0.0,
-              0.0,
-              0.0
-            ],
-            "yaw_degrees": 35.0
-          },
-          "coloring": "Radius",
-          "colour": {
-            "config": "ocio://studio-config-latest",
-            "display": "sRGB - Display",
-            "look": "",
-            "on": true,
-            "view": "ACES 2.0 - SDR 100 nits (Rec.709)",
-            "working_input": ""
-          },
-          "environment": {
-            "enabled": true,
-            "intensity": 1.0,
-            "path": "",
-            "rotation_degrees": 0.0
-          },
-          "formula": {
-            "Mandelbox": {
-              "fixed_radius": 1.0,
-              "fold_limit": 1.0,
-              "min_radius_ratio": 0.5,
-              "rotation_degrees": [
-                0.0,
-                0.0,
-                0.0
-              ],
-              "scale": 2.0
-            }
-          },
-          "inversion_center": [
-            0.0,
-            0.0,
-            0.0
-          ],
-          "inversion_radius": 1.0,
-          "inversion_strength": 0.0,
-          "julia": [
-            0.0,
-            0.0,
-            0.0
-          ],
-          "julia_mix": 0.0,
-          "lighting": {
-            "background": true,
-            "sky_horizon": [
-              0.012000000104308128,
-              0.019999999552965164,
-              0.04500000178813934
-            ],
-            "sky_intensity": 8.0,
-            "sky_zenith": [
-              0.04699999839067459,
-              0.07500000298023224,
-              0.14000000059604645
-            ],
-            "sun_angle": 0.5299999713897705,
-            "sun_azimuth": 57.2647705078125,
-            "sun_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "sun_disc": true,
-            "sun_elevation": 48.78280258178711,
-            "sun_intensity": 2.0
-          },
-          "mask": {
-            "array": {
-              "align": true,
-              "axis": "Y",
-              "count": 1,
-              "kind": "Linear",
-              "offset": [
-                0.0,
-                0.0,
-                0.0
-              ],
-              "radius": 1.0,
-              "sweep_degrees": 0.0
-            },
-            "density": 0.5,
-            "invert": false,
-            "seed": 0,
-            "shape": "Sphere",
-            "size": [
-              1.0,
-              1.0,
-              1.0
-            ]
-          },
-          "material": {
-            "base": 1.0,
-            "base_color": [
-              0.800000011920929,
-              0.800000011920929,
-              0.800000011920929
-            ],
-            "base_tint": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "coat": 0.0,
-            "coat_affect_color": 0.0,
-            "coat_affect_roughness": 0.0,
-            "coat_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "coat_ior": 1.5,
-            "coat_roughness": 0.10000000149011612,
-            "color_source": "Palette",
-            "diffuse_roughness": 0.0,
-            "emission": 0.0,
-            "emission_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "facing": null,
-            "metalness": 0.0,
-            "model": "Fast",
-            "preset": null,
-            "sheen": 0.0,
-            "sheen_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "sheen_roughness": 0.30000001192092896,
-            "specular": 1.0,
-            "specular_anisotropy": 0.0,
-            "specular_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "specular_ior": 1.5,
-            "specular_rotation": 0.0,
-            "specular_roughness": 0.20000000298023224,
-            "thin_film_ior": 1.5,
-            "thin_film_thickness": 0.0,
-            "transmission": 0.0,
-            "transmission_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "transmission_depth": 0.0,
-            "transmission_extra_roughness": 0.0
-          },
-          "name": "Mandelbox",
-          "object": {
-            "offset": [
-              0.0,
-              0.0,
-              0.0
-            ],
-            "rotation_degrees": [
-              0.0,
-              0.0,
-              0.0
-            ],
-            "scale": 1.0
-          },
-          "orbit_offset": [
-            0.0,
-            0.0,
-            0.0
-          ],
-          "palette": "Ice",
-          "render": {
-            "adaptive": {
-              "enabled": true,
-              "min_samples": 16,
-              "noise_threshold": 0.009999999776482582
-            },
-            "backend": "Auto",
-            "denoise": {
-              "enabled": true,
-              "interval": 32,
-              "mode": "ColorAlbedoNormal",
-              "quality": "Balanced"
-            },
-            "exposure_stops": 0.0,
-            "glass_probes": 256,
-            "hit_epsilon": 0.003000000026077032,
-            "iterations": 12.0,
-            "max_bounces": 6,
-            "max_steps": 4096,
-            "reinhard": false,
-            "saturation": 1.0,
-            "step_factor": 0.8500000238418579
-          },
-          "trap_axis": 1,
-          "trap_point": [
-            0.0,
-            0.0,
-            0.0
-          ],
-          "trap_scale": 1.5
-        },
-        "host": {
-          "flags": {},
-          "map": {
-            "/end": {
-              "Float": 240.0
-            },
-            "/locked": {
-              "Bool": false
-            },
-            "/material/base": {
-              "Float": 1.0
-            },
-            "/material/base_color": {
-              "Vec3": [
-                0.800000011920929,
-                0.800000011920929,
-                0.800000011920929
-              ]
-            },
-            "/material/base_tint": {
-              "Vec3": [
-                1.0,
-                1.0,
-                1.0
-              ]
-            },
-            "/material/coat": {
-              "Float": 0.0
-            },
-            "/material/coat_affect_color": {
-              "Float": 0.0
-            },
-            "/material/coat_affect_roughness": {
-              "Float": 0.0
-            },
-            "/material/coat_color": {
-              "Vec3": [
-                1.0,
-                1.0,
-                1.0
-              ]
-            },
-            "/material/coat_ior": {
-              "Float": 1.5
-            },
-            "/material/coat_roughness": {
-              "Float": 0.10000000149011612
-            },
-            "/material/color_source": {
-              "Str": "Palette"
-            },
-            "/material/diffuse_roughness": {
-              "Float": 0.0
-            },
-            "/material/emission": {
-              "Float": 0.0
-            },
-            "/material/emission_color": {
-              "Vec3": [
-                1.0,
-                1.0,
-                1.0
-              ]
-            },
-            "/material/facing": {
-              "Json": "null"
-            },
-            "/material/metalness": {
-              "Float": 0.0
-            },
-            "/material/model": {
-              "Str": "Fast"
-            },
-            "/material/preset": {
-              "Json": "null"
-            },
-            "/material/sheen": {
-              "Float": 0.0
-            },
-            "/material/sheen_color": {
-              "Vec3": [
-                1.0,
-                1.0,
-                1.0
-              ]
-            },
-            "/material/sheen_roughness": {
-              "Float": 0.30000001192092896
-            },
-            "/material/specular": {
-              "Float": 1.0
-            },
-            "/material/specular_anisotropy": {
-              "Float": 0.0
-            },
-            "/material/specular_color": {
-              "Vec3": [
-                1.0,
-                1.0,
-                1.0
-              ]
-            },
-            "/material/specular_ior": {
-              "Float": 1.5
-            },
-            "/material/specular_rotation": {
-              "Float": 0.0
-            },
-            "/material/specular_roughness": {
-              "Float": 0.20000000298023224
-            },
-            "/material/thin_film_ior": {
-              "Float": 1.5
-            },
-            "/material/thin_film_thickness": {
-              "Float": 0.0
-            },
-            "/material/transmission": {
-              "Float": 0.0
-            },
-            "/material/transmission_color": {
-              "Vec3": [
-                1.0,
-                1.0,
-                1.0
-              ]
-            },
-            "/material/transmission_depth": {
-              "Float": 0.0
-            },
-            "/material/transmission_extra_roughness": {
-              "Float": 0.0
-            },
-            "/shy": {
-              "Bool": false
-            },
-            "/solo": {
-              "Bool": false
-            },
-            "/start": {
-              "Float": 0.0
-            },
-            "/transform/pivot": {
-              "Vec3": [
-                0.0,
-                0.0,
-                0.0
-              ]
-            },
-            "/transform/position": {
-              "Vec3": [
-                0.0,
-                0.0,
-                0.0
-              ]
-            },
-            "/transform/rotation_degrees": {
-              "Vec3": [
-                0.0,
-                0.0,
-                0.0
-              ]
-            },
-            "/transform/scale": {
-              "Vec3": [
-                1.0,
-                1.0,
-                1.0
-              ]
-            },
-            "/visible": {
-              "Bool": true
-            }
-          }
-        },
-        "material": null,
-        "metadata": {},
-        "name": "Material",
-        "parent": null,
-        "type": "Material"
-      },
-      "7b3a4453-3857-4077-9c14-879e17253ec2": {
-        "children": [],
-        "discrete": {},
-        "environment_revision": 0,
-        "gpu": {
-          "render": {
-            "exposure_stops": 0.0,
-            "reinhard": false,
-            "saturation": 1.0
-          },
-          "viewport": {
-            "batch_budget_ms": 8.0,
-            "extras": true,
-            "frozen": false,
-            "manual_id": "158dc41c-7913-465d-8713-9520b658a2b9",
-            "mode": "Auto",
-            "moving_id": "158dc41c-7913-465d-8713-9520b658a2b9",
-            "paused": false,
-            "select": {
-              "camera": true,
-              "environment": true,
-              "fractal": true,
-              "group": true,
-              "light": true,
-              "mask": true
-            },
-            "settle_delay_ms": 180.0,
-            "show": {
-              "camera": true,
-              "environment": true,
-              "fractal": true,
-              "group": true,
-              "light": true,
-              "mask": true
-            },
-            "still_id": "158dc41c-7913-465d-8713-9520b658a2b9",
-            "target_fps": 30.0
-          }
-        },
-        "host": {
-          "flags": {},
-          "map": {
-            "/end": {
-              "Float": 240.0
-            },
-            "/locked": {
-              "Bool": false
-            },
-            "/render/exposure_stops": {
-              "Float": 0.0
-            },
-            "/render/reinhard": {
-              "Bool": false
-            },
-            "/render/saturation": {
-              "Float": 1.0
-            },
-            "/shy": {
-              "Bool": true
-            },
-            "/solo": {
-              "Bool": false
-            },
-            "/start": {
-              "Float": 0.0
-            },
-            "/transform/pivot": {
-              "Vec3": [
-                0.0,
-                0.0,
-                0.0
-              ]
-            },
-            "/transform/position": {
-              "Vec3": [
-                0.0,
-                0.0,
-                0.0
-              ]
-            },
-            "/transform/rotation_degrees": {
-              "Vec3": [
-                0.0,
-                0.0,
-                0.0
-              ]
-            },
-            "/transform/scale": {
-              "Vec3": [
-                1.0,
-                1.0,
-                1.0
-              ]
-            },
-            "/viewport/batch_budget_ms": {
-              "Float": 8.0
-            },
-            "/viewport/extras": {
-              "Bool": true
-            },
-            "/viewport/frozen": {
-              "Bool": false
-            },
-            "/viewport/manual_id": {
-              "Str": "8b23e12a-e843-41c7-b547-1f70a1ea6960"
-            },
-            "/viewport/mode": {
-              "Str": "Auto"
-            },
-            "/viewport/moving_id": {
-              "Str": "0650c0ce-8e36-4fe4-9649-110b9330cc27"
-            },
-            "/viewport/paused": {
-              "Bool": false
-            },
-            "/viewport/select/camera": {
-              "Bool": true
-            },
-            "/viewport/select/environment": {
-              "Bool": true
-            },
-            "/viewport/select/fractal": {
-              "Bool": true
-            },
-            "/viewport/select/group": {
-              "Bool": true
-            },
-            "/viewport/select/light": {
-              "Bool": true
-            },
-            "/viewport/select/mask": {
-              "Bool": true
-            },
-            "/viewport/settle_delay_ms": {
-              "Float": 180.0
-            },
-            "/viewport/show/camera": {
-              "Bool": true
-            },
-            "/viewport/show/environment": {
-              "Bool": true
-            },
-            "/viewport/show/fractal": {
-              "Bool": true
-            },
-            "/viewport/show/group": {
-              "Bool": true
-            },
-            "/viewport/show/light": {
-              "Bool": true
-            },
-            "/viewport/show/mask": {
-              "Bool": true
-            },
-            "/viewport/still_id": {
-              "Str": "8b23e12a-e843-41c7-b547-1f70a1ea6960"
-            },
-            "/viewport/target_fps": {
-              "Float": 30.0
-            },
-            "/visible": {
-              "Bool": true
-            }
-          }
-        },
-        "material": null,
-        "metadata": {
-          "catalog_role": "Profile"
-        },
-        "name": "Viewport",
-        "parent": null,
-        "type": "ViewportSettings"
-      },
-      "0650c0ce-8e36-4fe4-9649-110b9330cc27": {
-        "children": [],
-        "discrete": {},
-        "environment_revision": 0,
-        "gpu": {
-          "quality": {
-            "adaptive": {
-              "enabled": false,
-              "min_samples": 16,
-              "noise_threshold": 0.009999999776482582
-            },
-            "glass_probes": 256,
-            "hit_epsilon": 0.003000000026077032,
-            "max_bounces": 2,
-            "max_steps": 4096,
-            "resolution_scale": 1.0,
-            "samples": 8,
-            "step_factor": 0.8500000238418579
-          },
-          "render": {
-            "backend": "Auto",
-            "denoise": {
-              "enabled": true,
-              "interval": 32,
-              "mode": "ColorAlbedoNormal",
-              "quality": "Balanced"
-            },
-            "direct": {
-              "ao_radius": 0.2,
-              "ao_steps": 4,
-              "ao_strength": 1.0,
-              "shadow_steps": 16,
-              "shadow_strength": 1.0
-            },
-            "display": "PathTraced",
-            "method": "Fast",
-            "thinning": 0.0
-          }
-        },
-        "host": {
-          "flags": {},
-          "map": {
-            "/end": {
-              "Float": 240.0
-            },
-            "/locked": {
-              "Bool": false
-            },
-            "/quality/adaptive/enabled": {
-              "Bool": false
-            },
-            "/quality/adaptive/min_samples": {
-              "Int64": 16
-            },
-            "/quality/adaptive/noise_threshold": {
-              "Float": 0.009999999776482582
-            },
-            "/quality/glass_probes": {
-              "Int64": 256
-            },
-            "/quality/hit_epsilon": {
-              "Float": 0.003000000026077032
-            },
-            "/quality/max_bounces": {
-              "Int64": 2
-            },
-            "/quality/max_steps": {
-              "Int64": 4096
-            },
-            "/quality/resolution_scale": {
-              "Float": 1.0
-            },
-            "/quality/samples": {
-              "Int64": 8
-            },
-            "/quality/step_factor": {
-              "Float": 0.8500000238418579
-            },
-            "/render/backend": {
-              "Str": "Auto"
-            },
-            "/render/denoise/enabled": {
-              "Bool": true
-            },
-            "/render/denoise/interval": {
-              "Int64": 32
-            },
-            "/render/denoise/mode": {
-              "Str": "ColorAlbedoNormal"
-            },
-            "/render/denoise/quality": {
-              "Str": "Balanced"
-            },
-            "/render/direct/ao_radius": {
-              "Float": 0.20000000298023224
-            },
-            "/render/direct/ao_steps": {
-              "Int64": 4
-            },
-            "/render/direct/ao_strength": {
-              "Float": 1.0
-            },
-            "/render/direct/shadow_steps": {
-              "Int64": 16
-            },
-            "/render/direct/shadow_strength": {
-              "Float": 1.0
-            },
-            "/render/display": {
-              "Str": "PathTraced"
-            },
-            "/render/method": {
-              "Str": "Fast"
-            },
-            "/render/thinning": {
-              "Float": 0.0
-            },
-            "/shy": {
-              "Bool": true
-            },
-            "/solo": {
-              "Bool": false
-            },
-            "/start": {
-              "Float": 0.0
-            },
-            "/transform/pivot": {
-              "Vec3": [
-                0.0,
-                0.0,
-                0.0
-              ]
-            },
-            "/transform/position": {
-              "Vec3": [
-                0.0,
-                0.0,
-                0.0
-              ]
-            },
-            "/transform/rotation_degrees": {
-              "Vec3": [
-                0.0,
-                0.0,
-                0.0
-              ]
-            },
-            "/transform/scale": {
-              "Vec3": [
-                1.0,
-                1.0,
-                1.0
-              ]
-            },
-            "/visible": {
-              "Bool": true
-            }
-          }
-        },
-        "material": null,
-        "metadata": {
-          "catalog_role": "Profile"
-        },
-        "name": "Moving",
-        "parent": null,
-        "type": "RenderSettings"
-      },
-      "19a5664a-eaa3-465a-a79f-bf9b972aa654": {
-        "children": [],
-        "discrete": {},
-        "environment_revision": 0,
-        "gpu": {
-          "output": {
-            "channels": "Rgba",
-            "codec": "Hevc",
-            "container": "Mp4",
-            "denoise_at_completion": false,
-            "encoder": "Vulkan",
-            "exr_compression": "Zip",
-            "exr_depth": "Float",
-            "exr_dwa_level": 45.0,
-            "exv_profile": "Bc6hLossless",
-            "format": "Exr",
-            "height": 1080,
-            "jpeg_quality": 95,
-            "output_display": "",
-            "output_view": "",
-            "png": "Sdr8",
-            "png_peak_nits": 1000.0,
-            "png_video": "Off",
-            "prores_profile": "Hq",
-            "qp": 18,
-            "sixteen_bit": false,
-            "tiff_compression": "Deflate",
-            "video_depth": "Eight",
-            "video_signal": "Sdr8",
-            "width": 1920
-          }
-        },
-        "host": {
-          "flags": {},
-          "map": {
-            "/end": {
-              "Float": 240.0
-            },
-            "/locked": {
-              "Bool": false
-            },
-            "/output/channels": {
-              "Str": "Rgba"
-            },
-            "/output/codec": {
-              "Str": "Hevc"
-            },
-            "/output/container": {
-              "Str": "Mp4"
-            },
-            "/output/denoise_at_completion": {
-              "Bool": false
-            },
-            "/output/encoder": {
-              "Str": "Vulkan"
-            },
-            "/output/exr_compression": {
-              "Str": "Zip"
-            },
-            "/output/exr_depth": {
-              "Str": "Float"
-            },
-            "/output/exr_dwa_level": {
-              "Float": 45.0
-            },
-            "/output/exv_profile": {
-              "Str": "Bc6hLossless"
-            },
-            "/output/format": {
-              "Str": "Exr"
-            },
-            "/output/height": {
-              "Int64": 1080
-            },
-            "/output/jpeg_quality": {
-              "Int64": 95
-            },
-            "/output/output_display": {
-              "Str": ""
-            },
-            "/output/output_view": {
-              "Str": ""
-            },
-            "/output/png": {
-              "Str": "Sdr8"
-            },
-            "/output/png_peak_nits": {
-              "Float": 1000.0
-            },
-            "/output/png_video": {
-              "Str": "Off"
-            },
-            "/output/prores_profile": {
-              "Str": "Hq"
-            },
-            "/output/qp": {
-              "Int64": 18
-            },
-            "/output/sixteen_bit": {
-              "Bool": false
-            },
-            "/output/tiff_compression": {
-              "Str": "Deflate"
-            },
-            "/output/video_depth": {
-              "Str": "Eight"
-            },
-            "/output/video_signal": {
-              "Str": "Sdr8"
-            },
-            "/output/width": {
-              "Int64": 1920
-            },
-            "/shy": {
-              "Bool": true
-            },
-            "/solo": {
-              "Bool": false
-            },
-            "/start": {
-              "Float": 0.0
-            },
-            "/transform/pivot": {
-              "Vec3": [
-                0.0,
-                0.0,
-                0.0
-              ]
-            },
-            "/transform/position": {
-              "Vec3": [
-                0.0,
-                0.0,
-                0.0
-              ]
-            },
-            "/transform/rotation_degrees": {
-              "Vec3": [
-                0.0,
-                0.0,
-                0.0
-              ]
-            },
-            "/transform/scale": {
-              "Vec3": [
-                1.0,
-                1.0,
-                1.0
-              ]
-            },
-            "/visible": {
-              "Bool": true
-            }
-          }
-        },
-        "material": null,
-        "metadata": {
-          "catalog_role": "Profile"
-        },
-        "name": "Output File",
-        "parent": null,
-        "type": "OutputSettings"
-      },
       "bcabde18-16eb-40c8-a0a2-400e432d279b": {
         "children": [],
         "discrete": {},
         "environment_revision": 0,
         "gpu": {
-          "camera": {
-            "distance": 3.0999999046325684,
-            "f_number": 0.0,
-            "focus_distance": 0.0,
-            "fov_y_degrees": 38.0,
-            "free_flight": false,
-            "pitch_degrees": 20.0,
-            "roll_degrees": 0.0,
-            "sensor_height": 0.024000000208616257,
-            "target": [
-              0.0,
-              0.0,
-              0.0
-            ],
-            "yaw_degrees": 35.0
-          },
-          "coloring": "Radius",
-          "colour": {
-            "config": "ocio://studio-config-latest",
-            "display": "sRGB - Display",
-            "look": "",
-            "on": true,
-            "view": "ACES 2.0 - SDR 100 nits (Rec.709)",
-            "working_input": ""
-          },
-          "environment": {
-            "enabled": true,
-            "intensity": 1.0,
-            "path": "",
-            "rotation_degrees": 0.0
-          },
-          "formula": {
-            "Mandelbulb": {
-              "angle_phase_degrees": [
-                0.0,
-                0.0
-              ],
-              "angle_scale": [
-                1.0,
-                1.0
-              ],
-              "bailout": 2.0,
-              "power": 8.0,
-              "rotation_degrees": [
-                0.0,
-                0.0,
-                0.0
-              ]
-            }
-          },
-          "inversion_center": [
-            0.0,
-            0.0,
-            0.0
-          ],
-          "inversion_radius": 1.0,
-          "inversion_strength": 0.0,
-          "julia": [
-            0.0,
-            0.0,
-            0.0
-          ],
-          "julia_mix": 0.0,
-          "lighting": {
-            "background": true,
-            "sky_horizon": [
-              0.012000000104308128,
-              0.019999999552965164,
-              0.04500000178813934
-            ],
-            "sky_intensity": 8.0,
-            "sky_zenith": [
-              0.04699999839067459,
-              0.07500000298023224,
-              0.14000000059604645
-            ],
-            "sun_angle": 0.5299999713897705,
-            "sun_azimuth": 57.2647705078125,
-            "sun_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "sun_disc": true,
-            "sun_elevation": 48.78280258178711,
-            "sun_intensity": 2.0
-          },
-          "mask": {
-            "array": {
-              "align": true,
-              "axis": "Y",
-              "count": 1,
-              "kind": "Linear",
-              "offset": [
-                0.0,
-                0.0,
-                0.0
-              ],
-              "radius": 1.0,
-              "sweep_degrees": 0.0
-            },
-            "density": 0.5,
-            "invert": false,
-            "seed": 0,
-            "shape": "Sphere",
-            "size": [
-              1.0,
-              1.0,
-              1.0
-            ]
-          },
           "material": {
             "base": 1.0,
             "base_color": [
@@ -1741,57 +69,7 @@
             ],
             "transmission_depth": 0.0,
             "transmission_extra_roughness": 0.0
-          },
-          "name": "Mandelbulb",
-          "object": {
-            "offset": [
-              0.0,
-              0.0,
-              0.0
-            ],
-            "rotation_degrees": [
-              0.0,
-              0.0,
-              0.0
-            ],
-            "scale": 1.0
-          },
-          "orbit_offset": [
-            0.0,
-            0.0,
-            0.0
-          ],
-          "palette": "Classic",
-          "render": {
-            "adaptive": {
-              "enabled": true,
-              "min_samples": 16,
-              "noise_threshold": 0.009999999776482582
-            },
-            "backend": "Auto",
-            "denoise": {
-              "enabled": true,
-              "interval": 32,
-              "mode": "ColorAlbedoNormal",
-              "quality": "Balanced"
-            },
-            "exposure_stops": 0.0,
-            "glass_probes": 256,
-            "hit_epsilon": 0.0010000000474974513,
-            "iterations": 20.0,
-            "max_bounces": 6,
-            "max_steps": 4096,
-            "reinhard": false,
-            "saturation": 1.0,
-            "step_factor": 0.8500000238418579
-          },
-          "trap_axis": 1,
-          "trap_point": [
-            0.0,
-            0.0,
-            0.0
-          ],
-          "trap_scale": 1.5
+          }
         },
         "host": {
           "flags": {},
@@ -1974,6 +252,298 @@
         "parent": null,
         "type": "Material"
       },
+      "7440d760-d909-45fa-b91c-3f74899929e8": {
+        "children": [],
+        "discrete": {},
+        "environment_revision": 0,
+        "gpu": {
+          "environment": {
+            "enabled": true,
+            "intensity": 1.0,
+            "path": "",
+            "rotation_degrees": 0.0
+          },
+          "sky": {
+            "background": true,
+            "horizon": [
+              0.012000000104308128,
+              0.019999999552965164,
+              0.04500000178813934
+            ],
+            "intensity": 8.0,
+            "sun_disc": true,
+            "zenith": [
+              0.04699999839067459,
+              0.07500000298023224,
+              0.14000000059604645
+            ]
+          }
+        },
+        "host": {
+          "flags": {},
+          "map": {
+            "/end": {
+              "Float": 240.0
+            },
+            "/environment/enabled": {
+              "Bool": true
+            },
+            "/environment/intensity": {
+              "Float": 1.0
+            },
+            "/environment/path": {
+              "Str": "C:\\17\\venice_sunset_2k.hdr"
+            },
+            "/environment/rotation_degrees": {
+              "Float": 0.0
+            },
+            "/locked": {
+              "Bool": false
+            },
+            "/shy": {
+              "Bool": false
+            },
+            "/sky/background": {
+              "Bool": true
+            },
+            "/sky/horizon": {
+              "Vec3": [
+                0.012000000104308128,
+                0.019999999552965164,
+                0.04500000178813934
+              ]
+            },
+            "/sky/intensity": {
+              "Float": 8.0
+            },
+            "/sky/sun_disc": {
+              "Bool": true
+            },
+            "/sky/zenith": {
+              "Vec3": [
+                0.04699999839067459,
+                0.07500000298023224,
+                0.14000000059604645
+              ]
+            },
+            "/solo": {
+              "Bool": false
+            },
+            "/start": {
+              "Float": 0.0
+            },
+            "/transform/pivot": {
+              "Vec3": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            "/transform/position": {
+              "Vec3": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            "/transform/rotation_degrees": {
+              "Vec3": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            "/transform/scale": {
+              "Vec3": [
+                1.0,
+                1.0,
+                1.0
+              ]
+            },
+            "/visible": {
+              "Bool": true
+            }
+          }
+        },
+        "material": null,
+        "metadata": {},
+        "name": "Environment",
+        "parent": null,
+        "type": "Environment"
+      },
+      "7b3a4453-3857-4077-9c14-879e17253ec2": {
+        "children": [],
+        "discrete": {},
+        "environment_revision": 0,
+        "gpu": {
+          "render": {
+            "exposure_stops": 0.0,
+            "reinhard": false,
+            "saturation": 1.0
+          },
+          "viewport": {
+            "batch_budget_ms": 8.0,
+            "extras": true,
+            "frozen": false,
+            "manual_id": "158dc41c-7913-465d-8713-9520b658a2b9",
+            "mode": "Auto",
+            "moving_id": "158dc41c-7913-465d-8713-9520b658a2b9",
+            "paused": false,
+            "select": {
+              "camera": true,
+              "environment": true,
+              "fractal": true,
+              "group": true,
+              "light": true,
+              "mask": true
+            },
+            "settle_delay_ms": 180.0,
+            "show": {
+              "camera": true,
+              "environment": true,
+              "fractal": true,
+              "group": true,
+              "light": true,
+              "mask": true
+            },
+            "still_id": "158dc41c-7913-465d-8713-9520b658a2b9",
+            "target_fps": 30.0
+          }
+        },
+        "host": {
+          "flags": {},
+          "map": {
+            "/end": {
+              "Float": 240.0
+            },
+            "/locked": {
+              "Bool": false
+            },
+            "/render/exposure_stops": {
+              "Float": 0.0
+            },
+            "/render/reinhard": {
+              "Bool": false
+            },
+            "/render/saturation": {
+              "Float": 1.0
+            },
+            "/shy": {
+              "Bool": true
+            },
+            "/solo": {
+              "Bool": false
+            },
+            "/start": {
+              "Float": 0.0
+            },
+            "/transform/pivot": {
+              "Vec3": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            "/transform/position": {
+              "Vec3": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            "/transform/rotation_degrees": {
+              "Vec3": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            "/transform/scale": {
+              "Vec3": [
+                1.0,
+                1.0,
+                1.0
+              ]
+            },
+            "/viewport/batch_budget_ms": {
+              "Float": 8.0
+            },
+            "/viewport/extras": {
+              "Bool": true
+            },
+            "/viewport/frozen": {
+              "Bool": false
+            },
+            "/viewport/manual_id": {
+              "Str": "8b23e12a-e843-41c7-b547-1f70a1ea6960"
+            },
+            "/viewport/mode": {
+              "Str": "Auto"
+            },
+            "/viewport/moving_id": {
+              "Str": "0650c0ce-8e36-4fe4-9649-110b9330cc27"
+            },
+            "/viewport/paused": {
+              "Bool": false
+            },
+            "/viewport/select/camera": {
+              "Bool": true
+            },
+            "/viewport/select/environment": {
+              "Bool": true
+            },
+            "/viewport/select/fractal": {
+              "Bool": true
+            },
+            "/viewport/select/group": {
+              "Bool": true
+            },
+            "/viewport/select/light": {
+              "Bool": true
+            },
+            "/viewport/select/mask": {
+              "Bool": true
+            },
+            "/viewport/settle_delay_ms": {
+              "Float": 180.0
+            },
+            "/viewport/show/camera": {
+              "Bool": true
+            },
+            "/viewport/show/environment": {
+              "Bool": true
+            },
+            "/viewport/show/fractal": {
+              "Bool": true
+            },
+            "/viewport/show/group": {
+              "Bool": true
+            },
+            "/viewport/show/light": {
+              "Bool": true
+            },
+            "/viewport/show/mask": {
+              "Bool": true
+            },
+            "/viewport/still_id": {
+              "Str": "8b23e12a-e843-41c7-b547-1f70a1ea6960"
+            },
+            "/viewport/target_fps": {
+              "Float": 30.0
+            },
+            "/visible": {
+              "Bool": true
+            }
+          }
+        },
+        "material": null,
+        "metadata": {
+          "catalog_role": "Profile"
+        },
+        "name": "Viewport",
+        "parent": null,
+        "type": "ViewportSettings"
+      },
       "8b23e12a-e843-41c7-b547-1f70a1ea6960": {
         "children": [],
         "discrete": {},
@@ -2141,116 +711,11 @@
         "parent": null,
         "type": "RenderSettings"
       },
-      "3007fbd2-2600-4271-93f4-9120ac8be959": {
+      "e54db1cd-6747-4a70-be26-445e253d6732": {
         "children": [],
         "discrete": {},
         "environment_revision": 0,
         "gpu": {
-          "camera": {
-            "distance": 3.0999999046325684,
-            "f_number": 0.0,
-            "focus_distance": 0.0,
-            "fov_y_degrees": 35.0,
-            "free_flight": false,
-            "pitch_degrees": 20.0,
-            "roll_degrees": 0.0,
-            "sensor_height": 0.024000000208616257,
-            "target": [
-              0.0,
-              0.0,
-              0.0
-            ],
-            "yaw_degrees": 35.0
-          },
-          "coloring": "Radius",
-          "colour": {
-            "config": "ocio://studio-config-latest",
-            "display": "sRGB - Display",
-            "look": "",
-            "on": true,
-            "view": "ACES 2.0 - SDR 100 nits (Rec.709)",
-            "working_input": ""
-          },
-          "environment": {
-            "enabled": true,
-            "intensity": 1.0,
-            "path": "",
-            "rotation_degrees": 0.0
-          },
-          "formula": {
-            "Mandelbox": {
-              "fixed_radius": 1.0,
-              "fold_limit": 1.0,
-              "min_radius_ratio": 0.5,
-              "rotation_degrees": [
-                0.0,
-                0.0,
-                0.0
-              ],
-              "scale": 2.0
-            }
-          },
-          "inversion_center": [
-            0.0,
-            0.0,
-            0.0
-          ],
-          "inversion_radius": 1.0,
-          "inversion_strength": 0.0,
-          "julia": [
-            0.0,
-            0.0,
-            0.0
-          ],
-          "julia_mix": 0.0,
-          "lighting": {
-            "background": true,
-            "sky_horizon": [
-              0.012000000104308128,
-              0.019999999552965164,
-              0.04500000178813934
-            ],
-            "sky_intensity": 8.0,
-            "sky_zenith": [
-              0.04699999839067459,
-              0.07500000298023224,
-              0.14000000059604645
-            ],
-            "sun_angle": 0.5299999713897705,
-            "sun_azimuth": 57.2647705078125,
-            "sun_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "sun_disc": true,
-            "sun_elevation": 48.78280258178711,
-            "sun_intensity": 2.0
-          },
-          "mask": {
-            "array": {
-              "align": true,
-              "axis": "Y",
-              "count": 1,
-              "kind": "Linear",
-              "offset": [
-                0.0,
-                0.0,
-                0.0
-              ],
-              "radius": 1.0,
-              "sweep_degrees": 0.0
-            },
-            "density": 0.5,
-            "invert": false,
-            "seed": 0,
-            "shape": "Sphere",
-            "size": [
-              1.0,
-              1.0,
-              1.0
-            ]
-          },
           "material": {
             "base": 1.0,
             "base_color": [
@@ -2312,57 +777,7 @@
             ],
             "transmission_depth": 0.0,
             "transmission_extra_roughness": 0.0
-          },
-          "name": "Mandelbox",
-          "object": {
-            "offset": [
-              0.0,
-              0.0,
-              0.0
-            ],
-            "rotation_degrees": [
-              0.0,
-              0.0,
-              0.0
-            ],
-            "scale": 1.0
-          },
-          "orbit_offset": [
-            0.0,
-            0.0,
-            0.0
-          ],
-          "palette": "Ice",
-          "render": {
-            "adaptive": {
-              "enabled": true,
-              "min_samples": 16,
-              "noise_threshold": 0.009999999776482582
-            },
-            "backend": "Auto",
-            "denoise": {
-              "enabled": true,
-              "interval": 32,
-              "mode": "ColorAlbedoNormal",
-              "quality": "Balanced"
-            },
-            "exposure_stops": 0.0,
-            "glass_probes": 256,
-            "hit_epsilon": 0.003000000026077032,
-            "iterations": 12.0,
-            "max_bounces": 6,
-            "max_steps": 4096,
-            "reinhard": false,
-            "saturation": 1.0,
-            "step_factor": 0.8500000238418579
-          },
-          "trap_axis": 1,
-          "trap_point": [
-            0.0,
-            0.0,
-            0.0
-          ],
-          "trap_scale": 1.5
+          }
         },
         "host": {
           "flags": {},
@@ -2370,47 +785,487 @@
             "/end": {
               "Float": 240.0
             },
-            "/lighting/background": {
-              "Bool": true
+            "/locked": {
+              "Bool": false
             },
-            "/lighting/sky_horizon": {
+            "/material/base": {
+              "Float": 1.0
+            },
+            "/material/base_color": {
               "Vec3": [
-                0.012000000104308128,
-                0.019999999552965164,
-                0.04500000178813934
+                0.800000011920929,
+                0.800000011920929,
+                0.800000011920929
               ]
             },
-            "/lighting/sky_intensity": {
-              "Float": 8.0
-            },
-            "/lighting/sky_zenith": {
-              "Vec3": [
-                0.04699999839067459,
-                0.07500000298023224,
-                0.14000000059604645
-              ]
-            },
-            "/lighting/sun_angle": {
-              "Float": 0.5299999713897705
-            },
-            "/lighting/sun_azimuth": {
-              "Float": 57.2647705078125
-            },
-            "/lighting/sun_color": {
+            "/material/base_tint": {
               "Vec3": [
                 1.0,
                 1.0,
                 1.0
               ]
             },
-            "/lighting/sun_disc": {
+            "/material/coat": {
+              "Float": 0.0
+            },
+            "/material/coat_affect_color": {
+              "Float": 0.0
+            },
+            "/material/coat_affect_roughness": {
+              "Float": 0.0
+            },
+            "/material/coat_color": {
+              "Vec3": [
+                1.0,
+                1.0,
+                1.0
+              ]
+            },
+            "/material/coat_ior": {
+              "Float": 1.5
+            },
+            "/material/coat_roughness": {
+              "Float": 0.10000000149011612
+            },
+            "/material/color_source": {
+              "Str": "Palette"
+            },
+            "/material/diffuse_roughness": {
+              "Float": 0.0
+            },
+            "/material/emission": {
+              "Float": 0.0
+            },
+            "/material/emission_color": {
+              "Vec3": [
+                1.0,
+                1.0,
+                1.0
+              ]
+            },
+            "/material/facing": {
+              "Json": "null"
+            },
+            "/material/metalness": {
+              "Float": 0.0
+            },
+            "/material/model": {
+              "Str": "Fast"
+            },
+            "/material/preset": {
+              "Json": "null"
+            },
+            "/material/sheen": {
+              "Float": 0.0
+            },
+            "/material/sheen_color": {
+              "Vec3": [
+                1.0,
+                1.0,
+                1.0
+              ]
+            },
+            "/material/sheen_roughness": {
+              "Float": 0.30000001192092896
+            },
+            "/material/specular": {
+              "Float": 1.0
+            },
+            "/material/specular_anisotropy": {
+              "Float": 0.0
+            },
+            "/material/specular_color": {
+              "Vec3": [
+                1.0,
+                1.0,
+                1.0
+              ]
+            },
+            "/material/specular_ior": {
+              "Float": 1.5
+            },
+            "/material/specular_rotation": {
+              "Float": 0.0
+            },
+            "/material/specular_roughness": {
+              "Float": 0.20000000298023224
+            },
+            "/material/thin_film_ior": {
+              "Float": 1.5
+            },
+            "/material/thin_film_thickness": {
+              "Float": 0.0
+            },
+            "/material/transmission": {
+              "Float": 0.0
+            },
+            "/material/transmission_color": {
+              "Vec3": [
+                1.0,
+                1.0,
+                1.0
+              ]
+            },
+            "/material/transmission_depth": {
+              "Float": 0.0
+            },
+            "/material/transmission_extra_roughness": {
+              "Float": 0.0
+            },
+            "/shy": {
+              "Bool": false
+            },
+            "/solo": {
+              "Bool": false
+            },
+            "/start": {
+              "Float": 0.0
+            },
+            "/transform/pivot": {
+              "Vec3": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            "/transform/position": {
+              "Vec3": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            "/transform/rotation_degrees": {
+              "Vec3": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            "/transform/scale": {
+              "Vec3": [
+                1.0,
+                1.0,
+                1.0
+              ]
+            },
+            "/visible": {
+              "Bool": true
+            }
+          }
+        },
+        "material": null,
+        "metadata": {},
+        "name": "Material",
+        "parent": null,
+        "type": "Material"
+      },
+      "19a5664a-eaa3-465a-a79f-bf9b972aa654": {
+        "children": [],
+        "discrete": {},
+        "environment_revision": 0,
+        "gpu": {
+          "output": {
+            "denoise_at_completion": false,
+            "output_display": "",
+            "output_view": "",
+            "preset": {
+              "format": "Exr",
+              "height": 1080,
+              "png": "Sdr8",
+              "png_peak_nits": 1000.0,
+              "png_video": "Off",
+              "qp": 18,
+              "still": {
+                "channels": "Rgba",
+                "exr_compression": "Zip",
+                "exr_depth": "Float",
+                "exr_dwa_level": 45.0,
+                "exr_layer_depths": {},
+                "exr_layout": "Single",
+                "exr_pass_compression": null,
+                "exr_pass_layers": [],
+                "jpeg_quality": 95,
+                "sixteen_bit": false,
+                "tiff_compression": "Deflate"
+              },
+              "video": {
+                "chroma": "Yuv420",
+                "codec": "Hevc",
+                "container": "Mp4",
+                "depth": "Eight",
+                "encoder": "HevcVulkan",
+                "exv": "Bc6hLossless",
+                "preset": null,
+                "prores": "Hq",
+                "rate": {
+                  "Crf": 18
+                }
+              },
+              "width": 1920
+            }
+          }
+        },
+        "host": {
+          "flags": {},
+          "map": {
+            "/end": {
+              "Float": 240.0
+            },
+            "/locked": {
+              "Bool": false
+            },
+            "/output/denoise_at_completion": {
+              "Bool": false
+            },
+            "/output/output_display": {
+              "Str": ""
+            },
+            "/output/output_view": {
+              "Str": ""
+            },
+            "/output/preset": {
+              "Json": "{\"format\":\"Exr\",\"height\":1080,\"png\":\"Sdr8\",\"png_peak_nits\":1000.0,\"png_video\":\"Off\",\"qp\":18,\"still\":{\"channels\":\"Rgba\",\"exr_compression\":\"Zip\",\"exr_depth\":\"Float\",\"exr_dwa_level\":45.0,\"exr_layer_depths\":{},\"exr_layout\":\"Single\",\"exr_pass_compression\":null,\"exr_pass_layers\":[],\"jpeg_quality\":95,\"sixteen_bit\":false,\"tiff_compression\":\"Deflate\"},\"video\":{\"chroma\":\"Yuv420\",\"codec\":\"Hevc\",\"container\":\"Mp4\",\"depth\":\"Eight\",\"encoder\":\"HevcVulkan\",\"exv\":\"Bc6hLossless\",\"preset\":null,\"prores\":\"Hq\",\"rate\":{\"Crf\":18}},\"width\":1920}"
+            },
+            "/shy": {
               "Bool": true
             },
-            "/lighting/sun_elevation": {
-              "Float": 48.78280258178711
+            "/solo": {
+              "Bool": false
             },
-            "/lighting/sun_intensity": {
-              "Float": 2.0
+            "/start": {
+              "Float": 0.0
+            },
+            "/transform/pivot": {
+              "Vec3": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            "/transform/position": {
+              "Vec3": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            "/transform/rotation_degrees": {
+              "Vec3": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            "/transform/scale": {
+              "Vec3": [
+                1.0,
+                1.0,
+                1.0
+              ]
+            },
+            "/visible": {
+              "Bool": true
+            }
+          }
+        },
+        "material": null,
+        "metadata": {
+          "catalog_role": "Profile"
+        },
+        "name": "Output File",
+        "parent": null,
+        "type": "OutputSettings"
+      },
+      "0650c0ce-8e36-4fe4-9649-110b9330cc27": {
+        "children": [],
+        "discrete": {},
+        "environment_revision": 0,
+        "gpu": {
+          "quality": {
+            "adaptive": {
+              "enabled": false,
+              "min_samples": 16,
+              "noise_threshold": 0.009999999776482582
+            },
+            "glass_probes": 256,
+            "hit_epsilon": 0.003000000026077032,
+            "max_bounces": 2,
+            "max_steps": 4096,
+            "resolution_scale": 1.0,
+            "samples": 8,
+            "step_factor": 0.8500000238418579
+          },
+          "render": {
+            "backend": "Auto",
+            "denoise": {
+              "enabled": true,
+              "interval": 32,
+              "mode": "ColorAlbedoNormal",
+              "quality": "Balanced"
+            },
+            "direct": {
+              "ao_radius": 0.2,
+              "ao_steps": 4,
+              "ao_strength": 1.0,
+              "shadow_steps": 16,
+              "shadow_strength": 1.0
+            },
+            "display": "PathTraced",
+            "method": "Fast",
+            "thinning": 0.0
+          }
+        },
+        "host": {
+          "flags": {},
+          "map": {
+            "/end": {
+              "Float": 240.0
+            },
+            "/locked": {
+              "Bool": false
+            },
+            "/quality/adaptive/enabled": {
+              "Bool": false
+            },
+            "/quality/adaptive/min_samples": {
+              "Int64": 16
+            },
+            "/quality/adaptive/noise_threshold": {
+              "Float": 0.009999999776482582
+            },
+            "/quality/glass_probes": {
+              "Int64": 256
+            },
+            "/quality/hit_epsilon": {
+              "Float": 0.003000000026077032
+            },
+            "/quality/max_bounces": {
+              "Int64": 2
+            },
+            "/quality/max_steps": {
+              "Int64": 4096
+            },
+            "/quality/resolution_scale": {
+              "Float": 1.0
+            },
+            "/quality/samples": {
+              "Int64": 8
+            },
+            "/quality/step_factor": {
+              "Float": 0.8500000238418579
+            },
+            "/render/backend": {
+              "Str": "Auto"
+            },
+            "/render/denoise/enabled": {
+              "Bool": true
+            },
+            "/render/denoise/interval": {
+              "Int64": 32
+            },
+            "/render/denoise/mode": {
+              "Str": "ColorAlbedoNormal"
+            },
+            "/render/denoise/quality": {
+              "Str": "Balanced"
+            },
+            "/render/direct/ao_radius": {
+              "Float": 0.20000000298023224
+            },
+            "/render/direct/ao_steps": {
+              "Int64": 4
+            },
+            "/render/direct/ao_strength": {
+              "Float": 1.0
+            },
+            "/render/direct/shadow_steps": {
+              "Int64": 16
+            },
+            "/render/direct/shadow_strength": {
+              "Float": 1.0
+            },
+            "/render/display": {
+              "Str": "PathTraced"
+            },
+            "/render/method": {
+              "Str": "Fast"
+            },
+            "/render/thinning": {
+              "Float": 0.0
+            },
+            "/shy": {
+              "Bool": true
+            },
+            "/solo": {
+              "Bool": false
+            },
+            "/start": {
+              "Float": 0.0
+            },
+            "/transform/pivot": {
+              "Vec3": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            "/transform/position": {
+              "Vec3": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            "/transform/rotation_degrees": {
+              "Vec3": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            "/transform/scale": {
+              "Vec3": [
+                1.0,
+                1.0,
+                1.0
+              ]
+            },
+            "/visible": {
+              "Bool": true
+            }
+          }
+        },
+        "material": null,
+        "metadata": {
+          "catalog_role": "Profile"
+        },
+        "name": "Moving",
+        "parent": null,
+        "type": "RenderSettings"
+      },
+      "3007fbd2-2600-4271-93f4-9120ac8be959": {
+        "children": [],
+        "discrete": {},
+        "environment_revision": 0,
+        "gpu": {
+          "sun": {
+            "angle": 0.5299999713897705,
+            "azimuth": 57.2647705078125,
+            "color": [
+              1.0,
+              1.0,
+              1.0
+            ],
+            "elevation": 48.78280258178711,
+            "intensity": 2.0
+          }
+        },
+        "host": {
+          "flags": {},
+          "map": {
+            "/end": {
+              "Float": 240.0
             },
             "/locked": {
               "Bool": false
@@ -2423,6 +1278,25 @@
             },
             "/start": {
               "Float": 0.0
+            },
+            "/sun/angle": {
+              "Float": 0.5299999713897705
+            },
+            "/sun/azimuth": {
+              "Float": 57.2647705078125
+            },
+            "/sun/color": {
+              "Vec3": [
+                1.0,
+                1.0,
+                1.0
+              ]
+            },
+            "/sun/elevation": {
+              "Float": 48.78280258178711
+            },
+            "/sun/intensity": {
+              "Float": 2.0
             },
             "/transform/pivot": {
               "Vec3": [
@@ -2463,42 +1337,12 @@
         "parent": null,
         "type": "DirectionalLight"
       },
-      "7440d760-d909-45fa-b91c-3f74899929e8": {
+      "690843f0-1fbd-4241-8d3b-b03f7bb170fa": {
         "children": [],
         "discrete": {},
         "environment_revision": 0,
         "gpu": {
-          "camera": {
-            "distance": 3.0999999046325684,
-            "f_number": 0.0,
-            "focus_distance": 0.0,
-            "fov_y_degrees": 35.0,
-            "free_flight": false,
-            "pitch_degrees": 20.0,
-            "roll_degrees": 0.0,
-            "sensor_height": 0.024000000208616257,
-            "target": [
-              0.0,
-              0.0,
-              0.0
-            ],
-            "yaw_degrees": 35.0
-          },
           "coloring": "Radius",
-          "colour": {
-            "config": "ocio://studio-config-latest",
-            "display": "sRGB - Display",
-            "look": "",
-            "on": true,
-            "view": "ACES 2.0 - SDR 100 nits (Rec.709)",
-            "working_input": ""
-          },
-          "environment": {
-            "enabled": true,
-            "intensity": 1.0,
-            "path": "",
-            "rotation_degrees": 0.0
-          },
           "formula": {
             "Mandelbox": {
               "fixed_radius": 1.0,
@@ -2525,130 +1369,6 @@
             0.0
           ],
           "julia_mix": 0.0,
-          "lighting": {
-            "background": true,
-            "sky_horizon": [
-              0.012000000104308128,
-              0.019999999552965164,
-              0.04500000178813934
-            ],
-            "sky_intensity": 8.0,
-            "sky_zenith": [
-              0.04699999839067459,
-              0.07500000298023224,
-              0.14000000059604645
-            ],
-            "sun_angle": 0.5299999713897705,
-            "sun_azimuth": 57.2647705078125,
-            "sun_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "sun_disc": true,
-            "sun_elevation": 48.78280258178711,
-            "sun_intensity": 2.0
-          },
-          "mask": {
-            "array": {
-              "align": true,
-              "axis": "Y",
-              "count": 1,
-              "kind": "Linear",
-              "offset": [
-                0.0,
-                0.0,
-                0.0
-              ],
-              "radius": 1.0,
-              "sweep_degrees": 0.0
-            },
-            "density": 0.5,
-            "invert": false,
-            "seed": 0,
-            "shape": "Sphere",
-            "size": [
-              1.0,
-              1.0,
-              1.0
-            ]
-          },
-          "material": {
-            "base": 1.0,
-            "base_color": [
-              0.800000011920929,
-              0.800000011920929,
-              0.800000011920929
-            ],
-            "base_tint": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "coat": 0.0,
-            "coat_affect_color": 0.0,
-            "coat_affect_roughness": 0.0,
-            "coat_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "coat_ior": 1.5,
-            "coat_roughness": 0.10000000149011612,
-            "color_source": "Palette",
-            "diffuse_roughness": 0.0,
-            "emission": 0.0,
-            "emission_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "facing": null,
-            "metalness": 0.0,
-            "model": "Fast",
-            "preset": null,
-            "sheen": 0.0,
-            "sheen_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "sheen_roughness": 0.30000001192092896,
-            "specular": 1.0,
-            "specular_anisotropy": 0.0,
-            "specular_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "specular_ior": 1.5,
-            "specular_rotation": 0.0,
-            "specular_roughness": 0.20000000298023224,
-            "thin_film_ior": 1.5,
-            "thin_film_thickness": 0.0,
-            "transmission": 0.0,
-            "transmission_color": [
-              1.0,
-              1.0,
-              1.0
-            ],
-            "transmission_depth": 0.0,
-            "transmission_extra_roughness": 0.0
-          },
-          "name": "Mandelbox",
-          "object": {
-            "offset": [
-              0.0,
-              0.0,
-              0.0
-            ],
-            "rotation_degrees": [
-              0.0,
-              0.0,
-              0.0
-            ],
-            "scale": 1.0
-          },
           "orbit_offset": [
             0.0,
             0.0,
@@ -2656,27 +1376,7 @@
           ],
           "palette": "Ice",
           "render": {
-            "adaptive": {
-              "enabled": true,
-              "min_samples": 16,
-              "noise_threshold": 0.009999999776482582
-            },
-            "backend": "Auto",
-            "denoise": {
-              "enabled": true,
-              "interval": 32,
-              "mode": "ColorAlbedoNormal",
-              "quality": "Balanced"
-            },
-            "exposure_stops": 0.0,
-            "glass_probes": 256,
-            "hit_epsilon": 0.003000000026077032,
-            "iterations": 12.0,
-            "max_bounces": 6,
-            "max_steps": 4096,
-            "reinhard": false,
-            "saturation": 1.0,
-            "step_factor": 0.8500000238418579
+            "iterations": 12.0
           },
           "trap_axis": 1,
           "trap_point": [
@@ -2689,65 +1389,72 @@
         "host": {
           "flags": {},
           "map": {
+            "/coloring": {
+              "Str": "Radius"
+            },
             "/end": {
               "Float": 240.0
             },
-            "/environment/enabled": {
-              "Bool": true
+            "/formula": {
+              "Json": "{\"Mandelbox\":{\"fixed_radius\":1.0,\"fold_limit\":1.0,\"min_radius_ratio\":0.5,\"rotation_degrees\":[0.0,0.0,0.0],\"scale\":2.0}}"
             },
-            "/environment/intensity": {
+            "/formula/Mandelbox/fixed_radius": {
+              "Float": 1.5704476833343506
+            },
+            "/formula/Mandelbox/fold_limit": {
               "Float": 1.0
             },
-            "/environment/path": {
-              "Str": "C:\\17\\venice_sunset_2k.hdr"
+            "/formula/Mandelbox/min_radius_ratio": {
+              "Float": 0.5
             },
-            "/environment/rotation_degrees": {
+            "/formula/Mandelbox/rotation_degrees": {
+              "Vec3": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            "/formula/Mandelbox/scale": {
+              "Float": 2.0
+            },
+            "/inversion_center": {
+              "Vec3": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            "/inversion_radius": {
+              "Float": 1.0
+            },
+            "/inversion_strength": {
               "Float": 0.0
             },
-            "/lighting/background": {
-              "Bool": true
-            },
-            "/lighting/sky_horizon": {
+            "/julia": {
               "Vec3": [
-                0.012000000104308128,
-                0.019999999552965164,
-                0.04500000178813934
+                0.0,
+                0.0,
+                0.0
               ]
             },
-            "/lighting/sky_intensity": {
-              "Float": 8.0
-            },
-            "/lighting/sky_zenith": {
-              "Vec3": [
-                0.04699999839067459,
-                0.07500000298023224,
-                0.14000000059604645
-              ]
-            },
-            "/lighting/sun_angle": {
-              "Float": 0.5299999713897705
-            },
-            "/lighting/sun_azimuth": {
-              "Float": 57.2647705078125
-            },
-            "/lighting/sun_color": {
-              "Vec3": [
-                1.0,
-                1.0,
-                1.0
-              ]
-            },
-            "/lighting/sun_disc": {
-              "Bool": true
-            },
-            "/lighting/sun_elevation": {
-              "Float": 48.78280258178711
-            },
-            "/lighting/sun_intensity": {
-              "Float": 2.0
+            "/julia_mix": {
+              "Float": 0.0
             },
             "/locked": {
               "Bool": false
+            },
+            "/orbit_offset": {
+              "Vec3": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            "/palette": {
+              "Str": "Ice"
+            },
+            "/render/iterations": {
+              "Float": 12.0
             },
             "/shy": {
               "Bool": false
@@ -2774,9 +1481,144 @@
             },
             "/transform/rotation_degrees": {
               "Vec3": [
+                -0.0,
+                -0.0,
+                -0.0
+              ]
+            },
+            "/transform/scale": {
+              "Vec3": [
+                1.0,
+                1.0,
+                1.0
+              ]
+            },
+            "/trap_axis": {
+              "Int64": 1
+            },
+            "/trap_point": {
+              "Vec3": [
                 0.0,
                 0.0,
                 0.0
+              ]
+            },
+            "/trap_scale": {
+              "Float": 1.5
+            },
+            "/visible": {
+              "Bool": true
+            }
+          }
+        },
+        "material": "bcabde18-16eb-40c8-a0a2-400e432d279b",
+        "metadata": {},
+        "name": "Mandelbox",
+        "parent": null,
+        "type": "Fractal"
+      },
+      "7903ef62-0b69-41cb-bec4-6e0dd731e489": {
+        "children": [],
+        "discrete": {},
+        "environment_revision": 0,
+        "gpu": {
+          "camera": {
+            "distance": 3.0999999046325684,
+            "f_number": 0.0,
+            "focus_distance": 0.0,
+            "fov_y_degrees": 35.0,
+            "free_flight": false,
+            "pitch_degrees": 20.0,
+            "roll_degrees": 0.0,
+            "sensor_height": 0.024000000208616257,
+            "target": [
+              0.0,
+              0.0,
+              0.0
+            ],
+            "yaw_degrees": 35.0
+          }
+        },
+        "host": {
+          "flags": {},
+          "map": {
+            "/camera/distance": {
+              "Float": 3.0999999046325684
+            },
+            "/camera/f_number": {
+              "Float": 0.0
+            },
+            "/camera/focus_distance": {
+              "Float": 0.0
+            },
+            "/camera/fov_y_degrees": {
+              "Float": 35.0
+            },
+            "/camera/framing_radius": {
+              "Float": 4.063700199127197
+            },
+            "/camera/free_flight": {
+              "Bool": false
+            },
+            "/camera/orbit_phase_degrees": {
+              "Float": 0.0
+            },
+            "/camera/orbit_speed_degrees": {
+              "Float": 0.0
+            },
+            "/camera/pitch_degrees": {
+              "Float": 20.0
+            },
+            "/camera/roll_degrees": {
+              "Float": 0.0
+            },
+            "/camera/sensor_height": {
+              "Float": 0.024000000208616257
+            },
+            "/camera/target": {
+              "Vec3": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            "/camera/yaw_degrees": {
+              "Float": 35.0
+            },
+            "/end": {
+              "Float": 240.0
+            },
+            "/locked": {
+              "Bool": false
+            },
+            "/shy": {
+              "Bool": false
+            },
+            "/solo": {
+              "Bool": false
+            },
+            "/start": {
+              "Float": 0.0
+            },
+            "/transform/pivot": {
+              "Vec3": [
+                0.0,
+                0.0,
+                0.0
+              ]
+            },
+            "/transform/position": {
+              "Vec3": [
+                1.4662623405456543,
+                2.7280633449554443,
+                3.01308536529541
+              ]
+            },
+            "/transform/rotation_degrees": {
+              "Vec3": [
+                -228.400146484375,
+                -64.46216583251953,
+                148.3834228515625
               ]
             },
             "/transform/scale": {
@@ -2793,12 +1635,15 @@
         },
         "material": null,
         "metadata": {},
-        "name": "Environment",
+        "name": "Camera",
         "parent": null,
-        "type": "Environment"
+        "type": "Camera"
       }
     },
     "bus_slots": {
+      "output_render": "8b23e12a-e843-41c7-b547-1f70a1ea6960",
+      "output_settings": "19a5664a-eaa3-465a-a79f-bf9b972aa654",
+      "viewport_settings": "7b3a4453-3857-4077-9c14-879e17253ec2",
       "layer_order": [
         "8b23e12a-e843-41c7-b547-1f70a1ea6960",
         "0650c0ce-8e36-4fe4-9649-110b9330cc27",
@@ -2869,30 +1714,6 @@
           0.0
         ],
         "julia_mix": 0.0,
-        "lighting": {
-          "background": true,
-          "sky_horizon": [
-            0.012000000104308128,
-            0.019999999552965164,
-            0.04500000178813934
-          ],
-          "sky_intensity": 8.0,
-          "sky_zenith": [
-            0.04699999839067459,
-            0.07500000298023224,
-            0.14000000059604645
-          ],
-          "sun_angle": 0.5299999713897705,
-          "sun_azimuth": 57.2647705078125,
-          "sun_color": [
-            1.0,
-            1.0,
-            1.0
-          ],
-          "sun_disc": true,
-          "sun_elevation": 48.78280258178711,
-          "sun_intensity": 2.0
-        },
         "mask": {
           "array": {
             "align": true,
@@ -2999,6 +1820,32 @@
           0.0
         ],
         "palette": "Ice",
+        "sky": {
+          "background": true,
+          "horizon": [
+            0.012000000104308128,
+            0.019999999552965164,
+            0.04500000178813934
+          ],
+          "intensity": 8.0,
+          "sun_disc": true,
+          "zenith": [
+            0.04699999839067459,
+            0.07500000298023224,
+            0.14000000059604645
+          ]
+        },
+        "sun": {
+          "angle": 0.5299999713897705,
+          "azimuth": 57.2647705078125,
+          "color": [
+            1.0,
+            1.0,
+            1.0
+          ],
+          "elevation": 48.78280258178711,
+          "intensity": 2.0
+        },
         "trap_axis": 1,
         "trap_point": [
           0.0,
@@ -3006,10 +1853,7 @@
           0.0
         ],
         "trap_scale": 1.5
-      },
-      "output_render": "8b23e12a-e843-41c7-b547-1f70a1ea6960",
-      "output_settings": "19a5664a-eaa3-465a-a79f-bf9b972aa654",
-      "viewport_settings": "7b3a4453-3857-4077-9c14-879e17253ec2"
+      }
     }
   },
   "active_camera": "7903ef62-0b69-41cb-bec4-6e0dd731e489",

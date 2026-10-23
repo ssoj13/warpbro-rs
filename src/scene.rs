@@ -831,7 +831,6 @@ pub struct Render {
 
     pub adaptive: Adaptive,
 
-    #[serde(default)]
     pub backend: crate::render_profiles::Backend,
 }
 
@@ -896,7 +895,6 @@ pub struct Scene {
     #[serde(skip)]
     pub node: Option<crate::world::NodeId>,
     /// A Mask node's settings: its authoring branch (`WorldKind::Mask`).
-    #[serde(default)]
     pub mask: Mask,
     /// Frozen document carried only by exports/bookmark entries, never CUDA requests.
     #[serde(skip)]

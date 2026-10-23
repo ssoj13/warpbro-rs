@@ -100,7 +100,12 @@ pub enum Command {
         path: PathBuf,
         text: String,
     },
-    Delete(PathBuf),
+    /// Delete a file (a bookmark); the outcome arrives as a [`SceneEvent`] with this `id`
+    /// (`Ok(None)` when deleted), so the requester changes its list only once the file is gone.
+    Delete {
+        id: u64,
+        path: PathBuf,
+    },
     RefreshTemplates {
         directory: PathBuf,
     },
@@ -125,6 +130,8 @@ pub struct WindowEvent {
     pub result: Result<Vec<PathBuf>, crate::window_shot::ShotError>,
 }
 
+/// The outcome of a file request answered by id: a scene opened (`Ok(Some)`), a scene or
+/// bookmark saved or a file deleted (`Ok(None)`), or why not.
 pub struct SceneEvent {
     pub id: u64,
     pub path: PathBuf,
@@ -149,6 +156,8 @@ struct Replies {
     templates: mpsc::Sender<Result<Vec<crate::templates::Entry>, String>>,
     window: mpsc::Sender<WindowEvent>,
     take: mpsc::Sender<Result<crate::takes::Take, String>>,
+    /// Woken after every answer, so the UI takes it without polling (`IoService::spawn`).
+    ui: crate::render_service::Wake,
 }
 
 /// Run one command and answer it on its channel; a panic in its work is its error.
@@ -245,13 +254,20 @@ fn run(command: Command, replies: &Replies) {
                 Err(error) => error.clone(),
             });
         }
-        Command::Delete(path) => {
-            if let Err(e) = guarded(
-                || std::fs::remove_file(&path).map_err(|e| e.to_string()),
+        Command::Delete { id, path } => {
+            let result = guarded(
+                || {
+                    std::fs::remove_file(&path)
+                        .map(|()| None)
+                        .map_err(|e| e.to_string())
+                },
                 |e| e,
-            ) {
-                report(&replies.done, Err(format!("{}: {e}", path.display())));
-            }
+            );
+            deliver(
+                &replies.scene,
+                SceneEvent { id, path, result },
+                describe_scene,
+            );
         }
     }
 }
@@ -286,7 +302,8 @@ pub struct IoService {
     take_events: mpsc::Receiver<Result<crate::takes::Take, String>>,
 }
 impl IoService {
-    pub fn spawn() -> Self {
+    /// Start the file worker; `ui` is woken whenever an answer waits for the UI.
+    pub fn spawn(ui: crate::render_service::Wake) -> Self {
         let (tx, rx) = mpsc::sync_channel(8);
         let (done, events) = mpsc::channel();
         let (scene, scene_events) = mpsc::channel();
@@ -301,13 +318,18 @@ impl IoService {
             templates,
             window,
             take,
+            ui,
         };
         let worker = thread::Builder::new()
             .name("frac-file-writer".into())
             .spawn(move || {
                 loop {
                     match rx.recv_timeout(std::time::Duration::from_millis(50)) {
-                        Ok(command) => run(command, &replies),
+                        // No lock is held here: `run` answers on channels (`Wake::wake`).
+                        Ok(command) => {
+                            run(command, &replies);
+                            replies.ui.wake();
+                        }
                         Err(mpsc::RecvTimeoutError::Disconnected) => {
                             // The app is closing: nobody reads `done` any more, so a failed
                             // final save goes to the log.
@@ -316,7 +338,10 @@ impl IoService {
                         }
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
-                    flush(&pending, |error| report(&replies.done, Err(error)));
+                    flush(&pending, |error| {
+                        report(&replies.done, Err(error));
+                        replies.ui.wake();
+                    });
                 }
             });
         let worker = match worker {
@@ -427,7 +452,7 @@ mod tests {
         let expected = serde_json::to_value(&editor.document).unwrap();
         let path =
             std::env::temp_dir().join(format!("frac-scene-{}.frac.json", std::process::id()));
-        let io = IoService::spawn();
+        let io = IoService::spawn(crate::render_service::Wake::default());
         io.send(Command::SaveScene {
             id: 1,
             path: path.clone(),
@@ -489,7 +514,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("frac-io-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.json");
-        let io = IoService::spawn();
+        let io = IoService::spawn(crate::render_service::Wake::default());
         for n in 0..100 {
             io.settings(path.clone(), n.to_string());
         }
@@ -497,7 +522,7 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "99");
         assert!(!dir.join("settings.json.tmp").exists());
         let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        let io = IoService::spawn();
+        let io = IoService::spawn(crate::render_service::Wake::default());
         let blocker = dir.join("file");
         std::fs::write(&blocker, "original").unwrap();
         // The rename target is a directory that holds a file: the temp is written, the rename
@@ -531,5 +556,40 @@ mod tests {
         let result: Result<(), String> = guarded(|| panic!("boom"), |e| e);
         assert!(result.unwrap_err().contains("boom"));
         assert_eq!(guarded(|| Ok::<_, String>(7), |e| e), Ok(7));
+    }
+
+    /// A delete answers by id on the scene channel: done, then refused once the file is gone.
+    #[test]
+    fn delete_answers_by_id() {
+        let io = IoService::spawn(crate::render_service::Wake::default());
+        let path = std::env::temp_dir().join(format!("warpbro-delete-{}.json", std::process::id()));
+        std::fs::write(&path, "{}").unwrap();
+        let wait = |io: &IoService| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Some(event) = io.poll_scene() {
+                    return event;
+                }
+                assert!(std::time::Instant::now() < until);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        io.send(Command::Delete {
+            id: 7,
+            path: path.clone(),
+        })
+        .unwrap();
+        let deleted = wait(&io);
+        assert_eq!((deleted.id, deleted.path.as_path()), (7, path.as_path()));
+        assert!(deleted.result.unwrap().is_none());
+        assert!(!path.exists());
+        io.send(Command::Delete {
+            id: 8,
+            path: path.clone(),
+        })
+        .unwrap();
+        let missing = wait(&io);
+        assert_eq!(missing.id, 8);
+        assert!(missing.result.is_err());
     }
 }

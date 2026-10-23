@@ -1,3 +1,8 @@
+//! `frac-toolchain`: prints the native build environment as one JSON object of variables on
+//! stdout. On Windows it is MSVC (VS 2022 / 2026), the Windows SDK and UCRT, CUDA and vcpkg,
+//! found by `vcv-rs` and merged with the inherited PATH / INCLUDE / LIB / LIBPATH; elsewhere
+//! an empty object. `bootstrap.py` builds and runs it (a separate workspace, so it compiles
+//! without the application's CUDA dependencies) and starts cargo inside that environment.
 use std::collections::BTreeMap;
 
 #[cfg(windows)]
@@ -57,8 +62,8 @@ fn native_env() -> Result<BTreeMap<String, String>, String> {
 }
 
 fn main() {
-    match native_env() {
-        Ok(env) => println!("{}", serde_json::to_string(&env).unwrap()),
+    match native_env().and_then(|env| serde_json::to_string(&env).map_err(|e| e.to_string())) {
+        Ok(json) => println!("{json}"),
         Err(error) => {
             eprintln!("bootstrap: {error}");
             std::process::exit(1);

@@ -480,7 +480,7 @@ pub struct Take {
     /// Pinned takes are never dropped by retention.
     pub pinned: bool,
     /// The node it was recorded on (shown in the Takes panel; other nodes may play it).
-    #[serde(default)]
+    #[serde(deserialize_with = "crate::world::present")]
     pub source: Option<NodeId>,
     /// Non-destructive curve filters active on this take.
     #[serde(default, skip_serializing_if = "TakeFilters::is_default")]

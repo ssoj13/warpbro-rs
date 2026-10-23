@@ -430,6 +430,8 @@ pub enum RenderEvent {
 
 #[derive(Default)]
 struct Mailbox {
+    /// Wakes the UI when a frame or an event is posted for it (`push_event`, `publish_frame`).
+    ui: Wake,
     viewport: Option<ViewportRequest>,
     requested_generation: u64,
     requested_interactive: bool,
@@ -456,6 +458,27 @@ struct Mailbox {
     pending_preview_status: Option<RenderEvent>,
     recycled_preview: [Option<Arc<Frame>>; 3],
 }
+/// Wakes the UI from a worker thread when the worker posts a result the UI takes by polling
+/// (render frames and events, file results, colour config loads, export progress), so an idle
+/// window sleeps instead of polling (`window.rs`). One instance is made by the app and cloned
+/// into every worker; until the app attaches its egui context (headless tests) it wakes nothing.
+#[derive(Clone, Default)]
+pub struct Wake(Arc<std::sync::OnceLock<egui::Context>>);
+impl Wake {
+    /// Attach the UI's context; the first one stays (the app's single window).
+    pub fn attach(&self, ctx: &egui::Context) {
+        self.0.get_or_init(|| ctx.clone());
+    }
+    /// Ask the UI for a frame (from any thread). Never call it while holding a lock:
+    /// `request_repaint` takes egui's context lock, and a UI thread waiting for that lock of
+    /// ours while egui's is held would deadlock. Drop the guard first, then wake.
+    pub fn wake(&self) {
+        if let Some(ctx) = self.0.get() {
+            ctx.request_repaint();
+        }
+    }
+}
+
 struct Shared {
     state: Mutex<Mailbox>,
     wake: Condvar,
@@ -471,9 +494,13 @@ pub struct RenderService {
     worker_thread: Option<thread::JoinHandle<()>>,
 }
 impl RenderService {
-    pub fn spawn() -> Self {
+    /// Start the render worker; `ui` is woken whenever a frame or an event waits for the UI.
+    pub fn spawn(ui: Wake) -> Self {
         let shared = Arc::new(Shared {
-            state: Mutex::new(Mailbox::default()),
+            state: Mutex::new(Mailbox {
+                ui,
+                ..Mailbox::default()
+            }),
             wake: Condvar::new(),
         });
         let worker = shared.clone();
@@ -741,18 +768,28 @@ fn recycle_mailbox_frame(state: &mut Mailbox, frame: Arc<Frame>) {
         drop(frame);
     }
 }
+/// Post `event` for the UI (`RenderService::drain_events`) and wake the UI to take it.
 fn push_event(shared: &Shared, event: RenderEvent) {
-    let mut state = lock(shared);
+    let ui = {
+        let mut state = lock(shared);
+        queue_event(&mut state, event);
+        state.ui.clone()
+    };
+    ui.wake();
+}
+/// Put `event` into the mailbox by its kind: replaceable progress and preview results keep only
+/// the newest, final results survive a full queue in their overflow slots.
+fn queue_event(state: &mut Mailbox, event: RenderEvent) {
     match &event {
         RenderEvent::PreviewFrame { generation, .. } => {
             if state.preview_generation == Some(*generation) {
                 if let Some(RenderEvent::PreviewFrame { frame, .. }) =
                     state.pending_preview_frame.replace(event)
                 {
-                    recycle_mailbox_frame(&mut state, frame);
+                    recycle_mailbox_frame(state, frame);
                 }
             } else if let RenderEvent::PreviewFrame { frame, .. } = event {
-                recycle_mailbox_frame(&mut state, frame);
+                recycle_mailbox_frame(state, frame);
             }
             return;
         }
@@ -849,10 +886,19 @@ fn frame_eligible(frame: &Frame, state: &Mailbox) -> bool {
             && frame.generation < state.requested_generation)
 }
 fn publish_frame(shared: &Shared, frame: Arc<Frame>) {
-    let mut state = lock(shared);
-    if frame_eligible(&frame, &state) && frame.generation >= state.newest_completed_generation {
-        state.newest_completed_generation = frame.generation;
-        state.latest = Some(frame);
+    // The UI is woken after the mailbox lock is released (`Wake::wake`).
+    let stored = {
+        let mut state = lock(shared);
+        let eligible =
+            frame_eligible(&frame, &state) && frame.generation >= state.newest_completed_generation;
+        if eligible {
+            state.newest_completed_generation = frame.generation;
+            state.latest = Some(frame);
+        }
+        eligible.then(|| state.ui.clone())
+    };
+    if let Some(ui) = stored {
+        ui.wake();
     }
 }
 
@@ -1839,7 +1885,7 @@ mod tests {
     #[ignore = "requires CUDA; verifies Playa cache then play through the real worker"]
     fn cuda_preview_caches_inclusive_range_then_replays_native_presentation() {
         let _gpu_test = crate::test_gpu::lock();
-        let service = RenderService::spawn();
+        let service = RenderService::spawn(Wake::default());
         let mut scene = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
         scene.colour.on = false;
         scene.render.denoise.enabled = false;
@@ -2435,7 +2481,7 @@ mod tests {
     #[ignore = "requires actual CUDA and shared wgpu OIDN inference"]
     fn cuda_export_forces_oidn_below_interval_and_publishes_linear_result() {
         let _gpu_test = crate::test_gpu::lock();
-        let service = RenderService::spawn();
+        let service = RenderService::spawn(Wake::default());
         let mut scene = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
         scene.world_render = true;
         scene.camera.target = [1000.0; 3];

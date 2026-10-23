@@ -20,7 +20,6 @@ fn amazing_surface_distance(
     obj: u32,
     q: vec3<f32>,
     trap_mode: u32,
-    iter_override: f32,
 ) -> vec2<f32> {
     let oc = orbit_constant(is_world, obj, q);
     let c = oc.xyz;
@@ -32,7 +31,7 @@ fn amazing_surface_distance(
     let shift = ext_slot3(is_world, obj, 6u);
     let rot = load_iter_rot(is_world, obj);
     let trap_cfg = load_trap3(is_world, obj, trap_mode);
-    var frac = fraction_new(is_world, obj, iter_override);
+    var frac = fraction_new(is_world, obj);
 
     var z = q;
     var dr = 1.0;
@@ -81,7 +80,6 @@ fn bristorbrot_distance(
     obj: u32,
     q: vec3<f32>,
     trap_mode: u32,
-    iter_override: f32,
 ) -> vec2<f32> {
     let oc = orbit_constant(is_world, obj, q);
     let c = oc.xyz;
@@ -93,7 +91,7 @@ fn bristorbrot_distance(
     let bailout = pr(is_world, obj, P_BAILOUT);
     let rot = load_iter_rot(is_world, obj);
     let trap_cfg = load_trap3(is_world, obj, trap_mode);
-    var frac = fraction_new(is_world, obj, iter_override);
+    var frac = fraction_new(is_world, obj);
 
     var z = q;
     var dr = 1.0;
@@ -140,7 +138,6 @@ fn burning_ship_distance(
     obj: u32,
     q: vec3<f32>,
     trap_mode: u32,
-    iter_override: f32,
 ) -> vec2<f32> {
     let oc = orbit_constant(is_world, obj, q);
     let c = oc.xyz;
@@ -151,7 +148,7 @@ fn burning_ship_distance(
     let bailout = pr(is_world, obj, P_BAILOUT);
     let rot = load_iter_rot(is_world, obj);
     let trap_cfg = load_trap3(is_world, obj, trap_mode);
-    var frac = fraction_new(is_world, obj, iter_override);
+    var frac = fraction_new(is_world, obj);
 
     var z = q;
     var dr = 1.0;
@@ -196,7 +193,6 @@ fn kaleido_twist_distance(
     obj: u32,
     q: vec3<f32>,
     trap_mode: u32,
-    iter_override: f32,
 ) -> vec2<f32> {
     let scale = max(ext_slot(is_world, obj, 0u), 1.05);
     let shift = ext_slot3(is_world, obj, 1u);
@@ -207,7 +203,7 @@ fn kaleido_twist_distance(
     let post_r2 = ext_slot3(is_world, obj, 12u);
     let rot = load_iter_rot(is_world, obj);
     let trap_cfg = load_trap3(is_world, obj, trap_mode);
-    var frac = fraction_new(is_world, obj, iter_override);
+    var frac = fraction_new(is_world, obj);
 
     var z = q;
     var dr = 1.0;
@@ -254,7 +250,6 @@ fn polyhedral_kifs_distance(
     obj: u32,
     q: vec3<f32>,
     trap_mode: u32,
-    iter_override: f32,
 ) -> vec2<f32> {
     let sym = u32(ext_slot(is_world, obj, 0u));
     let scale = max(ext_slot(is_world, obj, 1u), 1.05);
@@ -262,7 +257,7 @@ fn polyhedral_kifs_distance(
     let thick = ext_slot(is_world, obj, 5u);
     let rot = load_iter_rot(is_world, obj);
     let trap_cfg = load_trap3(is_world, obj, trap_mode);
-    var frac = fraction_new(is_world, obj, iter_override);
+    var frac = fraction_new(is_world, obj);
 
     // Golden-ratio reflection normal (Knighty icosahedral fold plane)
     let n_ico = vec3<f32>(-0.5, -0.80901699, 0.30901699);
@@ -305,7 +300,6 @@ fn harmonic_bulb_distance(
     obj: u32,
     q: vec3<f32>,
     trap_mode: u32,
-    iter_override: f32,
 ) -> vec2<f32> {
     let oc = orbit_constant(is_world, obj, q);
     let c = oc.xyz;
@@ -317,7 +311,7 @@ fn harmonic_bulb_distance(
     let bailout = pr(is_world, obj, P_BAILOUT);
     let rot = load_iter_rot(is_world, obj);
     let trap_cfg = load_trap3(is_world, obj, trap_mode);
-    var frac = fraction_new(is_world, obj, iter_override);
+    var frac = fraction_new(is_world, obj);
 
     var z = q;
     var dr = 1.0;
@@ -365,7 +359,6 @@ fn mandelbar_distance(
     obj: u32,
     q: vec3<f32>,
     trap_mode: u32,
-    iter_override: f32,
 ) -> vec2<f32> {
     let oc = orbit_constant(is_world, obj, q);
     let c = oc.xyz;
@@ -377,7 +370,7 @@ fn mandelbar_distance(
     let bailout = pr(is_world, obj, P_BAILOUT);
     let rot = load_iter_rot(is_world, obj);
     let trap_cfg = load_trap3(is_world, obj, trap_mode);
-    var frac = fraction_new(is_world, obj, iter_override);
+    var frac = fraction_new(is_world, obj);
 
     var z = q;
     var dr = 1.0;
@@ -420,7 +413,6 @@ fn mobius_ifs_distance(
     obj: u32,
     q: vec3<f32>,
     trap_mode: u32,
-    iter_override: f32,
 ) -> vec2<f32> {
     let scale = ext_slot(is_world, obj, 0u);
     let min_r2 = max(ext_slot(is_world, obj, 1u), 1.0e-6);
@@ -429,7 +421,7 @@ fn mobius_ifs_distance(
     let twist = ext_slot(is_world, obj, 6u);
     let rot = load_iter_rot(is_world, obj);
     let trap_cfg = load_trap3(is_world, obj, trap_mode);
-    var frac = fraction_new(is_world, obj, iter_override);
+    var frac = fraction_new(is_world, obj);
 
     var z = q;
     var dr = 1.0;
@@ -624,7 +616,6 @@ fn attractor_tube_distance(
     obj: u32,
     q: vec3<f32>,
     trap_mode: u32,
-    iter_override: f32,
 ) -> vec2<f32> {
     let sys = u32(ext_slot(is_world, obj, 0u));
     let dt = clamp(ext_slot(is_world, obj, 1u), 0.005, 0.15);
@@ -634,11 +625,7 @@ fn attractor_tube_distance(
     let param_b = ext_slot(is_world, obj, 5u);
     let trap_cfg = load_trap3(is_world, obj, trap_mode);
 
-    var n_raw = max(pr(is_world, obj, P_ITERATIONS), 1.0);
-    if iter_override >= 0.0 {
-        n_raw = max(iter_override, 1.0);
-    }
-    let steps = clamp(u32(n_raw), 2u, 24u);
+    let steps = clamp(u32(max(object_iterations(is_world, obj), 1.0)), 2u, 24u);
 
     var p = q;
     var dr = 1.0;

@@ -365,6 +365,8 @@ pub struct ExportController {
     dialog: video_io_egui::ExportDialog,
     /// Active file dialog for saving (`true`) or loading (`false`) a `.json` preset file.
     preset_picker: Option<(bool, egui_file_dialog::FileDialog)>,
+    /// Woken by the export coordinator at every progress change (`Reports`).
+    ui: crate::render_service::Wake,
 }
 #[derive(Clone, Default)]
 struct Progress {
@@ -376,9 +378,31 @@ struct Progress {
     /// (`video_io::job::ExportSettings::encode_video`).
     levels: Option<HdrLevels>,
 }
+/// The coordinator's progress, shared with the UI thread, which is woken at every change
+/// (`ExportController::update` reads it without waiting).
+struct Reports {
+    state: Mutex<Progress>,
+    ui: crate::render_service::Wake,
+}
+impl Reports {
+    /// Change the progress, then wake the UI to show it, after the lock is released
+    /// (`Wake::wake`).
+    fn edit<R>(&self, change: impl FnOnce(&mut Progress) -> R) -> R {
+        let result = {
+            let mut state = self.read();
+            change(&mut state)
+        };
+        self.ui.wake();
+        result
+    }
+    /// The progress, also after a panic poisoned its lock.
+    fn read(&self) -> std::sync::MutexGuard<'_, Progress> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
 struct Run {
     settings: ExportSettings,
-    progress: Arc<Mutex<Progress>>,
+    progress: Arc<Reports>,
     cancel: Arc<AtomicBool>,
     coordinator: Option<std::thread::JoinHandle<()>>,
     /// The video encode the coordinator started after the last PNG, handed to the UI thread.
@@ -413,6 +437,7 @@ impl Default for ExportController {
             next_id: 100,
             out_root: crate::out_root(),
             last: None,
+            ui: crate::render_service::Wake::default(),
             quality: Err("The Output render profile cannot be evaluated".into()),
             dialog,
             preset_picker: None,
@@ -441,6 +466,18 @@ impl ExportController {
     pub fn is_running(&self) -> bool {
         self.run.is_some()
     }
+    /// An export whose coordinator wakes the UI at every change (`Reports`), the UI waking
+    /// nothing more: false while the video encode runs, which the UI must poll (`update`).
+    pub fn is_encoding(&self) -> bool {
+        self.run.as_ref().is_some_and(|run| run.encoding.is_some())
+    }
+    /// The controller of an app whose UI `ui` wakes at every export progress change.
+    pub fn new(ui: crate::render_service::Wake) -> Self {
+        Self {
+            ui,
+            ..Self::default()
+        }
+    }
     /// Once per UI frame: the coordinator's progress, then the video encode it started, which
     /// is polled here (never blocks) until it ends the run.
     pub fn update(&mut self) {
@@ -448,7 +485,7 @@ impl ExportController {
             return;
         };
         if run.encoding.is_none() {
-            let Some(progress) = run.progress.try_lock().ok().map(|p| p.clone()) else {
+            let Some(progress) = run.progress.state.try_lock().ok().map(|p| p.clone()) else {
                 return;
             };
             self.status = progress.status;
@@ -509,11 +546,14 @@ impl ExportController {
         let port = service.port();
         let id = self.next_id;
         self.next_id += u64::from(settings.io.job.frame_count()) + 1;
-        let progress = Arc::new(Mutex::new(Progress {
-            status: "Starting export".into(),
-            samples: (0, settings.samples),
-            ..Default::default()
-        }));
+        let progress = Arc::new(Reports {
+            state: Mutex::new(Progress {
+                status: "Starting export".into(),
+                samples: (0, settings.samples),
+                ..Default::default()
+            }),
+            ui: self.ui.clone(),
+        });
         let cancel = Arc::new(AtomicBool::new(false));
         let video_slot = Arc::new(Mutex::new(None));
         let shared = progress.clone();
@@ -538,7 +578,7 @@ impl ExportController {
                                 "Video cancelled; the PNG sequence is in {folder}"
                             )));
                         }
-                        let levels = shared.lock().unwrap_or_else(|e| e.into_inner()).levels;
+                        let levels = shared.read().levels;
                         // ffmpeg writes a temp sibling, published only when it succeeds and
                         // removed on failure, Cancel or a dropped ticket. The UI polls the
                         // started encode (`ExportController::update`).
@@ -568,7 +608,7 @@ impl ExportController {
                 let status = match result {
                     Ok(Ok(Some(status))) => status,
                     Ok(Ok(None)) => {
-                        let completed = shared.lock().unwrap_or_else(|e| e.into_inner()).completed;
+                        let completed = shared.read().completed;
                         if video && completed > 0 {
                             format!(
                                 "Export cancelled; saved {completed} frames to {}",
@@ -586,9 +626,10 @@ impl ExportController {
                 if !complete {
                     remove_if_empty(&config.io.dir);
                 }
-                let mut state = shared.lock().unwrap_or_else(|e| e.into_inner());
-                state.status = status;
-                state.done = true;
+                shared.edit(|state| {
+                    state.status = status;
+                    state.done = true;
+                });
             })
             .map_err(|e| e.to_string())?;
         self.completed = 0;
@@ -935,7 +976,7 @@ fn coordinate_export(
     scene: &Scene,
     port: &RenderPort,
     first_id: u64,
-    progress: &Mutex<Progress>,
+    progress: &Reports,
     cancel: &AtomicBool,
 ) -> Result<bool, String> {
     let mut writer = ExportWriter::spawn(settings.clone())?;
@@ -993,9 +1034,10 @@ fn coordinate_export(
                         samples,
                         total,
                     }) if job == id => {
-                        let mut state = progress.lock().unwrap_or_else(|e| e.into_inner());
-                        state.status = format!("Frame {number}: {samples}/{total} samples");
-                        state.samples = (samples, total);
+                        progress.edit(|state| {
+                            state.status = format!("Frame {number}: {samples}/{total} samples");
+                            state.samples = (samples, total);
+                        });
                     }
                     Ok(RenderEvent::ExportFrame { id: job, frame }) if job == id => break frame,
                     Ok(RenderEvent::ExportFailed { id: job, error }) if job == id => {
@@ -1011,11 +1053,10 @@ fn coordinate_export(
             if denoise && let Some(error) = &frame.denoise_error {
                 return Err(format!("Frame {number}: denoising failed: {error}"));
             }
-            {
-                let mut state = progress.lock().unwrap_or_else(|e| e.into_inner());
+            progress.edit(|state| {
                 state.status = format!("Writing frame {number}");
                 state.samples = (settings.samples, settings.samples);
-            }
+            });
             let mut pending = (number, frame);
             loop {
                 // A fully rendered frame must enter the writer even if Cancel
@@ -1058,7 +1099,7 @@ fn coordinate_export(
                         acknowledge(progress, settings.io.job.first, written)?
                     }
                     Ok(WriteEvent::Finished(levels)) => {
-                        progress.lock().unwrap_or_else(|e| e.into_inner()).levels = levels;
+                        progress.edit(|state| state.levels = levels);
                         return Ok(true);
                     }
                     Ok(WriteEvent::Failed(error)) => return Err(error),
@@ -1079,8 +1120,7 @@ fn coordinate_export(
         if let Err(error) = port.try_command(Command::CancelExport) {
             log::warn!("export cancel not sent to renderer: {error}");
         }
-        progress.lock().unwrap_or_else(|e| e.into_inner()).status =
-            "Finishing export; saving completed frames…".into();
+        progress.edit(|state| state.status = "Finishing export; saving completed frames…".into());
         writer.frames.take();
         loop {
             match writer.events.recv_timeout(Duration::from_millis(20)) {
@@ -1116,13 +1156,14 @@ fn coordinate_export(
     result
 }
 
-fn acknowledge(progress: &Mutex<Progress>, first: u32, written: u32) -> Result<(), String> {
-    let mut state = progress.lock().unwrap_or_else(|e| e.into_inner());
-    if written != first + state.completed {
-        return Err("Writer acknowledgements arrived out of order".into());
-    }
-    state.completed += 1;
-    Ok(())
+fn acknowledge(progress: &Reports, first: u32, written: u32) -> Result<(), String> {
+    progress.edit(|state| {
+        if written != first + state.completed {
+            return Err("Writer acknowledgements arrived out of order".into());
+        }
+        state.completed += 1;
+        Ok(())
+    })
 }
 
 /// A PNG sequence's video encode: started by the export coordinator once every frame is
@@ -2113,6 +2154,7 @@ mod tests {
             .resolve(
                 &Sel {
                     display: "Display P3 - Display".into(),
+                    view: "ACES 2.0 - SDR 100 nits (P3 D65)".into(),
                     ..crate::color::default_selection()
                 },
                 false,
@@ -2563,7 +2605,7 @@ mod tests {
     fn cuda_export_coordinator_samples_animation_and_writes_each_frame_once() {
         let _gpu_test = crate::test_gpu::lock();
         let dir = temp_dir("cuda");
-        let service = RenderService::spawn();
+        let service = RenderService::spawn(crate::render_service::Wake::default());
         let mut controller = ExportController {
             out_root: dir.clone(),
             job: ExportJob {
@@ -2635,15 +2677,7 @@ mod tests {
             .unwrap();
         let until = std::time::Instant::now() + Duration::from_secs(90);
         // Deliberately never poll GUI events or call update while the pipeline runs.
-        while !controller
-            .run
-            .as_ref()
-            .unwrap()
-            .progress
-            .lock()
-            .unwrap()
-            .done
-        {
+        while !controller.run.as_ref().unwrap().progress.read().done {
             assert!(
                 std::time::Instant::now() < until,
                 "autonomous export timed out"
@@ -2687,7 +2721,7 @@ mod tests {
     fn cuda_cancel_controller_publishes_completed_movie_without_gui_waiting() {
         let _gpu_test = crate::test_gpu::lock();
         let dir = temp_dir("controller-cancel");
-        let service = RenderService::spawn();
+        let service = RenderService::spawn(crate::render_service::Wake::default());
         let mut controller = ExportController {
             out_root: dir.clone(),
             job: ExportJob {

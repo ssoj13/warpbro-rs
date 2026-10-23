@@ -2,7 +2,7 @@
 //!
 //! The workspace is an `soluwell_chrome::dock_layout::Layout`: plain data the dock draws and reports
 //! actions for; every change goes through `Layout::apply_with_permissions` (atomic, validated).
-use super::{App, Tab};
+use super::App;
 use soluwell_chrome::dock_layout::{
     Action, DockArea, DockContent, DockError, DockLayoutBar, DockStyle, Layout, LayoutStore,
     Location, Node, Permissions, Placement, SplitAxis, SplitSize,
@@ -192,14 +192,8 @@ impl DockContent<Panel> for Viewer<'_> {
             Panel::Timeline => self.app.world_ui.timeline(ui, &mut self.app.world),
             Panel::Outliner => self.app.world_ui.outliner(ui, &mut self.app.world),
             Panel::Takes => self.app.takes_panel(ui),
-            Panel::Gallery | Panel::Bookmarks | Panel::Materials => {
-                self.app.tab = match panel {
-                    Panel::Bookmarks => Tab::Bookmarks,
-                    Panel::Materials => Tab::Materials,
-                    _ => Tab::Gallery,
-                };
-                self.app.browser(ui);
-            }
+            Panel::Materials => self.app.materials_tab(ui),
+            Panel::Gallery | Panel::Bookmarks => self.app.browser(ui, *panel),
         });
     }
     fn permissions(&self, panel: &Panel) -> Permissions {
@@ -326,12 +320,18 @@ impl App {
                     ui.close();
                 }
                 if ui.button("Reset to default").clicked() {
-                    self.dock = default_layout();
-                    self.panels_to_open.clear();
+                    self.reset_layout();
                     ui.close();
                 }
             });
         });
+    }
+
+    /// The default workspace (`default_layout`): Layout > Reset to default and Window > Reset
+    /// layout. Panels queued to open are dropped with the old layout.
+    fn reset_layout(&mut self) {
+        self.dock = default_layout();
+        self.panels_to_open.clear();
     }
 
     pub(super) fn window_menu(&mut self, ui: &mut egui::Ui) {
@@ -345,13 +345,11 @@ impl App {
             }
             ui.separator();
             if ui.button("Reset layout").clicked() {
-                self.dock = default_layout();
-                self.panels_to_open.clear();
+                self.reset_layout();
                 ui.close();
             }
             if ui.button("Fonts…").clicked() {
-                self.prefs.selected = 3;
-                self.panels_to_open.push(Panel::Settings);
+                self.open_settings(super::SettingsPage::Fonts);
                 ui.close();
             }
         });
@@ -475,15 +473,10 @@ impl App {
                         if exposure != effective.render.exposure_stops
                             && let Ok(viewport_id) = self.world.document.viewport_settings_id()
                         {
+                            // The camera's gesture: the drag shares the navigation's undo step.
                             let gesture = ui
                                 .input(|input| input.pointer.primary_down())
-                                .then(|| {
-                                    egui::Id::new((
-                                        "viewport_camera_edit",
-                                        self.world.document.active_camera,
-                                    ))
-                                    .value()
-                                })
+                                .then(|| self.camera_gesture())
                                 .or_else(|| self.world.active_edit());
                             if let Err(error) = self.world.execute_edit(
                                 crate::world::WorldCommand::SetAttribute {
@@ -561,17 +554,13 @@ impl App {
 impl super::App {
     /// The viewport's kind filter (Blender's "Selectability & Visibility" popover): an eye and a
     /// pick toggle per node kind and the extras switch. It holds nothing itself: each toggle
-    /// edits the ViewportSettings node's attribute, one undo step, as the Attribute Editor does.
+    /// edits the ViewportSettings node's attribute (`set_viewport_flag`), one undo step, as the
+    /// Attribute Editor does.
     fn visibility_menu(&mut self, ui: &mut egui::Ui) {
         use soluwell_config::icons as ph;
         let frame = f64::from(self.world_ui.playhead);
-        let (id, policy) = match self
-            .world
-            .document
-            .viewport_settings_id()
-            .and_then(|id| Ok((id, self.world.document.viewport_policy(frame)?)))
-        {
-            Ok(found) => found,
+        let policy = match self.world.document.viewport_policy(frame) {
+            Ok(policy) => policy,
             Err(error) => {
                 ui.label(error);
                 return;
@@ -609,23 +598,13 @@ impl super::App {
         {
             edit = Some(("/viewport/extras".into(), extras));
         }
-        if let Some((path, value)) = edit
-            && let Err(error) = self
-                .world
-                .execute(crate::world::WorldCommand::SetAttribute {
-                    id,
-                    path,
-                    value: serde_json::json!(value),
-                    frame,
-                })
-        {
-            self.status = error;
+        if let Some((path, value)) = edit {
+            self.set_viewport_flag(&path, value);
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
-
 pub(super) struct Fonts {
     pub face: String,
     pub body: f32,

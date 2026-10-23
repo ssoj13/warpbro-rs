@@ -1124,7 +1124,7 @@ fn numeric_component_keys_and_render_keys_share_playa_evaluation() {
     );
 }
 #[test]
-fn metadata_and_unknown_gpu_data_survive_roundtrip_with_stable_ids() {
+fn metadata_and_custom_attributes_survive_roundtrip_with_stable_ids() {
     let mut e = editor();
     let id = find(&e, WorldKind::Fractal);
     let metadata = json!({"notes":["arbitrary",{"nested":true}],"shot":42,"nullable":null});
@@ -1134,8 +1134,6 @@ fn metadata_and_unknown_gpu_data_survive_roundtrip_with_stable_ids() {
         value: metadata.clone(),
     })
     .unwrap();
-    e.document.node_mut(id).unwrap()["gpu"]["unknown_vendor_extension"] =
-        json!({"scalar":1.75,"channels":[1,2,3]});
     set(&mut e, id, "/custom/gain", json!(2.5), 0.0);
     e.execute(WorldCommand::Key {
         id,
@@ -1150,8 +1148,8 @@ fn metadata_and_unknown_gpu_data_survive_roundtrip_with_stable_ids() {
     assert_eq!(
         restored.runtime_graph().unwrap().nodes[&id]
             .data
-            .to_json_value()["gpu"]["unknown_vendor_extension"]["scalar"],
-        json!(1.75)
+            .to_json_value()["metadata"]["shot"],
+        json!(42)
     );
     assert_eq!(
         restored.attribute_value(id, "/custom/gain", 0.25).unwrap(),
@@ -2592,65 +2590,6 @@ fn assigned_profiles_guard_delete_and_explicit_reassignment_allows_atomic_delete
 }
 
 #[test]
-fn legacy_quality_settings_nodes_and_profile_look_fields_migrate_into_unified_profiles() {
-    let doc = WorldDocument::from_scene(&Scene::preset(Formula::Mandelbulb(Bulb::PRESET)));
-    let mut raw = serde_json::to_value(&doc).unwrap();
-    let out_id = doc.output_render_profile().unwrap();
-    let vp_id = doc.viewport_settings_id().unwrap();
-    let q_id = NodeId::new();
-    let q_str = q_id.to_string();
-    let out_str = out_id.to_string();
-    let vp_str = vp_id.to_string();
-
-    // Synthesize a legacy QualitySettings node and link it from output_render via /render/quality_id.
-    let mut q_node = raw["graph"]["nodes"][&out_str].clone();
-    q_node["type"] = json!("QualitySettings");
-    q_node["name"] = json!("Legacy Quality");
-    q_node["gpu"] = json!({"quality": q_node["gpu"]["quality"].clone()});
-    q_node["gpu"]["quality"]["samples"] = json!(144);
-    q_node["host"]["map"]["/quality/samples"] = json!({"value": {"Int64": 144}});
-
-    let out_node = &mut raw["graph"]["nodes"][&out_str];
-    out_node["gpu"].as_object_mut().unwrap().remove("quality");
-    out_node["gpu"]["render"]["quality_id"] = json!(q_str);
-    out_node["gpu"]["render"]["exposure_stops"] = json!(2.25);
-    let out_map = out_node["host"]["map"].as_object_mut().unwrap();
-    out_map.retain(|k, _| !k.starts_with("/quality/"));
-    out_map.insert(
-        "/render/quality_id".into(),
-        json!({"value": {"Str": q_str}}),
-    );
-    out_map.insert(
-        "/render/exposure_stops".into(),
-        json!({"value": {"Float": 2.25}}),
-    );
-
-    let vp_node = &mut raw["graph"]["nodes"][&vp_str];
-    vp_node["gpu"].as_object_mut().unwrap().remove("render");
-    vp_node["host"]["map"]
-        .as_object_mut()
-        .unwrap()
-        .retain(|k, _| !k.starts_with("/render/"));
-
-    raw["graph"]["nodes"]
-        .as_object_mut()
-        .unwrap()
-        .insert(q_id.to_string(), q_node);
-    raw["graph"]["bus_slots"]["layer_order"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!(q_id.to_string()));
-
-    let text = serde_json::to_string(&raw).unwrap();
-    let decoded = crate::io_service::decode_scene(&text).unwrap();
-    let hydrated = decoded.document.expect("document");
-    hydrated.validate_render_profiles(0.0).unwrap();
-    assert!(!hydrated.graph.nodes.contains_key(&q_id.to_string()));
-    assert_eq!(hydrated.effective_render(out_id, 0.0).unwrap().samples, 144);
-    assert_eq!(hydrated.snapshot(0.0).unwrap().render.exposure_stops, 2.25);
-}
-
-#[test]
 fn profile_fast_materials_are_evaluated_only_and_preserve_transmission_and_geometry() {
     use crate::scene::MaterialModel;
     let mut scene = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
@@ -2943,8 +2882,8 @@ fn output_settings_node_is_the_typed_static_export_recipe() {
     let mut animated = e.document.clone();
     let mut attrs = animated.attrs(instance).unwrap();
     let mut animation = Animation::with_arity(1);
-    animation.channels[0].upsert_key(Keyframe::with_tan(0.0, 18.0, Tan::Constant));
-    attrs.set_anim("/output/qp", Some(animation));
+    animation.channels[0].upsert_key(Keyframe::with_tan(0.0, 1.0, Tan::Constant));
+    attrs.set_anim("/output/denoise_at_completion", Some(animation));
     animated.store_attrs(instance, &attrs).unwrap();
     let restored: WorldDocument =
         serde_json::from_str(&serde_json::to_string(&animated).unwrap()).unwrap();
@@ -2992,6 +2931,39 @@ fn templates_load_and_evaluate() {
     assert!(failures.is_empty(), "failed: {failures:?}");
 }
 
+/// The first JSON pointer where `a` and `b` differ, with both values (`a` is the document,
+/// `b` the file); None when they are equal.
+fn first_diff(path: &str, a: &Value, b: &Value) -> Option<String> {
+    if a == b {
+        return None;
+    }
+    match (a, b) {
+        (Value::Object(ma), Value::Object(mb)) => {
+            for k in ma.keys().chain(mb.keys()) {
+                let p = format!("{path}/{k}");
+                match (ma.get(k), mb.get(k)) {
+                    (Some(va), Some(vb)) => {
+                        if let Some(d) = first_diff(&p, va, vb) {
+                            return Some(d);
+                        }
+                    }
+                    (va, vb) => return Some(format!("{p}: doc={va:?} vs file={vb:?}")),
+                }
+            }
+            None
+        }
+        (Value::Array(aa), Value::Array(ab)) if aa.len() == ab.len() => {
+            for (i, (va, vb)) in aa.iter().zip(ab.iter()).enumerate() {
+                if let Some(d) = first_diff(&format!("{path}/{i}"), va, vb) {
+                    return Some(d);
+                }
+            }
+            None
+        }
+        _ => Some(format!("{path}: doc={a} vs file={b}")),
+    }
+}
+
 fn check_template(text: &str) -> Result<serde_json::Map<String, Value>, String> {
     let scene = crate::io_service::decode_scene(text)?;
     let doc = scene.document.ok_or("decode_scene kept no document")?;
@@ -2999,36 +2971,6 @@ fn check_template(text: &str) -> Result<serde_json::Map<String, Value>, String> 
     let saved = serde_json::to_string_pretty(&*doc).map_err(|e| e.to_string())?;
     let encoded: Value = serde_json::from_str(&saved).map_err(|e| e.to_string())?;
     if encoded != file {
-        fn first_diff(path: &str, a: &Value, b: &Value) -> Option<String> {
-            if a == b {
-                return None;
-            }
-            match (a, b) {
-                (Value::Object(ma), Value::Object(mb)) => {
-                    for k in ma.keys().chain(mb.keys()) {
-                        let p = format!("{path}/{k}");
-                        match (ma.get(k), mb.get(k)) {
-                            (Some(va), Some(vb)) => {
-                                if let Some(d) = first_diff(&p, va, vb) {
-                                    return Some(d);
-                                }
-                            }
-                            (va, vb) => return Some(format!("{p}: doc={va:?} vs file={vb:?}")),
-                        }
-                    }
-                    None
-                }
-                (Value::Array(aa), Value::Array(ab)) if aa.len() == ab.len() => {
-                    for (i, (va, vb)) in aa.iter().zip(ab.iter()).enumerate() {
-                        if let Some(d) = first_diff(&format!("{path}/{i}"), va, vb) {
-                            return Some(d);
-                        }
-                    }
-                    None
-                }
-                _ => Some(format!("{path}: doc={a} vs file={b}")),
-            }
-        }
         let detail = first_diff("", &encoded, &file).unwrap_or_default();
         return Err(format!("document does not round-trip unchanged ({detail})"));
     }
@@ -3945,129 +3887,9 @@ fn a_mask_array_is_a_line_or_a_ring_and_cells_are_not_copies() {
     assert!(inactive_reason("/mask/array/count", |p| values.get(p)).is_some());
 }
 
-#[test]
-fn decode_scene_hydrates_missing_and_removed_schema_parameters() {
-    let original = WorldDocument::from_scene(&Scene::preset(Formula::Mandelbulb(Bulb::PRESET)));
-    let mut raw = serde_json::to_value(&original).unwrap();
-    raw.as_object_mut()
-        .unwrap()
-        .insert("obsolete_top_field".into(), json!(42));
-    let world = raw["graph"]["bus_slots"]["world"].as_object_mut().unwrap();
-    world.remove("inversion_strength");
-    world.remove("mask");
-    world.insert("obsolete_world_param".into(), json!("legacy"));
-    if let Some(cam) = world.get_mut("camera").and_then(Value::as_object_mut) {
-        let f_num = cam.remove("f_number").unwrap();
-        cam.insert("aperture".into(), f_num);
-        cam.remove("sensor_height");
-    }
-    for node in raw["graph"]["nodes"].as_object_mut().unwrap().values_mut() {
-        if let Some(gpu) = node["gpu"].as_object_mut() {
-            gpu.remove("inversion_strength");
-            gpu.insert("obsolete_gpu_field".into(), json!(true));
-            if let Some(render) = gpu.get_mut("render").and_then(Value::as_object_mut) {
-                render.remove("direct");
-                render.remove("display");
-                render.remove("thinning");
-            }
-        }
-        if let Some(map) = node["host"]["map"].as_object_mut() {
-            map.remove("/inversion_strength");
-            map.remove("/render/direct/shadow_strength");
-            map.remove("/render/display");
-            map.insert("/obsolete/param".into(), json!({"Float": 1.0}));
-        }
-    }
-    let text = serde_json::to_string(&raw).unwrap();
-    let decoded = crate::io_service::decode_scene(&text).unwrap();
-    let hydrated = decoded.document.expect("document");
-    assert_eq!(*hydrated, original);
-}
-
-/// The world documents a conversion covers: `templates/*.json` of the repository and, when
-/// `WARPBRO_CONVERT_DIR` is set, every `*.json` under that directory (recursively: the user's
-/// `~/.warpbro` templates and bookmarks). Files that are not world documents (settings, take
-/// clips) are left out by `convert_documents_once`.
-fn conversion_files() -> Vec<std::path::PathBuf> {
-    fn walk(dir: &std::path::Path, recursive: bool, out: &mut Vec<std::path::PathBuf>) {
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
-            if path.is_dir() {
-                if recursive {
-                    walk(&path, true, out);
-                }
-            } else if path.extension().is_some_and(|e| e == "json") {
-                out.push(path);
-            }
-        }
-    }
-    let mut files = Vec::new();
-    let templates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
-    walk(&templates, false, &mut files);
-    if let Ok(dir) = std::env::var("WARPBRO_CONVERT_DIR") {
-        walk(std::path::Path::new(&dir), true, &mut files);
-    }
-    files.sort();
-    files
-}
-
-/// ONE-TIME converter (plan1 Q1): decodes every world document of `conversion_files` with the
-/// current `decode_json` (its legacy migrations included), keeps the original once as
-/// `<file>.bak`, and writes it back in the current format (lighting split, slim `gpu` blobs,
-/// explicit camera framing radius). The written text must decode to the same document. Run by
-/// hand before wave 2 deletes the migrations:
-/// `cargo test convert_documents_once -- --ignored --nocapture` (with `WARPBRO_CONVERT_DIR`
-/// for the user's files).
-#[test]
-#[ignore = "rewrites templates/ and WARPBRO_CONVERT_DIR in place (keeps .bak copies)"]
-fn convert_documents_once() {
-    let mut failures = Vec::new();
-    for path in conversion_files() {
-        let name = path.display().to_string();
-        let text = std::fs::read_to_string(&path).unwrap();
-        let raw: Value = match serde_json::from_str(&text) {
-            Ok(raw) => raw,
-            Err(_) => {
-                println!("{name}: skipped (not JSON)");
-                continue;
-            }
-        };
-        if !raw.pointer("/graph/nodes").is_some_and(Value::is_object) {
-            println!("{name}: skipped (not a world document)");
-            continue;
-        }
-        let document = match WorldDocument::decode_json(&text) {
-            Ok(document) => document,
-            Err(error) => {
-                println!("{name}: FAILED: {error}");
-                failures.push(name);
-                continue;
-            }
-        };
-        let converted = serde_json::to_string_pretty(&document).unwrap();
-        let current: Value = serde_json::from_str(&converted).unwrap();
-        if current == raw {
-            println!("{name}: current");
-            continue;
-        }
-        let backup = path.with_extension("json.bak");
-        if !backup.exists() {
-            std::fs::copy(&path, &backup).unwrap();
-        }
-        std::fs::write(&path, &converted).unwrap();
-        let reread = WorldDocument::decode_json(&converted).unwrap();
-        assert_eq!(
-            reread, document,
-            "{name}: the converted text decodes to the same document"
-        );
-        println!("{name}: CONVERTED (original in {})", backup.display());
-    }
-    assert!(failures.is_empty(), "failed: {failures:?}");
-}
-
-/// The shipped templates are in the current format: they decode with no migration step
-/// (re-encoding gives their text back) and evaluate (`check_template`). Fails until
-/// `convert_documents_once` has run; it is what lets wave 2 delete the migrations.
+/// The shipped templates are in the current format: they decode strictly (`decode_json`),
+/// re-encode to their own text and evaluate (`check_template`). A format change converts them
+/// once; nothing reads an older layout.
 #[test]
 fn shipped_templates_are_current() {
     let templates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
@@ -4082,6 +3904,23 @@ fn shipped_templates_are_current() {
         }
     }
     assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+fn reset_is_one_undo_step_that_keeps_the_identity() {
+    let mut e = editor();
+    let before = e.document.clone();
+    let fresh = WorldDocument::from_scene(&Scene::preset(Formula::Mandelbulb(Bulb::PRESET)));
+    e.reset(fresh).unwrap();
+    assert_ne!(e.document, before);
+    assert_eq!(e.document.graph.id, before.graph.id);
+    let selection = e.selection.expect("a fractal is selected");
+    assert_eq!(e.document.info(selection).unwrap().kind, WorldKind::Fractal);
+    assert_eq!(e.selected, vec![selection]);
+    assert!(e.undo());
+    assert_eq!(e.document, before);
+    assert!(e.redo());
+    assert_ne!(e.document, before);
 }
 
 #[test]
@@ -4104,6 +3943,46 @@ fn malformed_documents_are_errors_not_panics() {
     let mut bad = raw.clone();
     bad["graph"]["nodes"][&key] = json!(7);
     assert!(decode(&bad).is_err());
+    // Strict: nothing is filled in or dropped. A missing top-level field, an unknown one, a
+    // node missing a field, a node with an unknown field, a gpu blob with a foreign or missing
+    // branch are all errors.
+    let mut bad = raw.clone();
+    bad.as_object_mut().unwrap().remove("fps");
+    assert!(decode(&bad).unwrap_err().contains("fps"));
+    // A missing Option field is an error too; only an explicit null is None.
+    for field in ["active_camera", "active_environment"] {
+        let mut bad = raw.clone();
+        bad.as_object_mut().unwrap().remove(field);
+        assert!(decode(&bad).unwrap_err().contains(field), "{field}");
+        let mut none = raw.clone();
+        none[field] = Value::Null;
+        assert!(decode(&none).is_ok(), "{field}: null is None");
+    }
+    let mut bad = raw.clone();
+    bad["lighting"] = json!({});
+    assert!(decode(&bad).unwrap_err().contains("lighting"));
+    let mut bad = raw.clone();
+    bad["graph"]["nodes"][&key]
+        .as_object_mut()
+        .unwrap()
+        .remove("discrete");
+    assert!(decode(&bad).unwrap_err().contains("missing discrete"));
+    let mut bad = raw.clone();
+    bad["graph"]["nodes"][&key]["settings_node"] = json!(null);
+    assert!(
+        decode(&bad)
+            .unwrap_err()
+            .contains("unknown field settings_node")
+    );
+    let mut bad = raw.clone();
+    bad["graph"]["nodes"][&key]["gpu"]["lighting"] = json!({});
+    assert!(decode(&bad).unwrap_err().contains("gpu must hold"));
+    let mut bad = raw.clone();
+    bad["graph"]["nodes"][&key]["gpu"]
+        .as_object_mut()
+        .unwrap()
+        .remove("quality");
+    assert!(decode(&bad).unwrap_err().contains("gpu must hold"));
     // An animation whose channels do not match its value.
     let mut e = WorldEditor::new(document.clone());
     let camera = find(&e, WorldKind::Camera);

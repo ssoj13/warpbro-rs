@@ -1,8 +1,14 @@
-//! The browser UI (egui): gallery + bookmarks with GPU thumbnails, the progressive viewport,
-//! the scene inspector and viewport screenshots. Renders (PNG / EXR / video) go through the
-//! Render / Encode panel (`export.rs`); all output lands in `~/.warpbro/out/<timestamp>`.
+//! The application shell (egui): `App` owns the authored document (`world::WorldEditor`, the
+//! one source of scene state), its evaluated snapshot (`App::scene`, rebuilt by
+//! `refresh_scene`), the render and file workers and every panel of the dock (`dock.rs`):
+//! viewport (progressive render, navigation, manipulator, picking), gallery, bookmarks and
+//! material cards with GPU thumbnails, Attribute Editor, Settings (saved to
+//! `~/.warpbro/settings.json`) and Render / Encode (`export.rs`; output lands in
+//! `~/.warpbro/out/<timestamp>`). `App::ui` is one frame: navigation and panel edits change
+//! `App::scene`, and the end-of-frame diff against `snapshot_before` authors them into the
+//! document as undoable edits. The window (`window.rs`) redraws only while `App::animating`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use egui::{self, Color32, ColorImage, RichText, Sense, TextureHandle, TextureOptions, Vec2};
@@ -36,11 +42,48 @@ struct Entry {
     path: Option<PathBuf>,
 }
 
-#[derive(PartialEq)]
-enum Tab {
-    Gallery,
-    Bookmarks,
-    Materials,
+/// The gallery or bookmark card the current document was made from: the card the browser
+/// highlights. Identity, not scene equality: a loaded card's document gets a new id.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Card {
+    Gallery(usize),
+    Bookmark(PathBuf),
+}
+
+/// A bookmark file operation waiting for the file worker (answered as an
+/// `io_service::SceneEvent` with its id): the bookmark list changes only once the file did.
+enum BookmarkOp {
+    /// The card a successful save adds (its path is the event's); boxed: an entry holds a scene.
+    Save(Box<Entry>),
+    Delete,
+}
+
+/// A document history step from the Edit menu, applied at the start of the next frame where the
+/// Undo / Redo hotkeys run (before `snapshot_before`), never in the middle of a frame's edits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum History {
+    Undo,
+    Redo,
+    /// Back to the document the scene was loaded as (`App::origin`), one undoable step.
+    Reset,
+}
+
+/// The preview cache's RAM budget (Settings > Animation): a share of the installed memory the
+/// OS reports, never more than leaves `reserve_gb` to the system (`CacheManager` reads the OS).
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+struct PreviewCache {
+    /// Share of the installed RAM, (0, 1].
+    fraction: f32,
+    /// GiB always left to the system.
+    reserve_gb: f32,
+}
+impl Default for PreviewCache {
+    fn default() -> Self {
+        Self {
+            fraction: 0.05,
+            reserve_gb: 2.0,
+        }
+    }
 }
 
 const SWATCH: usize = 96;
@@ -103,6 +146,10 @@ pub(crate) struct App {
     layouts: dock::Layouts,
     export: crate::export::ExportController,
     thumb_pending: Option<(u64, Scene)>,
+    /// Encoded `ThumbId`s of gallery, bookmark and swatch cards whose render failed: not asked
+    /// again (material cards keep their own state in `material_gallery`). Bookmark ids are
+    /// indices, so they are forgotten whenever the bookmark list changes.
+    thumb_failed: HashSet<u64>,
     /// The viewport click waiting for its GPU pick (`App::viewport_click`), and the last id.
     pick_pending: Option<PendingPick>,
     pick_sequence: u64,
@@ -118,8 +165,15 @@ pub(crate) struct App {
     preview_progress: Option<(u32, u32, usize)>,
     evaluated_world: Option<(playa_graph::NodeId, u64, u64)>,
     load_revision: u64,
-    /// The preset / bookmark the scene came from, for "Reset".
+    /// The scene as it was loaded, for Edit > Reset scene and View > Restore camera.
     origin: Scene,
+    /// The card `origin` was loaded from, if any (`browser` highlights it).
+    card: Option<Card>,
+    /// The colour selection a new document starts with (File > New, startup): `Settings::colour`.
+    /// The last selection the user chose in the colour controls; a loaded document keeps its own.
+    default_colour: crate::ocio::Sel,
+    /// An Edit menu history step waiting for the next frame (`History`).
+    history: Option<History>,
 
     showing_preview: bool,
     hdr_view: std::sync::Arc<std::sync::Mutex<soluwell_viewport::hdr_view::HdrView>>,
@@ -148,8 +202,9 @@ pub(crate) struct App {
     gizmo_gesture: Option<u64>,
     /// Records each manipulator drag as transform takes of the dragged nodes.
     drag_recorder: crate::takes::DragRecorder,
-    /// Splitter state of the three Settings > Controls grids.
-    prefs_grids: [AttrGridState; 5],
+    /// Splitter state of the Settings grids, in page order: Controls' camera controls, camera
+    /// alignment, manipulator, slot buttons and attribute controls, then Animation's preview cache.
+    prefs_grids: [AttrGridState; 6],
     dock: soluwell_chrome::dock_layout::Layout<dock::Panel>,
     /// The panel the user last clicked into: new tabs join its group.
     dock_focus: Option<dock::Panel>,
@@ -162,13 +217,18 @@ pub(crate) struct App {
     config_picker: egui_file_dialog::FileDialog,
     scene_picker: Option<(crate::templates::FileAction, egui_file_dialog::FileDialog)>,
     scene_file_path: Option<PathBuf>,
+    /// The last id of a file-worker request answered by id (scene files and bookmarks).
     scene_file_sequence: u64,
     scene_file_pending: Option<(u64, u64, crate::templates::FileAction)>,
+    /// Bookmark saves and deletes waiting for the file worker, by request id.
+    bookmark_ops: Vec<(u64, BookmarkOp)>,
+    /// Wakes this UI from the workers (render, file, colour, export) when they post a result;
+    /// attached to the window's egui context on the first frame (`ui`).
+    wake: crate::render_service::Wake,
     templates: Vec<crate::templates::Entry>,
     templates_requested: bool,
     templates_pending: bool,
     persisted_settings: Option<Settings>,
-    persisted_layout_revision: u64,
     snapshot_before: Option<Scene>,
     #[cfg(test)]
     settings_serializations: usize,
@@ -181,7 +241,8 @@ pub(crate) struct App {
 
     swatches: Vec<Option<TextureHandle>>,
     material_gallery: crate::material_gallery::MaterialGallery,
-    tab: Tab,
+    /// The preview cache's memory budget (`Settings::preview_cache`).
+    preview_cache: PreviewCache,
     target_spp: u32,
     spp_per_frame: u32,
     last_change: Instant,
@@ -213,7 +274,7 @@ pub(crate) struct App {
     seed: u32,
     /// `FRAC_SNAP=out.png [FRAC_SNAP_PRESET=i] [FRAC_SNAP_SPP=n]`: screenshot the window once the
     /// thumbnails and n viewport samples are done, then quit (for docs).
-    snap: Option<(PathBuf, u32, bool)>,
+    snap: Option<Snap>,
     /// The armed window screenshot (`window_shot`) and whether a frame was drawn since it was
     /// requested: the window captures it only then, so a menu that asked for it is closed.
     window_shot: Option<(crate::window_shot::WindowShot, bool)>,
@@ -234,6 +295,18 @@ pub(crate) struct App {
     controls: Controls,
 }
 
+/// The `FRAC_SNAP` documentation screenshot (`App::handle_snap`), its environment read once.
+#[derive(Clone, Debug)]
+struct Snap {
+    path: PathBuf,
+    /// Viewport samples to wait for (`FRAC_SNAP_SPP`, default 256), capped by the profile's target.
+    spp: u32,
+    /// Wait for every gallery / bookmark / swatch thumbnail too (`FRAC_SNAP_WAIT_THUMBS` != 0).
+    wait_thumbs: bool,
+    /// The window shot is armed: nothing more to do but wait for it.
+    requested: bool,
+}
+
 /// Shared fitted tile geometry for scene, workspace-material and library cards.
 fn thumbnail_grid(width: f32, maximum: Vec2, gap: f32) -> (usize, Vec2) {
     let width = width.max(1.0);
@@ -242,45 +315,70 @@ fn thumbnail_grid(width: f32, maximum: Vec2, gap: f32) -> (usize, Vec2) {
     (columns, Vec2::new(cell, cell * maximum.y / maximum.x))
 }
 
-fn now_stamp() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
+/// The bookmark directory, `~/.warpbro/bookmarks`.
+fn bookmarks_dir() -> PathBuf {
+    crate::warpbro_dir().join("bookmarks")
 }
 
-fn load_bookmarks() -> Vec<Entry> {
-    let dir = crate::warpbro_dir().join("bookmarks");
-    let mut v: Vec<(PathBuf, Scene)> = std::fs::read_dir(&dir)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|x| x == "json"))
-        .filter_map(|p| {
-            let s = std::fs::read_to_string(&p).ok()?;
-            let scene = crate::io_service::decode_scene(&s).ok()?;
-            Some((p, scene))
-        })
-        .collect();
-    v.sort_by(|a, b| a.0.cmp(&b.0));
-    v.into_iter()
-        .map(|(p, scene)| Entry {
-            scene,
-            thumb: None,
-            path: Some(p),
-        })
-        .collect()
-}
-
-fn pending_thumbnail_entry(entries: &[Entry], scene: &Scene) -> Option<usize> {
-    entries.iter().position(|entry| {
-        if entry.thumb.is_some() {
-            return false;
+/// The saved bookmarks in file-name order, and why the others could not be read (a missing
+/// directory is no error: nothing saved yet).
+fn load_bookmarks() -> (Vec<Entry>, Vec<String>) {
+    let dir = bookmarks_dir();
+    let mut errors = Vec::new();
+    let listing = match std::fs::read_dir(&dir) {
+        Ok(listing) => listing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return (Vec::new(), errors);
         }
-        let mut rendered = entry.scene.clone();
-        rendered.render.max_bounces = rendered.render.max_bounces.min(3);
-        &rendered == scene
+        Err(error) => {
+            errors.push(format!("{}: {error}", dir.display()));
+            return (Vec::new(), errors);
+        }
+    };
+    let mut entries: Vec<Entry> = Vec::new();
+    for item in listing {
+        let path = match item {
+            Ok(item) => item.path(),
+            Err(error) => {
+                errors.push(format!("{}: {error}", dir.display()));
+                continue;
+            }
+        };
+        if path.extension().is_none_or(|x| x != "json") {
+            continue;
+        }
+        match std::fs::read_to_string(&path)
+            .map_err(|error| error.to_string())
+            .and_then(|text| crate::io_service::decode_scene(&text))
+        {
+            Ok(scene) => entries.push(Entry {
+                scene,
+                thumb: None,
+                path: Some(path),
+            }),
+            Err(error) => errors.push(format!("{}: {error}", path.display())),
+        }
+    }
+    entries.sort_by(|a, b| a.path.cmp(&b.path));
+    (entries, errors)
+}
+
+/// The card a finished gallery / bookmark thumbnail of `scene` belongs to: the first one still
+/// without a thumbnail showing that scene (equal scenes fill one card each, in order; the
+/// list may have changed while it rendered, so not by index).
+fn pending_thumbnail_entry(entries: &[Entry], scene: &Scene) -> Option<usize> {
+    entries
+        .iter()
+        .position(|entry| entry.thumb.is_none() && entry.scene == *scene)
+}
+
+/// The window's display state (`soluwell_viewport::display::DisplayState`), which the window
+/// stores into the egui context every frame; None before the first frame. The one reader.
+fn display_state(ctx: &egui::Context) -> Option<soluwell_viewport::display::DisplayState> {
+    ctx.data(|d| {
+        d.get_temp::<soluwell_viewport::display::DisplayState>(
+            soluwell_viewport::display::state_id(),
+        )
     })
 }
 
@@ -294,11 +392,7 @@ pub(crate) struct Monitor {
 }
 impl Monitor {
     pub(crate) fn read(ctx: &egui::Context) -> Self {
-        let state = ctx.data(|d| {
-            d.get_temp::<soluwell_viewport::display::DisplayState>(
-                soluwell_viewport::display::state_id(),
-            )
-        });
+        let state = display_state(ctx);
         Self {
             hdr: state.as_ref().is_some_and(|s| s.output.is_hdr()),
             white_nits: state.as_ref().map_or(100.0, |s| s.target.white),
@@ -318,6 +412,40 @@ impl Monitor {
 
 /// The colour of every status warning (preview, OIDN failure, out of steps).
 const WARNING: Color32 = Color32::from_rgb(230, 180, 60);
+
+/// The status bar's sections in their order (`App::status_item`), the same in the resizable and
+/// the fixed layout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StatusItem {
+    Gpu,
+    Flight,
+    Size,
+    Samples,
+    Speed,
+    Batch,
+    Denoise,
+    UiFps,
+    March,
+    Message,
+}
+impl StatusItem {
+    const ALL: [Self; 10] = [
+        Self::Gpu,
+        Self::Flight,
+        Self::Size,
+        Self::Samples,
+        Self::Speed,
+        Self::Batch,
+        Self::Denoise,
+        Self::UiFps,
+        Self::March,
+        Self::Message,
+    ];
+    /// The resizable layout's default section widths, in `ALL` order (0: the rest).
+    const WIDTHS: [f32; 10] = [
+        200.0, 95.0, 95.0, 220.0, 130.0, 100.0, 170.0, 80.0, 150.0, 0.0,
+    ];
+}
 
 /// The status bar's sample progress and adaptive tile convergence indicator, shared by the
 /// resizable and fixed status bars.
@@ -481,14 +609,10 @@ struct Controls {
     gizmo_size: f32,
     gizmo_stroke: f32,
     /// Draw a wireframe bounding box around selected fractal object(s) in the viewport.
-    #[serde(default = "default_selection_bounds")]
     selection_bounds: bool,
     /// Holding Ctrl during orbit or flight eases the view to the nearest world coordinate
     /// plane or axis (within 15° of two planes) with this time constant in seconds.
     align_seconds: f32,
-}
-fn default_selection_bounds() -> bool {
-    true
 }
 impl Default for Controls {
     fn default() -> Self {
@@ -505,7 +629,7 @@ impl Default for Controls {
             swap_slot_buttons: false,
             gizmo_size: 120.0,
             gizmo_stroke: 3.0,
-            selection_bounds: default_selection_bounds(),
+            selection_bounds: true,
             align_seconds: 0.5,
         }
     }
@@ -554,10 +678,14 @@ impl Controls {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+/// The preferences file (`settings_path`): exactly what `App::current_settings` reads off the
+/// app and `App::apply_settings` puts back, every field required (no compat defaults: an
+/// older file is reported and replaced by the defaults).
+#[derive(PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Settings {
     display: soluwell_viewport::display::DisplayPrefs,
+    /// The colour selection of new documents (`App::default_colour`).
     colour: crate::ocio::Sel,
     colour_presets: crate::ocio::ColourPresets,
     panel: soluwell_panels::prefs::PrefsPanelState,
@@ -566,7 +694,6 @@ struct Settings {
     /// Navigation gestures are recorded as takes (the Takes panel's record switch).
     record_takes: bool,
     /// Minimum gesture duration (seconds) required to keep a recorded take.
-    #[serde(default = "default_min_take_secs")]
     min_take_secs: f64,
     /// The CamClip's last state, kept between scenes and runs (`App::camera_slots`).
     camera_slots: crate::camera_slots::CameraSlots,
@@ -584,9 +711,7 @@ struct Settings {
     timeline_outline_width: f32,
     file_dialogs: crate::file_dialogs::History,
     add_menu: crate::world_ui::AddMenuMemory,
-}
-fn default_min_take_secs() -> f64 {
-    crate::takes::DEFAULT_MIN_SECS
+    preview_cache: PreviewCache,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -598,7 +723,7 @@ impl Default for Settings {
             controls: Default::default(),
             recorder: Default::default(),
             record_takes: true,
-            min_take_secs: default_min_take_secs(),
+            min_take_secs: crate::takes::DEFAULT_MIN_SECS,
             camera_slots: Default::default(),
             fonts: Default::default(),
             layout: None,
@@ -614,28 +739,71 @@ impl Default for Settings {
             timeline_outline_width: 340.0,
             file_dialogs: Default::default(),
             add_menu: Default::default(),
+            preview_cache: Default::default(),
         }
     }
 }
-/// A numeric Settings row: slider over `range`, Ctrl-click / row menu resets to `default`.
-fn f_row(label: &str, v: f32, range: std::ops::RangeInclusive<f32>, default: f32) -> AttrField {
-    AttrField::new(label, AttrValue::Float(v))
-        .with_ui_options(vec![range.start().to_string(), range.end().to_string()])
-        .with_default(AttrValue::Float(default))
+
+/// One Settings grid row bound to the value it edits, so its label is written once: the grid
+/// shows it and an edit of that row writes the value back (`prefs_grid`).
+enum PrefRow<'a> {
+    /// A slider over `range`; Ctrl-click / the row menu resets it to `default`.
+    Float {
+        label: &'static str,
+        value: &'a mut f32,
+        range: std::ops::RangeInclusive<f32>,
+        default: f32,
+    },
+    /// A checkbox.
+    Bool {
+        label: &'static str,
+        value: &'a mut bool,
+        default: bool,
+    },
 }
-/// A checkbox Settings row.
-fn b_row(label: &str, v: bool, default: bool) -> AttrField {
-    AttrField::new(label, AttrValue::Bool(v)).with_default(AttrValue::Bool(default))
+impl PrefRow<'_> {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Float { label, .. } | Self::Bool { label, .. } => label,
+        }
+    }
+    fn field(&self) -> AttrField {
+        match self {
+            Self::Float {
+                label,
+                value,
+                range,
+                default,
+            } => AttrField::new(*label, AttrValue::Float(**value))
+                .with_ui_options(vec![range.start().to_string(), range.end().to_string()])
+                .with_default(AttrValue::Float(*default)),
+            Self::Bool {
+                label,
+                value,
+                default,
+            } => AttrField::new(*label, AttrValue::Bool(**value))
+                .with_default(AttrValue::Bool(*default)),
+        }
+    }
+    /// Store an edited value of this row's kind.
+    fn set(&mut self, edited: AttrValue) {
+        match (self, edited) {
+            (Self::Float { value, .. }, AttrValue::Float(v)) => **value = v,
+            (Self::Bool { value, .. }, AttrValue::Bool(v)) => **value = v,
+            _ => {}
+        }
+    }
 }
-/// Draws Settings `rows` as an attribute grid with the Attribute Editor's metrics and hands every
-/// edit (row label, new value) to `apply`.
+
+/// Draws Settings `rows` as an attribute grid with the Attribute Editor's metrics; an edit of a
+/// row is written to the value that row is bound to.
 fn prefs_grid(
     ui: &mut egui::Ui,
     metrics: AttrMetrics,
     state: &mut AttrGridState,
-    mut rows: Vec<AttrField>,
-    mut apply: impl FnMut(&str, AttrValue),
+    bound: &mut [PrefRow<'_>],
 ) {
+    let mut rows: Vec<AttrField> = bound.iter().map(PrefRow::field).collect();
     struct Plain;
     impl AttrGridHooks for Plain {}
     let metrics = metrics.normalized();
@@ -668,8 +836,10 @@ fn prefs_grid(
         for edit in
             render_grid_with_config(ui, &mut rows, state, &HashSet::new(), &config, &mut Plain)
         {
-            if !edit.parts.is_empty() {
-                apply(&edit.key, edit.value);
+            if !edit.parts.is_empty()
+                && let Some(row) = bound.iter_mut().find(|row| row.label() == edit.key)
+            {
+                row.set(edit.value);
             }
         }
     });
@@ -698,11 +868,26 @@ impl App {
                 path: None,
             })
             .collect();
-        let scene = gallery[0].scene.clone();
+        // `start_scene` before the settings: its colour is the default selection here.
+        let scene = Scene::preset(Formula::PRESETS[0]);
+        let (bookmarks, unreadable) = load_bookmarks();
+        for error in &unreadable {
+            log::error!("Bookmark not loaded: {error}");
+        }
+        let status = match unreadable.as_slice() {
+            [] => String::new(),
+            [error] => format!("Bookmark not loaded: {error}"),
+            [error, ..] => format!(
+                "{} bookmarks not loaded (see the log), e.g. {error}",
+                unreadable.len()
+            ),
+        };
+
+        let wake = crate::render_service::Wake::default();
 
         Self {
-            renderer: RenderService::spawn(),
-            io: crate::io_service::IoService::spawn(),
+            renderer: RenderService::spawn(wake.clone()),
+            io: crate::io_service::IoService::spawn(wake.clone()),
             gpu_name: "Initializing CUDA…".into(),
             frame: None,
             frame_from_cache: false,
@@ -712,12 +897,16 @@ impl App {
             staged_frame: None,
             staged_output: None,
             layouts: Default::default(),
-            export: Default::default(),
+            export: crate::export::ExportController::new(wake.clone()),
             thumb_pending: None,
+            thumb_failed: HashSet::new(),
             pick_pending: None,
             pick_sequence: 0,
             gui_fps: 60,
             origin: scene.clone(),
+            card: None,
+            default_colour: scene.colour.clone(),
+            history: None,
             last_scene: scene.clone(),
             viewport_scene: None,
             overlays: None,
@@ -739,7 +928,7 @@ impl App {
                 soluwell_viewport::hdr_view::HdrView::new(),
             )),
             display: Default::default(),
-            colour: crate::ocio::State::new(scene.colour.clone()),
+            colour: crate::ocio::State::new(scene.colour.clone(), wake.clone()),
             prefs: Default::default(),
             recorder_options: Default::default(),
             record_takes: true,
@@ -770,11 +959,12 @@ impl App {
             scene_file_path: None,
             scene_file_sequence: 0,
             scene_file_pending: None,
+            bookmark_ops: Vec::new(),
+            wake,
             templates: Vec::new(),
             templates_requested: false,
             templates_pending: false,
             persisted_settings: None,
-            persisted_layout_revision: 0,
             snapshot_before: None,
             #[cfg(test)]
             settings_serializations: 0,
@@ -783,18 +973,18 @@ impl App {
             status_layout: Default::default(),
             status_resizable: true,
             gallery,
-            bookmarks: load_bookmarks(),
+            bookmarks,
 
             swatches: (0..crate::materials::PRESETS.len()).map(|_| None).collect(),
             material_gallery: Default::default(),
-            tab: Tab::Gallery,
+            preview_cache: Default::default(),
             target_spp: 1024,
             spp_per_frame: 1,
             last_change: Instant::now(),
             raw_view: false,
             exposure_hold: 0.0,
             show_ui: true,
-            status: String::new(),
+            status,
             frame_ms: 16.0,
             seed: 0,
             fly: None,
@@ -803,18 +993,29 @@ impl App {
             orbit_drag: cam_controls_egui::OrbitDragState::default(),
             orbit_written: None,
             controls: Default::default(),
-            snap: std::env::var("FRAC_SNAP").ok().map(|p| {
-                let spp = std::env::var("FRAC_SNAP_SPP")
+            snap: std::env::var("FRAC_SNAP").ok().map(|path| Snap {
+                path: PathBuf::from(path),
+                spp: std::env::var("FRAC_SNAP_SPP")
                     .ok()
                     .and_then(|v| v.parse().ok())
-                    .unwrap_or(256);
-                (PathBuf::from(p), spp, false)
+                    .unwrap_or(256),
+                wait_thumbs: !std::env::var("FRAC_SNAP_WAIT_THUMBS").is_ok_and(|v| v == "0"),
+                requested: false,
             }),
             window_shot: None,
             fatal: None,
         }
-        .with_snap_preset()
         .with_settings()
+        .with_snap_preset()
+    }
+
+    /// The scene WarpBro opens with and File > New loads: the first gallery preset
+    /// (`Scene::gallery` starts with the family presets) in the colour selection of new
+    /// documents (`default_colour`).
+    fn start_scene(&self) -> Scene {
+        let mut scene = Scene::preset(Formula::PRESETS[0]);
+        scene.colour = self.default_colour.clone();
+        scene
     }
 
     fn with_settings(mut self) -> Self {
@@ -833,70 +1034,123 @@ impl App {
             self.status = format!("Preferences unreadable, defaults in use: {error}");
         }
         if let Some(Ok(settings)) = settings {
-            self.display = settings.display;
-            self.prefs = settings.panel;
-            self.controls = settings.controls;
-            self.recorder_options = settings.recorder;
-            self.toolbar = settings.toolbar;
-            self.record_takes = settings.record_takes;
-            if settings.min_take_secs.is_finite() {
-                self.min_take_secs = settings.min_take_secs.clamp(crate::takes::MIN_SECS, 600.0);
-                self.takes_recorder.min_secs = self.min_take_secs;
-                self.drag_recorder.min_secs = self.min_take_secs;
-            }
-            self.camera_slots = settings.camera_slots;
-            self.layouts.store = settings.layouts;
-            self.export.restore(settings.export);
-            self.gui_fps = settings.gui_fps.clamp(15, 240);
-            self.status_layout = settings.status_layout;
-            self.status_resizable = settings.status_resizable;
-            self.world_ui.attribute_metrics = settings.attribute_metrics.normalized();
-            self.world_ui.auto_key = settings.auto_key;
-            self.world_ui.new_key = settings.new_key;
-            self.world_ui.file_dialogs = settings.file_dialogs;
-            self.world_ui.set_add_menu_memory(settings.add_menu);
-            if settings.timeline_outline_width.is_finite() {
-                self.world_ui.timeline_outline_width = settings.timeline_outline_width.max(80.0);
-            }
-            self.fonts = settings.fonts;
-            if let Some(blob) = settings.layout {
-                // A layout saved before the dock engine change is refused here once (no compat).
-                match dock::restore_layout(&blob) {
-                    Ok(layout) => self.dock = layout,
-                    Err(error) => {
-                        self.status =
-                            format!("Saved layout could not be restored ({error}); using default")
-                    }
-                }
-            }
-            self.colour = crate::ocio::State::new(settings.colour.clone());
-            self.colour.presets = settings.colour_presets;
-            self.scene.colour = settings.colour;
-            self.origin.colour = self.scene.colour.clone();
+            self.apply_settings(settings);
         }
         if let Ok(category) = std::env::var("FRAC_SETTINGS") {
-            self.panels_to_open
-                .push(if category.eq_ignore_ascii_case("export") {
-                    dock::Panel::Export
-                } else {
-                    dock::Panel::Settings
-                });
-            self.prefs.selected =
-                SettingsPage::named(&category).unwrap_or(SettingsPage::Display) as usize;
+            if category.eq_ignore_ascii_case("export") {
+                self.panels_to_open.push(dock::Panel::Export);
+            } else {
+                match SettingsPage::named(&category) {
+                    Some(page) => self.open_settings(page),
+                    None => self.status = format!("FRAC_SETTINGS: no settings page {category}"),
+                }
+            }
         }
-        if let Ok(before) = self
-            .world
-            .document
-            .snapshot(f64::from(self.world_ui.playhead))
-        {
-            let _ = self.world.edit_snapshot(
-                None,
-                &before,
-                &self.scene,
-                f64::from(self.world_ui.playhead),
-            );
-        }
+        // The first document is a new one: it starts in the saved colour selection.
+        let scene = self.start_scene();
+        self.load(scene, Load::New);
         self
+    }
+
+    /// Put saved preferences into effect (`with_settings`). Destructured field by field, so a
+    /// new `Settings` field does not compile until it is applied here and read back in
+    /// `current_settings`.
+    fn apply_settings(&mut self, settings: Settings) {
+        let Settings {
+            display,
+            colour,
+            colour_presets,
+            panel,
+            controls,
+            recorder,
+            record_takes,
+            min_take_secs,
+            camera_slots,
+            fonts,
+            layout,
+            toolbar,
+            layouts,
+            export,
+            gui_fps,
+            status_layout,
+            status_resizable,
+            attribute_metrics,
+            auto_key,
+            new_key,
+            timeline_outline_width,
+            file_dialogs,
+            add_menu,
+            preview_cache,
+        } = settings;
+        self.display = display;
+        self.default_colour = colour;
+        self.colour.presets = colour_presets;
+        self.prefs = panel;
+        self.controls = controls;
+        self.recorder_options = recorder;
+        self.record_takes = record_takes;
+        if min_take_secs.is_finite() {
+            self.min_take_secs = min_take_secs.clamp(crate::takes::MIN_SECS, 600.0);
+            self.takes_recorder.min_secs = self.min_take_secs;
+            self.drag_recorder.min_secs = self.min_take_secs;
+        }
+        self.camera_slots = camera_slots;
+        self.fonts = fonts;
+        if let Some(blob) = layout {
+            // A layout saved before the dock engine change is refused here once (no compat).
+            match dock::restore_layout(&blob) {
+                Ok(layout) => self.dock = layout,
+                Err(error) => {
+                    self.status =
+                        format!("Saved layout could not be restored ({error}); using default")
+                }
+            }
+        }
+        self.toolbar = toolbar;
+        self.layouts.store = layouts;
+        self.export.restore(export);
+        self.gui_fps = gui_fps.clamp(15, 240);
+        self.status_layout = status_layout;
+        self.status_resizable = status_resizable;
+        self.world_ui.attribute_metrics = attribute_metrics.normalized();
+        self.world_ui.auto_key = auto_key;
+        self.world_ui.new_key = new_key;
+        if timeline_outline_width.is_finite() {
+            self.world_ui.timeline_outline_width = timeline_outline_width.max(80.0);
+        }
+        self.world_ui.file_dialogs = file_dialogs;
+        self.world_ui.set_add_menu_memory(add_menu);
+        self.preview_cache = preview_cache;
+    }
+
+    /// The preferences as they are now: what the autosave writes (`changed_settings_json`).
+    fn current_settings(&self) -> Settings {
+        Settings {
+            display: self.display,
+            colour: self.default_colour.clone(),
+            colour_presets: self.colour.presets.clone(),
+            panel: self.prefs.clone(),
+            controls: self.controls,
+            recorder: self.recorder_options,
+            record_takes: self.record_takes,
+            min_take_secs: self.min_take_secs,
+            camera_slots: self.camera_slots,
+            fonts: self.fonts.clone(),
+            layout: self.layouts.cache.blob.clone(),
+            toolbar: self.toolbar,
+            layouts: self.layouts.store.clone(),
+            export: self.export.job.clone(),
+            gui_fps: self.gui_fps,
+            status_layout: self.status_layout.clone(),
+            status_resizable: self.status_resizable,
+            attribute_metrics: self.world_ui.attribute_metrics,
+            auto_key: self.world_ui.auto_key,
+            new_key: self.world_ui.new_key,
+            timeline_outline_width: self.world_ui.timeline_outline_width,
+            file_dialogs: self.world_ui.file_dialogs.clone(),
+            add_menu: self.world_ui.add_menu_memory(),
+            preview_cache: self.preview_cache,
+        }
     }
 
     /// Open the Settings panel on `page`.
@@ -907,8 +1161,7 @@ impl App {
 
     pub(super) fn profile_ui_actions(&mut self, actions: crate::render_profiles_ui::Actions) {
         if let Some(id) = actions.edit {
-            self.world.selection = Some(id);
-            self.world.selected = vec![id];
+            self.world.click_select(Some(id), false);
             self.panels_to_open.push(dock::Panel::Inspector);
         }
         if let Some(error) = actions.error {
@@ -916,14 +1169,18 @@ impl App {
         }
     }
 
+    /// Set a switch of the ViewportSettings node (`/viewport/...`) at the playhead, one undo
+    /// step, as the Attribute Editor would: View > Pause rendering and the viewport toolbar's
+    /// visibility menu.
     fn set_viewport_flag(&mut self, path: &str, value: bool) {
+        let frame = f64::from(self.world_ui.playhead);
         let result = self.world.document.viewport_settings_id().and_then(|id| {
             self.world
                 .execute(crate::world::WorldCommand::SetAttribute {
                     id,
                     path: path.into(),
                     value: serde_json::json!(value),
-                    frame: 0.0,
+                    frame,
                 })
         });
         if let Err(error) = result {
@@ -931,14 +1188,15 @@ impl App {
         }
     }
 
+    /// The undo gesture id of the active camera's viewport edits (navigation, the toolbar's
+    /// exposure drag): one id, so they share one open undo step.
+    fn camera_gesture(&self) -> u64 {
+        egui::Id::new(("viewport_camera_edit", self.world.document.active_camera)).value()
+    }
+
     /// Settings layout and category bodies adapted directly from exr-view::ui_settings.
     fn settings_ui(&mut self, ui: &mut egui::Ui) {
-        let ctx = ui.ctx().clone();
-        let state = ctx.data(|d| {
-            d.get_temp::<soluwell_viewport::display::DisplayState>(
-                soluwell_viewport::display::state_id(),
-            )
-        });
+        let state = display_state(ui.ctx());
         let mut browse = false;
         let mut changed = false;
         let mut category = self.prefs.selected;
@@ -1017,200 +1275,187 @@ impl App {
                                 ui.selectable_value(&mut self.world_ui.new_key, tan, tan.label());
                             }
                         });
+                        soluwell_panels::prefs::section_header(ui, "Preview cache");
+                        let defaults = PreviewCache::default();
+                        let cache = &mut self.preview_cache;
+                        prefs_grid(
+                            ui,
+                            self.world_ui.attribute_metrics,
+                            &mut self.prefs_grids[5],
+                            &mut [
+                                PrefRow::Float {
+                                    label: "Share of installed RAM",
+                                    value: &mut cache.fraction,
+                                    range: 0.01..=0.9,
+                                    default: defaults.fraction,
+                                },
+                                PrefRow::Float {
+                                    label: "Kept for the system, GiB",
+                                    value: &mut cache.reserve_gb,
+                                    range: 0.0..=64.0,
+                                    default: defaults.reserve_gb,
+                                },
+                            ],
+                        );
+                        ui.label("Played and cached previews keep their frames in RAM within this budget.");
                     }
                     SettingsPage::Controls => {
-                        soluwell_panels::prefs::section_header(ui, "Camera controls");
                         let am = self.world_ui.attribute_metrics;
                         let c = &mut self.controls;
                         let d = Controls::default();
+                        let grids = &mut self.prefs_grids;
+                        soluwell_panels::prefs::section_header(ui, "Camera controls");
                         prefs_grid(
                             ui,
                             am,
-                            &mut self.prefs_grids[0],
-                            vec![
-                                f_row(
-                                    "Mouse sensitivity",
-                                    c.look_sensitivity,
-                                    0.1..=5.0,
-                                    d.look_sensitivity,
-                                ),
-                                f_row("Flight speed ×", c.fly_speed, 0.02..=50.0, d.fly_speed),
-                                f_row(
-                                    "Translate decay, s",
-                                    c.translate_decay,
-                                    0.02..=5.0,
-                                    d.translate_decay,
-                                ),
-                                f_row(
-                                    "Rotate decay, s",
-                                    c.rotate_decay,
-                                    0.02..=5.0,
-                                    d.rotate_decay,
-                                ),
-                                b_row("Smooth look", c.inertial_look, d.inertial_look),
-                                f_row(
-                                    "Look smoothing, s",
-                                    c.look_smoothing,
-                                    0.0..=0.5,
-                                    d.look_smoothing,
-                                ),
-                                f_row(
-                                    "Horizon flip, °",
-                                    c.flip_degrees,
-                                    20.0..=85.0,
-                                    d.flip_degrees,
-                                ),
-                                f_row(
-                                    "Shift fast ×",
-                                    c.fast_multiplier,
-                                    1.0..=20.0,
-                                    d.fast_multiplier,
-                                ),
-                                f_row(
-                                    "Alt slow ×",
-                                    c.slow_multiplier,
-                                    0.01..=1.0,
-                                    d.slow_multiplier,
-                                ),
+                            &mut grids[0],
+                            &mut [
+                                PrefRow::Float {
+                                    label: "Mouse sensitivity",
+                                    value: &mut c.look_sensitivity,
+                                    range: 0.1..=5.0,
+                                    default: d.look_sensitivity,
+                                },
+                                PrefRow::Float {
+                                    label: "Flight speed ×",
+                                    value: &mut c.fly_speed,
+                                    range: 0.02..=50.0,
+                                    default: d.fly_speed,
+                                },
+                                PrefRow::Float {
+                                    label: "Translate decay, s",
+                                    value: &mut c.translate_decay,
+                                    range: 0.02..=5.0,
+                                    default: d.translate_decay,
+                                },
+                                PrefRow::Float {
+                                    label: "Rotate decay, s",
+                                    value: &mut c.rotate_decay,
+                                    range: 0.02..=5.0,
+                                    default: d.rotate_decay,
+                                },
+                                PrefRow::Bool {
+                                    label: "Smooth look",
+                                    value: &mut c.inertial_look,
+                                    default: d.inertial_look,
+                                },
+                                PrefRow::Float {
+                                    label: "Look smoothing, s",
+                                    value: &mut c.look_smoothing,
+                                    range: 0.0..=0.5,
+                                    default: d.look_smoothing,
+                                },
+                                PrefRow::Float {
+                                    label: "Horizon flip, °",
+                                    value: &mut c.flip_degrees,
+                                    range: 20.0..=85.0,
+                                    default: d.flip_degrees,
+                                },
+                                PrefRow::Float {
+                                    label: "Shift fast ×",
+                                    value: &mut c.fast_multiplier,
+                                    range: 1.0..=20.0,
+                                    default: d.fast_multiplier,
+                                },
+                                PrefRow::Float {
+                                    label: "Alt slow ×",
+                                    value: &mut c.slow_multiplier,
+                                    range: 0.01..=1.0,
+                                    default: d.slow_multiplier,
+                                },
                             ],
-                            |label, v| match (label, v) {
-                                ("Mouse sensitivity", AttrValue::Float(v)) => {
-                                    c.look_sensitivity = v
-                                }
-                                ("Flight speed ×", AttrValue::Float(v)) => c.fly_speed = v,
-                                ("Translate decay, s", AttrValue::Float(v)) => {
-                                    c.translate_decay = v
-                                }
-                                ("Rotate decay, s", AttrValue::Float(v)) => c.rotate_decay = v,
-                                ("Smooth look", AttrValue::Bool(v)) => c.inertial_look = v,
-                                ("Look smoothing, s", AttrValue::Float(v)) => c.look_smoothing = v,
-                                ("Horizon flip, °", AttrValue::Float(v)) => c.flip_degrees = v,
-                                ("Shift fast ×", AttrValue::Float(v)) => c.fast_multiplier = v,
-                                ("Alt slow ×", AttrValue::Float(v)) => c.slow_multiplier = v,
-                                _ => {}
-                            },
                         );
                         soluwell_panels::prefs::section_header(ui, "Camera alignment (hold Ctrl)");
                         prefs_grid(
                             ui,
                             am,
-                            &mut self.prefs_grids[4],
-                            vec![f_row(
-                                "Ease time, s",
-                                c.align_seconds,
-                                0.0..=5.0,
-                                d.align_seconds,
-                            )],
-                            |label, v| {
-                                if let ("Ease time, s", AttrValue::Float(v)) = (label, v) {
-                                    c.align_seconds = v;
-                                }
-                            },
+                            &mut grids[1],
+                            &mut [PrefRow::Float {
+                                label: "Ease time, s",
+                                value: &mut c.align_seconds,
+                                range: 0.0..=5.0,
+                                default: d.align_seconds,
+                            }],
                         );
                         soluwell_panels::prefs::section_header(ui, "Manipulator");
-                        let d = Controls::default();
                         prefs_grid(
                             ui,
                             am,
-                            &mut self.prefs_grids[3],
-                            vec![
-                                f_row(
-                                    "Size, pt",
-                                    c.gizmo_size,
-                                    GIZMO_SIZE_MIN..=GIZMO_SIZE_MAX,
-                                    d.gizmo_size,
-                                ),
-                                f_row("Line width, pt", c.gizmo_stroke, 0.5..=10.0, d.gizmo_stroke),
-                                b_row(
-                                    "Selection bounding box",
-                                    c.selection_bounds,
-                                    d.selection_bounds,
-                                ),
+                            &mut grids[2],
+                            &mut [
+                                PrefRow::Float {
+                                    label: "Size, pt",
+                                    value: &mut c.gizmo_size,
+                                    range: GIZMO_SIZE_MIN..=GIZMO_SIZE_MAX,
+                                    default: d.gizmo_size,
+                                },
+                                PrefRow::Float {
+                                    label: "Line width, pt",
+                                    value: &mut c.gizmo_stroke,
+                                    range: 0.5..=10.0,
+                                    default: d.gizmo_stroke,
+                                },
+                                PrefRow::Bool {
+                                    label: "Selection bounding box",
+                                    value: &mut c.selection_bounds,
+                                    default: d.selection_bounds,
+                                },
                             ],
-                            |label, v| match (label, v) {
-                                ("Size, pt", AttrValue::Float(v)) => c.gizmo_size = v,
-                                ("Line width, pt", AttrValue::Float(v)) => c.gizmo_stroke = v,
-                                ("Selection bounding box", AttrValue::Bool(v)) => {
-                                    c.selection_bounds = v
-                                }
-                                _ => {}
-                            },
                         );
                         soluwell_panels::prefs::section_header(ui, "Slot buttons");
                         prefs_grid(
                             ui,
                             am,
-                            &mut self.prefs_grids[1],
-                            vec![b_row(
-                                "Swap copy/paste mouse buttons",
-                                c.swap_slot_buttons,
-                                false,
-                            )],
-                            |_, v| {
-                                if let AttrValue::Bool(v) = v {
-                                    c.swap_slot_buttons = v
-                                }
-                            },
+                            &mut grids[3],
+                            &mut [PrefRow::Bool {
+                                label: "Swap copy/paste mouse buttons",
+                                value: &mut c.swap_slot_buttons,
+                                default: d.swap_slot_buttons,
+                            }],
                         );
                         ui.label(format!(
                             "CamClip and colour presets · {}",
-                            crate::hotkeys::slot_hint(
-                                self.controls.swap_slot_buttons,
-                                "copy",
-                                "paste"
-                            )
+                            crate::hotkeys::slot_hint(c.swap_slot_buttons, "copy", "paste")
                         ));
                         soluwell_panels::prefs::section_header(ui, "Attribute controls");
                         let defaults = AttrMetrics::default();
                         let metrics = &mut self.world_ui.attribute_metrics;
-                        let m = *metrics;
                         prefs_grid(
                             ui,
                             am,
-                            &mut self.prefs_grids[2],
-                            vec![
-                                f_row(
-                                    "Field height",
-                                    m.field_height,
-                                    AttrMetrics::FIELD_HEIGHT_RANGE,
-                                    defaults.field_height,
-                                ),
-                                f_row(
-                                    "Numeric field width",
-                                    m.numeric_width,
-                                    AttrMetrics::NUMERIC_WIDTH_RANGE,
-                                    defaults.numeric_width,
-                                ),
-                                f_row(
-                                    "Icon size",
-                                    m.icon_side,
-                                    AttrMetrics::ICON_SIDE_RANGE,
-                                    defaults.icon_side,
-                                ),
-                                f_row(
-                                    "Row spacing",
-                                    m.row_gap,
-                                    AttrMetrics::ROW_GAP_RANGE,
-                                    defaults.row_gap,
-                                ),
-                                f_row(
-                                    "Component spacing",
-                                    m.component_gap,
-                                    AttrMetrics::COMPONENT_GAP_RANGE,
-                                    defaults.component_gap,
-                                ),
+                            &mut grids[4],
+                            &mut [
+                                PrefRow::Float {
+                                    label: "Field height",
+                                    value: &mut metrics.field_height,
+                                    range: AttrMetrics::FIELD_HEIGHT_RANGE,
+                                    default: defaults.field_height,
+                                },
+                                PrefRow::Float {
+                                    label: "Numeric field width",
+                                    value: &mut metrics.numeric_width,
+                                    range: AttrMetrics::NUMERIC_WIDTH_RANGE,
+                                    default: defaults.numeric_width,
+                                },
+                                PrefRow::Float {
+                                    label: "Icon size",
+                                    value: &mut metrics.icon_side,
+                                    range: AttrMetrics::ICON_SIDE_RANGE,
+                                    default: defaults.icon_side,
+                                },
+                                PrefRow::Float {
+                                    label: "Row spacing",
+                                    value: &mut metrics.row_gap,
+                                    range: AttrMetrics::ROW_GAP_RANGE,
+                                    default: defaults.row_gap,
+                                },
+                                PrefRow::Float {
+                                    label: "Component spacing",
+                                    value: &mut metrics.component_gap,
+                                    range: AttrMetrics::COMPONENT_GAP_RANGE,
+                                    default: defaults.component_gap,
+                                },
                             ],
-                            |label, v| {
-                                let AttrValue::Float(v) = v else { return };
-                                match label {
-                                    "Field height" => metrics.field_height = v,
-                                    "Numeric field width" => metrics.numeric_width = v,
-                                    "Icon size" => metrics.icon_side = v,
-                                    "Row spacing" => metrics.row_gap = v,
-                                    "Component spacing" => metrics.component_gap = v,
-                                    _ => {}
-                                }
-                            },
                         );
                         *metrics = metrics.normalized();
                         ui.label(
@@ -1224,21 +1469,30 @@ impl App {
         );
         self.prefs = prefs;
         if reset {
-            if category == 0 {
-                self.display = Default::default();
-            } else if category == 1 {
-                self.colour.sel = crate::color::default_selection();
-                self.colour.reload();
-                changed = true;
-            } else if category == 3 {
-                self.fonts = Default::default();
-            } else if category == SettingsPage::Animation as usize {
-                self.world_ui.new_key = curves::Tan::Smooth;
-            } else if category == SettingsPage::Render as usize {
-                self.status = "Reset profile values in Attribute Editor".into();
-            } else {
-                self.controls = Default::default();
-                self.world_ui.attribute_metrics = Default::default();
+            let defaults = Settings::default();
+            match SettingsPage::ALL.get(category) {
+                Some(SettingsPage::Display) => {
+                    self.display = defaults.display;
+                    self.gui_fps = defaults.gui_fps;
+                }
+                Some(SettingsPage::Color) => {
+                    self.colour.set_sel(&defaults.colour);
+                    self.colour.reload();
+                    changed = true;
+                }
+                Some(SettingsPage::Fonts) => self.fonts = defaults.fonts,
+                Some(SettingsPage::Animation) => {
+                    self.world_ui.new_key = defaults.new_key;
+                    self.preview_cache = defaults.preview_cache;
+                }
+                Some(SettingsPage::Render) => {
+                    self.status = "Reset profile values in Attribute Editor".into();
+                }
+                Some(SettingsPage::Controls) => {
+                    self.controls = defaults.controls;
+                    self.world_ui.attribute_metrics = defaults.attribute_metrics;
+                }
+                None => {}
             }
         }
         if let Some(page) = destination {
@@ -1257,13 +1511,6 @@ impl App {
         self.apply_colour_change(changed);
     }
 
-    /// The transform manipulator of the current tool on the selected unlocked nodes that take it
-    /// (`world::manip_tools`: fractals and groups, the sun for Rotate), drawn over the viewport
-    /// image. It shows each object's world pose at
-    /// its pivot; a drag writes back only the edited channel (position, rotation or scale) as
-    /// the local pose under the parent, one undo step per drag, keyed like any edit at the
-    /// playhead. The edits change the scene, so the viewport switches to its Moving profile
-    /// while dragging, as during navigation.
     /// Draw the viewport's extras (`overlay::extras`, cached per document state, playhead,
     /// selection and aspect) and the cubes of a Bounds display over the image.
     fn draw_overlays(&mut self, ui: &egui::Ui, rect: egui::Rect) {
@@ -1347,10 +1594,31 @@ impl App {
         }
     }
 
+    /// The transform manipulator of the current tool on the selected unlocked nodes that take it
+    /// (`world::manip_tools`: fractals and groups, the sun for Rotate), drawn over the viewport
+    /// image. It shows each object's world pose at its pivot; a drag writes back only the edited
+    /// channel (position, rotation or scale) as the local pose under the parent, one undo step
+    /// per drag, keyed like any edit at the playhead. The edits change the scene, so the viewport
+    /// switches to its Moving profile while dragging, as during navigation.
     fn manipulate(&mut self, ui: &egui::Ui, rect: egui::Rect) {
         use soluwell_viewport::gizmo::{
             GizmoConfig, GizmoOrientation, GizmoSpace, GizmoTool, Transform,
         };
+        /// One manipulated node, resolved whole before it joins the list, so the gizmo's
+        /// targets and the edits its answer is applied to are one list and cannot drift.
+        struct Handle {
+            id: crate::world::NodeId,
+            /// The handles' pose (`Transform`) the gizmo draws and drags.
+            target: Transform,
+            /// The parent's world matrix: the drag is written as the local pose under it.
+            parent: glam::Mat4,
+            /// The node's world scale (kept by Move and Rotate).
+            scale: glam::Vec3,
+            /// The local pose the handles show: the take the node plays, else the authored one.
+            shown: crate::takes::Trs,
+            /// A take drives the node (the drag releases it).
+            bound: bool,
+        }
         let tool = match self.tool {
             ViewTool::Select => None,
             ViewTool::Move => Some(GizmoTool::Move),
@@ -1359,7 +1627,6 @@ impl App {
         };
         let frame = f64::from(self.world_ui.playhead);
         let document = &self.world.document;
-        let selected = self.world.targets(None);
         let policy = match document.viewport_policy(frame) {
             Ok(policy) => policy,
             Err(error) => {
@@ -1367,11 +1634,9 @@ impl App {
                 return;
             }
         };
-        // (node, parent world matrix, world scale, shown local pose, bound to a take), in the
-        // order of `targets`.
-        let mut edited = Vec::new();
-        let mut targets = Vec::new();
-        for id in selected {
+        let mut handles = Vec::new();
+        let mut failed = None;
+        for id in self.world.targets(None) {
             let Ok(info) = document.info(id) else {
                 continue;
             };
@@ -1382,45 +1647,50 @@ impl App {
                 ViewTool::Rotate => turns,
                 ViewTool::Scale => scales,
             };
-            // The viewport manipulates only what it shows and lets pick (its kind filter).
-            if info.locked
-                || !takes_tool
-                || !policy.selectable.contains(info.kind)
-                || !document
-                    .shows(id, info.kind, frame, policy.shown)
-                    .unwrap_or(false)
-            {
+            if info.locked || !takes_tool {
                 continue;
             }
-            let Ok((pose, parent)) = document.manip_frame(id, frame) else {
-                continue;
-            };
-            let (scale, rotation, translation) = pose.to_scale_rotation_translation();
-            // Move and Rotate draw unit handles: a scaled object would stretch them.
-            let shown = if self.tool == ViewTool::Scale {
-                scale
-            } else {
-                glam::Vec3::ONE
-            };
-            targets.push(Transform::from_scale_rotation_translation(
-                shown,
-                rotation,
-                translation,
-            ));
-            // The local pose the handles show: the take the node plays, else the authored one.
-            let take = match document.take_trs(id, frame) {
-                Ok(take) => take,
-                Err(error) => {
-                    self.status = error;
-                    continue;
+            let handle = viewport_selects(document, &policy, frame, id).and_then(|selects| {
+                // The viewport manipulates only what it shows and lets pick (its kind filter).
+                if !selects {
+                    return Ok(None);
                 }
-            };
-            let Some(shown) = take.or_else(|| document.authored_trs(id, frame).ok()) else {
-                continue;
-            };
-            edited.push((id, parent, scale, shown, take.is_some()));
+                let (pose, parent) = document.manip_frame(id, frame)?;
+                let (scale, rotation, translation) = pose.to_scale_rotation_translation();
+                let take = document.take_trs(id, frame)?;
+                let shown = match take {
+                    Some(take) => take,
+                    None => document.authored_trs(id, frame)?,
+                };
+                // Move and Rotate draw unit handles: a scaled object would stretch them.
+                let handle_scale = if self.tool == ViewTool::Scale {
+                    scale
+                } else {
+                    glam::Vec3::ONE
+                };
+                Ok(Some(Handle {
+                    id,
+                    target: Transform::from_scale_rotation_translation(
+                        handle_scale,
+                        rotation,
+                        translation,
+                    ),
+                    parent,
+                    scale,
+                    shown,
+                    bound: take.is_some(),
+                }))
+            });
+            match handle {
+                Ok(Some(handle)) => handles.push(handle),
+                Ok(None) => {}
+                Err(error) => failed = Some(error),
+            }
         }
-        let Some(tool) = tool.filter(|_| !targets.is_empty() && rect.height() > 0.0) else {
+        if let Some(error) = failed {
+            self.status = error;
+        }
+        let Some(tool) = tool.filter(|_| !handles.is_empty() && rect.height() > 0.0) else {
             self.gizmo.clear_hover();
             self.end_drag();
             return;
@@ -1444,6 +1714,7 @@ impl App {
             },
             ..Default::default()
         });
+        let targets: Vec<Transform> = handles.iter().map(|handle| handle.target).collect();
         let Some((_, moved)) = self.gizmo.interact(ui, &targets) else {
             self.end_drag();
             return;
@@ -1451,7 +1722,15 @@ impl App {
         let gesture = egui::Id::new("viewport_gizmo").value();
         self.gizmo_gesture = Some(gesture);
         let mut dragged = Vec::new();
-        for ((id, parent, scale, shown, bound), t) in edited.into_iter().zip(moved) {
+        for (handle, t) in handles.into_iter().zip(moved) {
+            let Handle {
+                id,
+                parent,
+                scale,
+                shown,
+                bound,
+                ..
+            } = handle;
             let scale = if self.tool == ViewTool::Scale {
                 t.scale
             } else {
@@ -1498,8 +1777,9 @@ impl App {
             if bound && let Err(error) = self.world.bind_take(&[id], None, Some(gesture)) {
                 self.status = error;
             }
-            if let Ok(pose) = self.world.document.authored_trs(id, frame) {
-                dragged.push((id, pose));
+            match self.world.document.authored_trs(id, frame) {
+                Ok(pose) => dragged.push((id, pose)),
+                Err(error) => self.status = error,
             }
         }
         if self.record_takes {
@@ -1571,42 +1851,37 @@ impl App {
         }
     }
 
+    /// The colour controls (Settings > Color, the toolbar's view, a picked config file) changed
+    /// the working selection (`colour.sel`): it goes to the scene, which the end-of-frame diff
+    /// authors into the document (`refresh_scene` then mirrors the document back with
+    /// `State::set_sel`), and it becomes the selection of new documents. The renderer drops
+    /// its colour caches, so a reloaded config file is read again.
     fn apply_colour_change(&mut self, changed: bool) {
         if changed {
             self.scene.render.reinhard = false;
             self.scene.colour = self.colour.sel.clone();
+            self.default_colour = self.colour.sel.clone();
             if let Err(error) = self.renderer.try_command(Command::ReloadColour) {
                 self.status = format!("Colour reload: {error}");
             }
         }
     }
 
-    fn save_settings(&mut self, ctx: &egui::Context) {
+    /// The OCIO config file dialog (Settings > Color > File…): a picked file becomes the
+    /// working config. Runs where the panels do, before the end-of-frame diff authors it.
+    fn update_config_picker(&mut self, ctx: &egui::Context) {
         self.config_picker.update(ctx);
         self.world_ui
             .file_dialogs
             .observe(crate::file_dialogs::OCIO, &self.config_picker);
-        let mut changed = false;
         if let Some(path) = self.config_picker.take_picked() {
             self.colour.set_config(path.to_string_lossy().into_owned());
-            changed = true;
+            self.apply_colour_change(true);
         }
-        if changed {
-            let before = self.scene.clone();
-            self.scene.render.reinhard = false;
-            self.scene.colour = self.colour.sel.clone();
-            if let Err(error) = self.world.edit_snapshot(
-                None,
-                &before,
-                &self.scene,
-                f64::from(self.world_ui.playhead),
-            ) {
-                self.status = error;
-            }
-            if let Err(error) = self.renderer.try_command(Command::ReloadColour) {
-                self.status = format!("Colour reload: {error}");
-            }
-        }
+    }
+
+    /// Hand changed preferences to the file worker (coalesced there).
+    fn save_settings(&mut self) {
         match self.changed_settings_json() {
             Ok(Some(json)) => {
                 self.io.settings(settings_path(), json);
@@ -1616,83 +1891,28 @@ impl App {
         }
     }
 
-    fn settings_match(&self, saved: &Settings) -> bool {
-        let export = &self.export.job;
-        let previous = &saved.export;
-        saved.display == self.display
-            && saved.colour == self.scene.colour
-            && saved.colour_presets == self.colour.presets
-            && saved.panel == self.prefs
-            && saved.controls == self.controls
-            && saved.recorder == self.recorder_options
-            && saved.toolbar == self.toolbar
-            && saved.record_takes == self.record_takes
-            && saved.min_take_secs == self.min_take_secs
-            && saved.camera_slots == self.camera_slots
-            && saved.fonts == self.fonts
-            && saved.layouts == self.layouts.store
-            && saved.gui_fps == self.gui_fps
-            && saved.status_layout == self.status_layout
-            && saved.status_resizable == self.status_resizable
-            && saved.attribute_metrics == self.world_ui.attribute_metrics
-            && saved.auto_key == self.world_ui.auto_key
-            && saved.new_key == self.world_ui.new_key
-            && saved.file_dialogs == self.world_ui.file_dialogs
-            && saved.add_menu == self.world_ui.add_menu_memory()
-            && saved.timeline_outline_width == self.world_ui.timeline_outline_width
-            // Every field, so a new setting is saved without being listed here.
-            && export == previous
-    }
-
+    /// The preferences as JSON when they differ from the last ones handed out, else None.
     fn changed_settings_json(&mut self) -> Result<Option<String>, String> {
         self.layouts
             .cache
             .refresh(&self.dock)
             .map_err(|error| format!("Layout save failed: {error}"))?;
-        if self.persisted_layout_revision == self.layouts.cache.revision
-            && self
-                .persisted_settings
-                .as_ref()
-                .is_some_and(|saved| self.settings_match(saved))
-        {
+        let settings = self.current_settings();
+        if self.persisted_settings.as_ref() == Some(&settings) {
             return Ok(None);
         }
-        let layout = self.layouts.cache.blob.clone();
-        let settings = Settings {
-            display: self.display,
-            colour: self.scene.colour.clone(),
-            colour_presets: self.colour.presets.clone(),
-            panel: self.prefs.clone(),
-            controls: self.controls,
-            recorder: self.recorder_options,
-            layout,
-            toolbar: self.toolbar,
-            record_takes: self.record_takes,
-            min_take_secs: self.min_take_secs,
-            camera_slots: self.camera_slots,
-            fonts: self.fonts.clone(),
-            layouts: self.layouts.store.clone(),
-            export: self.export.job.clone(),
-            gui_fps: self.gui_fps,
-            status_layout: self.status_layout.clone(),
-            status_resizable: self.status_resizable,
-            attribute_metrics: self.world_ui.attribute_metrics,
-            auto_key: self.world_ui.auto_key,
-            new_key: self.world_ui.new_key,
-            file_dialogs: self.world_ui.file_dialogs.clone(),
-            add_menu: self.world_ui.add_menu_memory(),
-            timeline_outline_width: self.world_ui.timeline_outline_width,
-        };
         let json = serde_json::to_string_pretty(&settings).map_err(|error| error.to_string())?;
         #[cfg(test)]
         {
             self.settings_serializations += 1;
         }
         self.persisted_settings = Some(settings);
-        self.persisted_layout_revision = self.layouts.cache.revision;
         Ok(Some(json))
     }
 
+    /// `FRAC_SNAP_PRESET=i` opens gallery preset i, `FRAC_SNAP_MATERIAL=name` applies that
+    /// library preset to the selection's material, `FRAC_SNAP_TAB=materials` shows the
+    /// Materials panel: the documentation screenshots' scene (`App::handle_snap`).
     fn with_snap_preset(mut self) -> Self {
         if let Some(i) = std::env::var("FRAC_SNAP_PRESET")
             .ok()
@@ -1701,46 +1921,56 @@ impl App {
         {
             let scene = e.scene.clone();
             self.load(scene, Load::New);
+            self.card = Some(Card::Gallery(i));
         }
         if let Ok(name) = std::env::var("FRAC_SNAP_MATERIAL")
             && let Some(p) = crate::materials::PRESETS.iter().find(|p| p.name() == name)
         {
             let before = self.scene.clone();
             p.apply(&mut self.scene.material);
-            let _ = self.world.edit_snapshot(
+            if let Err(error) = self.world.edit_snapshot(
                 self.world.selection,
                 &before,
                 &self.scene,
                 f64::from(self.world_ui.playhead),
-            );
+            ) {
+                self.status = format!("FRAC_SNAP_MATERIAL {name}: {error}");
+            }
         }
         if std::env::var("FRAC_SNAP_TAB").is_ok_and(|t| t == "materials") {
-            self.tab = Tab::Materials;
             self.panels_to_open.push(dock::Panel::Materials);
         }
         self
     }
 
-    fn handle_snap(&mut self, ctx: &egui::Context, thumbs_pending: bool) {
-        let Some((path, spp, requested)) = self.snap.clone() else {
+    /// Arm the `FRAC_SNAP` window shot once the viewport shows its samples (the snap's count,
+    /// at most the profile's target, which is where adaptive sampling stops) and, unless told
+    /// not to, every card thumbnail is done (a failed one counts as done).
+    fn handle_snap(&mut self, thumbs_pending: bool) {
+        let Some(snap) = &self.snap else {
             return;
         };
-        let wait_thumbs = !std::env::var("FRAC_SNAP_WAIT_THUMBS").is_ok_and(|value| value == "0");
-        let ready = (!wait_thumbs || !thumbs_pending)
+        let spp = snap.spp.min(self.target_spp);
+        let ready = !snap.requested
+            && (!snap.wait_thumbs || !thumbs_pending)
             && !self.showing_preview
             && self.frame.as_ref().is_some_and(|t| t.complete(spp));
+        if !ready {
+            return;
+        }
         // The window's own signal through the one window-screenshot path; the window closes
         // once the file is written (`window_event`). Behind an armed user shot it waits.
-        if ready
-            && !requested
-            && self.arm_window_shot(crate::window_shot::WindowShot {
-                kind: crate::window_shot::ShotKind::Displayed { path },
-                quit: true,
-            })
+        let shot = crate::window_shot::WindowShot {
+            kind: crate::window_shot::ShotKind::Displayed {
+                path: snap.path.clone(),
+            },
+            quit: true,
+        };
+        if self.arm_window_shot(shot)
+            && let Some(snap) = &mut self.snap
         {
-            self.snap = self.snap.take().map(|(path, spp, _)| (path, spp, true));
+            snap.requested = true;
         }
-        ctx.request_repaint();
     }
 
     fn refresh_templates(&mut self) {
@@ -1754,13 +1984,8 @@ impl App {
             Err(error) => self.status = error,
         }
     }
-    fn scene_file_dialog(&mut self, save: bool) {
-        self.scene_action_dialog(if save {
-            crate::templates::FileAction::Save
-        } else {
-            crate::templates::FileAction::Open
-        });
-    }
+    /// The file dialog of a scene or template `action`; the picked path goes to
+    /// `submit_scene_action` (`update_scene_picker`).
     fn scene_action_dialog(&mut self, action: crate::templates::FileAction) {
         let save = action.save();
         let template_directory = crate::templates::directory();
@@ -1789,16 +2014,8 @@ impl App {
         self.scene_picker = Some((action, dialog));
     }
 
-    fn submit_scene_file(&mut self, path: PathBuf, save: bool) {
-        self.submit_scene_action(
-            path,
-            if save {
-                crate::templates::FileAction::Save
-            } else {
-                crate::templates::FileAction::Open
-            },
-        );
-    }
+    /// Send a scene or template `action` on `path` to the file worker; its answer comes back by
+    /// id (`scene_file_event`).
     fn submit_scene_action(&mut self, mut path: PathBuf, action: crate::templates::FileAction) {
         let save = action.save();
         self.world.finish_edit();
@@ -1816,7 +2033,7 @@ impl App {
             // The scene file carries the CamClip as it is now.
             self.world.document.camera_slots = self.camera_slots;
         }
-        let id = self.scene_file_sequence.wrapping_add(1);
+        let id = self.next_file_id();
         let command = if save {
             crate::io_service::Command::SaveScene {
                 id,
@@ -1831,7 +2048,6 @@ impl App {
         };
         match self.io.send(command) {
             Ok(()) => {
-                self.scene_file_sequence = id;
                 self.scene_file_pending = Some((id, self.load_revision, action));
                 self.status = format!(
                     "{} {}",
@@ -1884,11 +2100,10 @@ impl App {
                 self.status = format!("Opened {}", event.path.display());
             }
             Ok(None) => {
-                if !action.template() {
-                    self.scene_file_path = Some(event.path.clone());
-                }
                 if action.template() {
                     self.refresh_templates();
+                } else {
+                    self.scene_file_path = Some(event.path.clone());
                 }
                 self.status = format!("Saved {}", event.path.display());
             }
@@ -1896,29 +2111,89 @@ impl App {
         }
     }
 
+    /// A finished bookmark save or delete (`BookmarkOp`): the list follows the file only now.
+    fn bookmark_event(&mut self, op: BookmarkOp, event: crate::io_service::SceneEvent) {
+        if let Err(error) = event.result {
+            self.status = format!("Bookmark {}: {error}", event.path.display());
+            return;
+        }
+        match op {
+            BookmarkOp::Save(mut entry) => {
+                entry.path = Some(event.path.clone());
+                self.bookmarks.push(*entry);
+                self.panels_to_open.push(dock::Panel::Bookmarks);
+                self.status = format!("Saved bookmark {}", event.path.display());
+            }
+            BookmarkOp::Delete => {
+                self.bookmarks
+                    .retain(|entry| entry.path.as_ref() != Some(&event.path));
+                self.status = format!("Deleted bookmark {}", event.path.display());
+            }
+        }
+        // Bookmark thumbnail ids are list indices: a changed list makes their failures stale.
+        self.thumb_failed.retain(|id| {
+            !matches!(
+                crate::material_gallery::ThumbId::decode(*id),
+                crate::material_gallery::ThumbId::Bookmark(_)
+            )
+        });
+    }
+
+    /// The id of the next file-worker request answered by id (`SceneEvent::id`).
+    fn next_file_id(&mut self) -> u64 {
+        self.scene_file_sequence = self.scene_file_sequence.wrapping_add(1);
+        self.scene_file_sequence
+    }
+
     /// File > Save: to the scene's file, or through the dialog for a scene that has none.
     fn save_scene(&mut self) {
         if let Some(path) = self.scene_file_path.clone() {
-            self.submit_scene_file(path, true);
+            self.submit_scene_action(path, crate::templates::FileAction::Save);
         } else {
-            self.scene_file_dialog(true);
+            self.scene_action_dialog(crate::templates::FileAction::Save);
         }
     }
 
     /// File > New: everything cleared, the scene the app starts with loaded as a new document.
     fn new_scene(&mut self) {
-        let scene = self.gallery[0].scene.clone();
+        let scene = self.start_scene();
         self.load(scene, Load::New);
         self.status = "New scene".into();
     }
 
+    /// Edit > Reset scene: the document back to how it was loaded (`origin`), as one undoable
+    /// step; the scene's file and the history stay.
+    fn reset_scene(&mut self) {
+        self.world.finish_edit();
+        let document = crate::world::WorldDocument::from_scene(&self.origin);
+        self.status = match self.world.reset(document) {
+            Ok(()) => "Scene reset".into(),
+            Err(error) => error,
+        };
+    }
+
+    /// Apply a document history step (`History`) at the frame's history point (`ui`).
+    fn step_history(&mut self, step: History) {
+        match step {
+            History::Undo => {
+                self.world.undo();
+            }
+            History::Redo => {
+                self.world.redo();
+            }
+            History::Reset => self.reset_scene(),
+        }
+    }
+
     /// Load `scene` as the editor's document: the same document again (`Load::Same`: a file
-    /// opened, a reset) or a new one made from it (`Load::New`: a template, preset or bookmark,
-    /// which gets its own identity: `WorldDocument::renew_identity`).
+    /// opened) or a new one made from it (`Load::New`: a template, preset or bookmark, which
+    /// gets its own identity: `WorldDocument::renew_identity`). A new history starts; the
+    /// colour state follows the document at the next `refresh_scene`.
     fn load(&mut self, mut scene: Scene, mode: Load) {
         self.takes_recorder.cancel();
         self.preview.cancel();
         self.preview_key = None;
+        self.card = None;
         self.scene_file_path = None;
         self.scene_file_pending = None;
         self.evaluated_world = None;
@@ -1941,15 +2216,25 @@ impl App {
         self.material_gallery.invalidate();
         self.origin = scene.clone();
         scene.document = Some(Box::new(document));
-        self.colour.set_sel(&scene.colour);
-        self.scene = self
+        self.scene = match self
             .world
             .document
             .snapshot(f64::from(self.world_ui.playhead))
-            .unwrap_or(scene);
+        {
+            Ok(evaluated) => evaluated,
+            Err(error) => {
+                // Shown as loaded until an edit makes it evaluate (`refresh_scene` retries).
+                self.status = format!("Scene not evaluated: {error}");
+                scene
+            }
+        };
     }
 
-    fn render_one_thumbnail(&mut self, _ctx: &egui::Context) -> bool {
+    /// Send the next card thumbnail to the render worker, one at a time: material cards first,
+    /// then gallery, bookmark and swatch cards without a thumbnail that did not fail
+    /// (`thumb_failed`). Returns whether thumbnail work is still waiting (`FRAC_SNAP`; a failed
+    /// card counts as done).
+    fn render_one_thumbnail(&mut self) -> bool {
         if let Err(error) = self
             .material_gallery
             .refresh(&self.world, f64::from(self.world_ui.playhead))
@@ -1966,8 +2251,17 @@ impl App {
         // carries its own render settings).
         const SEED: u32 = 7;
         const MAX_BOUNCES: u32 = 3;
-        let material_request = self.material_gallery.next_thumbnail();
-        let item = material_request
+        let failed = &self.thumb_failed;
+        // The first card of `entries` still to render, as (encoded id, scene).
+        let next_card = |entries: &[Entry], card: fn(usize) -> ThumbId| {
+            entries.iter().enumerate().find_map(|(i, e)| {
+                let id = card(i).encode();
+                (e.thumb.is_none() && !failed.contains(&id)).then(|| (id, e.scene.clone()))
+            })
+        };
+        let item = self
+            .material_gallery
+            .next_thumbnail()
             .map(|request| {
                 (
                     request.id,
@@ -1978,49 +2272,26 @@ impl App {
                 )
             })
             .or_else(|| {
-                self.gallery
+                next_card(&self.gallery, ThumbId::Gallery)
+                    .or_else(|| next_card(&self.bookmarks, ThumbId::Bookmark))
+                    .map(|(id, scene)| (id, scene, THUMB_W, THUMB_H, THUMB_SPP))
+            })
+            .or_else(|| {
+                crate::materials::PRESETS
                     .iter()
+                    .zip(&self.swatches)
                     .enumerate()
-                    .find(|(_, e)| e.thumb.is_none())
-                    .map(|(i, e)| {
+                    .find(|(i, (_, slot))| {
+                        slot.is_none() && !failed.contains(&ThumbId::Swatch(*i).encode())
+                    })
+                    .map(|(i, (preset, _))| {
                         (
-                            ThumbId::Gallery(i).encode(),
-                            e.scene.clone(),
-                            THUMB_W,
-                            THUMB_H,
-                            THUMB_SPP,
+                            ThumbId::Swatch(i).encode(),
+                            swatch_scene(preset),
+                            SWATCH,
+                            SWATCH,
+                            SWATCH_SPP,
                         )
-                    })
-                    .or_else(|| {
-                        self.bookmarks
-                            .iter()
-                            .enumerate()
-                            .find(|(_, e)| e.thumb.is_none())
-                            .map(|(i, e)| {
-                                (
-                                    ThumbId::Bookmark(i).encode(),
-                                    e.scene.clone(),
-                                    THUMB_W,
-                                    THUMB_H,
-                                    THUMB_SPP,
-                                )
-                            })
-                    })
-                    .or_else(|| {
-                        crate::materials::PRESETS
-                            .iter()
-                            .zip(&self.swatches)
-                            .enumerate()
-                            .find(|(_, (_, slot))| slot.is_none())
-                            .map(|(i, (preset, _))| {
-                                (
-                                    ThumbId::Swatch(i).encode(),
-                                    swatch_scene(preset),
-                                    SWATCH,
-                                    SWATCH,
-                                    SWATCH_SPP,
-                                )
-                            })
                     })
             });
         let Some((id, scene, width, height, spp)) = item else {
@@ -2038,26 +2309,36 @@ impl App {
             max_bounces: MAX_BOUNCES,
         }) {
             Ok(()) => self.thumb_pending = Some((id, scene)),
-            // A full queue is retried on a later frame.
-            Err(CommandError::Full) if material => self.material_gallery.retry_thumbnail(id),
-            Err(CommandError::Full) => {}
-            Err(error) => {
-                if material {
-                    self.material_gallery.fail_thumbnail(id, error.to_string());
-                }
-                self.status = format!("Thumbnail: {error}");
+            // A full queue is retried on the next frame, which no worker result may bring.
+            Err(CommandError::Full) if material => {
+                self.material_gallery.retry_thumbnail(id);
+                self.wake.wake();
             }
+            Err(CommandError::Full) => self.wake.wake(),
+            Err(error) => self.fail_thumbnail(id, error.to_string()),
         }
         true
+    }
+
+    /// A card's thumbnail failed: the card keeps its placeholder and is not asked again
+    /// (material cards keep the error on their card), and the status line says why.
+    fn fail_thumbnail(&mut self, id: u64, error: String) {
+        if matches!(
+            crate::material_gallery::ThumbId::decode(id),
+            crate::material_gallery::ThumbId::Material(_)
+        ) {
+            self.material_gallery.fail_thumbnail(id, error.clone());
+        } else {
+            self.thumb_failed.insert(id);
+        }
+        self.status = format!("Thumbnail: {error}");
     }
 
     /// Selection and assignment are separate: cards refer to authored node UUIDs.
     fn select_material_node(&mut self, id: crate::world::NodeId) {
         self.remember_material_targets();
         self.world.finish_edit();
-        self.world.selection = Some(id);
-        self.world.selected.clear();
-        self.world.selected.push(id);
+        self.world.click_select(Some(id), false);
         self.panels_to_open.push(dock::Panel::Inspector);
     }
 
@@ -2107,16 +2388,12 @@ impl App {
         }
     }
 
-    fn material_assignment_targets(&self) -> &[crate::world::NodeId] {
-        &self.material_targets
-    }
-
     /// The objects an "Assign to …" action addresses.
     fn assign_targets(&mut self, to: AssignTo) -> Vec<crate::world::NodeId> {
         match to {
             AssignTo::Selected => {
                 self.remember_material_targets();
-                self.material_assignment_targets().to_vec()
+                self.material_targets.clone()
             }
             AssignTo::AllFractals => self.world.document.material_consumers(),
         }
@@ -2230,10 +2507,7 @@ impl App {
                 .weak(),
         );
         let mut select = None;
-        let selected_targets = {
-            self.remember_material_targets();
-            !self.material_assignment_targets().is_empty()
-        };
+        let selected_targets = !self.material_targets.is_empty();
         let any_fractal = !self.world.document.material_consumers().is_empty();
         let mut assign = None;
         let mut refresh = None;
@@ -2404,10 +2678,8 @@ impl App {
     fn material_library(&mut self, ui: &mut egui::Ui) {
         use crate::materials::{CATEGORIES, PRESETS};
         ui.label("Click a preset to add a Material node to the work area. Assign it separately.");
-        let selected_targets = {
-            self.remember_material_targets();
-            !self.material_assignment_targets().is_empty()
-        };
+        self.remember_material_targets();
+        let selected_targets = !self.material_targets.is_empty();
         let any_fractal = !self.world.document.material_consumers().is_empty();
         let mut add = None;
         let mut assign = None;
@@ -2497,31 +2769,37 @@ impl App {
         }
     }
 
+    /// File > Save bookmark: the document into `~/.warpbro/bookmarks/<time>-<name>.json`. The
+    /// card joins the Bookmarks panel once the file is written (`bookmark_event`).
     fn save_bookmark(&mut self) {
-        let dir = crate::warpbro_dir().join("bookmarks");
-        let path = dir.join(format!(
-            "{}-{}.json",
-            now_stamp(),
+        let stamp = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(time) => time.as_secs(),
+            Err(error) => {
+                self.status = format!("Bookmark not saved: the clock is before 1970 ({error})");
+                return;
+            }
+        };
+        let path = bookmarks_dir().join(format!(
+            "{stamp}-{}.json",
             crate::fs_name::stem(&self.scene.name)
         ));
-        match serde_json::to_string_pretty(&self.world.document)
-            .map_err(|e| e.to_string())
-            .and_then(|text| {
-                self.io.send(crate::io_service::Command::Write {
-                    path: path.clone(),
-                    text,
-                })
-            }) {
+        let id = self.next_file_id();
+        match self.io.send(crate::io_service::Command::SaveScene {
+            id,
+            path,
+            document: Box::new(self.world.document.clone()),
+        }) {
             Ok(()) => {
-                self.bookmarks.push(Entry {
+                let entry = Entry {
                     scene: self.frozen_world_scene(),
                     thumb: None,
-                    path: Some(path),
-                });
-                self.tab = Tab::Bookmarks;
+                    path: None,
+                };
+                self.bookmark_ops
+                    .push((id, BookmarkOp::Save(Box::new(entry))));
                 self.status = "Saving bookmark…".into();
             }
-            Err(e) => self.status = e,
+            Err(error) => self.status = error,
         }
     }
 
@@ -2916,13 +3194,7 @@ impl App {
                     {
                         self.thumb_pending = None;
                     }
-                    if matches!(
-                        crate::material_gallery::ThumbId::decode(id),
-                        crate::material_gallery::ThumbId::Material(_)
-                    ) {
-                        self.material_gallery.fail_thumbnail(id, error.clone());
-                    }
-                    self.status = format!("Thumbnail: {error}");
+                    self.fail_thumbnail(id, error);
                 }
                 RenderEvent::Thumbnail { id, frame } => {
                     use crate::material_gallery::ThumbId;
@@ -2984,10 +3256,19 @@ impl App {
             }
         }
         while let Some(event) = self.io.poll_scene() {
-            self.scene_file_event(event);
+            match self.bookmark_ops.iter().position(|(id, _)| *id == event.id) {
+                Some(index) => {
+                    let (_, op) = self.bookmark_ops.remove(index);
+                    self.bookmark_event(op, event);
+                }
+                None => self.scene_file_event(event),
+            }
         }
         while let Some(result) = self.io.poll() {
-            self.status = result.unwrap_or_else(|e| e);
+            self.status = result.unwrap_or_else(|error| {
+                log::error!("{error}");
+                error
+            });
         }
         while let Some(event) = self.io.poll_window() {
             self.window_event(ctx, event);
@@ -3146,11 +3427,7 @@ impl App {
         }
         let held = flight_held(ui, resp);
         if hotkeys::consume(ui.ctx(), Scope::Viewport, Hotkey::Home) {
-            self.scene.camera = self.origin.camera;
-            self.fly = None;
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
-            self.status = "Camera restored".into();
+            self.restore_camera(ui.ctx());
             return;
         }
         if !held && hotkeys::consume(ui.ctx(), Scope::Viewport, Hotkey::Fit) {
@@ -3163,10 +3440,7 @@ impl App {
         if !held && hotkeys::consume(ui.ctx(), Scope::Viewport, Hotkey::Play) {
             self.world_ui.playing = !self.world_ui.playing;
         }
-        let radius = self
-            .scene
-            .camera_reference
-            .unwrap_or(self.scene.formula.framing_radius());
+        let radius = self.scene.camera_radius();
         if held && self.fly.is_none() {
             self.start_flight();
         }
@@ -3260,10 +3534,7 @@ impl App {
         use cam_controls::{CameraIntent, OrbitPose};
         use glam::Vec3;
         let dt = nav_dt(ui.ctx());
-        let radius = self
-            .scene
-            .camera_reference
-            .unwrap_or(self.scene.formula.framing_radius());
+        let radius = self.scene.camera_radius();
         let cam = &mut self.scene.camera;
         let rig = &mut self.orbit.rig;
         if rig.has_inertia() && self.orbit_written != Some(*cam) {
@@ -3366,11 +3637,7 @@ impl App {
     fn frame_camera(&mut self, width: u32, height: u32) {
         use cam_controls::{CameraController, CameraPose, SpaceFlight};
         use glam::{Mat4, Vec3};
-        let reference = self
-            .scene
-            .camera_reference
-            .unwrap_or(self.scene.formula.framing_radius())
-            .max(1e-4);
+        let reference = self.scene.camera_radius().max(1e-4);
         if self.scene.world_render {
             let selected = self.world.targets(None);
             let matches_selection = |node: Option<crate::world::NodeId>| {
@@ -3403,28 +3670,16 @@ impl App {
                 } else {
                     object.formula.framing_radius()
                 };
-                let scale = matrix
-                    .x_axis
-                    .truncate()
-                    .length()
-                    .max(matrix.y_axis.truncate().length())
-                    .max(matrix.z_axis.truncate().length());
                 (
                     matrix.transform_point3(Vec3::ZERO),
-                    (local_radius * scale).max(1e-4),
+                    (local_radius * max_scale(&matrix)).max(1e-4),
                 )
             };
             let bounds_sphere = |b: &crate::scene::Bounds| -> (Vec3, f32) {
                 let matrix = Mat4::from_cols_array_2d(&b.world);
-                let scale = matrix
-                    .x_axis
-                    .truncate()
-                    .length()
-                    .max(matrix.y_axis.truncate().length())
-                    .max(matrix.z_axis.truncate().length());
                 (
                     matrix.transform_point3(Vec3::ZERO),
-                    (b.half * scale).max(1e-4),
+                    (b.half * max_scale(&matrix)).max(1e-4),
                 )
             };
             let mut spheres: Vec<(Vec3, f32)> = self
@@ -3493,15 +3748,21 @@ impl App {
         self.status = "Camera framed to bounds".into();
     }
 
+    /// View > Restore camera (H): the camera as the scene was loaded (`origin`); a flight
+    /// stops and releases the cursor. Authored by the end-of-frame diff like any navigation.
+    fn restore_camera(&mut self, ctx: &egui::Context) {
+        self.scene.camera = self.origin.camera;
+        self.fly = None;
+        ctx.send_viewport_cmd(egui::ViewportCommand::CursorGrab(egui::CursorGrab::None));
+        self.status = "Camera restored".into();
+    }
+
     /// Seed the flight rig from the scene camera. `fly_camera` then drives it while RMB is
     /// held and lets its momentum and lock spring settle after release.
     fn start_flight(&mut self) {
         use cam_controls::{CameraPose, SpaceFlight};
         use glam::Vec3;
-        let radius = self
-            .scene
-            .camera_reference
-            .unwrap_or(self.scene.formula.framing_radius());
+        let radius = self.scene.camera_radius();
         let cam = &self.scene.camera;
         let orientation = cam.orientation();
         let eye = Vec3::from_array(cam.target) - (orientation * -Vec3::Z) * (cam.distance * radius);
@@ -3556,7 +3817,7 @@ impl App {
                     ui.close();
                 }
                 if menu_item(ui, "Open scene…", Scope::Global, Hotkey::OpenScene).clicked() {
-                    self.scene_file_dialog(false);
+                    self.scene_action_dialog(crate::templates::FileAction::Open);
                     ui.close();
                 }
                 if menu_item(ui, "Save scene", Scope::Global, Hotkey::SaveScene).clicked() {
@@ -3564,7 +3825,7 @@ impl App {
                     ui.close();
                 }
                 if menu_item(ui, "Save scene as…", Scope::Global, Hotkey::SaveSceneAs).clicked() {
-                    self.scene_file_dialog(true);
+                    self.scene_action_dialog(crate::templates::FileAction::Save);
                     ui.close();
                 }
                 ui.menu_button("Templates", |ui| {
@@ -3642,23 +3903,35 @@ impl App {
             });
             ui.menu_button("Edit", |ui| {
                 use crate::hotkeys::{Command as Hotkey, Scope, menu_item};
+                // History steps wait for the next frame's history point (`History`).
+                let mut history = None;
                 if menu_item(ui, "Undo", Scope::Global, Hotkey::Undo).clicked() {
-                    self.world.undo();
-                    ui.close();
+                    history = Some(History::Undo);
                 }
                 if menu_item(ui, "Redo", Scope::Global, Hotkey::Redo).clicked() {
-                    self.world.redo();
-                    ui.close();
+                    history = Some(History::Redo);
                 }
                 ui.separator();
-                if ui.button("Reset scene").clicked() {
-                    self.load(self.origin.clone(), Load::Same);
+                if ui
+                    .button("Reset scene")
+                    .on_hover_text("Back to the scene as it was opened: one undoable step")
+                    .clicked()
+                {
+                    history = Some(History::Reset);
+                }
+                if history.is_some() {
+                    self.history = history;
+                    ui.ctx().request_repaint();
                     ui.close();
                 }
-                if ui.button("Copy scene JSON").clicked()
-                    && let Ok(json) = serde_json::to_string_pretty(&self.world.document)
-                {
-                    ui.ctx().copy_text(json);
+                if ui.button("Copy scene JSON").clicked() {
+                    match serde_json::to_string_pretty(&self.world.document) {
+                        Ok(json) => {
+                            ui.ctx().copy_text(json);
+                            self.status = "Copied the scene JSON".into();
+                        }
+                        Err(error) => self.status = format!("Copy scene JSON: {error}"),
+                    }
                     ui.close();
                 }
                 ui.separator();
@@ -3668,6 +3941,7 @@ impl App {
                 }
             });
             ui.menu_button("View", |ui| {
+                use crate::hotkeys::{Command as Hotkey, Scope, menu_item};
                 if let Ok(policy) = self
                     .world
                     .document
@@ -3689,9 +3963,8 @@ impl App {
                     self.toggle_flight_mode();
                     ui.close();
                 }
-                if ui.button("Restore camera    H").clicked() {
-                    self.scene.camera = self.origin.camera;
-                    self.fly = None;
+                if menu_item(ui, "Restore camera", Scope::Viewport, Hotkey::Home).clicked() {
+                    self.restore_camera(ui.ctx());
                     ui.close();
                 }
                 if crate::hotkeys::menu_item(
@@ -3719,20 +3992,18 @@ impl App {
         });
     }
 
-    fn browser(&mut self, ui: &mut egui::Ui) {
-        if self.tab == Tab::Materials {
-            self.materials_tab(ui);
-            return;
-        }
-        let mut load: Option<Scene> = None;
-        let mut delete: Option<usize> = None;
+    /// The Gallery or the Bookmarks dock `panel`: scene cards; a click opens the card's scene as
+    /// a new document, a bookmark's context menu deletes its file.
+    fn browser(&mut self, ui: &mut egui::Ui, panel: dock::Panel) {
+        let mut load: Option<(Scene, Card)> = None;
+        let mut delete: Option<PathBuf> = None;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                let entries = if self.tab == Tab::Gallery {
-                    &self.gallery
-                } else {
+                let entries = if panel == dock::Panel::Bookmarks {
                     &self.bookmarks
+                } else {
+                    &self.gallery
                 };
                 if entries.is_empty() {
                     ui.label("No bookmarks yet: Save bookmark stores the current scene.");
@@ -3747,7 +4018,11 @@ impl App {
                     .spacing([gap, gap])
                     .show(ui, |ui| {
                         for (i, e) in entries.iter().enumerate() {
-                            let selected = e.scene == self.origin;
+                            let card = match &e.path {
+                                Some(path) => Card::Bookmark(path.clone()),
+                                None => Card::Gallery(i),
+                            };
+                            let selected = self.card.as_ref() == Some(&card);
                             let frame = egui::Frame::group(ui.style()).stroke(if selected {
                                 egui::Stroke::new(2.0, ui.visuals().selection.stroke.color)
                             } else {
@@ -3797,16 +4072,16 @@ impl App {
                                     .inner
                                 })
                                 .inner;
-                            if resp.clicked() {
-                                load = Some(e.scene.clone());
-                            }
-                            if e.path.is_some() {
+                            if let Some(path) = &e.path {
                                 resp.context_menu(|ui| {
                                     if ui.button("Delete bookmark").clicked() {
-                                        delete = Some(i);
+                                        delete = Some(path.clone());
                                         ui.close();
                                     }
                                 });
+                            }
+                            if resp.clicked() {
+                                load = Some((e.scene.clone(), card));
                             }
                             if (i + 1) % columns == 0 {
                                 ui.end_row();
@@ -3814,18 +4089,18 @@ impl App {
                         }
                     });
             });
-        if let Some(s) = load {
-            self.load(s, Load::New);
+        if let Some((scene, card)) = load {
+            self.load(scene, Load::New);
+            self.card = Some(card);
         }
-        if let Some(i) = delete {
-            if let Some(p) = self.bookmarks[i].path.clone() {
-                if let Err(error) = self.io.send(crate::io_service::Command::Delete(p)) {
-                    self.status = error;
-                } else {
-                    self.bookmarks.remove(i);
-                }
-            } else {
-                self.bookmarks.remove(i);
+        if let Some(path) = delete {
+            let id = self.next_file_id();
+            match self
+                .io
+                .send(crate::io_service::Command::Delete { id, path })
+            {
+                Ok(()) => self.bookmark_ops.push((id, BookmarkOp::Delete)),
+                Err(error) => self.status = error,
             }
         }
     }
@@ -3847,13 +4122,13 @@ impl App {
                 .info(material)
                 .is_ok_and(|node| node.kind == crate::world::WorldKind::Material)
         {
-            let apply = ui.add_enabled(!self.material_assignment_targets().is_empty(), egui::Button::new("Apply to object"))
+            let apply = ui.add_enabled(!self.material_targets.is_empty(), egui::Button::new("Apply to object"))
                 .on_hover_ui(|ui| {
-                    if self.material_assignment_targets().is_empty() {
+                    if self.material_targets.is_empty() {
                         ui.label("Select an object with a Material field, then select a material to edit.");
                     } else {
                         ui.label("Assign this material to:");
-                        for &id in self.material_assignment_targets() {
+                        for &id in &self.material_targets {
                             if let Ok(node) = self.world.document.info(id) { ui.label(node.name); }
                         }
                     }
@@ -3871,12 +4146,34 @@ impl App {
         }
     }
 
+    /// The status bar in its resizable (`soluwell_chrome::statusbar`) or fixed layout: the same
+    /// sections (`StatusItem`) drawn by one `status_item`.
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.scope(|ui| {
             if self.status_resizable {
-                self.resizable_status_bar(ui);
+                // Fixed section identity / count: transient frame and OIDN states never move
+                // widths onto another indicator.
+                let mut layout = std::mem::take(&mut self.status_layout);
+                soluwell_chrome::statusbar::StatusBar::new().show_with(
+                    ui,
+                    &mut layout,
+                    &StatusItem::WIDTHS,
+                    |index, ui| {
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                        if let Some(item) = StatusItem::ALL.get(index) {
+                            self.status_item(ui, *item, false);
+                        }
+                    },
+                );
+                self.status_layout = layout;
             } else {
-                self.fixed_status_bar(ui);
+                ui.horizontal(|ui| {
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                    let mut separate = false;
+                    for item in StatusItem::ALL {
+                        separate |= self.status_item(ui, item, separate);
+                    }
+                });
             }
         })
         .response
@@ -3907,128 +4204,74 @@ impl App {
         }
     }
 
-    fn resizable_status_bar(&mut self, ui: &mut egui::Ui) {
-        // Fixed section identity/count: transient frame and OIDN states never
-        // move widths onto another indicator. Rendering uses only mailbox data.
-        const WIDTHS: [f32; 10] = [
-            200.0, 95.0, 95.0, 220.0, 130.0, 100.0, 170.0, 80.0, 150.0, 0.0,
-        ];
-        let gpu_label = self.status_gpu_label();
-        let frame = self.frame.as_deref();
-        let preview = self.showing_preview;
-        let target_spp = self.target_spp;
-        soluwell_chrome::statusbar::StatusBar::new().show_with(
-            ui,
-            &mut self.status_layout,
-            &WIDTHS,
-            |index, ui| {
-                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-                match index {
-                    0 => {
-                        ui.label(RichText::new(&gpu_label).weak())
-                            .on_hover_text(&gpu_label);
-                    }
-                    1 => {
-                        ui.label(if self.scene.camera.free_flight {
-                            "Free flight · `"
-                        } else {
-                            "Horizon · `"
-                        });
-                    }
-                    2 => {
-                        if let Some(frame) = frame {
-                            ui.label(format!("{}×{}", frame.width, frame.height));
-                        }
-                    }
-                    3 => {
-                        if let Some(frame) = frame {
-                            sample_status_ui(ui, frame, target_spp, preview, 120.0);
-                        }
-                    }
-                    4 => {
-                        if let Some(frame) = frame {
-                            ui.label(format!("{:.1} Msamples/s", frame.msamples_per_s()));
-                        }
-                    }
-                    5 => {
-                        ui.label(format!("{} spp/batch", self.spp_per_frame));
-                    }
-                    6 => {
-                        if let Some(frame) = frame {
-                            if let Some(error) = &frame.denoise_error {
-                                ui.colored_label(WARNING, "OIDN failed")
-                                    .on_hover_text(error);
-                            } else if frame.denoised_samples > 0 {
-                                ui.label(format!(
-                                    "OIDN {} spp · {:.1} ms",
-                                    frame.denoised_samples, frame.denoise_ms
-                                ));
-                            }
-                        }
-                    }
-                    7 => {
-                        ui.label(format!("UI {:.0} fps", 1000.0 / self.frame_ms.max(0.1)));
-                    }
-                    8 => {
-                        if let Some(frame) = frame {
-                            march_limit_label(ui, frame.unresolved);
-                        }
-                    }
-                    _ => {
-                        ui.label(RichText::new(&self.status).weak())
-                            .on_hover_text(&self.status);
-                    }
-                }
-            },
-        );
-    }
-
-    fn fixed_status_bar(&mut self, ui: &mut egui::Ui) {
-        let gpu_label = self.status_gpu_label();
-        ui.horizontal(|ui| {
-            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-            ui.label(RichText::new(&gpu_label).weak());
-            ui.label(if self.scene.camera.free_flight {
-                "Free flight · `"
-            } else {
-                "Horizon · `"
-            });
+    /// Draw status bar section `item` when it has something to show; returns whether it did.
+    /// `separate` puts a separator before a shown section (the fixed layout; the resizable one
+    /// draws its own dividers).
+    fn status_item(&self, ui: &mut egui::Ui, item: StatusItem, separate: bool) -> bool {
+        let frame = self.current();
+        let shown = match item {
+            StatusItem::Gpu | StatusItem::Flight | StatusItem::Batch | StatusItem::UiFps => true,
+            StatusItem::Size | StatusItem::Samples | StatusItem::Speed => frame.is_some(),
+            StatusItem::Denoise => {
+                frame.is_some_and(|f| f.denoise_error.is_some() || f.denoised_samples > 0)
+            }
+            StatusItem::March => frame.is_some_and(|f| f.unresolved > 0.0),
+            StatusItem::Message => !self.status.is_empty(),
+        };
+        if !shown {
+            return false;
+        }
+        if separate {
             ui.separator();
-            if let Some(t) = self.current() {
-                ui.label(format!("{}×{}", t.width, t.height));
-                ui.separator();
-                sample_status_ui(ui, t, self.target_spp, self.showing_preview, 120.0);
-                ui.separator();
-                ui.label(format!("{:.1} Msamples/s", t.msamples_per_s()));
-                ui.separator();
+        }
+        match (item, frame) {
+            (StatusItem::Gpu, _) => {
+                let label = self.status_gpu_label();
+                ui.label(RichText::new(&label).weak()).on_hover_text(&label);
+            }
+            (StatusItem::Flight, _) => {
+                ui.label(if self.scene.camera.free_flight {
+                    "Free flight · `"
+                } else {
+                    "Horizon · `"
+                });
+            }
+            (StatusItem::Size, Some(frame)) => {
+                ui.label(format!("{}×{}", frame.width, frame.height));
+            }
+            (StatusItem::Samples, Some(frame)) => {
+                sample_status_ui(ui, frame, self.target_spp, self.showing_preview, 120.0);
+            }
+            (StatusItem::Speed, Some(frame)) => {
+                ui.label(format!("{:.1} Msamples/s", frame.msamples_per_s()));
+            }
+            (StatusItem::Batch, _) => {
                 ui.label(format!("{} spp/batch", self.spp_per_frame));
-                if t.denoised_samples > 0 {
-                    ui.separator();
-                    ui.label(format!(
-                        "OIDN {} spp · {:.1} ms",
-                        t.denoised_samples, t.denoise_ms
-                    ));
-                }
-                if let Some(error) = &t.denoise_error {
-                    ui.separator();
-                    ui.label(RichText::new("OIDN failed").color(WARNING))
+            }
+            (StatusItem::Denoise, Some(frame)) => match &frame.denoise_error {
+                Some(error) => {
+                    ui.colored_label(WARNING, "OIDN failed")
                         .on_hover_text(error);
                 }
+                None => {
+                    ui.label(format!(
+                        "OIDN {} spp · {:.1} ms",
+                        frame.denoised_samples, frame.denoise_ms
+                    ));
+                }
+            },
+            (StatusItem::UiFps, _) => {
+                ui.label(format!("UI {:.0} fps", 1000.0 / self.frame_ms.max(0.1)));
             }
-            ui.separator();
-            ui.label(format!("UI {:.0} fps", 1000.0 / self.frame_ms.max(0.1)));
-            if let Some(t) = self.current()
-                && t.unresolved > 0.0
-            {
-                ui.separator();
-                march_limit_label(ui, t.unresolved);
-            }
-            if !self.status.is_empty() {
-                ui.separator();
+            (StatusItem::March, Some(frame)) => march_limit_label(ui, frame.unresolved),
+            (StatusItem::Message, _) => {
                 ui.label(RichText::new(&self.status).weak())
                     .on_hover_text(&self.status);
             }
-        });
+            // A frame section without a frame is not shown (`shown`).
+            (_, None) => {}
+        }
+        true
     }
 
     /// A viewport click (Blender / Maya): the extras' wire under the cursor first (cameras,
@@ -4057,6 +4300,23 @@ impl App {
             1.0 - 2.0 * (pos.y - rect.top()) / rect.height().max(1.0),
         ];
         if !focus {
+            let frame = f64::from(self.world_ui.playhead);
+            let document = &self.world.document;
+            let policy = match document.viewport_policy(frame) {
+                Ok(policy) => policy,
+                Err(error) => {
+                    self.status = error;
+                    return;
+                }
+            };
+            // A node whose visibility cannot be evaluated is not picked; the error is shown.
+            let failed = std::cell::Cell::new(None);
+            let selects = |node| {
+                viewport_selects(document, &policy, frame, node).unwrap_or_else(|error| {
+                    failed.set(Some(error));
+                    false
+                })
+            };
             let bounds: Vec<_> = crate::overlay::bounds(&request.scene.bounds, &[]).collect();
             let extras = self.overlays.iter().flat_map(|(_, wires)| wires.iter());
             let wire = crate::overlay::wire_at(
@@ -4065,7 +4325,7 @@ impl App {
                 rect,
                 pos,
                 PICK_REACH,
-                |node| self.viewport_selects(node),
+                selects,
             );
             // The cursor's world ray: through the near plane and a point beyond it.
             let unproject = (projection * view).inverse();
@@ -4076,11 +4336,14 @@ impl App {
                 .bounds
                 .iter()
                 .filter_map(|b| {
-                    let node = b.node.filter(|node| self.viewport_selects(*node))?;
+                    let node = b.node.filter(|node| selects(*node))?;
                     Some((b.hit(near, (beyond - near).normalize_or_zero())?, node))
                 })
                 .min_by(|a, b| a.0.total_cmp(&b.0))
                 .map(|(_, node)| node);
+            if let Some(error) = failed.into_inner() {
+                self.status = error;
+            }
             if let Some(node) = wire.or(cube) {
                 self.world.click_select(Some(node), add);
                 return;
@@ -4114,20 +4377,6 @@ impl App {
         }
     }
 
-    /// Whether a viewport click may select `node`: shown and of a kind the viewport's filter
-    /// lets pick (`/viewport/select/<kind>`), as the manipulator requires.
-    fn viewport_selects(&self, node: playa_graph::NodeId) -> bool {
-        let frame = f64::from(self.world_ui.playhead);
-        let document = &self.world.document;
-        let (Ok(policy), Ok(info)) = (document.viewport_policy(frame), document.info(node)) else {
-            return false;
-        };
-        policy.selectable.contains(info.kind)
-            && document
-                .shows(node, info.kind, frame, policy.shown)
-                .unwrap_or(false)
-    }
-
     /// A GPU pick's answer ([`Self::viewport_click`]); a stale one (a newer click) is dropped.
     fn picked(&mut self, id: u64, hit: Result<Option<(usize, f32)>, String>) {
         let Some(pending) = self.pick_pending.take_if(|p| p.id == id) else {
@@ -4155,9 +4404,21 @@ impl App {
             }
             return;
         }
-        let node = hit
-            .and_then(|(index, _)| pending.nodes.get(index).copied().flatten())
-            .filter(|node| self.viewport_selects(*node));
+        let frame = f64::from(self.world_ui.playhead);
+        let document = &self.world.document;
+        let node = match hit.and_then(|(index, _)| pending.nodes.get(index).copied().flatten()) {
+            Some(node) => match document
+                .viewport_policy(frame)
+                .and_then(|policy| viewport_selects(document, &policy, frame, node))
+            {
+                Ok(selects) => selects.then_some(node),
+                Err(error) => {
+                    self.status = error;
+                    return;
+                }
+            },
+            None => None,
+        };
         if hit.is_some() && node.is_none() {
             // A fractal the viewport does not let pick: the click changes nothing.
             return;
@@ -4233,7 +4494,11 @@ impl App {
                     model: glam::Mat4::from_scale(glam::vec3(2.0, 2.0, 1.0)).to_cols_array_2d(),
                     ..Default::default()
                 };
-                let mut view = self.hdr_view.lock().unwrap();
+                // A paint callback that panicked mid-draw leaves the view usable: take it back.
+                let mut view = self
+                    .hdr_view
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 view.set_output_format(soluwell_viewport::display::CANVAS_FORMAT);
                 let (format, bytes) = if output_hdr {
                     (
@@ -4307,10 +4572,26 @@ struct PendingPick {
 /// How far (points) from a wire of the viewport extras a click still picks its node.
 const PICK_REACH: f32 = 6.0;
 
+/// Whether the viewport lets `node` be picked and manipulated at `frame`: shown, and of a kind
+/// the viewport's filter lets pick (`/viewport/select/<kind>`). A node the document no longer
+/// has is not selectable; an evaluation error is returned.
+fn viewport_selects(
+    document: &WorldDocument,
+    policy: &crate::render_profiles::ViewportPolicy,
+    frame: f64,
+    node: crate::world::NodeId,
+) -> Result<bool, String> {
+    let Ok(info) = document.info(node) else {
+        return Ok(false);
+    };
+    Ok(policy.selectable.contains(info.kind)
+        && document.shows(node, info.kind, frame, policy.shown)?)
+}
+
 /// Whether a loaded scene is the same document again or a new one made from it (`App::load`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Load {
-    /// A scene file opened (again), or a reset: its identity stays.
+    /// A scene file opened (again): its identity stays.
     Same,
     /// A template, preset or bookmark instantiated: a document of its own.
     New,
@@ -4365,42 +4646,35 @@ fn viewport_pixels(size: egui::Vec2, ppp: f32) -> (usize, usize) {
 }
 
 impl App {
-    /// Identify cached render content without serializing the document on repaint.
-    fn preview_identity(&self, ctx: &egui::Context) -> PreviewKey {
-        let state = ctx.data(|d| {
-            d.get_temp::<soluwell_viewport::display::DisplayState>(
-                soluwell_viewport::display::state_id(),
-            )
-        });
+    /// Identify cached render content without serializing the document on repaint: the
+    /// document state, the monitor, the viewport's size (as laid out, else as last requested)
+    /// and the Still profile's scale and samples. Errors when the profile does not evaluate or
+    /// the viewport has no size yet (a preview renders at the viewport's size).
+    fn preview_identity(&self, ctx: &egui::Context) -> Result<PreviewKey, String> {
+        let monitor = Monitor::read(ctx);
         let effective = self
             .world
             .document
-            .viewport_render(f64::from(self.world_ui.playhead), false)
-            .ok()
-            .map(|selection| selection.effective);
-        let extent = self
-            .viewport_rect
-            .map(|rect| viewport_pixels(rect.size(), ctx.pixels_per_point()))
-            .unwrap_or_else(|| {
-                (
-                    self.request.as_ref().map_or(640, |r| r.width),
-                    self.request.as_ref().map_or(360, |r| r.height),
-                )
-            });
-        PreviewKey {
+            .viewport_render(f64::from(self.world_ui.playhead), false)?
+            .effective;
+        let (width, height) = match (self.viewport_rect, &self.request) {
+            (Some(rect), _) => viewport_pixels(rect.size(), ctx.pixels_per_point()),
+            (None, Some(request)) => (request.width, request.height),
+            (None, None) => {
+                return Err("The viewport has no size yet: a preview renders at its size".into());
+            }
+        };
+        Ok(PreviewKey {
             document: playa_graph::NodeId(self.world.document.graph.id),
             revision: self.world.revision(),
-            output_hdr: state.as_ref().is_some_and(|s| s.output.is_hdr()),
-            white_nits_bits: state.as_ref().map_or(100.0, |s| s.target.white).to_bits(),
+            output_hdr: monitor.hdr,
+            white_nits_bits: monitor.white_nits.to_bits(),
             seed: self.seed,
-            width: extent.0.max(1),
-            height: extent.1.max(1),
-            scale_bits: effective
-                .as_ref()
-                .map_or(1.0f32, |r| r.resolution_scale)
-                .to_bits(),
-            samples: effective.as_ref().map_or(0, |r| r.samples),
-        }
+            width: width.max(1),
+            height: height.max(1),
+            scale_bits: effective.resolution_scale.to_bits(),
+            samples: effective.samples,
+        })
     }
 
     /// The stamp rejects late frames after scrubbing or authoring; interactive
@@ -4424,7 +4698,13 @@ impl App {
         {
             return;
         }
-        let key = self.preview_identity(ctx);
+        let key = match self.preview_identity(ctx) {
+            Ok(key) => key,
+            Err(error) => {
+                self.status = error;
+                return;
+            }
+        };
         if viewport.target_spp != key.samples
             || viewport.output_hdr != key.output_hdr
             || viewport.white_nits.to_bits() != key.white_nits_bits
@@ -4439,12 +4719,18 @@ impl App {
             request
         } else {
             self.preview_sequence = self.preview_sequence.wrapping_add(1);
-            self.make_preview_request(
+            match self.make_preview_request(
                 self.world.document.first,
                 self.world.document.last,
                 key.samples,
                 ctx,
-            )
+            ) {
+                Ok(request) => request,
+                Err(error) => {
+                    self.status = error;
+                    return;
+                }
+            }
         };
         match self
             .preview
@@ -4455,14 +4741,17 @@ impl App {
         }
     }
 
+    /// The preview render of frames `first..=last` at `spp` samples: the frozen document (the
+    /// cached preview's while its identity holds), the Still profile, the viewport's size and
+    /// the preview cache budget of the settings (`preview_cache`).
     fn make_preview_request(
         &self,
         first: u32,
         last: u32,
         spp: u32,
         ctx: &egui::Context,
-    ) -> crate::preview::PreviewRequest {
-        let key = self.preview_identity(ctx);
+    ) -> Result<crate::preview::PreviewRequest, String> {
+        let key = self.preview_identity(ctx)?;
         let scene = if self.preview_key == Some(key) {
             self.preview.cached_request().map(|r| r.scene)
         } else {
@@ -4470,15 +4759,11 @@ impl App {
         }
         .unwrap_or_else(|| Arc::new(self.frozen_world_scene()));
         let size = scaled_extent((key.width, key.height), f32::from_bits(key.scale_bits));
-        crate::preview::PreviewRequest {
+        let policy = self.world.document.viewport_policy(f64::from(first))?;
+        Ok(crate::preview::PreviewRequest {
             generation: self.preview_sequence,
             scene,
-            render_profile: self
-                .world
-                .document
-                .viewport_policy(f64::from(first))
-                .ok()
-                .map(|policy| policy.selected(false).1),
+            render_profile: Some(policy.selected(false).1),
             first,
             last,
             fps: self.world.document.fps as f32,
@@ -4489,9 +4774,9 @@ impl App {
             budget_ms: crate::render_service::BACKGROUND_BUDGET_MS,
             output_hdr: key.output_hdr,
             white_nits: f32::from_bits(key.white_nits_bits),
-            cache_fraction: 0.05,
-            reserve_gb: 2.0,
-        }
+            cache_fraction: f64::from(self.preview_cache.fraction),
+            reserve_gb: f64::from(self.preview_cache.reserve_gb),
+        })
     }
 
     fn begin_preview(
@@ -4503,9 +4788,17 @@ impl App {
     ) {
         self.world.finish_edit();
         self.preview_sequence = self.preview_sequence.wrapping_add(1);
-        let key = self.preview_identity(ctx);
-        let request = self.make_preview_request(first, last, mode.samples(key.samples), ctx);
-        self.start_preview_request(request, mode.cache_all(), key);
+        let prepared = self.preview_identity(ctx).and_then(|key| {
+            let request = self.make_preview_request(first, last, mode.samples(key.samples), ctx)?;
+            Ok((request, key))
+        });
+        match prepared {
+            Ok((request, key)) => self.start_preview_request(request, mode.cache_all(), key),
+            Err(error) => {
+                self.world_ui.playing = false;
+                self.status = error;
+            }
+        }
     }
 
     fn start_preview_request(
@@ -4535,16 +4828,19 @@ impl App {
 
     fn sync_preview(&mut self, dt: f32, ctx: &egui::Context) {
         self.preview.set_loop(self.world_ui.looping);
+        // Navigation over the viewport ends a played preview: a press or the wheel there, or a
+        // viewport key that moves the camera (`hotkeys`, under the viewport's scope rules).
+        use crate::hotkeys::{Command as Hotkey, Scope};
         let navigating = self.viewport_rect.is_some_and(|rect| {
             ctx.input(|input| {
                 input.pointer.hover_pos().is_some_and(|p| rect.contains(p))
-                    && (input.pointer.any_down()
-                        || input.smooth_scroll_delta.y != 0.0
-                        || [egui::Key::G, egui::Key::H, egui::Key::F]
-                            .iter()
-                            .any(|k| input.key_pressed(*k)))
+                    && (input.pointer.any_down() || input.smooth_scroll_delta.y != 0.0)
             })
-        });
+        }) || crate::hotkeys::pressed(
+            ctx,
+            Scope::Viewport,
+            &[Hotkey::Fit, Hotkey::Home, Hotkey::Flight],
+        );
         if navigating && self.preview.position().is_some() {
             self.preview.cancel();
             self.preview_key = None;
@@ -4552,11 +4848,16 @@ impl App {
             self.world_ui.playing = false;
         }
         // The viewport alone decides whether the size still fits (on the pass that is shown):
-        // a discarded pass's layout must not cancel playback here.
-        if self
-            .preview_key
-            .is_some_and(|key| key.content() != self.preview_identity(ctx).content())
-        {
+        // a discarded pass's layout must not cancel playback here. A preview whose identity
+        // cannot be told any more is stale too.
+        let stale = self.preview_key.map(|key| {
+            self.preview_identity(ctx)
+                .map(|current| key.content() != current.content())
+        });
+        if let Some(Err(error)) = &stale {
+            self.status = error.clone();
+        }
+        if matches!(stale, Some(Ok(true) | Err(_))) {
             self.preview.cancel();
             self.preview_key = None;
             self.showing_preview = false;
@@ -4670,10 +4971,38 @@ impl App {
                 self.snapshot_clones += 1;
             }
         }
+        // The document owns the colour selection: the colour controls show its selection
+        // (after a load, undo, redo or any edit); a rebuild happens only when it differs.
+        self.colour.set_sel(&self.scene.colour);
         Ok(())
     }
+
+    /// Whether something advances without input or a worker's result: worker results (frames,
+    /// thumbnails, picks, file answers, colour configs, export progress) wake the UI themselves
+    /// (`render_service::Wake`). What is left: the clock (playback, a played preview, the
+    /// interactive viewport settling into its still profile), motion that coasts, a drag,
+    /// a preview cache that retries refused commands, a video encode (no worker events) and an
+    /// armed window shot (captured after the next frame). While it holds, every frame asks for
+    /// the next one (the window caps them at `gui_fps`); otherwise the window sleeps until
+    /// input or a wake (`window.rs` honours egui's repaint requests).
+    fn animating(&self) -> bool {
+        self.request
+            .as_ref()
+            .is_some_and(|request| request.active && request.interactive)
+            || self.world_ui.playing
+            || self.preview.caching()
+            || self.preview.running()
+            || self.export.is_encoding()
+            || self.fly.is_some()
+            || self.orbit.rig.has_inertia()
+            || self.takes_recorder.recording()
+            || self.gizmo_gesture.is_some()
+            || self.window_shot.is_some()
+    }
+
     pub(crate) fn ui(&mut self, root: &mut egui::Ui) {
         let ctx = root.ctx().clone();
+        self.wake.attach(&ctx);
         self.navigated = false;
         self.apply_fonts(&ctx);
         self.update_scene_picker(&ctx);
@@ -4710,13 +5039,13 @@ impl App {
             self.new_scene();
         }
         if hotkeys::consume(&ctx, Scope::Global, Hotkey::OpenScene) {
-            self.scene_file_dialog(false);
+            self.scene_action_dialog(crate::templates::FileAction::Open);
         }
         if hotkeys::consume(&ctx, Scope::Global, Hotkey::SaveScene) {
             self.save_scene();
         }
         if hotkeys::consume(&ctx, Scope::Global, Hotkey::SaveSceneAs) {
-            self.scene_file_dialog(true);
+            self.scene_action_dialog(crate::templates::FileAction::Save);
         }
         if hotkeys::consume(&ctx, Scope::Global, Hotkey::WindowShot) {
             self.request_window_shot(
@@ -4724,10 +5053,17 @@ impl App {
                 Monitor::read(&ctx),
             );
         }
-        if hotkeys::consume(&ctx, Scope::Global, Hotkey::Redo) {
-            self.world.redo();
+        // The history point: hotkeys, and the Edit menu's step of the previous frame, change the
+        // document before this frame's edits start (`snapshot_before` below).
+        let history = if hotkeys::consume(&ctx, Scope::Global, Hotkey::Redo) {
+            Some(History::Redo)
         } else if hotkeys::consume(&ctx, Scope::Global, Hotkey::Undo) {
-            self.world.undo();
+            Some(History::Undo)
+        } else {
+            self.history.take()
+        };
+        if let Some(step) = history {
+            self.step_history(step);
         }
         self.node_clipboard(&ctx);
 
@@ -4735,7 +5071,8 @@ impl App {
             self.status = error;
         }
         let before = self.snapshot_before.take();
-        let thumbs_pending = self.render_one_thumbnail(&ctx);
+        self.update_config_picker(&ctx);
+        let thumbs_pending = self.render_one_thumbnail();
         self.poll_events(&ctx);
         self.export.update();
         self.viewport_visible = false;
@@ -4771,9 +5108,7 @@ impl App {
         // must stay the open undo step until release, not be closed by this one every frame.
         let camera_gesture = (self.fly.is_some()
             || (self.gizmo_gesture.is_none() && ctx.input(|i| i.pointer.any_down())))
-        .then(|| {
-            egui::Id::new(("viewport_camera_edit", self.world.document.active_camera)).value()
-        });
+        .then(|| self.camera_gesture());
         if let Some(before) = before.as_ref()
             && self.load_revision == edit_origin
         {
@@ -4819,6 +5154,9 @@ impl App {
                         .edit_snapshot(self.world.selection, before, &self.scene, edit_frame)
                 };
                 if let Err(error) = result {
+                    // A refused edit must not leave unauthored values (or a colour selection
+                    // the document does not have) on screen: evaluate the document again.
+                    self.evaluated_world = None;
                     self.status = error;
                 }
             }
@@ -4836,20 +5174,15 @@ impl App {
         if let Err(error) = self.refresh_scene() {
             self.status = error;
         }
-        self.save_settings(&ctx);
+        self.save_settings();
         if let Some(error) = self.current().and_then(|t| t.colour_error.as_deref()) {
             self.status = format!("Colour output failed: {error}");
         }
-        self.handle_snap(&ctx, thumbs_pending);
-        ctx.request_repaint_after(std::time::Duration::from_secs_f64(
-            1.0 / self.gui_fps as f64,
-        ));
+        self.handle_snap(thumbs_pending);
+        if self.animating() {
+            ctx.request_repaint();
+        }
     }
-}
-
-#[allow(dead_code)]
-fn exists(p: &Path) -> bool {
-    p.exists()
 }
 
 /// The viewport tool (Maya / Playa Q W E R): Select shows no manipulator and leaves the mouse
@@ -4874,6 +5207,16 @@ impl ViewTool {
     }
 }
 
+/// The largest axis scale of `matrix`: the radius factor of a sphere it transforms.
+fn max_scale(matrix: &glam::Mat4) -> f32 {
+    matrix
+        .x_axis
+        .truncate()
+        .length()
+        .max(matrix.y_axis.truncate().length())
+        .max(matrix.z_axis.truncate().length())
+}
+
 /// The navigation clock step: what the flight and orbit rigs integrate with, and what takes
 /// are timed by, so a played take moves at the speed it was flown.
 fn nav_dt(ctx: &egui::Context) -> f32 {
@@ -4889,6 +5232,7 @@ fn flight_held(ui: &egui::Ui, resp: &egui::Response) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn gizmo_size_steps_stay_inside_the_settings_span() {
@@ -5070,7 +5414,6 @@ mod tests {
         let _gpu_test = crate::test_gpu::lock();
         for (width, columns) in [(200.0, 1), (600.0, 3)] {
             let mut app = App::new();
-            app.tab = Tab::Gallery;
             app.gallery.truncate(4);
             for (index, entry) in app.gallery.iter_mut().enumerate() {
                 entry.scene.name = format!("Gallery-{index}");
@@ -5086,7 +5429,7 @@ mod tests {
                         )),
                         ..Default::default()
                     },
-                    |root| app.browser(root),
+                    |root| app.browser(root, dock::Panel::Gallery),
                 );
                 positions = output
                     .shapes
@@ -5194,7 +5537,7 @@ mod tests {
         let material = app.world.selection.unwrap();
         app.select_material_node(material);
         app.remember_material_targets();
-        assert_eq!(app.material_assignment_targets(), &[object]);
+        assert_eq!(app.material_targets, [object]);
         assert!(app.world.document.supports_material(object));
         assert!(!app.world.document.supports_material(material));
         app.assign_gallery_material(material, AssignTo::Selected)
@@ -5224,7 +5567,7 @@ mod tests {
         app.world.selection = Some(camera);
         app.world.selected = vec![camera];
         app.remember_material_targets();
-        assert!(app.material_assignment_targets().is_empty());
+        assert!(app.material_targets.is_empty());
         assert!(
             app.assign_gallery_material(material, AssignTo::Selected)
                 .is_err()
@@ -5339,8 +5682,8 @@ mod tests {
             egui::Pos2::ZERO,
             egui::vec2(128.0, 64.0),
         ));
-        let key = app.preview_identity(&ctx);
-        let cached = app.make_preview_request(0, 10, key.samples, &ctx);
+        let key = app.preview_identity(&ctx).unwrap();
+        let cached = app.make_preview_request(0, 10, key.samples, &ctx).unwrap();
         assert_eq!((cached.width, cached.height, cached.spp), (96, 48, 41));
         assert_eq!(cached.render_profile, Some(policy.still_id));
         app.last_change = Instant::now() - std::time::Duration::from_secs(2);
@@ -5562,7 +5905,7 @@ mod tests {
                 frame: 0.0,
             })
             .unwrap();
-        assert_ne!(key, Some(app.preview_identity(&ctx)));
+        assert_ne!(key, Some(app.preview_identity(&ctx).unwrap()));
     }
 
     #[test]
@@ -5632,6 +5975,14 @@ mod tests {
         let objects = app.scene.objects.as_ptr();
         let snapshots = app.snapshot_clones;
         assert!(app.request.is_none());
+        // A preview renders at the viewport's size: without one it is refused, not guessed.
+        app.begin_preview(0, 10, crate::preview::PreviewMode::Play, &ctx);
+        assert!(app.preview.position().is_none());
+        assert!(!app.status.is_empty());
+        app.viewport_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(640.0, 360.0),
+        ));
         app.begin_preview(0, 10, crate::preview::PreviewMode::Play, &ctx);
         for frame in 1..=10 {
             app.world_ui.seek(frame);
@@ -6294,8 +6645,8 @@ mod tests {
     fn duplicate_bookmark_thumbnails_fill_the_next_empty_entry() {
         let _gpu_test = crate::test_gpu::lock();
         let scene = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
-        let mut rendered = scene.clone();
-        rendered.render.max_bounces = rendered.render.max_bounces.min(3);
+        // The scene as sent: the worker caps the bounces itself, so the card's scene is unchanged.
+        let rendered = scene.clone();
         let ctx = egui::Context::default();
         let thumb = ctx.load_texture(
             "duplicate",
@@ -6484,12 +6835,28 @@ mod tests {
             repeat: false,
             modifiers: Default::default(),
         };
-        app.scene.object.offset = [7.0, -3.0, 2.0];
+        // F frames the world's objects: move the fractal through the document.
+        let fractal = app
+            .world
+            .document
+            .nodes()
+            .into_iter()
+            .find(|node| node.kind == crate::world::WorldKind::Fractal)
+            .unwrap()
+            .id;
+        app.world
+            .execute(crate::world::WorldCommand::SetAttribute {
+                id: fractal,
+                path: "/transform/position".into(),
+                value: serde_json::json!([7.0, -3.0, 2.0]),
+                frame: 0.0,
+            })
+            .unwrap();
+        app.refresh_scene().unwrap();
         frame(&mut app, vec![shortcut(egui::Key::F)]);
         assert!(
-            (glam::Vec3::from_array(app.scene.camera.target)
-                - glam::Vec3::from_array(app.scene.object.offset))
-            .length()
+            (glam::Vec3::from_array(app.scene.camera.target) - glam::Vec3::new(7.0, -3.0, 2.0))
+                .length()
                 < 1e-5
         );
         assert!(app.fly.is_none());
@@ -6501,8 +6868,11 @@ mod tests {
         }
         frame(&mut app, vec![home_release]);
         assert_eq!(
-            app.scene.object.offset,
-            [7.0, -3.0, 2.0],
+            app.world
+                .document
+                .attribute_value(fractal, "/transform/position", 0.0)
+                .unwrap(),
+            serde_json::json!([7.0, -3.0, 2.0]),
             "H must reset only the camera"
         );
         let flight_key = |key, pressed| egui::Event::Key {
@@ -6603,6 +6973,8 @@ mod tests {
         let _gpu_test = crate::test_gpu::lock();
         use glam::Vec3;
         let mut app = App::new();
+        // The single-object scene (no world document objects): `framing_bounds`' fallback box.
+        app.scene.world_render = false;
         for formula in [
             crate::scene::Formula::Mandelbulb(crate::scene::Bulb::PRESET),
             crate::scene::Formula::Mandelbox(crate::scene::MandelBox::PRESET),
@@ -6909,9 +7281,25 @@ mod tests {
         let second = app.world.document.graph.id;
         assert_ne!(first, second, "two scenes from one template");
         assert_ne!(Some(first), template.document.as_ref().map(|d| d.graph.id));
-        // A reset returns to this scene, not to the template.
-        app.load(app.origin.clone(), Load::Same);
+        // A reset returns to this scene, not to the template, as one undoable step.
+        let moved = app.origin.animation.first + 1;
+        app.world
+            .execute(crate::world::WorldCommand::SetMark {
+                slot: 1,
+                frame: Some(moved),
+            })
+            .unwrap();
+        app.scene_file_path = Some(PathBuf::from("kept.frac.json"));
+        app.reset_scene();
         assert_eq!(app.world.document.graph.id, second);
+        assert_eq!(
+            app.world.document.marks.get(&1),
+            Some(&app.origin.animation.first)
+        );
+        assert_eq!(app.scene_file_path, Some(PathBuf::from("kept.frac.json")));
+        assert!(app.world.undo(), "the reset is undoable");
+        assert_eq!(app.world.document.marks.get(&1), Some(&moved));
+        assert!(app.world.redo());
         // An edit then Save As: the copy is a new document, and undo keeps it so.
         app.world
             .execute(crate::world::WorldCommand::SetMark {
@@ -7121,5 +7509,98 @@ mod tests {
         frame.converged = true;
         let done = texts(&frame);
         assert!(done.iter().any(|t| t == "converged"), "{done:?}");
+    }
+
+    /// The document owns the colour selection: the colour controls follow it through edits,
+    /// undo and redo, and the saved default seeds only new documents, never a loaded one.
+    #[test]
+    fn colour_selection_follows_the_document_and_seeds_only_new_scenes() {
+        let _gpu_test = crate::test_gpu::lock();
+        let mut app = App::new();
+        app.refresh_scene().unwrap();
+        let original = app.scene.colour.clone();
+        let before = app.scene.clone();
+        let mut edited = app.scene.clone();
+        edited.colour.look = "Edited look".into();
+        let frame = f64::from(app.world_ui.playhead);
+        app.world
+            .edit_snapshot(None, &before, &edited, frame)
+            .unwrap();
+        app.refresh_scene().unwrap();
+        assert_eq!(app.colour.sel, edited.colour);
+        assert!(app.world.undo());
+        app.refresh_scene().unwrap();
+        assert_eq!(app.colour.sel, original);
+        assert!(app.world.redo());
+        app.refresh_scene().unwrap();
+        assert_eq!(app.colour.sel, edited.colour);
+
+        app.default_colour.look = "Default look".into();
+        let mut own = Scene::preset(Formula::Mandelbox(MandelBox::PRESET));
+        own.colour.look = "Own look".into();
+        app.load(own, Load::New);
+        app.refresh_scene().unwrap();
+        assert_eq!(app.colour.sel.look, "Own look");
+        app.new_scene();
+        app.refresh_scene().unwrap();
+        assert_eq!(app.scene.colour.look, "Default look");
+        assert_eq!(app.colour.sel.look, "Default look");
+    }
+
+    /// A gallery, bookmark or swatch card whose render failed is not asked for again.
+    #[test]
+    fn failed_card_thumbnails_are_not_requested_again() {
+        use crate::material_gallery::ThumbId;
+        let _gpu_test = crate::test_gpu::lock();
+        let mut app = App::new();
+        let cards: Vec<ThumbId> = (0..app.gallery.len())
+            .map(ThumbId::Gallery)
+            .chain((0..app.bookmarks.len()).map(ThumbId::Bookmark))
+            .chain((0..app.swatches.len()).map(ThumbId::Swatch))
+            .collect();
+        for card in cards {
+            app.fail_thumbnail(card.encode(), "test failure".into());
+        }
+        for _ in 0..4 {
+            app.render_one_thumbnail();
+            if let Some((id, _)) = app.thumb_pending.take() {
+                assert!(matches!(ThumbId::decode(id), ThumbId::Material(_)));
+            }
+        }
+    }
+
+    /// Saving and deleting a bookmark change the list only once the file worker confirms.
+    #[test]
+    fn bookmark_list_changes_only_after_the_file_does() {
+        let _gpu_test = crate::test_gpu::lock();
+        let mut app = App::new();
+        let count = app.bookmarks.len();
+        let path = PathBuf::from("bookmark-test.json");
+        let event = |result: Result<Option<Box<Scene>>, String>| crate::io_service::SceneEvent {
+            id: 1,
+            path: path.clone(),
+            result,
+        };
+        let card = |app: &App| Entry {
+            scene: app.frozen_world_scene(),
+            thumb: None,
+            path: None,
+        };
+        app.bookmark_event(
+            BookmarkOp::Save(Box::new(card(&app))),
+            event(Err("disk full".into())),
+        );
+        assert_eq!(app.bookmarks.len(), count);
+        app.bookmark_event(BookmarkOp::Save(Box::new(card(&app))), event(Ok(None)));
+        assert_eq!(app.bookmarks.len(), count + 1);
+        assert_eq!(
+            app.bookmarks.last().and_then(|entry| entry.path.clone()),
+            Some(path.clone())
+        );
+        assert!(app.panels_to_open.contains(&dock::Panel::Bookmarks));
+        app.bookmark_event(BookmarkOp::Delete, event(Err("locked".into())));
+        assert_eq!(app.bookmarks.len(), count + 1);
+        app.bookmark_event(BookmarkOp::Delete, event(Ok(None)));
+        assert_eq!(app.bookmarks.len(), count);
     }
 }
