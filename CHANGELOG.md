@@ -1,5 +1,41 @@
 # Changelog
 
+## Unreleased - 2026-10-23 (bug hunt plan1: waves 1-3)
+
+- **Render robustness:** typed `RenderError` from every step and launch (no panics on device or
+  scene failures), typed thumbnail and command failures, one accumulate loop (`Gpu::advance`)
+  over one `Film { Cuda, Wgpu }`, OIDN cadence decided once per step, admission resolves the
+  backend (explicit CUDA with an extended family is a typed error), export seed = frame number.
+- **WGSL parity with CUDA:** mask arrays, Cells, Kleinian, Pseudo-Kleinian, TrapPoint, Hybrid,
+  normals, glass exit and absorption, march, light sampling and camera layout ported 1:1;
+  two-pass `tally`; dispatch past the 65535-workgroup limit (`linear_id`, 2D grid).
+- **WGPU shader modules per family:** every trace entry is generated from one `TraceEntry`
+  table; each family gets its own shader module whose `family_distance` is that family's
+  estimator alone (generated from `FormulaMeta::wgsl`), the dynamic module serves mixed-family
+  worlds only. naga did not fold the constant family argument, so every "specialized" pipeline
+  used to carry all 28 families (driver compile: ~15 min for pick, longer for trace). Mixed
+  material x one family is specialized too; pick compiles per module on first use.
+- **Pipeline disk cache and warmup:** every WGPU pipeline goes through
+  `gpu_info::create_compute_pipeline` (persistent cache, Vulkan). `WarpBro --warmup` replaces
+  `--warmup-cuda` (`bootstrap.py --skip-warmup`): CUDA module plus WGPU device, module and post
+  pipelines. `--world-bench --backend auto|cuda|wgpu`.
+- **Window on `soluwell-window`:** `window.rs` is an adapter onto the shared egui-widgets-rs host
+  (private present queue, `max_fps` = GUI fps, HDR window shots through `App::presented`, locked
+  cursor falls back to confined).
+- **Formula registry SSOT:** `FORMULAS` drives presets (`Scene::preset(Formula)`), masks
+  (`SIGNED_MASK`, `ITERATING_MASK`) and the WGSL estimator switch.
+- **Export and colour:** `OutputSettings` is the video-io `Preset` plus extras, one OCIO config
+  load per source (`ocio::shared`), SDR preview view from the config, 16-bit codes from the OCIO
+  encoder, file IO joined on drop and written through `.tmp`; EDR displays stay relative to
+  SDR white.
+- **Document:** strict decode (missing required fields, including `active_camera`,
+  `active_environment`, `Take.source`, `Scene.mask` and `RenderSettings.backend`, are errors);
+  migrations removed after converting the shipped templates once; Sun/Sky split, reorder,
+  rename buffer, transport gesture, 64 MiB undo byte budget, one connection resolver.
+- **App shell:** the document owns the colour selection; one `render_service::Wake` for render,
+  IO, OCIO and export workers (never woken under a lock); repaint delay honoured; menu
+  undo/redo queued.
+
 ## 0.1.0 - 2026-10-20
 
 - **20 new fractal & procedural shape families (`8..28`, 28 families total) with declarative metadata (`src/formulas.rs`, `src/formulas.wgsl`):**

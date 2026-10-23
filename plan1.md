@@ -360,6 +360,29 @@ First build the safety net, then fix each divergence against the pinned fractal-
   mixed-family worlds; Mixed material x one family now specialized too; pick per module (lazy,
   `homogeneous_family`); every pipeline via `gpu_info::create_compute_pipeline`; `--warmup` opens
   the device + post pipelines only. Shader code paths, inlining and unrolling unchanged.
+  **Still slow (2026-10-23):** `cuda_wgpu_renders_mandelbulb_world_and_picks_object` passed but
+  took 4946 s on an overloaded machine: one family's estimator is still inlined at ~169 call
+  sites per trace pipeline. Next: 7.5.
+- [ ] **7.5 M. WGPU trace code size: one estimator call site per loop** (operator approved
+  2026-10-23; all tests at the very end, GPU tests only with the operator's go).
+  1. [ ] Static breakdown (CPU only, no GPU): count `family_distance` call sites reachable from
+     each trace / pick entry, grouped by caller (naga IR call graph of `shader_source(Some(0))`),
+     as an ignored test or xtask that prints the table. Record the table here.
+  2. [ ] For the largest callers, restructure so each loop has ONE estimator call site, with
+     bit-identical math (same points, same order, same results): the normal stencil (6 taps x
+     halvings -> a loop over the 6 offsets), `march` (step + two bisection loops -> one loop
+     with a phase state), shadow / AO / light visibility marches likewise. No unrolling or
+     inlining is forbidden; no algorithm changes. Mirror nothing in CUDA (fractal-rs unchanged).
+  3. [ ] Re-count (step 1) and record before/after call sites.
+  4. [ ] End: GPU-free suite + clippy; then, with the operator's go and an idle machine: the
+     WGPU world test (compile time), `parity_tests::cuda_wgpu_primary_guides_agree_per_pixel`,
+     and one A/B `--world-bench --backend wgpu --case <one case>` before/after (the "before"
+     pipelines are in the driver cache from the earlier test). Any slowdown -> that change is
+     dropped.
+  Fallbacks, not planned: SPIR-V `DontInline` on the estimator via passthrough (may cost call
+  overhead, needs a probe); wavefront split of the megakernel (CUDA parity, big refactor).
+- [ ] **7.6 L. CUDA per-family world kernels** (fractal-rs): only `world_fast_bulb` is
+  specialized; homogeneous worlds of other families run the universal dispatcher. Unmeasured.
 
 ---
 
