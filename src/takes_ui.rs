@@ -156,7 +156,7 @@ impl App {
                 self.record_takes = !recording;
                 if recording {
                     self.takes_recorder.cancel();
-                    self.drag_recorder.finish();
+                    self.drag_recorder.cancel();
                 }
             }
             if ui
@@ -564,28 +564,19 @@ impl App {
                 self.select_take(id, ctrl, shift);
                 Ok(())
             }
-            Action::Pin(ids, pinned) => {
-                for id in ids {
-                    self.world.edit_take(id, |t| t.pinned = pinned);
-                }
-                Ok(())
-            }
+            Action::Pin(ids, pinned) => ids
+                .into_iter()
+                .try_for_each(|id| self.world.edit_take(id, |t| t.pinned = pinned).map(drop)),
             Action::Bind(id) => self.toggle_binding(id),
-            Action::Play(id) => self.bind_targets(id).map(|()| {
-                if let Some(take) = self.world.document.takes.get(id) {
-                    let (first, last) = (self.world.document.first, self.world.document.last);
-                    self.world_ui
-                        .seek((take.start.round().max(0.0) as u32).clamp(first, last));
-                }
-                self.world_ui.playing = true;
-            }),
+            Action::Play(id) => self.play_take(id),
             Action::Rename(id, name) => {
                 self.takes_view.rename = None;
                 let name = name.trim().to_owned();
-                if !name.is_empty() {
-                    self.world.edit_take(id, |t| t.name = name);
+                if name.is_empty() {
+                    Ok(())
+                } else {
+                    self.world.edit_take(id, |t| t.name = name).map(drop)
                 }
-                Ok(())
             }
             Action::Delete(ids) => {
                 let mut count = 0;
@@ -654,17 +645,12 @@ impl App {
                 }
                 .map(|takes| self.add_takes(takes, "Made"))
             }
-            Action::SetStart(id, start) => {
-                self.world.edit_take(id, |t| t.start = start);
-                Ok(())
-            }
+            Action::SetStart(id, start) => self.world.edit_take(id, |t| t.start = start).map(drop),
             Action::SetTiming(id, timing) => {
-                self.world.edit_take(id, |t| t.timing = timing);
-                Ok(())
+                self.world.edit_take(id, |t| t.timing = timing).map(drop)
             }
             Action::SetFilters(id, filters) => {
-                self.world.edit_take(id, |t| t.filters = filters);
-                Ok(())
+                self.world.edit_take(id, |t| t.filters = filters).map(drop)
             }
             Action::Bake(id) => {
                 self.bake_take(id);
@@ -768,12 +754,8 @@ impl App {
 
     /// The placed objects among the selected nodes: what a transform take binds to and is made of.
     fn selected_objects(&self) -> Vec<NodeId> {
-        let selected: Vec<NodeId> = if self.world.selected.is_empty() {
-            self.world.selection.into_iter().collect()
-        } else {
-            self.world.selected.clone()
-        };
-        selected
+        self.world
+            .targets(None)
             .into_iter()
             .filter(|id| {
                 self.world.document.info(*id).is_ok_and(|n| {
@@ -813,17 +795,40 @@ impl App {
         Ok(targets)
     }
 
-    /// Bind take `id` to its targets ([`Self::take_targets`]).
-    fn bind_targets(&mut self, id: u64) -> Result<(), String> {
+    /// Bind take `id` to its targets ([`Self::take_targets`]); returns them.
+    fn bind_targets(&mut self, id: u64) -> Result<Vec<NodeId>, String> {
         let targets = self.take_targets(id)?;
-        self.world.bind_take(&targets, Some(id), None)
+        self.world.bind_take(&targets, Some(id), None)?;
+        Ok(targets)
+    }
+
+    /// Bind take `id` and play from where it begins playing: the first frame of its bar on the
+    /// timeline (`WorldDocument::take_span`: its timing and the node's `/take/offset` and
+    /// speed), else, when none of it falls in the work area, its play start.
+    fn play_take(&mut self, id: u64) -> Result<(), String> {
+        let targets = self.bind_targets(id)?;
+        let document = &self.world.document;
+        let span = match targets.first() {
+            Some(node) => document.take_span(*node)?,
+            None => None,
+        };
+        let start = match (span, document.takes.get(id)) {
+            (Some((start, _)), _) => start as f64,
+            (None, Some(take)) => take.play_start(document.first),
+            (None, None) => return Err(format!("No take {id}")),
+        };
+        let (first, last) = (document.first, document.last);
+        self.world_ui
+            .seek((start.round().max(0.0) as u32).clamp(first, last));
+        self.world_ui.playing = true;
+        Ok(())
     }
 
     /// Unbind take `id` everywhere when it drives anything, else bind it to its targets.
     fn toggle_binding(&mut self, id: u64) -> Result<(), String> {
         let bound = self.world.document.take_users(id);
         if bound.is_empty() {
-            return self.bind_targets(id);
+            return self.bind_targets(id).map(drop);
         }
         self.world.bind_take(&bound, None, None)
     }

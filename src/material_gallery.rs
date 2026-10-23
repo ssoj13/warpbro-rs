@@ -3,8 +3,45 @@
 use crate::scene::Material;
 use crate::world::{NodeId, WorldEditor, WorldKind};
 
-/// Material thumbnail IDs occupy a separate namespace from scene/bookmark IDs.
-pub(crate) const THUMBNAIL_ID_MASK: u64 = 1 << 63;
+/// Which card a thumbnail render belongs to. It travels through the render worker as an opaque
+/// `u64` (`Command::Thumbnail::id`): the kind in the top two bits, the index or the material
+/// ticket below. The one encoder and decoder of thumbnail ids.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ThumbId {
+    /// A Gallery preset (index into the gallery cards).
+    Gallery(usize),
+    /// A saved bookmark (index into the bookmark cards).
+    Bookmark(usize),
+    /// A material-library swatch (index into `materials::PRESETS`).
+    Swatch(usize),
+    /// An authored Material node's card: a [`MaterialGallery`] ticket.
+    Material(u64),
+}
+impl ThumbId {
+    const SHIFT: u32 = 62;
+    /// The largest index or ticket an id carries.
+    pub(crate) const MAX_INDEX: u64 = (1 << Self::SHIFT) - 1;
+
+    pub(crate) fn encode(self) -> u64 {
+        let (kind, index) = match self {
+            Self::Gallery(i) => (0, i as u64),
+            Self::Bookmark(i) => (1, i as u64),
+            Self::Swatch(i) => (2, i as u64),
+            Self::Material(ticket) => (3, ticket),
+        };
+        (kind << Self::SHIFT) | (index & Self::MAX_INDEX)
+    }
+
+    pub(crate) fn decode(id: u64) -> Self {
+        let index = id & Self::MAX_INDEX;
+        match id >> Self::SHIFT {
+            0 => Self::Gallery(index as usize),
+            1 => Self::Bookmark(index as usize),
+            2 => Self::Swatch(index as usize),
+            _ => Self::Material(index),
+        }
+    }
+}
 
 /// One authored Material UUID and its current evaluated presentation.
 pub(crate) struct MaterialEntry {
@@ -19,7 +56,6 @@ pub(crate) struct MaterialEntry {
 /// CPU-only intent for the existing asynchronous thumbnail worker.
 pub(crate) struct MaterialThumbnailRequest {
     pub id: u64,
-    pub node: NodeId,
     pub material: Material,
 }
 
@@ -144,12 +180,11 @@ impl MaterialGallery {
         self.sequence = self
             .sequence
             .checked_add(1)
-            .filter(|value| *value < THUMBNAIL_ID_MASK)?;
-        let id = THUMBNAIL_ID_MASK | self.sequence;
+            .filter(|value| *value <= ThumbId::MAX_INDEX)?;
+        let id = ThumbId::Material(self.sequence).encode();
         entry.pending = Some(id);
         Some(MaterialThumbnailRequest {
             id,
-            node: entry.id,
             material: entry.material.clone(),
         })
     }
@@ -214,13 +249,22 @@ impl MaterialGallery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scene::Scene;
+    use crate::scene::{Bulb, Formula, Scene};
     use crate::world::{WorldCommand, WorldDocument};
     use serde_json::json;
 
+    /// The node whose card holds reserved ticket `id`.
+    fn pending_node(gallery: &MaterialGallery, id: u64) -> Option<NodeId> {
+        gallery
+            .entries
+            .iter()
+            .find(|entry| entry.pending == Some(id))
+            .map(|entry| entry.id)
+    }
+
     fn world() -> (WorldEditor, NodeId, NodeId) {
         let mut editor = WorldEditor::new(WorldDocument::from_scene(&Scene::preset(
-            crate::params::FAMILY_BULB,
+            Formula::Mandelbulb(Bulb::PRESET),
         )));
         let first = editor
             .document
@@ -254,15 +298,29 @@ mod tests {
     }
 
     #[test]
+    fn thumbnail_ids_round_trip_per_kind() {
+        for id in [
+            ThumbId::Gallery(0),
+            ThumbId::Gallery(37),
+            ThumbId::Bookmark(1_000_001),
+            ThumbId::Swatch(5),
+            ThumbId::Material(ThumbId::MAX_INDEX),
+        ] {
+            assert_eq!(ThumbId::decode(id.encode()), id);
+        }
+        assert_ne!(ThumbId::Gallery(3).encode(), ThumbId::Bookmark(3).encode());
+    }
+
+    #[test]
     fn terminal_thumbnail_errors_stop_repaint_retries_until_explicit_refresh_or_material_change() {
         let (mut editor, first, second) = world();
         let mut gallery = MaterialGallery::default();
         gallery.refresh(&editor, 0.0).unwrap();
         let old = gallery.next_thumbnail().unwrap();
-        assert_eq!(old.node, first);
+        assert_eq!(pending_node(&gallery, old.id), Some(first));
         assert!(gallery.fail_thumbnail(old.id, "colour transform failed".into()));
         let other = gallery.next_thumbnail().unwrap();
-        assert_eq!(other.node, second);
+        assert_eq!(pending_node(&gallery, other.id), Some(second));
         assert!(gallery.fail_thumbnail(other.id, "worker failed".into()));
         for _ in 0..32 {
             assert!(gallery.next_thumbnail().is_none());
@@ -276,7 +334,7 @@ mod tests {
         assert!(!gallery.fail_thumbnail(old.id, "stale error".into()));
         let current = gallery.next_thumbnail().unwrap();
         assert_ne!(current.id, old.id);
-        assert_eq!(current.node, first);
+        assert_eq!(pending_node(&gallery, current.id), Some(first));
         assert!(gallery.fail_thumbnail(current.id, "another failure".into()));
         editor
             .execute(WorldCommand::SetAttribute {
@@ -297,7 +355,7 @@ mod tests {
                 .is_none()
         );
         let changed = gallery.next_thumbnail().unwrap();
-        assert_eq!(changed.node, first);
+        assert_eq!(pending_node(&gallery, changed.id), Some(first));
         gallery.fail_thumbnail(changed.id, "failed again".into());
         gallery.invalidate();
         gallery.refresh(&editor, 1.0).unwrap();
@@ -349,12 +407,12 @@ mod tests {
         gallery.refresh(&editor, 0.0).unwrap();
         let ctx = egui::Context::default();
         let first_request = gallery.next_thumbnail().unwrap();
-        assert_eq!(first_request.node, first);
+        assert_eq!(pending_node(&gallery, first_request.id), Some(first));
         let thumb = texture(&ctx);
         let texture_id = thumb.id();
         assert!(gallery.accept_thumbnail(first_request.id, thumb));
         let old = gallery.next_thumbnail().unwrap();
-        assert_eq!(old.node, second);
+        assert_eq!(pending_node(&gallery, old.id), Some(second));
         editor
             .execute(WorldCommand::Rename {
                 id: first,
@@ -378,14 +436,15 @@ mod tests {
         assert!(!gallery.accept_thumbnail(old.id, texture(&ctx)));
         let current = gallery.next_thumbnail().unwrap();
         assert_ne!(current.id, old.id);
-        assert_eq!(current.node, second);
+        assert_eq!(pending_node(&gallery, current.id), Some(second));
         assert_eq!(
             current.material,
             editor.document.material(second, 12.0).unwrap()
         );
         gallery.retry_thumbnail(current.id);
         assert!(!gallery.is_pending(current.id));
-        assert_eq!(gallery.next_thumbnail().unwrap().node, second);
+        let next = gallery.next_thumbnail().unwrap();
+        assert_eq!(pending_node(&gallery, next.id), Some(second));
     }
 
     #[test]

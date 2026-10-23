@@ -111,6 +111,7 @@ impl CameraSlots {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::{Bulb, Formula};
 
     #[test]
     fn strip_clicks_follow_the_shared_mapping_in_both_layouts() {
@@ -123,7 +124,7 @@ mod tests {
             };
             let ctx = egui::Context::default();
             let mut slots = CameraSlots::default();
-            let mut camera = crate::scene::Scene::preset(crate::params::FAMILY_BULB).camera;
+            let mut camera = crate::scene::Scene::preset(Formula::Mandelbulb(Bulb::PRESET)).camera;
             let frame = |slots: &mut CameraSlots, camera: &mut Camera, events: Vec<egui::Event>| {
                 let mut action = None;
                 let output = ctx.run_ui(
@@ -190,7 +191,7 @@ mod tests {
     #[test]
     fn slots_copy_and_paste_the_whole_camera_and_survive_serialization() {
         let mut slots = CameraSlots::default();
-        let mut camera = crate::scene::Scene::preset(crate::params::FAMILY_BULB).camera;
+        let mut camera = crate::scene::Scene::preset(Formula::Mandelbulb(Bulb::PRESET)).camera;
         let original = camera;
         assert!(
             !slots.restore(2, &mut camera),

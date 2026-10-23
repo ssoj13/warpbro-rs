@@ -85,7 +85,7 @@ fn retention_keeps_pinned_takes_and_the_takes_nodes_play() {
     let mut takes = Takes::default();
     let first = takes.add(take(&[0.0, 1.0]), &[]);
     let second = takes.add(take(&[0.0, 2.0]), &[]);
-    assert!(takes.edit(first, &[], |t| t.pinned = true));
+    assert!(takes.edit(first, &[], |t| t.pinned = true).unwrap());
     for i in 0..(MAX_UNPINNED + 5) {
         takes.add(take(&[0.0, 3.0 + i as f32]), &[second]);
     }
@@ -254,6 +254,28 @@ fn a_drag_records_one_transform_take_per_moved_node() {
 }
 
 #[test]
+fn a_drag_during_playback_starts_its_take_on_the_frame_its_motion_began() {
+    let mut d = DragRecorder::default();
+    let a = node(1);
+    for i in 0..40 {
+        // A still head of 10 samples while the playhead runs one frame per sample.
+        let x = if i < 10 { 0.0 } else { (i - 9) as f32 };
+        d.sample(1.0 / 24.0, 100.0 + f64::from(i), &[(a, trs(0.0, x))]);
+    }
+    let takes = d.finish();
+    assert_eq!(takes.len(), 1);
+    assert_eq!(
+        takes[0].start, 109.0,
+        "the last still sample, where the motion begins"
+    );
+    // Pausing the recording drops a drag in progress.
+    d.sample(1.0 / 24.0, 0.0, &[(a, trs(0.0, 0.0))]);
+    d.sample(1.0 / 24.0, 1.0, &[(a, trs(0.0, 5.0))]);
+    d.cancel();
+    assert!(d.finish().is_empty());
+}
+
+#[test]
 fn the_euler_filter_and_simplify_edit_a_takes_motion_like_keys() {
     // A turn written with a decomposer's wrap at +-180: 170, 180, -170, -160.
     let turn: Vec<Sample<Trs>> = [170.0, 180.0, -170.0, -160.0]
@@ -327,13 +349,17 @@ fn non_destructive_take_filters_toggle_live_and_roundtrip_through_json_and_clips
     let id = takes.add(raw, &[]);
 
     // Toggle Smooth + Euler + Simplify on.
-    assert!(takes.edit(id, &[], |t| {
-        t.filters.euler = true;
-        t.filters.smooth = true;
-        t.filters.cutoff = 0.1;
-        t.filters.simplify = true;
-        t.filters.tolerance = 0.05;
-    }));
+    assert!(
+        takes
+            .edit(id, &[], |t| {
+                t.filters.euler = true;
+                t.filters.smooth = true;
+                t.filters.cutoff = 0.1;
+                t.filters.simplify = true;
+                t.filters.tolerance = 0.05;
+            })
+            .unwrap()
+    );
     let filtered = takes.get(id).unwrap();
     assert_eq!(filtered.poses, raw_poses, "raw poses remain untouched");
     assert_ne!(filtered.effective_poses(), &raw_poses);
@@ -354,11 +380,15 @@ fn non_destructive_take_filters_toggle_live_and_roundtrip_through_json_and_clips
     assert_eq!(clip_back.effective_poses(), filtered.effective_poses());
 
     // Toggling all filters back off restores exact raw recorded poses.
-    assert!(takes.edit(id, &[], |t| {
-        t.filters.euler = false;
-        t.filters.smooth = false;
-        t.filters.simplify = false;
-    }));
+    assert!(
+        takes
+            .edit(id, &[], |t| {
+                t.filters.euler = false;
+                t.filters.smooth = false;
+                t.filters.simplify = false;
+            })
+            .unwrap()
+    );
     let restored = takes.get(id).unwrap();
     assert_eq!(restored.effective_poses(), &raw_poses);
     assert_eq!(restored.trs_at(120.0, 0, 239, 24.0).unwrap(), raw_mid);

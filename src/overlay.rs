@@ -68,7 +68,9 @@ fn cube(m: Mat4, half: Vec3, style: Style) -> impl Iterator<Item = Wire> {
 }
 
 /// A mask's shape: a sphere's three great circles, a box's edges, or the grid of a Cells mask's
-/// 3x3x3 cells around its origin (which cells it removes is its seed's, not drawn).
+/// 3x3x3 cells around its origin (which cells it removes is its seed's, not drawn). The kernels'
+/// cell `(i, j, k)` spans `[i, i + 1) * edge` per axis (`floor(p / edge)`, fractal-kernels
+/// `mask_distance`), so the drawn cells are -1..=1, their borders at -1, 0, 1 and 2 edges.
 fn mask(m: Mat4, settings: &crate::scene::Mask, style: Style) -> Vec<Wire> {
     let mut wires = Vec::new();
     for frame in settings.copy_frames() {
@@ -88,7 +90,7 @@ fn mask_shape(m: Mat4, mask: &crate::scene::Mask, style: Style) -> Vec<Wire> {
         MaskShape::Box => cube(m, s, style).collect(),
         MaskShape::Cells => {
             let edge = s.x;
-            let at = |i: usize| (i as f32 - 1.5) * edge;
+            let at = |i: usize| (i as f32 - 1.0) * edge;
             let mut wires = Vec::new();
             for (a, b) in (0..4).flat_map(|a| (0..4).map(move |b| (a, b))) {
                 let (p, q) = (at(a), at(b));
@@ -337,6 +339,7 @@ pub fn project(wire: &Wire, clip: Mat4, rect: egui::Rect) -> Vec<[egui::Pos2; 2]
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::{Bulb, Formula};
 
     #[test]
     fn a_click_picks_the_nearest_wire_within_reach() {
@@ -384,8 +387,30 @@ mod tests {
     }
 
     #[test]
+    fn the_cells_grid_lies_on_the_kernel_cell_borders() {
+        let mask = crate::scene::Mask {
+            shape: MaskShape::Cells,
+            size: [2.0, 2.0, 2.0],
+            ..Default::default()
+        };
+        let wires = mask_shape(Mat4::IDENTITY, &mask, Style::Plain);
+        assert_eq!(wires.len(), 48, "16 lines along each of the three axes");
+        // Cells -1..=1 of edge 2: borders at integer multiples of the edge, -2..=4.
+        for p in wires.iter().flat_map(|w| w.points.iter()) {
+            for v in p.to_array() {
+                assert!(
+                    [-2.0, 0.0, 2.0, 4.0].contains(&v),
+                    "{v} is not a cell border"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn selected_object_bounds_draws_selected_fractal_and_group_children_without_pick_nodes() {
-        let doc = WorldDocument::from_scene(&crate::scene::Scene::preset(0));
+        let doc = WorldDocument::from_scene(&crate::scene::Scene::preset(Formula::Mandelbulb(
+            Bulb::PRESET,
+        )));
         let mut e = crate::world::WorldEditor::new(doc);
         let fractal = e
             .document

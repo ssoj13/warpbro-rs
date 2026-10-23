@@ -566,16 +566,19 @@ impl Take {
         on_poses!(&self.poses, s => s.len())
     }
 
-    /// Recompute the cached filtered poses from `self.poses` and `self.filters`.
-    pub fn rebuild_filtered(&mut self) {
+    /// Recompute the cached filtered poses from `self.poses` and `self.filters`. A filter that
+    /// fails on this motion is an error: the take would otherwise play its raw motion while the
+    /// panel shows the filter on (`checked` refuses such a take).
+    fn rebuild_filtered(&mut self) -> Result<(), String> {
         if !self.filters.any_active() {
             self.filtered.0 = None;
-            return;
+            return Ok(());
         }
         self.filtered.0 = Some(map_poses!(
             &self.poses,
-            s => filtered_samples(s, &self.filters).unwrap_or_else(|_| s.clone())
+            s => filtered_samples(s, &self.filters)?
         ));
+        Ok(())
     }
 
     /// The poses this take plays and bakes: the non-destructively filtered poses when any filter
@@ -603,7 +606,8 @@ impl Take {
         match problem {
             Some(what) => Err(format!("Invalid take \"{}\": {what}", self.name)),
             None => {
-                self.rebuild_filtered();
+                self.rebuild_filtered()
+                    .map_err(|e| format!("Take \"{}\": {e}", self.name))?;
                 Ok(self)
             }
         }
@@ -798,14 +802,14 @@ impl Takes {
         self.list.iter().find(|t| t.id == id)
     }
     /// Add a take (named "Take N" when unnamed) and apply retention, keeping the takes in
-    /// `used`. Returns its id.
+    /// `used`. Returns its id. Every take is made through `Take::checked`, which built its
+    /// filtered poses.
     pub fn add(&mut self, mut take: Take, used: &[u64]) -> u64 {
         self.next += 1;
         take.id = self.next;
         if take.name.trim().is_empty() {
             take.name = format!("Take {}", take.id);
         }
-        take.rebuild_filtered();
         self.list.push(Arc::new(take));
         self.trim(used);
         self.next
@@ -833,16 +837,23 @@ impl Takes {
         self.list.len() != before
     }
 
-    /// Mutate one take in place (retention keeps `used`); false when it does not exist.
-    pub fn edit(&mut self, id: u64, used: &[u64], apply: impl FnOnce(&mut Take)) -> bool {
-        let Some(take) = self.list.iter_mut().find(|t| t.id == id) else {
-            return false;
+    /// Edit one take (retention keeps `used`); Ok(false) when it does not exist. The edited take
+    /// must pass `Take::checked` (finite start and filters, filters that work on its motion),
+    /// else the edit is refused and the take stays as it was.
+    pub fn edit(
+        &mut self,
+        id: u64,
+        used: &[u64],
+        apply: impl FnOnce(&mut Take),
+    ) -> Result<bool, String> {
+        let Some(slot) = self.list.iter_mut().find(|t| t.id == id) else {
+            return Ok(false);
         };
-        let take = Arc::make_mut(take);
-        apply(take);
-        take.rebuild_filtered();
+        let mut take = Take::clone(slot);
+        apply(&mut take);
+        *slot = Arc::new(take.checked()?);
         self.trim(used);
-        true
+        Ok(true)
     }
 }
 
@@ -1004,21 +1015,24 @@ impl Recorder {
     }
 }
 
+/// One dragged node's local transforms, each with the document frame it was taken on.
+type DragSamples = Vec<(f64, Sample<Trs>)>;
+
 /// Records manipulator drags: each dragged node's local transform every frame of the drag,
 /// cut into one transform take per node when the drag ends.
 pub struct DragRecorder {
     /// Minimum gesture duration (seconds) required to keep a recorded take.
     pub min_secs: f64,
-    start: f64,
     clock: f64,
-    live: Vec<(NodeId, Vec<Sample<Trs>>)>,
+    /// Per dragged node: each sample with the document frame it was taken on (playback may
+    /// run during the drag), so a take starts on the frame its motion began.
+    live: Vec<(NodeId, DragSamples)>,
 }
 
 impl Default for DragRecorder {
     fn default() -> Self {
         Self {
             min_secs: MIN_SECS,
-            start: 0.0,
             clock: 0.0,
             live: Vec::new(),
         }
@@ -1032,20 +1046,22 @@ impl DragRecorder {
             ..Self::default()
         }
     }
-    /// One frame of a drag: the dragged nodes' local transforms after this frame's edit. The
-    /// first call starts the drag at document frame `frame`.
+    /// One frame of a drag: the dragged nodes' local transforms after this frame's edit, on
+    /// document frame `frame`. The first call starts the drag.
     pub fn sample(&mut self, dt: f64, frame: f64, poses: &[(NodeId, Trs)]) {
         if self.live.is_empty() {
-            self.start = frame;
             self.clock = 0.0;
         } else {
             self.clock += dt;
         }
         for &(node, pose) in poses {
-            let sample = Sample {
-                seconds: self.clock,
-                pose,
-            };
+            let sample = (
+                frame,
+                Sample {
+                    seconds: self.clock,
+                    pose,
+                },
+            );
             match self.live.iter_mut().find(|(n, _)| *n == node) {
                 Some((_, samples)) => samples.push(sample),
                 None => self.live.push((node, vec![sample])),
@@ -1053,20 +1069,30 @@ impl DragRecorder {
         }
     }
 
-    /// The drag ended: one take per node that moved for at least the minimum gesture time
-    /// (rebased to its own first sample, its still head and tail dropped).
+    /// Abandon a drag in progress without making takes (recording paused, document replaced).
+    pub fn cancel(&mut self) {
+        self.live.clear();
+    }
+
+    /// The drag ended: one take per node that moved for at least the minimum gesture time,
+    /// its still head and tail dropped. Like a trim (`Take::trimmed`), the take starts on the
+    /// frame its kept motion began, so it plays on the frames it played on.
     pub fn finish(&mut self) -> Vec<Take> {
-        let start = self.start;
         let min_secs = self.min_secs.max(MIN_SECS);
         std::mem::take(&mut self.live)
             .into_iter()
             .filter_map(|(node, samples)| {
-                let first = samples.windows(2).position(|w| w[0].pose != w[1].pose)?;
-                let last = samples.windows(2).rposition(|w| w[0].pose != w[1].pose)? + 1;
-                let t0 = samples[first].seconds;
-                let kept: Vec<_> = samples[first..=last]
+                let moved = |w: &[(f64, Sample<Trs>)]| match w {
+                    [(_, a), (_, b)] => a.pose != b.pose,
+                    _ => false,
+                };
+                let first = samples.windows(2).position(moved)?;
+                let last = samples.windows(2).rposition(moved)? + 1;
+                let kept = samples.get(first..=last)?;
+                let &(start, Sample { seconds: t0, .. }) = kept.first()?;
+                let kept: Vec<_> = kept
                     .iter()
-                    .map(|s| Sample {
+                    .map(|(_, s)| Sample {
                         seconds: s.seconds - t0,
                         pose: s.pose,
                     })

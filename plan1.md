@@ -372,6 +372,20 @@ First build the safety net, then fix each divergence against the pinned fractal-
   `#[allow]`s, lists what the compiler sees as dead) was started but blocked for 20 min on the
   target-dir lock held by another build; stopped. Run it as step 1 of execution.
 
+## Execution state (2026-10-23)
+
+Approved by the operator ("unification, dedup, SSOT everywhere, fix everything systemically").
+Decisions taken by the lead: Q1 delete migrations after a one-time conversion (`#[ignore]` test
+`convert_documents_once`, backups `*.bak`); Q2 keep `conn`, one resolver; Q3 typed admission
+error; Q4 deferred to PLAN.md item 12 (comments fixed only); Q5 byte-budget undo + slim `gpu`
+blobs. Presets take a typed `Formula` (`Formula::from_code` only at boundaries).
+Branch `fix/plan1`, checkpoint d1c9cae. Wave 1 agents (render-core, shaders, export-colour,
+world-doc) were PAUSED mid-work on the operator's order (usage limit): the tree is uncommitted
+and not type-checked. Their status files and handoffs: session scratchpad `status-*.md`, brief
+`brief.md`. Resume: finish wave 1, apply handoffs, `cargo check` via the machine-wide lock
+(`python C:/projects/projects.rust.cg/cglibs/.buildlock/buildlock.py cargo ...`), then wave 2
+(app shell, WGSL entry-point generator + parity test, migration deletion after conversion).
+
 ## Execution order (after approval)
 
 1. Clippy with forced dead-code warnings (baseline list).

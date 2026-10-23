@@ -23,6 +23,25 @@ pub enum PaletteScheme {
     RoseGold,
     Twilight,
 }
+impl PaletteScheme {
+    /// Every variant: the Attribute Editor's choices (`world::attribute_choices`).
+    pub const ALL: [Self; 14] = [
+        Self::Classic,
+        Self::Fire,
+        Self::Ice,
+        Self::Mono,
+        Self::Sunset,
+        Self::Aurora,
+        Self::Ocean,
+        Self::Ember,
+        Self::Amethyst,
+        Self::Verdant,
+        Self::Copper,
+        Self::Neon,
+        Self::RoseGold,
+        Self::Twilight,
+    ];
+}
 
 #[derive(Clone, Copy)]
 struct Gradient {

@@ -1,48 +1,37 @@
-//! Adapted from exr-view/src/ocio.rs.
-//! The OCIO display transform of the colour image: the config, the user's choice
-//! (display, view, look), the transform the tile shader and the CPU twin both run, and
-//! the Colour panel. The input is always the tracer's working space
-//! (`color::WORKING`): a renderer fact, not a choice, so it is never persisted.
+//! WarpBro's OCIO adapter over `vfx-ocio` (the OpenColorIO 2.5 port Playa and vfx-view use):
+//! the scene's colour choice, the loaded configs, the display transforms the renderer and the
+//! export writers run, and the Colour panel.
 //!
-//! Everything comes from `vfx-ocio` (the OpenColorIO 2.5 port Playa and vfx-view use):
-//! ONE `Processor` gives the WGSL spliced into the tile shader (`wgsl_prelude`, bound
-//! through `GpuOcioResources::build_for(.., FRAGMENT)` in `tiles::render`) and the
-//! exact CPU twin (`apply_rgba`) that Save view and the GPU test use.
-//!
-//! The chain in colour mode (`channel_mode == RGBA`): the exposure gain on the input
-//! values, the OCIO display/view transform (with its look), then the gamma dial on the
-//! display-encoded result (where OCIO's own `ociodisplay` applies its display gamma:
-//! an `ExponentTransform` after the display/view transform). No sRGB OETF: the
-//! display colour space already encodes. Isolated channels are data and keep the
-//! built-in path. The exposure is a gain on the input (linear ACEScg) values, which is
-//! scene-linear exposure.
-//!
-//! What the transform ends with follows the window's output (`present::Output`):
-//!
-//! - **SDR output: encoded.** The display's own code values go to the canvas as
-//!   they are (the user picks the display that matches the monitor, as in any OCIO
-//!   viewer). Only SDR displays are offered: a view is hidden when its display
-//!   colour space says `encoding: hdr-video` (one without an encoding, OCIO v1, is
-//!   offered), and a display needs a non-data SDR view (in OCIO v2 a shared view
-//!   renders into the DISPLAY's space, so a PQ display's "SDR" views are PQ too).
-//! - **HDR output: linear.** Every display is offered. One processor runs the
-//!   display/view transform, then the display colour space back to OCIO's display
-//!   reference (linear CIE XYZ D65, 1.0 = 100 nits, the config's own
-//!   `to_display_reference` or inverted `from_display_reference`), then XYZ to
-//!   linear Rec.709: linear light with 1.0 = SDR reference white, which the tile
-//!   shader encodes like the built-in chain and the present pass maps to the
-//!   surface. A data view (`Raw`) passes its values through as that light.
+//! - [`Sel`]: what the scene shows through (config, display, view, look, working input). The
+//!   world document owns it; the Colour panel's [`State`] follows it (`State::set_sel`).
+//! - [`shared`]: one loaded [`Ocio`] per config source for the whole process: the panel's worker,
+//!   the renderer's `color::ColorPipeline` and export start all read the same load. The panel's
+//!   Reload drops it ([`forget`]); every transform cache is keyed by the load ([`Ocio::serial`]).
+//! - [`Ocio::transform`]: the display/view transform (with its look) from the tracer's working
+//!   space (`color::WORKING`, ACEScg: a renderer fact, never persisted). "Encoded" ends in the
+//!   display's code values (the SDR preview). "Linear" continues to linear Rec.709 display light,
+//!   what the viewport and every file writer take: the display colour space back to OCIO's display
+//!   reference (CIE XYZ D65, 1.0 = 100 nits: the config's `to_display_reference` or the inverted
+//!   `from_display_reference`), then XYZ to Rec.709. An SDR view's light is relative (1.0 = SDR
+//!   white), an HDR view's absolute with its measured peak ([`Transform::light`]); a data view
+//!   (`Raw`) passes its values through as that light. [`Ocio::encoder`] takes the light back to
+//!   the display's codes (16-bit SDR stills).
+//! - [`Ocio::output_transform`]: the display / view an output of a signal (SDR, PQ, HLG) renders
+//!   through (video-io's output-view policy over this config's classification).
+//! - [`State`]: the Colour panel. Config loads and the selection check run on its worker; the
+//!   panel shows their errors.
 
-use std::sync::Arc;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock, Mutex, OnceLock, PoisonError};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use vfx_ocio::builtin::embedded;
 use vfx_ocio::color_matrix::{Adaptation, REC709, conversion_matrix_from_xyz_d65};
 use vfx_ocio::{
-    DisplayViewTransform, Encoding, GpuLanguage, GpuProcessor, GpuShaderCode, GroupTransform,
-    MatrixTransform, Processor, ReferenceSpaceType, TransformDirection,
+    DisplayViewTransform, Encoding, GroupTransform, MatrixTransform, Processor, ReferenceSpaceType,
+    TransformDirection,
 };
 pub use video_io::output_view::OutputKind;
 use video_io::output_view::{OutputView, ViewSignal, resolve_output_view};
@@ -62,8 +51,11 @@ fn hdr_signal(display: &str) -> ViewSignal {
     }
 }
 
-/// What the user picked; persisted (`persist::Config::ocio`). Empty names mean the
-/// config's defaults ([`Ocio::resolve`]).
+/// The colour choice of a scene. The world document stores it (`bus_slots["world"]["colour"]`,
+/// read into `Scene::colour`); the Colour panel edits a copy ([`State::sel`]) that the app
+/// authors back; `Settings.colour` is the choice a new document starts with and the colour
+/// presets ([`ColourPresets`]) store whole ones. Empty names mean the config's defaults
+/// ([`Ocio::resolve`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sel {
@@ -89,10 +81,55 @@ pub fn source(sel_config: &str) -> String {
     if !sel_config.trim().is_empty() {
         return sel_config.trim().to_owned();
     }
-    std::env::var("OCIO")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
+    OCIO_ENV
+        .clone()
         .unwrap_or_else(|| "ocio://default".to_owned())
+}
+
+/// `$OCIO`, read once: [`source`] runs every rendered frame (`color::ColorPipeline`), and reading
+/// the environment takes the process-wide environment lock. A value that is not Unicode cannot
+/// name a config; it is reported once and the default applies.
+static OCIO_ENV: LazyLock<Option<String>> = LazyLock::new(|| match std::env::var("OCIO") {
+    Ok(value) => Some(value).filter(|v| !v.trim().is_empty()),
+    Err(std::env::VarError::NotPresent) => None,
+    Err(std::env::VarError::NotUnicode(raw)) => {
+        log::warn!("$OCIO is not Unicode ({raw:?}); using ocio://default");
+        None
+    }
+});
+
+/// A config load, or why it failed (shared as it is: the error is the same for every reader).
+pub type Loaded = Result<Arc<Ocio>, String>;
+
+/// Every config this process loaded, one per source ([`shared`]).
+static CONFIGS: LazyLock<Mutex<HashMap<String, Arc<OnceLock<Loaded>>>>> =
+    LazyLock::new(Default::default);
+
+/// The config `src` ([`source`]) names, loaded once for the whole process: the Colour panel's
+/// worker, the renderer's `color::ColorPipeline` and export start read the same [`Ocio`], so they
+/// can never disagree about a file that changed on disk. A failed load is shared as well, until
+/// [`forget`]. The first reader loads it; readers of the same source wait for that load, readers
+/// of other sources do not (the map lock is held only to find the slot).
+pub fn shared(src: &str) -> Loaded {
+    let slot = {
+        let mut configs = CONFIGS.lock().unwrap_or_else(PoisonError::into_inner);
+        match configs.get(src) {
+            Some(slot) => slot.clone(),
+            None => configs.entry(src.to_owned()).or_default().clone(),
+        }
+    };
+    slot.get_or_init(|| Ocio::load(src).map(Arc::new).map_err(|e| format!("{e:#}")))
+        .clone()
+}
+
+/// Drop `src`'s config: the next [`shared`] reads the file again (the Colour panel's Reload). A
+/// reader still holding the old load keeps it until it asks again; caches keyed by
+/// [`Ocio::serial`] then rebuild.
+pub fn forget(src: &str) {
+    CONFIGS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(src);
 }
 
 /// Names a [`Sel`] resolves to in one config.
@@ -108,8 +145,7 @@ pub struct Names {
 pub struct Ocio {
     /// What it was loaded from ([`source`]).
     pub src: String,
-    /// Which load this is (process-wide counter): part of every transform key, so a
-    /// reload of the same source rebuilds the tile pipeline.
+    /// Which load this is (process-wide counter, [`Self::serial`]).
     serial: u64,
     cfg: vfx_ocio::Config,
     /// [`Ocio::working_space`], found once per load.
@@ -137,6 +173,12 @@ impl Ocio {
             working: std::sync::OnceLock::new(),
             peaks: Default::default(),
         })
+    }
+
+    /// Which load this is: part of every cached transform's key (`color::ColorPipeline`), so a
+    /// reloaded file ([`forget`]) is never served from a cache of the old one.
+    pub fn serial(&self) -> u64 {
+        self.serial
     }
 
     /// Every colour space, config order.
@@ -308,23 +350,34 @@ impl Ocio {
             view: view.into(),
             ..current.clone()
         };
+        // A selection that does not resolve (its input or look is not in this config) only ranks
+        // the view last here; the Colour panel reports the selection's own error (`State::err`).
         let names = self.resolve(&sel, true).ok()?;
-        if let Ok(peaks) = self.peaks.lock()
-            && let Some(peak) = peaks.get(&names)
+        if let Some(peak) = self
+            .peaks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&names)
         {
             return *peak;
         }
-        let peak = self
+        let peak = match self
             .transform(&names, true)
-            .ok()
-            .and_then(|t| t.light().ok())
-            .and_then(|light| match light {
-                crate::color::DisplayLight::Absolute { peak_nits } => Some(peak_nits),
-                crate::color::DisplayLight::Relative => None,
-            });
-        if let Ok(mut peaks) = self.peaks.lock() {
-            peaks.insert(names, peak);
-        }
+            .map_err(|e| format!("{e:#}"))
+            .and_then(|t| t.light())
+        {
+            Ok(crate::color::DisplayLight::Absolute { peak_nits }) => Some(peak_nits),
+            Ok(crate::color::DisplayLight::Relative) => None,
+            // Cached below, so each view is reported once per load.
+            Err(error) => {
+                log::warn!("OCIO view {display} / {view} has no measurable peak: {error}");
+                None
+            }
+        };
+        self.peaks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(names, peak);
         peak
     }
 
@@ -407,25 +460,35 @@ impl Ocio {
         } else {
             self.cfg.processor_for_display_view_transform(&dvt)?
         };
-        let key = format!(
-            "{}#{}|{}|{}|{}|{}|{}",
-            self.src,
-            self.serial,
-            names.input,
-            names.display,
-            names.view,
-            names.look,
-            if linear { "linear" } else { "encoded" }
-        );
         // Absolute light: the view renders into an HDR display colour space.
-        let absolute = linear
-            && self
-                .cfg
-                .get_views(&names.display)
-                .into_iter()
-                .find(|v| v.name() == names.view)
-                .is_some_and(|v| self.encoding(&names.display, v) == Some(Encoding::Hdr));
-        Transform::new(proc, key, linear, absolute)
+        let absolute =
+            linear && self.view_encoding(&names.display, &names.view) == Some(Encoding::Hdr);
+        Ok(Transform { proc, absolute })
+    }
+
+    /// The cheap check of `sel` the Colour panel shows (`State::err`): its names resolve in this
+    /// config and its view has a display reference to reach light from ([`Self::transform`]'s
+    /// linear chain), without building a processor. The renderer builds and reports the rest.
+    pub fn check(&self, sel: &Sel) -> Result<Names> {
+        let names = self.resolve(sel, true)?;
+        self.to_display_light(&names.display, &names.view)?;
+        Ok(names)
+    }
+
+    /// Linear Rec.709 display light of `names`' view (what `transform(names, true)` ends in) back
+    /// to that display's code values: the inverse of its light chain, so the codes are exactly the
+    /// encoded transform's. A writer that holds only a frame's light gets the same codes the
+    /// frame's 8-bit preview has, at any precision (16-bit SDR stills).
+    pub fn encoder(&self, names: &Names) -> Result<Processor> {
+        let light = vfx_ocio::Transform::Group(GroupTransform {
+            name: String::new(),
+            transforms: self.to_display_light(&names.display, &names.view)?,
+            direction: TransformDirection::Forward,
+        });
+        Ok(self
+            .cfg
+            .processor_from_transform(&light, TransformDirection::Forward)?
+            .inverse()?)
     }
 
     /// The transforms that take `display`/`view`'s output to linear Rec.709 light:
@@ -470,19 +533,13 @@ impl Ocio {
     }
 }
 
-/// One built display transform: the processor (CPU twin) and its WGSL.
+/// One built display transform ([`Ocio::transform`]): its processor, and whether its light is
+/// absolute. `color::ColorPipeline` compiles the processor for the GPU; the CPU applies it for
+/// probes (peaks, the preview check).
 pub struct Transform {
-    /// What built it; the tile pipeline rebuilds when it changes.
-    pub key: String,
     proc: Processor,
-    /// `fn ocio_transform(vec4<f32>) -> vec4<f32>` with its bindings (groups 1 and 2).
-    pub prelude: String,
-    /// The uniforms and LUTs `GpuOcioResources` binds.
-    pub code: GpuShaderCode,
-    /// It ends in linear Rec.709 light (HDR output), not in display code values.
-    linear: bool,
-    /// Its light is ABSOLUTE (an HDR display colour space, e.g. PQ: display
-    /// reference 1.0 = 100 nits), not relative to SDR white: see [`Self::gain`].
+    /// Its light is ABSOLUTE (an HDR display colour space, e.g. PQ: display reference 1.0 =
+    /// 100 nits), not relative to SDR white. Only a linear transform has light.
     absolute: bool,
 }
 
@@ -492,20 +549,6 @@ impl Transform {
     }
     pub(crate) fn absolute(&self) -> bool {
         self.absolute
-    }
-    /// Compile `proc` for the GPU; `linear` says it ends in linear light,
-    /// `absolute` that the light is in absolute nits (see [`Self::gain`]).
-    pub fn new(proc: Processor, key: String, linear: bool, absolute: bool) -> Result<Self> {
-        let gpu = GpuProcessor::from_processor_wgsl(&proc)?;
-        let code = gpu.generate_shader(GpuLanguage::Wgsl)?;
-        Ok(Self {
-            key,
-            prelude: gpu.wgsl_prelude(),
-            code,
-            proc,
-            linear,
-            absolute,
-        })
     }
 
     /// What its light is: relative to SDR white, or the absolute light of an HDR view with the
@@ -522,108 +565,20 @@ impl Transform {
                 .map_err(|e| e.to_string())?;
         Ok(crate::color::DisplayLight::Absolute { peak_nits })
     }
-
-    /// The gain from the transform's light to the canvas (1.0 = SDR white of
-    /// `white` nits). An SDR view's light is relative (its 1.0 IS SDR white, as the
-    /// OS shows SDR content on an HDR display): 1. An HDR view's light is absolute
-    /// (display reference 1.0 = 100 nits; a 1000-nit view peaks at 10): 100/white,
-    /// so the present pass, which scales canvas 1.0 to `white` nits, lands on the
-    /// nits the view meant.
-    pub fn gain(&self, white: f32) -> f32 {
-        if self.absolute {
-            100.0 / white.max(1.0)
-        } else {
-            1.0
-        }
-    }
-
-    /// It ends in linear Rec.709 light, which the tile shader encodes.
-    pub fn linear(&self) -> bool {
-        self.linear
-    }
-
-    /// Whether it samples LUT textures (`Rgba32Float` with a filtering sampler, which
-    /// needs `wgpu::Features::FLOAT32_FILTERABLE`).
-    pub fn has_luts(&self) -> bool {
-        !self.code.textures().is_empty()
-    }
-
-    /// CPU twin of the tile shader's OCIO colour branch over linear RGBA pixels:
-    /// the exposure gain, the transform, for a linear transform `gain`
-    /// ([`Self::gain`]), the gamma dial and, for a linear transform, the canvas
-    /// encoding; alpha stays the input's.
-    pub fn display(&self, px: &mut [[f32; 4]], exposure_ev: f32, gamma: f32, gain: f32) {
-        let mut alpha = vec![0.0; px.len()];
-        self.display_kernel(px, &mut alpha, exposure_ev, gamma, gain);
-    }
-
-    /// The exporter supplies admitted reusable alpha storage alongside its row.
-    pub(crate) fn display_scratch(
-        &self,
-        px: &mut [[f32; 4]],
-        alpha: &mut [f32],
-        exposure_ev: f32,
-        gamma: f32,
-        gain: f32,
-    ) -> Result<(), &'static str> {
-        if alpha.len() != px.len() {
-            return Err("OCIO alpha scratch must match the pixel row");
-        }
-        self.display_kernel(px, alpha, exposure_ev, gamma, gain);
-        Ok(())
-    }
-
-    fn display_kernel(
-        &self,
-        px: &mut [[f32; 4]],
-        alpha: &mut [f32],
-        exposure_ev: f32,
-        gamma: f32,
-        gain: f32,
-    ) {
-        use rayon::prelude::*;
-        let mult = 2.0_f32.powf(exposure_ev);
-        px.par_iter_mut()
-            .zip(alpha.par_iter_mut())
-            .for_each(|(p, a)| {
-                *a = p[3];
-                // Alpha is restored verbatim below. A NaN alpha must not enter RGB
-                // matrix operations, where even a zero alpha coefficient propagates it.
-                p[3] = 1.0;
-                for c in &mut p[..3] {
-                    *c *= mult;
-                }
-            });
-        self.proc.apply_rgba(px);
-        let linear = self.linear;
-        px.par_iter_mut().zip(alpha.par_iter()).for_each(|(p, &a)| {
-            for c in &mut p[..3] {
-                *c = if linear {
-                    crate::transfer::oetf(crate::transfer::dial(*c * gain, gamma))
-                } else {
-                    crate::transfer::dial(*c, gamma)
-                };
-            }
-            p[3] = a;
-        });
-    }
 }
 
 /// A replaceable colour request; stale selections never accumulate in a queue.
 struct ColourRequest {
     generation: u64,
-    reload: u64,
     src: String,
     sel: Sel,
-    hdr: bool,
-    filterable: bool,
 }
-type LoadedConfig = Result<Arc<Ocio>, String>;
 struct ColourResult {
     generation: u64,
     src: String,
-    config: LoadedConfig,
-    active: Result<Option<Arc<Transform>>, String>,
+    config: Loaded,
+    /// [`Ocio::check`] of the selection (Ok while OCIO is off).
+    check: Result<(), String>,
 }
 #[derive(Default)]
 struct ColourMailbox {
@@ -632,63 +587,74 @@ struct ColourMailbox {
     stop: bool,
 }
 struct ColourWorker {
-    mailbox: Arc<(std::sync::Mutex<ColourMailbox>, std::sync::Condvar)>,
+    mailbox: Arc<(Mutex<ColourMailbox>, std::sync::Condvar)>,
     latest: Arc<AtomicU64>,
 }
 impl ColourWorker {
     fn new() -> std::io::Result<Self> {
         let mailbox = Arc::new((
-            std::sync::Mutex::new(ColourMailbox::default()),
+            Mutex::new(ColourMailbox::default()),
             std::sync::Condvar::new(),
         ));
         let latest = Arc::new(AtomicU64::new(0));
         let worker_mailbox = mailbox.clone();
         let worker_latest = latest.clone();
-        std::thread::Builder::new().name("frac-colour".into()).spawn(move || {
-            let mut cached: Option<(String, u64, LoadedConfig)> = None;
-            loop {
-                let request = {
-                    let (mutex, wake) = &*worker_mailbox;
-                    let mut slot = mutex.lock().unwrap_or_else(|e| e.into_inner());
-                    while slot.request.is_none() && !slot.stop {
-                        slot = wake.wait(slot).unwrap_or_else(|e| e.into_inner());
-                    }
-                    if slot.stop { return; }
-                    slot.request.take().unwrap()
-                };
-                if cached.as_ref().is_none_or(|(src, reload, _)| src != &request.src || *reload != request.reload) {
-                    let loaded = Ocio::load(&request.src).map(Arc::new).map_err(|e| format!("{e:#}"));
-                    cached = Some((request.src.clone(), request.reload, loaded));
-                }
-                if worker_latest.load(Ordering::Acquire) != request.generation { continue; }
-                let config = cached.as_ref().unwrap().2.clone();
-                let active = if !request.sel.on {
-                    Ok(None)
-                } else {
-                    (|| {
-                        let ocio = config.as_ref().map_err(Clone::clone)?;
-                        let names = ocio.resolve(&request.sel, request.hdr).map_err(|e| format!("{e:#}"))?;
-                        let transform = ocio.transform(&names, request.hdr).map_err(|e| format!("{e:#}"))?;
-                        if transform.has_luts() && !request.filterable {
-                            return Err("this transform samples LUT textures, and this GPU cannot filter 32-bit float textures".into());
+        std::thread::Builder::new()
+            .name("frac-colour".into())
+            .spawn(move || {
+                loop {
+                    let request = {
+                        let (mutex, wake) = &*worker_mailbox;
+                        let mut slot = mutex.lock().unwrap_or_else(PoisonError::into_inner);
+                        loop {
+                            if slot.stop {
+                                return;
+                            }
+                            if let Some(request) = slot.request.take() {
+                                break request;
+                            }
+                            slot = wake.wait(slot).unwrap_or_else(PoisonError::into_inner);
                         }
-                        Ok(Some(Arc::new(transform)))
-                    })()
-                };
-                let mut slot = worker_mailbox.0.lock().unwrap_or_else(|e| e.into_inner());
-                if slot.stop { return; }
-                if worker_latest.load(Ordering::Acquire) == request.generation {
-                    slot.result = Some(ColourResult {
-                        generation: request.generation, src: request.src, config, active,
-                    });
+                    };
+                    let config = shared(&request.src);
+                    if worker_latest.load(Ordering::Acquire) != request.generation {
+                        continue;
+                    }
+                    let check = if request.sel.on {
+                        config.as_ref().map_err(Clone::clone).and_then(|ocio| {
+                            ocio.check(&request.sel)
+                                .map(drop)
+                                .map_err(|e| format!("{e:#}"))
+                        })
+                    } else {
+                        Ok(())
+                    };
+                    let mut slot = worker_mailbox
+                        .0
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner);
+                    if slot.stop {
+                        return;
+                    }
+                    if worker_latest.load(Ordering::Acquire) == request.generation {
+                        slot.result = Some(ColourResult {
+                            generation: request.generation,
+                            src: request.src,
+                            config,
+                            check,
+                        });
+                    }
                 }
-            }
-        })?;
+            })?;
         Ok(Self { mailbox, latest })
     }
     fn submit(&self, request: ColourRequest) {
         self.latest.store(request.generation, Ordering::Release);
-        let mut slot = self.mailbox.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = self
+            .mailbox
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         slot.request = Some(request);
         slot.result = None;
         self.mailbox.1.notify_one();
@@ -699,28 +665,30 @@ impl ColourWorker {
 }
 impl Drop for ColourWorker {
     fn drop(&mut self) {
-        let mut slot = self.mailbox.0.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slot = self
+            .mailbox
+            .0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         slot.stop = true;
         slot.request = None;
         self.mailbox.1.notify_one();
-        // No join on the UI: the worker exits after its current finite build.
+        // No join on the UI: the worker exits after its current finite load.
     }
 }
 
-/// The Colour panel's state. File loading and processor/WGSL construction run
-/// on its worker; the UI consumes only ready metadata and transforms.
+/// The Colour panel's state: the working copy of the document's selection, the config it names
+/// and that selection's check. Config loads and checks run on its worker; the UI consumes only
+/// ready results. Every display (SDR and HDR) is offered: the selection is the rendering and
+/// export target, and an SDR window shows an HDR view through its SDR preview.
 pub struct State {
     pub sel: Sel,
     pub presets: ColourPresets,
     preset_edit: Option<PresetEdit>,
-    filterable: bool,
-    hdr: bool,
-    cfg: Option<(String, LoadedConfig)>,
-    active: Option<Arc<Transform>>,
+    cfg: Option<(String, Loaded)>,
     pub err: Option<String>,
     worker: Option<ColourWorker>,
     generation: u64,
-    reload_serial: u64,
     pending: bool,
 }
 
@@ -737,47 +705,33 @@ impl State {
             sel,
             presets: Default::default(),
             preset_edit: None,
-            filterable: true,
-            hdr: false,
             cfg: None,
-            active: None,
             err,
             worker,
             generation: 0,
-            reload_serial: 0,
             pending: false,
         };
         state.rebuild();
         state
     }
 
-    pub fn set_filterable(&mut self, filterable: bool) {
-        if self.filterable != filterable {
-            self.filterable = filterable;
+    /// Follow the document's selection (`App::refresh_scene`, after load, undo, redo and every
+    /// edit): rebuilds only when it differs, so calling it every frame costs a comparison.
+    pub fn set_sel(&mut self, sel: &Sel) {
+        if self.sel != *sel {
+            self.sel = sel.clone();
             self.rebuild();
         }
     }
 
-    pub fn set_hdr(&mut self, hdr: bool) {
-        if self.hdr != hdr {
-            self.hdr = hdr;
-            self.rebuild();
-        }
-    }
-
-    pub fn active(&self) -> Option<&Arc<Transform>> {
-        self.active.as_ref()
-    }
-
-    /// Schedule the latest selection without loading files or compiling colour
-    /// processors on the caller. Until completion, no stale transform is exposed.
+    /// Schedule the latest selection without loading files on the caller. Until it completes,
+    /// no stale error is shown.
     pub fn rebuild(&mut self) {
         let Some(worker) = &self.worker else {
             return;
         };
         self.generation = self.generation.wrapping_add(1);
         self.err = None;
-        self.active = None;
         self.pending = true;
         let src = source(&self.sel.config);
         if self
@@ -789,15 +743,12 @@ impl State {
         }
         worker.submit(ColourRequest {
             generation: self.generation,
-            reload: self.reload_serial,
             src,
             sel: self.sel.clone(),
-            hdr: self.hdr,
-            filterable: self.filterable,
         });
     }
 
-    /// Consume an already-ready event. Never waits for a build or a worker lock.
+    /// Consume an already-ready event. Never waits for a load or a worker lock.
     pub fn poll(&mut self) -> bool {
         let Some(result) = self.worker.as_ref().and_then(ColourWorker::take_ready) else {
             return false;
@@ -807,16 +758,7 @@ impl State {
         }
         self.pending = false;
         self.cfg = Some((result.src, result.config));
-        match result.active {
-            Ok(active) => {
-                self.active = active;
-                self.err = None;
-            }
-            Err(error) => {
-                self.active = None;
-                self.err = Some(error);
-            }
-        }
+        self.err = result.check.err();
         true
     }
 
@@ -840,17 +782,11 @@ impl State {
         self.rebuild();
     }
 
-    /// Switch OCIO on or off.
-    pub fn set_on(&mut self, on: bool) {
-        self.sel.on = on;
-        self.rebuild();
-    }
-
-    /// Read the config again (it changed on disk, or a failed load was fixed) and
-    /// rebuild; the new load serial makes the tile pipeline rebuild too.
+    /// Read the config again (it changed on disk, or a failed load was fixed): the shared load
+    /// is dropped ([`forget`]), so the renderer and export read the new one too.
     pub fn reload(&mut self) {
+        forget(&source(&self.sel.config));
         self.cfg = None;
-        self.reload_serial = self.reload_serial.wrapping_add(1);
         self.rebuild();
     }
 
@@ -861,9 +797,9 @@ impl State {
             .config()
             .ok()
             .and_then(|ocio| {
-                let names = ocio.resolve(&self.sel, self.hdr).ok()?;
+                let names = ocio.resolve(&self.sel, true).ok()?;
                 let views = ocio
-                    .views(&names.display, self.hdr)
+                    .views(&names.display, true)
                     .into_iter()
                     .map(str::to_owned)
                     .collect::<Vec<_>>();
@@ -930,10 +866,9 @@ impl State {
                 return;
             };
             let owned = |v: Vec<&str>| v.into_iter().map(str::to_owned).collect::<Vec<_>>();
-            let hdr = self.hdr;
-            let displays = owned(ocio.displays(hdr));
-            let resolved = ocio.resolve(&self.sel, hdr).ok();
-            let views = resolved.as_ref().map(|n| owned(ocio.views(&n.display, hdr))).unwrap_or_default();
+            let displays = owned(ocio.displays(true));
+            let resolved = ocio.resolve(&self.sel, true).ok();
+            let views = resolved.as_ref().map(|n| owned(ocio.views(&n.display, true))).unwrap_or_default();
             let (inputs, looks) = (owned(ocio.inputs()), owned(ocio.looks()));
             let auto_input = ocio.working_space().map_or_else(|| "none found".to_owned(), |n| format!("auto: {n}"));
             let input_warning = resolved
@@ -1123,7 +1058,9 @@ impl ColourPresets {
                             focus: true,
                         });
                     }
-                    Some(SlotClick::Recall) => *selection = slot.selection.clone(),
+                    Some(SlotClick::Recall) => {
+                        self.restore(index, selection);
+                    }
                     None => {}
                 }
             }
@@ -1403,7 +1340,7 @@ mod tests {
         assert_eq!(n.display, "Display P3 HDR - Display");
         assert_eq!(n.view, "ACES 2.0 - HDR 1000 nits (P3 D65)");
         assert_eq!(n.look, "ACES 1.3 Reference Gamut Compression");
-        assert!(o.transform(&n, true).unwrap().linear());
+        assert!(o.transform(&n, true).unwrap().light().unwrap().hdr());
     }
 
     fn cg() -> Ocio {
@@ -1498,30 +1435,11 @@ mod tests {
             ("sRGB - Display", "ACES 2.0 - SDR 100 nits (Rec.709)")
         );
         let t = o.transform(&n, false).unwrap();
-        let mut px = [[0.18, 0.18, 0.18, 0.4]];
-        t.display(&mut px, 0.0, 1.0, 1.0);
+        let mut px = [[0.18, 0.18, 0.18, 1.0]];
+        t.processor().apply_rgba(&mut px);
         for c in &px[0][..3] {
             assert!((c - 0.349).abs() < 2e-3, "{px:?}");
         }
-        assert_eq!(px[0][3], 0.4, "alpha is the input's");
-        eprintln!("default transform: LUT textures = {}", t.has_luts());
-    }
-
-    /// Exposure is a gain on the input and the dial acts on the display value.
-    #[test]
-    fn exposure_and_dial_bracket_the_transform() {
-        let o = cg();
-        let t = o
-            .transform(&o.resolve(&Sel::default(), false).unwrap(), false)
-            .unwrap();
-        let mut a = [[0.09, 0.09, 0.09, 1.0]];
-        let mut b = [[0.18, 0.18, 0.18, 1.0]];
-        t.display(&mut a, 1.0, 1.0, 1.0);
-        t.display(&mut b, 0.0, 1.0, 1.0);
-        assert!((a[0][0] - b[0][0]).abs() < 1e-6, "{a:?} vs {b:?}");
-        let mut g = [[0.18, 0.18, 0.18, 1.0]];
-        t.display(&mut g, 0.0, 2.0, 1.0);
-        assert!((g[0][0] - b[0][0].sqrt()).abs() < 1e-6, "{g:?}");
     }
 
     /// HDR views are hidden (the Studio config has PQ displays), SDR ones stay, and a
@@ -1555,6 +1473,9 @@ mod tests {
             o.views(&n.display, true)
                 .contains(&"ACES 2.0 - HDR 1000 nits (P3 D65)")
         );
+        // The panel's check fails the same way, without building a processor.
+        assert!(o.check(&bad).is_err());
+        assert_eq!(o.check(&hdr).unwrap(), n);
     }
 
     /// A look replaces the view's looks and changes the picture.
@@ -1580,42 +1501,39 @@ mod tests {
             )
             .unwrap();
         let (mut a, mut b) = ([[0.9, 0.2, 0.05, 1.0]], [[0.9, 0.2, 0.05, 1.0]]);
-        plain.display(&mut a, 0.0, 1.0, 1.0);
-        looked.display(&mut b, 0.0, 1.0, 1.0);
+        plain.processor().apply_rgba(&mut a);
+        looked.processor().apply_rgba(&mut b);
         assert_ne!(a, b, "look {look}");
     }
 
-    /// Linear (HDR output) = the encoded transform decoded to light: for the sRGB
-    /// display the display's code values run back through its own curve and
-    /// primaries, so the linear result is the sRGB EOTF of the encoded one (within
-    /// the float noise of two matrices); an HDR view uses the headroom (a 1000-nit
-    /// view reaches ~10x SDR white) where the SDR view stays at white.
+    /// Linear = the encoded transform decoded to light: for the sRGB display the display's code
+    /// values run back through its own curve and primaries, so the encoded result is the sRGB
+    /// OETF of the linear one (within the float noise of two matrices); an HDR view uses the
+    /// headroom (a 1000-nit view reaches ~10x SDR white, display reference 1.0 = 100 nits) where
+    /// the SDR view stays at white. An SDR view's light is relative, an HDR view's absolute.
     #[test]
     fn linear_is_the_light_of_the_display() {
         let o = Ocio::load("ocio://studio-config-latest").unwrap();
         let sdr = o.resolve(&Sel::default(), true).unwrap();
         let enc = o.transform(&sdr, false).unwrap();
         let lin = o.transform(&sdr, true).unwrap();
-        assert!(lin.linear() && !enc.linear() && lin.key != enc.key);
         for v in [0.02f32, 0.18, 0.7, 3.0] {
             let (mut a, mut b) = ([[v, v * 0.8, v * 0.5, 1.0]], [[v, v * 0.8, v * 0.5, 1.0]]);
-            enc.display(&mut a, 0.0, 1.0, 1.0);
-            lin.display(&mut b, 0.0, 1.0, lin.gain(240.0));
+            enc.processor().apply_rgba(&mut a);
+            lin.processor().apply_rgba(&mut b);
             for c in 0..3 {
-                // `display` returns the canvas encoding: sRGB-encoded both ways.
                 assert!(
-                    (a[0][c] - b[0][c]).abs() < 2e-3,
+                    (a[0][c] - crate::color::oetf(b[0][c])).abs() < 2e-3,
                     "{v}: encoded {:?} vs linear {:?}",
                     a[0],
                     b[0]
                 );
             }
         }
-        // Light in display-reference units (gain 1: 1.0 = 100 nits for an HDR view).
         let peak = |t: &Transform| {
             let mut px = [[64.0, 64.0, 64.0, 1.0]];
-            t.display(&mut px, 0.0, 1.0, 1.0);
-            crate::transfer::eotf(px[0][1])
+            t.processor().apply_rgba(&mut px);
+            px[0][1]
         };
         let hdr_sel = Sel {
             display: "Rec.2100-PQ - Display".into(),
@@ -1627,13 +1545,76 @@ mod tests {
             .unwrap();
         assert!(peak(&hdr) > 5.0, "1000-nit view peak {}", peak(&hdr));
         assert!(peak(&lin) < 1.05, "SDR view peak {}", peak(&lin));
-        // An HDR view is absolute: on a 250-nit SDR white its 100 nits are 0.4 of it;
-        // an SDR view (and any encoded transform) is relative.
-        assert_eq!(hdr.gain(250.0), 0.4);
-        assert_eq!((lin.gain(250.0), enc.gain(250.0)), (1.0, 1.0));
+        assert!(hdr.light().unwrap().hdr());
+        assert_eq!(lin.light().unwrap(), crate::color::DisplayLight::Relative);
+        assert_eq!(enc.light().unwrap(), crate::color::DisplayLight::Relative);
     }
 
-    /// A config change resets the names; OCIO off shows the built-in transform.
+    /// The encoder takes a view's light back to exactly the codes the encoded transform gives:
+    /// for the sRGB display and for a Display P3 one, whose codes an sRGB OETF of the Rec.709
+    /// light would put in the wrong primaries.
+    #[test]
+    fn the_encoder_inverts_the_light_to_the_displays_codes() {
+        let o = Ocio::load("ocio://studio-config-latest").unwrap();
+        let p3 = o
+            .displays(false)
+            .into_iter()
+            .find(|d| d.contains("P3") && !d.contains("HDR"))
+            .expect("the Studio config has an SDR P3 display")
+            .to_owned();
+        for display in ["sRGB - Display".to_owned(), p3] {
+            let names = o
+                .resolve(
+                    &Sel {
+                        display: display.clone(),
+                        ..Sel::default()
+                    },
+                    false,
+                )
+                .unwrap();
+            let encoder = o.encoder(&names).unwrap();
+            let probe = [
+                [0.001f32, 0.02, 0.05, 1.0],
+                [0.18, 0.5, 0.9, 1.0],
+                [0.9, 0.2, 0.05, 1.0],
+                [2.0, 2.0, 2.0, 1.0],
+            ];
+            let (mut codes, mut light) = (probe, probe);
+            o.transform(&names, false)
+                .unwrap()
+                .processor()
+                .apply_rgba(&mut codes);
+            o.transform(&names, true)
+                .unwrap()
+                .processor()
+                .apply_rgba(&mut light);
+            encoder.apply_rgba(&mut light);
+            for (got, want) in light.iter().zip(codes) {
+                for c in 0..3 {
+                    assert!(
+                        (got[c] - want[c]).abs() < 1e-4,
+                        "{display}: {got:?} vs {want:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// One load per source for the whole process; a reload (forget) reads the file again.
+    #[test]
+    fn configs_are_shared_per_source_until_forgotten() {
+        let src = "ocio://cg-config-latest";
+        let a = shared(src).unwrap();
+        let b = shared(src).unwrap();
+        assert!(Arc::ptr_eq(&a, &b));
+        forget(src);
+        let c = shared(src).unwrap();
+        assert_ne!(a.serial(), c.serial());
+        assert!(shared("no such config.ocio").is_err());
+    }
+
+    /// The panel follows the document's selection (`set_sel` rebuilds only on change), a config
+    /// change resets the names, a bad name is the panel's error, and a reload is a new load.
     #[test]
     fn state_follows_the_choice() {
         fn ready(state: &mut State) {
@@ -1653,29 +1634,33 @@ mod tests {
             ..Sel::default()
         });
         ready(&mut s);
-        assert!(s.active().is_some(), "{:?}", s.err);
-        s.sel.view = "no such view".into();
-        s.rebuild();
-        ready(&mut s);
-        assert!(
-            s.active().is_none() && s.err.as_deref().is_some_and(|e| e.contains("no such view"))
+        assert!(s.err.is_none() && s.config().is_ok(), "{:?}", s.err);
+        let generation = s.generation;
+        let same = s.sel.clone();
+        s.set_sel(&same);
+        assert_eq!(
+            s.generation, generation,
+            "an unchanged selection does not rebuild"
         );
+        s.set_sel(&Sel {
+            view: "no such view".into(),
+            ..same.clone()
+        });
+        ready(&mut s);
+        assert!(s.err.as_deref().is_some_and(|e| e.contains("no such view")));
         s.set_config("ocio://studio-config-latest".into());
         ready(&mut s);
-        assert!(s.sel.view.is_empty() && s.active().is_some());
-        // A reload is a new transform (new key), so the tile pipeline rebuilds too.
-        let key = s.active().unwrap().key.clone();
+        assert!(s.sel.view.is_empty() && s.err.is_none(), "{:?}", s.err);
+        let serial = s.config().unwrap().serial();
         s.reload();
         ready(&mut s);
-        assert_ne!(s.active().unwrap().key, key);
-        // An HDR output makes the transform linear (a new key: the pipeline rebuilds).
-        let key = s.active().unwrap().key.clone();
-        s.set_hdr(true);
+        assert_ne!(s.config().unwrap().serial(), serial);
+        s.set_sel(&Sel {
+            on: false,
+            ..s.sel.clone()
+        });
         ready(&mut s);
-        assert!(s.active().unwrap().linear() && s.active().unwrap().key != key);
-        s.set_on(false);
-        ready(&mut s);
-        assert!(s.active().is_none() && s.err.is_none());
+        assert!(s.err.is_none());
     }
 
     #[test]
@@ -1719,52 +1704,6 @@ mod tests {
         }
         assert_eq!(state.generation, expected_generation);
         assert!(state.err.is_none(), "{:?}", state.err);
-        assert!(state.active().is_some());
-        state.sel.on = false;
-        state.rebuild();
-        // Disabling is visible immediately, regardless of worker completion.
-        assert!(state.active().is_none());
-    }
-
-    #[test]
-    fn admitted_alpha_scratch_is_reused_and_preserves_alpha_bits() {
-        let ocio = Ocio::load("ocio://default").unwrap();
-        let transform = ocio
-            .transform(&ocio.resolve(&Sel::default(), false).unwrap(), false)
-            .unwrap();
-        let alpha_bits = [0x8000_0000, 0x7fc0_1234, 0x3f80_0000, 0x0000_0000];
-        let mut scratch = vec![0.0; 4096];
-        let allocation = scratch.as_ptr();
-        let capacity = scratch.capacity();
-        for _ in 0..3 {
-            let mut pixels: Vec<[f32; 4]> = (0..4096)
-                .map(|i| [0.18, 0.18, 0.18, f32::from_bits(alpha_bits[i % 4])])
-                .collect();
-            transform
-                .display_scratch(&mut pixels, &mut scratch, 0.0, 1.0, 1.0)
-                .unwrap();
-            for (i, pixel) in pixels.iter().enumerate() {
-                assert_eq!(pixel[3].to_bits(), alpha_bits[i % 4]);
-                assert_eq!(crate::transfer::code8(pixel[0]), 89);
-            }
-            assert_eq!(scratch.as_ptr(), allocation);
-            assert_eq!(scratch.capacity(), capacity);
-        }
-    }
-
-    #[test]
-    fn short_alpha_scratch_refuses_before_changing_pixels() {
-        let ocio = Ocio::load("ocio://default").unwrap();
-        let transform = ocio
-            .transform(&ocio.resolve(&Sel::default(), false).unwrap(), false)
-            .unwrap();
-        let mut pixels = [[0.18, 0.5, 1.0, f32::from_bits(0x7fc0_4567)]];
-        let before = pixels.map(|p| p.map(f32::to_bits));
-        assert!(
-            transform
-                .display_scratch(&mut pixels, &mut [], 1.0, 1.2, 1.0)
-                .is_err()
-        );
-        assert_eq!(pixels.map(|p| p.map(f32::to_bits)), before);
+        assert!(state.config().is_ok());
     }
 }

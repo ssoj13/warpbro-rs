@@ -2,7 +2,7 @@
 #[cfg(test)]
 #[path = "world_tests.rs"]
 mod tests;
-use crate::scene::Scene;
+use crate::scene::{Bulb, Formula, Scene};
 use curves::Tan;
 use playa_engine::entities::anim::{Animation, Channel, Keyframe};
 use playa_engine::entities::{AttrValue, Attrs};
@@ -75,6 +75,16 @@ pub fn take_kind(kind: WorldKind) -> Option<crate::takes::TakeKind> {
 
 pub(crate) const CAMERA_ORBIT_SPEED: &str = "/camera/orbit_speed_degrees";
 pub(crate) const CAMERA_ORBIT_PHASE: &str = "/camera/orbit_phase_degrees";
+/// The scene size a camera's distance and focus distance are measured in (scene units per
+/// framing radius, `Scene::camera_reference`). A camera attribute of its own, set from the
+/// fractal it was created to frame, so editing that fractal's formula never moves the camera.
+pub(crate) const CAMERA_FRAMING: &str = "/camera/framing_radius";
+
+/// Default byte budget of the undo / redo history (serialized document size, `history_bytes`).
+/// A fresh scene serializes to tens of kilobytes, so this keeps over a thousand steps of an
+/// ordinary scene; the resident size is a few times larger (`serde_json::Value` trees), which
+/// bounds the history to a few hundred megabytes in the worst case.
+const UNDO_BUDGET: usize = 64 << 20;
 
 /// What a scene is evaluated for: an output (export, Output profile) shows every node kind, the
 /// viewport only the kinds its ViewportSettings show (`WorldDocument::shown_kinds`).
@@ -175,15 +185,7 @@ pub struct WorldAttribute {
     pub default: Option<Value>,
 }
 
-/// The span a parameter's slider covers: its useful range. Typing may go past it, up to the
-/// hard limit (`WorldAttribute::range`).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Slider {
-    pub min: f64,
-    pub max: f64,
-    /// Logarithmic for values spanning orders of magnitude.
-    pub log: bool,
-}
+pub use crate::formulas::Slider;
 #[derive(Clone, Debug)]
 pub enum WorldCommand {
     Create {
@@ -192,10 +194,9 @@ pub enum WorldCommand {
         parent: Option<NodeId>,
     },
     Delete(NodeId),
-    /// Copy the nodes (with descendants) in place; the copies are selected (Ctrl+D).
+    /// Copy the nodes (with descendants) in place; the copies are selected
+    /// (`WorldEditor::duplicate` picks them for the UI).
     Duplicate(Vec<NodeId>),
-    /// Insert a clipboard fragment from `WorldDocument::copy_fragment` (Ctrl+V).
-    Paste(String),
     Rename {
         id: NodeId,
         name: String,
@@ -247,6 +248,9 @@ pub enum WorldCommand {
         path: String,
         value: Value,
     },
+    /// Put `ids` in this order among the layer-order slots they occupy; every other node keeps
+    /// its slot. A filtered view (the timeline without its shy nodes) reorders what it shows
+    /// without moving what it hides.
     Reorder {
         ids: Vec<NodeId>,
     },
@@ -317,21 +321,6 @@ pub enum WorldCommand {
     SetActiveEnvironment(NodeId),
     ReloadEnvironment(NodeId),
     Batch(Vec<WorldCommand>),
-    #[cfg(test)]
-    SetVisible {
-        id: NodeId,
-        visible: bool,
-    },
-    #[cfg(test)]
-    SetLocked {
-        id: NodeId,
-        locked: bool,
-    },
-    #[cfg(test)]
-    SetSolo {
-        id: NodeId,
-        solo: bool,
-    },
     SetSpan {
         id: NodeId,
         start: f64,
@@ -346,10 +335,63 @@ pub enum WorldCommand {
 }
 type WorldEditSnapshot = (WorldDocument, Option<NodeId>, Vec<NodeId>);
 
+/// One undo / redo state and what it costs of the history budget (`WorldEditor::push_undo`).
+#[derive(Clone, Debug)]
+struct HistoryStep {
+    state: WorldEditSnapshot,
+    /// Serialized size of the state's graph ([`graph_bytes`]), measured once when stored.
+    bytes: usize,
+}
+impl HistoryStep {
+    fn new(state: WorldEditSnapshot) -> Self {
+        let bytes = graph_bytes(&state.0);
+        Self { state, bytes }
+    }
+}
+
+/// The serialized size of `document`'s graph, counted without building the text: the measure of
+/// the undo budget (the graph is what every state holds its own copy of; the takes are shared
+/// `Arc`s and the rest is a few numbers).
+fn graph_bytes(document: &WorldDocument) -> usize {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    match serde_json::to_writer(&mut count, &document.graph) {
+        Ok(()) => count.0,
+        Err(error) => {
+            // A graph of JSON values with string keys always serializes; logged, not hidden.
+            log::error!("Undo history: cannot measure a document state: {error}");
+            0
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct PendingWorldEdit {
     gesture: u64,
     original: WorldEditSnapshot,
+}
+
+/// Paste report: the pasted roots and the references the paste cleared because they point to
+/// nothing in this scene (`WorldEditor::paste`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Pasted {
+    pub roots: usize,
+    /// Material references to a material in neither the clipboard nor this scene.
+    pub materials: usize,
+    /// Parent references to a node in neither the clipboard nor this scene.
+    pub parents: usize,
+    /// Take references: takes are per document, so all of them from another scene, else the
+    /// ones to a take this scene no longer has (or of another kind).
+    pub takes: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -357,8 +399,12 @@ pub struct WorldEditor {
     pub document: WorldDocument,
     pub selection: Option<NodeId>,
     pub selected: Vec<NodeId>,
-    undo: Vec<WorldEditSnapshot>,
-    redo: Vec<WorldEditSnapshot>,
+    undo: Vec<HistoryStep>,
+    redo: Vec<HistoryStep>,
+    /// Bytes the undo and redo states may hold together ([`UNDO_BUDGET`]); the oldest undo
+    /// states go first. Dropping them also lets the takes only they played go
+    /// (`takes_in_use` reads the history).
+    undo_budget: usize,
     pending_edit: Option<PendingWorldEdit>,
     revision: u64,
     /// Interpolation of every key this editor creates (Settings > Animation > New key type).
@@ -377,6 +423,7 @@ impl WorldEditor {
             selected: selection.into_iter().collect(),
             undo: vec![],
             redo: vec![],
+            undo_budget: UNDO_BUDGET,
             revision: 0,
             pending_edit: None,
             new_key: Tan::Smooth,
@@ -402,6 +449,45 @@ impl WorldEditor {
             Some(id) if self.selected.contains(&id) => Some(id),
             _ => self.selected.last().copied(),
         };
+    }
+    /// The nodes a command acts on: the selection, or `row` alone when the command comes from a
+    /// row that is not part of it (a right-clicked outliner or timeline row). `row` None: a
+    /// toolbar button or hotkey, the selection. The ONE "selected, else this one" rule of
+    /// Duplicate, Delete, the property filters and the take targets.
+    pub fn targets(&self, row: Option<NodeId>) -> Vec<NodeId> {
+        let selected: Vec<NodeId> = if self.selected.is_empty() {
+            self.selection.into_iter().collect()
+        } else {
+            self.selected.clone()
+        };
+        match row {
+            Some(row) if !selected.contains(&row) => vec![row],
+            _ => selected,
+        }
+    }
+    /// Duplicate `targets(row)` with their descendants as one undo step; the copies become the
+    /// selection. Returns how many nodes were copied. Every Duplicate of the UI ends here.
+    pub fn duplicate(&mut self, row: Option<NodeId>) -> Result<usize, String> {
+        let ids = self.targets(row);
+        if ids.is_empty() {
+            return Err("Select the nodes to duplicate".into());
+        }
+        let count = ids.len();
+        self.execute(WorldCommand::Duplicate(ids))?;
+        Ok(count)
+    }
+    /// Paste a clipboard fragment of `WorldDocument::copy_fragment` (Ctrl+V) as one undo step; the
+    /// pasted roots become the selection. The report counts what the paste cleared.
+    pub fn paste(&mut self, text: &str) -> Result<Pasted, String> {
+        let (source, nodes) =
+            parse_clipboard(text).ok_or("The clipboard holds no WarpBro nodes")?;
+        let same_document = source == json!(self.document.graph.id);
+        let mut pasted = Pasted::default();
+        self.apply_edit(None, |editor| {
+            pasted = editor.insert_fragment(nodes, same_document)?.1;
+            Ok(())
+        })?;
+        Ok(pasted)
     }
     /// Cache invalidation token, combined with the document UUID by consumers.
     pub fn revision(&self) -> u64 {
@@ -433,9 +519,29 @@ impl WorldEditor {
         if !self.differs_from(&pending.original) {
             return false;
         }
-        self.undo.push(pending.original);
+        self.push_undo(pending.original);
         self.redo.clear();
         true
+    }
+
+    /// Store an undo state, then drop the oldest ones while undo and redo together hold more
+    /// than the budget; the newest undo state always stays, however large.
+    fn push_undo(&mut self, state: WorldEditSnapshot) {
+        self.undo.push(HistoryStep::new(state));
+        let total: usize = self.undo.iter().chain(&self.redo).map(|s| s.bytes).sum();
+        let excess = total.saturating_sub(self.undo_budget);
+        let mut freed = 0;
+        let dropped = self
+            .undo
+            .iter()
+            .take(self.undo.len().saturating_sub(1))
+            .take_while(|step| {
+                let more = freed < excess;
+                freed += step.bytes;
+                more
+            })
+            .count();
+        self.undo.drain(..dropped);
     }
 
     pub fn finish_edit_unless(&mut self, active: Option<u64>) -> bool {
@@ -463,7 +569,7 @@ impl WorldEditor {
                 });
             }
         } else {
-            self.undo.push(before);
+            self.push_undo(before);
             self.redo.clear();
         }
     }
@@ -556,13 +662,17 @@ impl WorldEditor {
 
     pub fn undo(&mut self) -> bool {
         self.finish_edit();
-        if let Some((d, s, selected)) = self.undo.pop() {
+        if let Some(HistoryStep {
+            state: (d, s, selected),
+            ..
+        }) = self.undo.pop()
+        {
             let d = self.keep_live(d);
-            self.redo.push((
+            self.redo.push(HistoryStep::new((
                 std::mem::replace(&mut self.document, d),
                 self.selection,
                 self.selected.clone(),
-            ));
+            )));
             self.selection = s;
             self.selected = selected;
             self.revision = self.revision.wrapping_add(1);
@@ -573,13 +683,18 @@ impl WorldEditor {
     }
     pub fn redo(&mut self) -> bool {
         self.finish_edit();
-        if let Some((d, s, selected)) = self.redo.pop() {
+        if let Some(HistoryStep {
+            state: (d, s, selected),
+            ..
+        }) = self.redo.pop()
+        {
             let d = self.keep_live(d);
-            self.undo.push((
+            let before = (
                 std::mem::replace(&mut self.document, d),
                 self.selection,
                 self.selected.clone(),
-            ));
+            );
+            self.push_undo(before);
             self.selection = s;
             self.selected = selected;
             self.revision = self.revision.wrapping_add(1);
@@ -610,6 +725,7 @@ impl WorldEditor {
         self.undo
             .iter_mut()
             .chain(self.redo.iter_mut())
+            .map(|step| &mut step.state)
             .chain(self.pending_edit.iter_mut().map(|p| &mut p.original))
             .map(|(document, ..)| document)
     }
@@ -622,6 +738,7 @@ impl WorldEditor {
             .undo
             .iter()
             .chain(&self.redo)
+            .map(|step| &step.state)
             .chain(self.pending_edit.iter().map(|p| &p.original))
         {
             used.extend(document.takes_in_use());
@@ -679,14 +796,20 @@ impl WorldEditor {
         Ok(self.document.takes.remove(id))
     }
 
-    /// Rename, pin or retime a take (a change to a played take moves its nodes).
-    pub fn edit_take(&mut self, id: u64, apply: impl FnOnce(&mut crate::takes::Take)) -> bool {
+    /// Rename, pin, retime or filter a take (a change to a played take moves its nodes). An
+    /// edit that leaves the take invalid (a filter that fails on its motion) is refused and the
+    /// take stays as it was (`Takes::edit`). Ok(false): there is no take `id`.
+    pub fn edit_take(
+        &mut self,
+        id: u64,
+        apply: impl FnOnce(&mut crate::takes::Take),
+    ) -> Result<bool, String> {
         let used = self.takes_in_use();
-        let edited = self.document.takes.edit(id, &used, apply);
+        let edited = self.document.takes.edit(id, &used, apply)?;
         if edited {
             self.revision = self.revision.wrapping_add(1);
         }
-        edited
+        Ok(edited)
     }
 
     /// Key take `id` onto `node` as one undoable edit (keys outside its span remain) that also
@@ -735,20 +858,36 @@ impl WorldEditor {
     pub fn can_undo(&self) -> bool {
         !self.undo.is_empty()
     }
-    /// Insert `nodes` (UUID -> node data) with fresh UUIDs and select the pasted roots. References
-    /// inside the fragment follow the remap; a parent or material that is neither in the fragment
-    /// nor in this document is cleared. A fragment that still cannot be evaluated (e.g. an
-    /// attribute connection to an absent node) is an error, so the edit rolls back.
-    fn insert_fragment(&mut self, nodes: HashMap<String, Value>) -> Result<Vec<NodeId>, String> {
+    /// Insert `nodes` (UUID -> node data) with fresh UUIDs and select the inserted roots.
+    /// References inside the fragment follow the remap. This alone decides which outside
+    /// references are cleared, and counts them: a parent or material in neither the fragment nor
+    /// this document, and a take reference unless the fragment comes from this document
+    /// (`same_document`: take ids are per document) and this scene still has that take, of the
+    /// kind the node plays. A fragment that still cannot be evaluated (e.g. an attribute
+    /// connection to an absent node) is an error, so the edit rolls back.
+    fn insert_fragment(
+        &mut self,
+        nodes: HashMap<String, Value>,
+        same_document: bool,
+    ) -> Result<(Vec<NodeId>, Pasted), String> {
         if nodes.is_empty() {
             return Err("Nothing to paste".into());
         }
-        // Copies hold references (UUIDs), never the referenced nodes; a reference that resolves
-        // in neither the fragment nor this document is cleared (reported by `unresolved_references`).
+        // Clipboard text is foreign data: check the stored shape before indexing into it.
+        for (key, data) in &nodes {
+            node_shape(key, data)?;
+        }
+        // Copies hold references (UUIDs), never the referenced nodes.
         let mut nodes = nodes;
-        for (key, field) in self.document.unresolved_references(&nodes) {
-            if let Some(data) = nodes.get_mut(&key) {
-                data[field] = Value::Null;
+        let mut pasted = Pasted::default();
+        for (key, field) in self.document.unresolved_references(&nodes, same_document) {
+            if let Some(data) = nodes.get_mut(&key).and_then(Value::as_object_mut) {
+                data.insert(field.into(), Value::Null);
+                match field {
+                    "material" => pasted.materials += 1,
+                    "parent" => pasted.parents += 1,
+                    _ => pasted.takes += 1,
+                }
             }
         }
         let mut fragment = SubnetFile {
@@ -760,6 +899,7 @@ impl WorldEditor {
         for data in fragment.nodes.values_mut() {
             let mut attrs: Attrs =
                 serde_json::from_value(data["host"].clone()).map_err(|e| e.to_string())?;
+            check_arity(&attrs)?;
             for path in [
                 "/viewport/moving_id",
                 "/viewport/still_id",
@@ -807,31 +947,11 @@ impl WorldEditor {
         roots.sort_by_key(|id| order.iter().position(|n| n.id == *id));
         self.selection = roots.last().copied();
         self.selected = roots.clone();
-        Ok(roots)
+        pasted.roots = roots.len();
+        Ok((roots, pasted))
     }
     fn apply(&mut self, command: WorldCommand) -> Result<(), String> {
         match command {
-            #[cfg(test)]
-            WorldCommand::SetVisible { id, visible } => self.apply(WorldCommand::SetAttribute {
-                id,
-                path: "/visible".into(),
-                value: json!(visible),
-                frame: 0.0,
-            })?,
-            #[cfg(test)]
-            WorldCommand::SetLocked { id, locked } => self.apply(WorldCommand::SetAttribute {
-                id,
-                path: "/locked".into(),
-                value: json!(locked),
-                frame: 0.0,
-            })?,
-            #[cfg(test)]
-            WorldCommand::SetSolo { id, solo } => self.apply(WorldCommand::SetAttribute {
-                id,
-                path: "/solo".into(),
-                value: json!(solo),
-                frame: 0.0,
-            })?,
             WorldCommand::SetSpan { id, start, end } => {
                 if !start.is_finite() || !end.is_finite() || start >= end {
                     return Err("Span must have a finite end after its start".into());
@@ -861,31 +981,7 @@ impl WorldEditor {
                 if enabled {
                     self.apply(WorldCommand::Key { id, path, frame })?;
                 } else {
-                    let held = self.document.attribute_value(id, &path, frame)?;
-                    let mut attrs = self.document.attrs(id)?;
-                    if let Some((parent, index)) = self.document.component_path(id, &path)? {
-                        let mut base = attrs
-                            .get(&parent)
-                            .cloned()
-                            .map(attr_json)
-                            .ok_or("Missing component")?;
-                        base[index] =
-                            self.document
-                                .without_navigation_offset(id, &path, held.clone())?;
-                        attrs.set(&parent, to_attr(&base));
-                        if let Some(anim) = attrs.anim_mut(&parent) {
-                            anim.channels[index] = Channel::new();
-                        }
-                        if attrs.anim(&parent).is_some_and(Animation::is_empty) {
-                            attrs.set_anim(&parent, None);
-                        }
-                        self.document.store_attrs(id, &attrs)?;
-                        return Ok(());
-                    }
-                    attrs.set_anim(&path, None);
-                    self.document.store_attrs(id, &attrs)?;
-                    self.document
-                        .set_attribute(id, &path, held, frame, false, self.new_key)?;
+                    self.document.unkey(id, &path, frame, true, self.new_key)?;
                 }
             }
             WorldCommand::Batch(commands) => {
@@ -901,18 +997,10 @@ impl WorldEditor {
                 self.selected = vec![id];
             }
             WorldCommand::Delete(id) => {
-                self.document.assert_unlocked(id)?;
-                let mut remove = HashSet::from([id]);
-                loop {
-                    let n = remove.len();
-                    for node in self.document.nodes() {
-                        if node.parent.is_some_and(|p| remove.contains(&p)) {
-                            remove.insert(node.id);
-                        }
-                    }
-                    if n == remove.len() {
-                        break;
-                    }
+                let remove = self.document.subtree(&[id]);
+                // One lock rule: no node that goes may be locked, a descendant included.
+                for id in &remove {
+                    self.document.assert_unlocked(*id)?;
                 }
                 self.document.guard_settings_delete(&remove)?;
                 for id in &remove {
@@ -926,6 +1014,19 @@ impl WorldEditor {
                     {
                         data["material"] = Value::Null;
                     }
+                }
+                if let Some(order) = self
+                    .document
+                    .graph
+                    .bus_slots
+                    .get_mut("layer_order")
+                    .and_then(Value::as_array_mut)
+                {
+                    order.retain(|v| {
+                        v.as_str()
+                            .and_then(NodeId::parse)
+                            .is_none_or(|id| !remove.contains(&id))
+                    });
                 }
                 self.selected.retain(|id| !remove.contains(id));
                 if self.selection.is_some_and(|id| remove.contains(&id)) {
@@ -951,22 +1052,11 @@ impl WorldEditor {
                     self.document.assert_unlocked(id)?;
                 }
                 let nodes = self.document.fragment(&ids)?;
-                let roots = self.insert_fragment(nodes)?;
+                let (roots, _) = self.insert_fragment(nodes, true)?;
                 for &id in &roots {
                     let name = format!("{} copy", self.document.info(id)?.name);
                     self.document.node_mut(id)?["name"] = json!(name);
                 }
-            }
-            WorldCommand::Paste(text) => {
-                let (source, mut nodes) =
-                    parse_clipboard(&text).ok_or("The clipboard holds no WarpBro nodes")?;
-                // Take ids are per document: copies from another scene play no take.
-                if source != json!(self.document.graph.id) {
-                    for data in nodes.values_mut() {
-                        data["take"] = Value::Null;
-                    }
-                }
-                self.insert_fragment(nodes)?;
             }
             WorldCommand::Rename { id, name } => {
                 self.document.assert_unlocked(id)?;
@@ -981,19 +1071,25 @@ impl WorldEditor {
                 self.document.node_mut(id)?["parent"] = json!(parent);
             }
             WorldCommand::Reorder { ids } => {
-                let known: HashSet<_> = self.document.nodes().iter().map(|n| n.id).collect();
+                let mut order: Vec<NodeId> =
+                    self.document.nodes().into_iter().map(|n| n.id).collect();
                 let unique: HashSet<_> = ids.iter().copied().collect();
-                if unique.len() != ids.len() || !unique.is_subset(&known) {
+                if unique.len() != ids.len() || !unique.iter().all(|id| order.contains(id)) {
                     return Err("Layer order contains unknown or duplicate IDs".into());
                 }
-                let mut order = ids;
-                order.extend(
-                    self.document
-                        .nodes()
-                        .into_iter()
-                        .filter(|n| !unique.contains(&n.id))
-                        .map(|n| n.id),
-                );
+                // The listed ids fill the slots they occupy, in their new order; every other
+                // node keeps its slot. The stored order is rewritten whole (no stale ids).
+                let slots: Vec<usize> = order
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, id)| unique.contains(id))
+                    .map(|(slot, _)| slot)
+                    .collect();
+                for (slot, id) in slots.into_iter().zip(ids) {
+                    if let Some(at) = order.get_mut(slot) {
+                        *at = id;
+                    }
+                }
                 self.document
                     .graph
                     .bus_slots
@@ -1019,7 +1115,7 @@ impl WorldEditor {
             WorldCommand::CreateMaterial { material, name } => {
                 let scene = Scene {
                     material,
-                    ..Scene::preset(0)
+                    ..Scene::preset(Formula::Mandelbulb(Bulb::PRESET))
                 };
                 let id = self
                     .document
@@ -1253,42 +1349,7 @@ impl WorldEditor {
             }
             WorldCommand::RemoveKey { id, path, frame } => {
                 self.document.assert_unlocked(id)?;
-                let held = self.document.attribute_value(id, &path, frame)?;
-                let component = self.document.component_path(id, &path)?;
-                let mut attrs = self.document.attrs(id)?;
-                if let Some((parent, index)) = &component {
-                    if let Some(channel) = attrs
-                        .anim_mut(parent)
-                        .and_then(|a| a.channels.get_mut(*index))
-                    {
-                        channel.remove_key(frame);
-                    }
-                    if attrs
-                        .anim(parent)
-                        .and_then(|a| a.channels.get(*index))
-                        .is_some_and(Channel::is_empty)
-                    {
-                        let mut base = attrs
-                            .get(parent)
-                            .cloned()
-                            .map(attr_json)
-                            .ok_or("Missing component")?;
-                        base[*index] =
-                            self.document
-                                .without_navigation_offset(id, &path, held.clone())?;
-                        attrs.set(parent, to_attr(&base));
-                    }
-                    if attrs.anim(parent).is_some_and(Animation::is_empty) {
-                        attrs.set_anim(parent, None);
-                    }
-                } else {
-                    attrs.remove_key(&path, frame);
-                }
-                self.document.store_attrs(id, &attrs)?;
-                if component.is_none() && !attrs.is_animated(&path) {
-                    self.document
-                        .set_attribute(id, &path, held, frame, false, self.new_key)?;
-                }
+                self.document.unkey(id, &path, frame, false, self.new_key)?;
             }
             WorldCommand::MoveKeys {
                 id,
@@ -1300,23 +1361,18 @@ impl WorldEditor {
                 if !delta.is_finite() || frames.iter().any(|f| !(f + delta).is_finite()) {
                     return Err("Invalid key time".into());
                 }
-                let component = self.document.component_path(id, &path)?;
-                let parent = component.as_ref().map(|(p, _)| p.as_str()).unwrap_or(&path);
                 let mut attrs = self.document.attrs(id)?;
-                if let Some(anim) = attrs.anim_mut(parent) {
-                    for (index, ch) in anim.channels.iter_mut().enumerate() {
-                        if component.as_ref().is_some_and(|(_, i)| *i != index) {
-                            continue;
-                        }
-                        let moves: Vec<_> = ch
-                            .keys()
-                            .iter()
-                            .filter(|k| frames.contains(&k.t()))
-                            .map(|k| (k.t(), k.t() + delta))
-                            .collect();
-                        ch.move_keys(&moves);
-                    }
-                }
+                let (attr, channel) = WorldDocument::lane(&attrs, &path);
+                WorldDocument::for_channels(&mut attrs, &attr, channel, |_, ch| {
+                    let moves: Vec<_> = ch
+                        .keys()
+                        .iter()
+                        .filter(|k| frames.contains(&k.t()))
+                        .map(|k| (k.t(), k.t() + delta))
+                        .collect();
+                    ch.move_keys(&moves);
+                    Ok::<(), String>(())
+                })?;
                 self.document.store_attrs(id, &attrs)?;
             }
             WorldCommand::Interpolation {
@@ -1326,30 +1382,26 @@ impl WorldEditor {
                 kind,
             } => {
                 self.document.assert_unlocked(id)?;
-                let discrete = if self.document.component_path(id, &path)?.is_some() {
-                    false
-                } else {
-                    self.document.is_discrete(id, &path)?
-                };
-                let component = self.document.component_path(id, &path)?;
-                let parent = component.as_ref().map(|(p, _)| p.as_str()).unwrap_or(&path);
                 let mut attrs = self.document.attrs(id)?;
-                if let Some(anim) = attrs.anim_mut(parent) {
-                    for (index, ch) in anim.channels.iter_mut().enumerate() {
-                        if component.as_ref().is_some_and(|(_, i)| *i != index) {
-                            continue;
-                        }
-                        let times: Vec<_> = ch
-                            .keys()
-                            .iter()
-                            .map(|k| k.t())
-                            .filter(|t| frames.contains(t))
-                            .collect();
-                        for t in times {
-                            ch.set_tan(t, if discrete { Tan::Constant } else { kind });
-                        }
+                let (attr, channel) = WorldDocument::lane(&attrs, &path);
+                // A discrete attribute (choices, switches) only steps.
+                let kind = if channel.is_none() && self.document.is_discrete(id, &attr)? {
+                    Tan::Constant
+                } else {
+                    kind
+                };
+                WorldDocument::for_channels(&mut attrs, &attr, channel, |_, ch| {
+                    let times: Vec<_> = ch
+                        .keys()
+                        .iter()
+                        .map(|k| k.t())
+                        .filter(|t| frames.contains(t))
+                        .collect();
+                    for t in times {
+                        ch.set_tan(t, kind);
                     }
-                }
+                    Ok::<(), String>(())
+                })?;
                 self.document.store_attrs(id, &attrs)?;
             }
             WorldCommand::CurveEffect { targets, effect } => self.curve_effect(targets, effect)?,
@@ -1427,27 +1479,20 @@ impl WorldEditor {
         }
         for (id, path) in targets {
             self.document.assert_unlocked(id)?;
-            let component = self.document.component_path(id, &path)?;
-            let parent = component
-                .as_ref()
-                .map_or(path.as_str(), |(p, _)| p.as_str())
-                .to_owned();
-            if component.is_none() && self.document.is_discrete(id, &parent)? {
+            let mut attrs = self.document.attrs(id)?;
+            let (attr, channel) = WorldDocument::lane(&attrs, &path);
+            if !attrs.is_animated(&attr)
+                || (channel.is_none() && self.document.is_discrete(id, &attr)?)
+            {
                 continue;
             }
-            let mut attrs = self.document.attrs(id)?;
-            let Some(anim) = attrs.anim_mut(&parent) else {
-                continue;
-            };
-            for (index, channel) in anim.channels.iter_mut().enumerate() {
-                if component.as_ref().is_some_and(|(_, i)| *i != index) {
-                    continue;
-                }
-                let mut tracks = [channel.track().clone()];
+            WorldDocument::for_channels(&mut attrs, &attr, channel, |_, ch| {
+                let mut tracks = [ch.track().clone()];
                 effect.apply(&mut tracks).map_err(error)?;
                 let [track] = tracks;
-                channel.replace_track(track);
-            }
+                ch.replace_track(track);
+                Ok::<(), String>(())
+            })?;
             self.document.store_attrs(id, &attrs)?;
         }
         Ok(())
@@ -1477,9 +1522,7 @@ impl WorldEditor {
                 )?;
             }
             // Navigation mode is a static preference on the camera, never a generated key.
-            if attrs.is_animated("/camera/free_flight")
-                || attrs.conn("/camera/free_flight").is_some()
-            {
+            if WorldDocument::driven(&attrs, "/camera/free_flight") {
                 if editor
                     .document
                     .attribute_value(id, "/camera/free_flight", frame)?
@@ -1546,6 +1589,11 @@ impl WorldEditor {
             }
             if node.kind == WorldKind::Camera {
                 // Viewport navigation has explicit Auto Key semantics in navigate_camera().
+                continue;
+            }
+            if node.kind == WorldKind::DirectionalLight {
+                // A scene holds the first sun in world space (`sun_light`): writing it back would
+                // copy it onto every Sun and apply their parents twice. Suns edit as attributes.
                 continue;
             }
             if node.kind == WorldKind::Environment
@@ -1634,83 +1682,45 @@ impl WorldEditor {
         })
     }
 }
+/// The values attribute `path` may take, in menu order; empty for a free value. Every enum lists
+/// its own variants (`T::ALL`), so the choices follow the types: a new variant cannot be
+/// missing from its menu.
 fn attribute_choices(path: &str) -> Vec<Value> {
-    if path == "/formula" {
-        return (0..crate::scene::Formula::COUNT)
-            .map(|family| {
-                serde_json::to_value(Scene::preset(family).formula)
-                    .expect("Formula defaults serialize")
-            })
-            .collect();
-    }
-    if let Some(choices) = crate::formulas::formula_param_choices(path) {
-        return choices;
-    }
-    // Export enums list their own variants, so the choices follow the types.
     fn variants<T: Serialize>(all: impl IntoIterator<Item = T>) -> Vec<Value> {
         all.into_iter()
             .filter_map(|v| serde_json::to_value(v).ok())
             .collect()
     }
-    match path {
-        "/render/backend" => return variants(crate::render_profiles::Backend::ALL),
-        "/output/format" => return variants(crate::export::ExportFormat::ALL),
-        "/output/encoder" => return variants(crate::export::VideoEncoder::ALL),
-        "/output/png" => return variants(video_io::export::PngEncoding::ALL),
-        "/output/png_video" => return variants(video_io::catalog::PngVideo::ALL),
-        "/output/codec" => {
-            return variants(video_io::catalog::CODECS.iter().map(|c| c.codec));
-        }
-        "/output/container" => {
-            return variants([
-                video_io::catalog::Container::Mp4,
-                video_io::catalog::Container::Mov,
-                video_io::catalog::Container::Exv,
-            ]);
-        }
-        "/output/video_depth" => {
-            return variants([
-                video_io::catalog::Depth::Eight,
-                video_io::catalog::Depth::Ten,
-            ]);
-        }
-        "/output/video_signal" => return variants(video_io::export::PngEncoding::ALL),
-        "/output/prores_profile" => return variants(video_io::catalog::ProResProfile::ALL),
-        "/output/exv_profile" => return variants(video_io::catalog::ExvProfile::ALL),
-        "/output/channels" => return variants(video_io::still::Channels::ALL),
-        "/output/tiff_compression" => return variants(video_io::still::TiffCompression::ALL),
-        "/output/exr_depth" => return variants(video_io::still::ExrDepth::ALL),
-        "/output/exr_compression" => return variants(video_io::still::ExrCompression::ALL),
-        _ => {}
-    }
-    let values: &[&str] = match path {
-        "/render/method" => &["Fast", "Full"],
-        "/render/display" => &["PathTraced", "Direct", "Bounds"],
-        "/viewport/mode" => &["Auto", "Locked"],
-        "/palette" => &[
-            "Classic", "Fire", "Ice", "Mono", "Sunset", "Aurora", "Ocean", "Ember", "Amethyst",
-            "Verdant", "Copper", "Neon", "RoseGold", "Twilight",
-        ],
-        "/coloring" => &["Radius", "TrapOrigin", "TrapPlane", "TrapPoint"],
-        "/mask/shape" => &["Sphere", "Box", "Cells"],
-        "/mask/array/kind" => &["Linear", "Radial"],
-        "/mask/array/axis" => &["X", "Y", "Z"],
-        "/render/denoise/mode" => &["Color", "ColorAlbedo", "ColorAlbedoNormal"],
-        "/render/denoise/quality" => &["Fast", "Balanced"],
-        "/material/model" => &["Fast", "StandardSurface"],
-        "/material/color_source" => &["Palette", "Material"],
-        p if p.ends_with("/kind") && p.starts_with("/formula") => {
-            &["Tetrahedron", "Octahedron", "Menger"]
-        }
-        // One Hybrid step slot: Off skips it, the rest run their sub-formula.
-        // The whole `/formula/Hybrid/steps` array keeps no choices: it edits
-        // slot by slot (`set_attribute` rejects a whole value outside choices).
-        p if p.starts_with("/formula/Hybrid/steps/") => {
-            &["Off", "Mandelbulb", "Mandelbox", "KifsFold", "Inversion"]
-        }
-        _ => &[],
+    use crate::scene::{
+        ArrayAxis, ArrayKind, ColorSource, Coloring, HybridStep, KifsKind, MaskShape, MaterialModel,
     };
-    values.iter().map(|v| json!(v)).collect()
+    if path == "/formula" {
+        return variants(crate::scene::Formula::PRESETS);
+    }
+    if let Some(choices) = crate::formulas::formula_param_choices(path) {
+        return choices;
+    }
+    match path {
+        "/render/backend" => variants(crate::render_profiles::Backend::ALL),
+        "/render/method" => variants(crate::render_profiles::RenderMethod::ALL),
+        "/render/display" => variants(crate::render_profiles::Display::ALL),
+        "/viewport/mode" => variants(crate::render_profiles::ViewportMode::ALL),
+        "/palette" => variants(crate::palette::PaletteScheme::ALL),
+        "/coloring" => variants(Coloring::ALL),
+        "/mask/shape" => variants(MaskShape::ALL),
+        "/mask/array/kind" => variants(ArrayKind::ALL),
+        "/mask/array/axis" => variants(ArrayAxis::ALL),
+        "/render/denoise/mode" => variants(crate::denoise::Mode::ALL),
+        "/render/denoise/quality" => variants(crate::denoise::Quality::ALL),
+        "/material/model" => variants(MaterialModel::ALL),
+        "/material/color_source" => variants(ColorSource::ALL),
+        p if p.ends_with("/kind") && p.starts_with("/formula") => variants(KifsKind::ALL),
+        // One Hybrid step slot: Off skips it, the rest run their sub-formula. The whole
+        // `/formula/Hybrid/steps` array keeps no choices: it edits slot by slot
+        // (`set_attribute` rejects a whole value outside choices).
+        p if p.starts_with("/formula/Hybrid/steps/") => variants(HybridStep::ALL),
+        _ => Vec::new(),
+    }
 }
 pub(crate) fn attribute_range(path: &str) -> Option<(f64, f64)> {
     if let Some(range) = crate::formulas::formula_param_range(path) {
@@ -1744,20 +1754,11 @@ pub(crate) fn attribute_range(path: &str) -> Option<(f64, f64)> {
         "/viewport/target_fps" => Some((1.0, 240.0)),
         "/viewport/settle_delay_ms" => Some((0.0, 10000.0)),
         "/viewport/batch_budget_ms" => Some((0.1, 1000.0)),
-        "/output/width" | "/output/height" => Some((1.0, crate::export::MAX_AXIS as f64)),
-        "/output/qp" => Some((0.0, 255.0)),
-        "/output/jpeg_quality" => Some((1.0, 100.0)),
-        "/output/exr_dwa_level" => Some((
-            f64::from(*crate::export::DWA_LEVEL_RANGE.start()),
-            f64::from(*crate::export::DWA_LEVEL_RANGE.end()),
-        )),
-        "/output/png_peak_nits" => Some((
-            f64::from(*crate::export::PEAK_NITS.start()),
-            f64::from(*crate::export::PEAK_NITS.end()),
-        )),
         "/camera/fov_y_degrees" => Some((1.0, 179.0)),
         "/camera/f_number" => Some((0.0, f32::MAX as f64)),
         "/camera/sensor_height" => Some((0.000001, f32::MAX as f64)),
+        // A zero radius would put the camera on its target whatever its distance.
+        CAMERA_FRAMING => Some((1.0e-6, f32::MAX as f64)),
         // Axis index of the trap plane (X, Y, Z); the kernel reads min(2).
         "/trap_axis" => Some((0.0, 2.0)),
         // The palette coordinate is 1 - exp(-trap * scale): a negative scale pins it at 0.
@@ -1804,25 +1805,9 @@ pub(crate) fn attribute_label(path: &str) -> String {
         CAMERA_ORBIT_SPEED => return "Orbit speed (°/s)".into(),
         CAMERA_ORBIT_PHASE => return "Orbit phase (°)".into(),
         "/transform/position" => return "Translate".into(),
-        "/transform/rotation" | "/transform/rotation_degrees" => return "Rotate".into(),
+        "/transform/rotation_degrees" => return "Rotate".into(),
         "/transform/scale" => return "Scale".into(),
-        "/output/png" => return "PNG encoding".into(),
-        "/output/png_video" => return "PNG video".into(),
-        "/output/png_peak_nits" => return "HDR peak (nits)".into(),
-        "/output/qp" => return "QP / CRF".into(),
-        "/output/codec" => return "Video codec".into(),
-        "/output/container" => return "Video container".into(),
-        "/output/video_depth" => return "Video bit depth".into(),
-        "/output/video_signal" => return "Video signal".into(),
-        "/output/prores_profile" => return "ProRes profile".into(),
-        "/output/exv_profile" => return "EXV profile".into(),
-        "/output/channels" => return "Channels".into(),
-        "/output/sixteen_bit" => return "16-bit integer".into(),
-        "/output/jpeg_quality" => return "JPEG quality (%)".into(),
-        "/output/tiff_compression" => return "TIFF compression".into(),
-        "/output/exr_depth" => return "EXR depth".into(),
-        "/output/exr_compression" => return "EXR compression".into(),
-        "/output/exr_dwa_level" => return "EXR DWA level".into(),
+        "/output/preset" => return "Encode recipe".into(),
         "/output/output_display" => return "Display override".into(),
         "/output/output_view" => return "View override".into(),
         "/output/denoise_at_completion" => return "Denoise at completion".into(),
@@ -1867,7 +1852,7 @@ pub(crate) fn attribute_default(kind: WorldKind, path: &str) -> Option<Value> {
         _ => {}
     }
     static FRESH: LazyLock<HashMap<(WorldKind, String), Value>> = LazyLock::new(|| {
-        let world = WorldDocument::from_scene(&Scene::preset(crate::params::FAMILY_BULB));
+        let world = WorldDocument::from_scene(&Scene::preset(Formula::Mandelbulb(Bulb::PRESET)));
         let mut defaults = HashMap::new();
         for node in world.nodes() {
             let Ok(attrs) = world.attrs(node.id) else {
@@ -1880,8 +1865,8 @@ pub(crate) fn attribute_default(kind: WorldKind, path: &str) -> Option<Value> {
                 }
             }
         }
-        for code in 0..crate::scene::Formula::COUNT {
-            if let Ok(formula_json) = serde_json::to_value(Scene::preset(code).formula) {
+        for formula in crate::scene::Formula::PRESETS {
+            if let Ok(formula_json) = serde_json::to_value(formula) {
                 let mut f_attrs = Attrs::new();
                 discover(&formula_json, "/formula", &mut f_attrs);
                 for (p, v) in f_attrs.iter() {
@@ -1971,50 +1956,14 @@ fn attribute_slider(path: &str) -> Option<Slider> {
     }
     if let Some(rest) = path.strip_prefix("/formula/") {
         let (family, param) = rest.split_once('/')?;
-        if crate::formulas::find_formula_meta_by_variant(family).is_some_and(|m| m.code >= 8) {
-            return crate::formulas::formula_param_slider(path).map(|(min, max)| Slider {
-                min,
-                max,
-                log: false,
-            });
-        }
+        // A Hybrid's sub-formula slides like its standalone family.
         let (family, param) = match (family, param.split_once('/')) {
             ("Hybrid", Some(("bulb", p))) => ("Mandelbulb", p),
             ("Hybrid", Some(("mandelbox", p))) => ("Mandelbox", p),
             ("Hybrid", Some(("kifs", p))) => ("Kifs", p),
             _ => (family, param),
         };
-        return match (family, param) {
-            (_, "rotation_degrees" | "angle_phase_degrees") => lin(-720.0, 720.0),
-            ("Mandelbulb", "power") => lin(1.0, 64.0),
-            // The logarithmic DE requires an escaped radius >= 1.
-            ("Mandelbulb" | "QuaternionJulia", "bailout") => log(1.0, 64.0),
-            ("Mandelbulb", "angle_scale") => lin(-8.0, 8.0),
-            ("Mandelbox", "scale") => lin(-16.0, 16.0),
-            ("Mandelbox", "fixed_radius" | "fold_limit") => log(0.001, 32.0),
-            ("Mandelbox", "min_radius_ratio") => lin(0.0, 1.0),
-            ("Kifs", "scale") => lin(1.0, 16.0),
-            ("Kifs", "offset") => lin(-16.0, 16.0),
-            ("Apollonian", "scale") | ("Hybrid", "apollonian_scale") => log(0.01, 32.0),
-            // Zero disables the explicit bounding sphere.
-            ("Apollonian" | "Kleinian" | "PseudoKleinian", "bound_radius") => lin(0.0, 32.0),
-            ("Kleinian", "a") => lin(1.0, 8.0),
-            ("Kleinian", "b") => lin(-8.0, 8.0),
-            ("PseudoKleinian", "box_size") => lin(0.0, 16.0),
-            ("PseudoKleinian", "c") => lin(-8.0, 8.0),
-            ("PseudoKleinian", "offset") => lin(-16.0, 16.0),
-            ("PseudoKleinian", "size") => log(0.001, 32.0),
-            ("PseudoKleinian", "thickness") => log(0.000001, 1.0),
-            ("QuaternionJulia", "constant") => lin(-8.0, 8.0),
-            ("QuaternionJulia", "slice_w") => lin(-8.0, 8.0),
-            // Hybrid uses length(z) / dr, without the logarithmic DE restriction.
-            ("Hybrid", "bailout") => log(0.01, 64.0),
-            _ => crate::formulas::formula_param_slider(path).map(|(min, max)| Slider {
-                min,
-                max,
-                log: false,
-            }),
-        };
+        return crate::formulas::formula_param_slider(&format!("/formula/{family}/{param}"));
     }
     match path {
         "/julia" => lin(-8.0, 8.0),
@@ -2050,13 +1999,14 @@ fn attribute_slider(path: &str) -> Option<Slider> {
             lin(-180.0, 180.0)
         }
         "/camera/orbit_speed_degrees" => lin(-90.0, 90.0),
+        CAMERA_FRAMING => log(0.01, 100.0),
         "/environment/intensity" => lin(0.0, 10.0),
         "/environment/rotation_degrees" => lin(-180.0, 180.0),
-        "/lighting/sky_intensity" | "/lighting/sun_intensity" => lin(0.0, 20.0),
+        "/sky/intensity" | "/sun/intensity" => lin(0.0, 20.0),
         // Angular diameter in degrees (the sun is ~0.53).
-        "/lighting/sun_angle" => lin(0.0, 10.0),
-        "/lighting/sun_azimuth" => lin(0.0, 360.0),
-        "/lighting/sun_elevation" => lin(-90.0, 90.0),
+        "/sun/angle" => lin(0.0, 10.0),
+        "/sun/azimuth" => lin(0.0, 360.0),
+        "/sun/elevation" => lin(-90.0, 90.0),
         "/material/coat_ior" | "/material/specular_ior" | "/material/thin_film_ior" => {
             lin(1.0, 3.0)
         }
@@ -2249,58 +2199,11 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
         "/viewport/frozen" => {
             "Keep the currently displayed viewport image and stop new viewport batches; the image may no longer reflect scene edits."
         }
-        "/output/format" => {
-            "EXR: scene-linear ACEScg sequence. PNG / JPEG / TIFF / TGA: display rendering baked in. Video: HEVC, H.264, AV1, ProRes or EXV."
-        }
-        "/output/encoder" => {
-            "Video encoder implementation for HEVC and H.264: Auto (GPU with CPU fallback), GPU · Vulkan Video, or CPU · Software."
-        }
-        "/output/width" | "/output/height" => {
-            "Base export size; the Output render profile's resolution scale applies once when the export starts."
-        }
-        "/output/qp" => {
-            "Quantizer / CRF of the built-in video encoder (0–51 for HEVC/H.264, 0–255 for AV1), or libx265 CRF of a PNG export's video. Lower keeps more detail."
+        "/output/preset" => {
+            "The encode recipe (format, size, codec, quality, still options): edited as a whole in Render / Encode."
         }
         "/output/denoise_at_completion" => {
             "Run OIDN once after all samples of each exported frame, overriding the Output profile's denoise cadence."
-        }
-        "/output/png" => {
-            "How a PNG encodes display light: SDR 8/16-bit, HDR10 (PQ) or HLG, 16-bit BT.2020."
-        }
-        "/output/png_peak_nits" => {
-            "For an HDR PNG or video whose scene view is not an HDR view of that kind: the HDR view whose measured peak is nearest this."
-        }
-        "/output/png_video" => "A video ffmpeg also encodes from the finished PNG sequence.",
-        "/output/codec" => {
-            "Native video codec: HEVC (H.265), H.264 (AVC), AV1, Apple ProRes, or EXV float16 HDR container."
-        }
-        "/output/container" => "Video container format (.mp4, .mov, or .exv).",
-        "/output/video_depth" => "Bit depth for SDR HEVC / AV1 video (8-bit or 10-bit).",
-        "/output/video_signal" => {
-            "Signal transfer for HEVC, AV1 and ProRes video: SDR BT.709, HDR10 (PQ) or HLG."
-        }
-        "/output/prores_profile" => {
-            "Apple ProRes 10-bit intra-frame profile: Proxy, LT, 422, 422 HQ, 4444, or 4444 XQ."
-        }
-        "/output/exv_profile" => {
-            "EXV float16 HDR video profile: BC6H lossless/fast, PIZ, ZIPS, ZIP, RLE, DWAA, or DWAB."
-        }
-        "/output/channels" => "Still image channels: RGB (3 channels) or RGBA (with alpha).",
-        "/output/sixteen_bit" => {
-            "Write 16-bit integer samples per channel for SDR PNG and TIFF stills."
-        }
-        "/output/jpeg_quality" => "JPEG baseline DCT quality (1–100; 95 is near-lossless).",
-        "/output/tiff_compression" => {
-            "TIFF lossless compression: None, LZW, Deflate (zlib), or PackBits."
-        }
-        "/output/exr_depth" => {
-            "OpenEXR channel depth: 16-bit float (Half) or 32-bit float (Float)."
-        }
-        "/output/exr_compression" => {
-            "OpenEXR compression mode: None, RLE, ZIPS, ZIP, PIZ, PXR24, B44, B44A, DWAA, DWAB, HTJ2K 32, or HTJ2K 256."
-        }
-        "/output/exr_dwa_level" => {
-            "OpenEXR DreamWorks lossy wavelet compression level (0–250; 45 is default)."
         }
         "/output/output_display" | "/output/output_view" => {
             "OCIO display / view overriding the automatic output transform; empty is automatic."
@@ -2370,7 +2273,7 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
         "/camera/pitch_degrees" => "Camera tilt up / down.",
         "/camera/roll_degrees" => "Camera roll around the view axis.",
         "/camera/distance" => {
-            "Distance from the target in framing radii of the fractal (1 frames it)."
+            "Distance from the target in framing radii (Framing radius; 1 frames the fractal)."
         }
         "/camera/fov_y_degrees" => "Vertical field of view.",
         "/camera/f_number" => {
@@ -2385,27 +2288,30 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
             "Turntable: degrees per second the camera orbits the target (integrated over the animation)."
         }
         "/camera/orbit_phase_degrees" => "Turntable starting angle added to the orbit.",
+        CAMERA_FRAMING => {
+            "The scene size the distance and focus distance are measured in: 1 distance is this far. Set from the fractal the camera was made to frame."
+        }
         "/environment/enabled" => {
             "Light the scene with the environment image (else the sky gradient)."
         }
         "/environment/path" => "Lat-long HDR / EXR environment image.",
         "/environment/intensity" => "Environment brightness multiplier.",
         "/environment/rotation_degrees" => "Turns the environment around world up.",
-        "/lighting/sun_azimuth" => "Sun direction around world up.",
-        "/lighting/sun_elevation" => "Sun height above the horizon (negative: below).",
-        "/lighting/sun_color" => "Sun colour.",
-        "/lighting/sun_intensity" => "Sun brightness.",
-        "/lighting/sun_angle" => {
+        "/sun/azimuth" => "Sun direction around world up.",
+        "/sun/elevation" => "Sun height above the horizon (negative: below).",
+        "/sun/color" => "Sun colour.",
+        "/sun/intensity" => "Sun brightness.",
+        "/sun/angle" => {
             "Sun disc diameter in degrees: larger gives softer shadows (the real sun is ~0.53)."
         }
-        "/lighting/sky_intensity" => "Sky light brightness.",
-        "/lighting/sky_horizon" => "Sky colour at the horizon.",
-        "/lighting/sky_zenith" => "Sky colour straight up.",
-        "/lighting/background" => {
+        "/sky/intensity" => "Sky light brightness.",
+        "/sky/horizon" => "Sky colour at the horizon.",
+        "/sky/zenith" => "Sky colour straight up.",
+        "/sky/background" => {
             "Show the sky behind the fractal; off keeps its light but renders the background black."
         }
-        "/lighting/sun_disc" => {
-            "Show the sun disc in the background; off keeps its light and its reflections."
+        "/sky/sun_disc" => {
+            "Show the suns' discs in the sky behind the fractal; off keeps their light and reflections."
         }
         "/material/model" => {
             "Fast: a quick metal / plastic model. Standard Surface: the full Autodesk Standard Surface (glass, coat, sheen, film); transmission always uses it."
@@ -2520,7 +2426,7 @@ pub(crate) fn attribute_hint(path: &str) -> Option<&'static str> {
             "Shy: hidden from the timeline while its Shy switch is on. Settings nodes start shy."
         }
         "/start" => "First frame this node exists on.",
-        "/end" => "Last frame this node exists on.",
+        "/end" => "Frame this node ends before (exclusive): it exists up to the frame before.",
         _ => return None,
     })
 }
@@ -2591,7 +2497,7 @@ pub(crate) fn inactive_reason<'a>(
     if path == "/render/iterations" {
         let family = value("/formula")?.as_object()?.keys().next()?;
         if let Some(meta) = crate::formulas::find_formula_meta_by_variant(family)
-            && !meta.uses_iterations()
+            && !meta.iterates
         {
             return Some(format!(
                 "{} is analytical (no iteration loop)",
@@ -2636,9 +2542,9 @@ pub(crate) fn inactive_reason<'a>(
 fn is_color_attribute(path: &str) -> bool {
     matches!(
         path,
-        "/lighting/sun_color"
-            | "/lighting/sky_horizon"
-            | "/lighting/sky_zenith"
+        "/sun/color"
+            | "/sky/horizon"
+            | "/sky/zenith"
             | "/material/base_color"
             | "/material/base_tint"
             | "/material/specular_color"
@@ -2650,7 +2556,6 @@ fn is_color_attribute(path: &str) -> bool {
     )
 }
 
-/// A number clamped to the attribute's hard limits; other values pass through.
 /// Tangent for a value written at `frame`: a key that already exists keeps its out kind (editing a
 /// value must not reset its interpolation), a new key takes `new` (Settings > Animation).
 fn key_tan(ch: &Channel, frame: f64, new: Tan) -> Tan {
@@ -2660,6 +2565,9 @@ fn key_tan(ch: &Channel, frame: f64, new: Tan) -> Tan {
         .map_or(new, |k| k.out.kind)
 }
 
+/// A number clamped to the attribute's hard limits; other values pass through. The number keeps
+/// its type (`set_attribute` has already given it the attribute's): the limits of an integer
+/// attribute are whole.
 fn clamp_to_range(path: &str, value: Value) -> Value {
     match (attribute_range(path), value.as_f64()) {
         (Some((min, max)), Some(v)) if v < min || v > max => {
@@ -2669,13 +2577,17 @@ fn clamp_to_range(path: &str, value: Value) -> Value {
     }
 }
 
-/// `v` as an integer when `template` is one and `v` is whole, else as a float: a limit never
-/// rounds away (0 clamped to a 0.0005 floor stays 0.0005).
-fn numeric_like(template: &Value, v: f64) -> Value {
-    match (template.is_u64() || template.is_i64(), v.fract() == 0.0) {
-        (true, true) if v >= 0.0 => json!(v as u64),
-        (true, true) => json!(v as i64),
-        _ => json!(v),
+/// `v` as a number of `template`'s type: rounded to an integer when `template` is one (unsigned
+/// stays at or above 0), else a float. The ONE rule of "a number like this one": attribute edits
+/// (`set_attribute`), settings evaluation, the stored-value writes of `set_pointer` and the
+/// Attribute Editor's typed fields (`world_ui::grid_json`).
+pub(crate) fn numeric_like(template: &Value, v: f64) -> Value {
+    if template.is_u64() {
+        json!(v.round().max(0.0) as u64)
+    } else if template.is_i64() {
+        json!(v.round() as i64)
+    } else {
+        json!(v)
     }
 }
 
@@ -2695,6 +2607,9 @@ fn scene_json(scene: &Scene) -> Result<Value, String> {
     }
     Ok(v)
 }
+/// The scene branches a node of `kind` authors: its attributes (`discover`) and its stored `gpu`
+/// template (`node_template`) hold these and nothing else. A Sun has its light, the Environment
+/// its image and the sky.
 fn branches(kind: WorldKind) -> &'static [&'static str] {
     match kind {
         WorldKind::Fractal => &[
@@ -2713,8 +2628,8 @@ fn branches(kind: WorldKind) -> &'static [&'static str] {
             "render",
         ],
         WorldKind::Camera => &["camera"],
-        WorldKind::DirectionalLight => &["lighting"],
-        WorldKind::Environment => &["environment", "lighting"],
+        WorldKind::DirectionalLight => &["sun"],
+        WorldKind::Environment => &["environment", "sky"],
         WorldKind::Material => &["material"],
         WorldKind::Group => &[],
         WorldKind::RenderSettings => &["render", "quality"],
@@ -2725,6 +2640,10 @@ fn branches(kind: WorldKind) -> &'static [&'static str] {
 }
 fn discover(value: &Value, path: &str, attrs: &mut Attrs) {
     match value {
+        // The export recipe (`video_io::job::Preset`) is one atomic attribute: its enum objects
+        // (`rate: {"Crf": n}`) and optional fields change their leaf set with the value, and the
+        // Render / Encode dialog edits it as a whole (`render_profiles::output_edits`).
+        Value::Object(_) if path == "/output/preset" => attrs.set(path, to_attr(value)),
         Value::Object(map) => {
             if path == "/formula" || path == "/material/facing" {
                 attrs.set(path, to_attr(value));
@@ -2776,6 +2695,47 @@ fn numeric(v: &Value) -> bool {
         || v.as_array()
             .is_some_and(|a| !a.is_empty() && a.iter().all(Value::is_number))
 }
+/// Stored node data has this shape before anything indexes into it: an object whose `host`,
+/// `gpu`, `metadata` and `discrete` (where present) are objects. Decoding
+/// (`WorldDocument::decode_json`) and pasting (`WorldEditor::insert_fragment`) check it, so a
+/// malformed or hand-edited node is an error instead of a panic on assignment.
+fn node_shape(key: &str, data: &Value) -> Result<(), String> {
+    let node = data
+        .as_object()
+        .ok_or_else(|| format!("Node {key} is not an object"))?;
+    for field in ["host", "gpu", "metadata", "discrete"] {
+        if node.get(field).is_some_and(|v| !v.is_object()) {
+            return Err(format!("Node {key}: {field} must be an object"));
+        }
+    }
+    Ok(())
+}
+
+/// Every animation of `attrs` has one channel per component of its value, and every navigation
+/// offset (`/_navigation/<path>`) the shape of its channel: the key commands and the navigation
+/// address channels by component. Checked with `node_shape`.
+fn check_arity(attrs: &Attrs) -> Result<(), String> {
+    let width = |value: &AttrValue| attr_json(value.clone()).as_array().map_or(1, Vec::len);
+    for (path, value) in attrs.iter() {
+        if let Some(anim) = attrs.anim(path)
+            && anim.channels.len() != width(value)
+        {
+            return Err(format!(
+                "{path} has {} animation channels for a value of {}",
+                anim.channels.len(),
+                width(value)
+            ));
+        }
+        if let Some(channel) = path.strip_prefix("/_navigation")
+            && let Some(base) = attrs.get(channel)
+            && width(base) != width(value)
+        {
+            return Err(format!("Navigation offset {path} does not match {channel}"));
+        }
+    }
+    Ok(())
+}
+
 fn set_pointer(root: &mut Value, path: &str, value: Value, create: bool) -> Result<(), String> {
     if path.is_empty() {
         *root = value;
@@ -2788,18 +2748,11 @@ fn set_pointer(root: &mut Value, path: &str, value: Value, create: bool) -> Resu
         .collect();
     fn put(root: &mut Value, parts: &[String], value: Value, create: bool) -> Result<(), String> {
         if parts.is_empty() {
-            if !create
-                && (root.is_u64() || root.is_i64())
-                && let Some(f) = value.as_f64()
-            {
-                *root = if root.is_u64() {
-                    json!(f.round().max(0.0) as u64)
-                } else {
-                    json!(f.round() as i64)
-                };
-                return Ok(());
-            }
-            *root = value;
+            // An existing number keeps its type (a keyed integer channel evaluates as float).
+            *root = match value.as_f64() {
+                Some(f) if !create && root.is_number() => numeric_like(root, f),
+                _ => value,
+            };
             return Ok(());
         }
         if let Value::Array(a) = root {
@@ -2848,7 +2801,7 @@ impl WorldEditor {
         let mut data = self.document.node(source)?.clone();
         data["parent"] = Value::Null;
         data["children"] = json!([]);
-        let roots = self.insert_fragment(HashMap::from([(source.to_string(), data)]))?;
+        let (roots, _) = self.insert_fragment(HashMap::from([(source.to_string(), data)]), true)?;
         let id = *roots.first().ok_or("Cloned settings node missing")?;
         self.document.node_mut(id)?["name"] = json!(name.trim());
         self.document.node_mut(id)?["metadata"]["catalog_role"] = json!(role);
@@ -2972,9 +2925,9 @@ impl WorldDocument {
     pub fn output_settings(&self) -> Result<crate::export::OutputSettings, String> {
         self.output_settings_of(self.output_settings_id()?)
     }
-    /// The recipe of any OutputSettings node: strictly typed, each field within its range.
-    /// Cross-field rules (HEVC needs even sizes) are export-start checks
-    /// (`OutputSettings::validate`), so an edit can pass through such a state in the form.
+    /// The recipe of any OutputSettings node, strictly typed. The recipe's limits and
+    /// cross-field rules (HEVC 4:2:0 needs even sizes) are export-start checks
+    /// (`ExportSettings::validate`), so an edit can pass through such a state in the form.
     pub fn output_settings_of(&self, id: NodeId) -> Result<crate::export::OutputSettings, String> {
         self.require_settings(id, WorldKind::OutputSettings)?;
         // Static values: any time reads the same; the document start is a valid one.
@@ -2982,7 +2935,7 @@ impl WorldDocument {
         serde_json::from_value(values).map_err(|e| format!("Invalid OutputSettings {id}: {e}"))
     }
     fn static_settings_value_with(attrs: &Attrs, path: &str) -> Result<Value, String> {
-        if attrs.anim(path).is_some() || attrs.conn(path).is_some() {
+        if Self::driven(attrs, path) {
             return Err(format!("Settings attribute {path} must be static"));
         }
         attrs
@@ -2991,18 +2944,8 @@ impl WorldDocument {
             .map(attr_json)
             .ok_or_else(|| format!("Missing settings attribute {path}"))
     }
-    fn static_settings_value(&self, id: NodeId, path: &str) -> Result<Value, String> {
-        let attrs = self.attrs(id)?;
-        Self::static_settings_value_with(&attrs, path)
-    }
     fn static_settings_reference_with(attrs: &Attrs, path: &str) -> Result<NodeId, String> {
         Self::static_settings_value_with(attrs, path)?
-            .as_str()
-            .and_then(NodeId::parse)
-            .ok_or_else(|| format!("Settings reference {path} must be a UUID"))
-    }
-    fn static_settings_reference(&self, id: NodeId, path: &str) -> Result<NodeId, String> {
-        self.static_settings_value(id, path)?
             .as_str()
             .and_then(NodeId::parse)
             .ok_or_else(|| format!("Settings reference {path} must be a UUID"))
@@ -3132,7 +3075,11 @@ impl WorldDocument {
         // block carries a neutral value; it must never proxy a particular fractal's geometry.
         values.insert(
             "iterations".into(),
-            json!(Scene::preset(crate::params::FAMILY_BULB).render.iterations),
+            json!(
+                Scene::preset(Formula::Mandelbulb(Bulb::PRESET))
+                    .render
+                    .iterations
+            ),
         );
         let evaluated_quality = json!({
             "quality": self.settings_values_with(profile, profile_node, &profile_attrs, "quality", frame)?
@@ -3339,20 +3286,18 @@ impl WorldDocument {
         discover(&value, &format!("/{branch}"), &mut schema);
         for (path, base) in schema.iter() {
             let mut current = self.attribute_value_with(id, node, attrs, path, frame)?;
-            if let Some((min, max)) = attribute_range(path) {
+            let base = attr_json(base.clone());
+            // Integer settings are unsigned (counts, steps); an unlimited one fits u32.
+            let limits = attribute_range(path)
+                .or_else(|| base.is_i64().then_some((0.0, f64::from(u32::MAX))));
+            if let Some((min, max)) = limits {
                 let number = current
                     .as_f64()
                     .filter(|v| v.is_finite() && (min..=max).contains(v))
                     .ok_or_else(|| format!("Settings value {path} is outside its limits"))?;
-                if attr_json(base.clone()).is_i64() {
-                    current = json!(number.round() as u64);
+                if base.is_i64() {
+                    current = numeric_like(&base, number);
                 }
-            } else if attr_json(base.clone()).is_i64() {
-                let number = current
-                    .as_f64()
-                    .filter(|v| v.is_finite() && *v >= 0.0 && *v <= u32::MAX as f64)
-                    .ok_or_else(|| format!("Invalid integer settings value {path}"))?;
-                current = json!(number.round() as u32);
             }
             set_pointer(&mut value, &path[branch.len() + 1..], current, false)?;
         }
@@ -3363,9 +3308,7 @@ impl WorldDocument {
         for node in self.nodes() {
             let attrs = self.attrs(node.id)?;
             for (path, _) in attrs.iter() {
-                if crate::render_profiles::static_path(path)
-                    && (attrs.anim(path).is_some() || attrs.conn(path).is_some())
-                {
+                if crate::render_profiles::static_path(path) && Self::driven(&attrs, path) {
                     return Err(format!("Settings attribute {path} must be static"));
                 }
             }
@@ -3403,12 +3346,13 @@ impl WorldDocument {
                     if !look["reinhard"].is_boolean() {
                         return Err("Invalid viewport look reinhard".into());
                     }
+                    let attrs = self.attrs(node.id)?;
                     for path in [
                         "/viewport/moving_id",
                         "/viewport/still_id",
                         "/viewport/manual_id",
                     ] {
-                        let id = self.static_settings_reference(node.id, path)?;
+                        let id = Self::static_settings_reference_with(&attrs, path)?;
                         if role == crate::render_profiles::CatalogRole::Profile {
                             self.require_live_settings(id, WorldKind::RenderSettings)?;
                         } else {
@@ -3532,7 +3476,7 @@ impl WorldDocument {
     pub fn take_warp_identity(&self, id: NodeId) -> Result<bool, String> {
         let attrs = self.attrs(id)?;
         let constant = |path: &str| {
-            (!attrs.is_animated(path) && attrs.conn(path).is_none())
+            (!Self::driven(&attrs, path))
                 .then(|| attrs.get(path).cloned().map(attr_json))
                 .flatten()
                 .and_then(|v| v.as_f64())
@@ -3637,7 +3581,7 @@ impl WorldDocument {
     /// `frame`: the time warp. The take starts on its start frame plus `/take/offset` and
     /// advances by `/take/speed` per frame, integrated, so a keyed speed ramps the motion
     /// smoothly instead of jumping along it:
-    /// `start + integral of speed(f) df from (start + offset) to frame`.
+    /// `start + integral of speed(f) df from (start + offset) to frame` ([`Self::warp`]).
     /// A take id the scene does not have is an error.
     pub fn take_frame(
         &self,
@@ -3653,62 +3597,15 @@ impl WorldDocument {
                 self.info(id).map(|i| i.name).unwrap_or_default()
             )
         })?;
-        let number = |path: &str, at: f64| -> Result<f64, String> {
-            self.attribute_value(id, path, at)?
-                .as_f64()
-                .filter(|v| v.is_finite())
-                .ok_or_else(|| format!("{path} must be a finite number"))
+        let &[shown] = self.warp(id, &take, &[frame])?.as_slice() else {
+            return Err("Time warp lost its frame".into());
         };
-        let anchor = take.play_start(self.first);
-        let begin = anchor + number(TAKE_OFFSET, frame)?;
-        let attrs = self.attrs(id)?;
-        let connected = attrs.conn(TAKE_SPEED).is_some();
-        let advanced = if attrs.is_animated(TAKE_SPEED) || connected {
-            // The keyed curve is read directly (the attributes decoded once); a connection
-            // resolves through its source.
-            let speed = |at: f64| -> Result<f64, String> {
-                if connected {
-                    return number(TAKE_SPEED, at);
-                }
-                attrs
-                    .eval_at(TAKE_SPEED, at)
-                    .map(attr_json)
-                    .and_then(|v| v.as_f64())
-                    .filter(|v| v.is_finite())
-                    .ok_or_else(|| format!("{TAKE_SPEED} must be a finite number"))
-            };
-            // Composite Simpson over steps of at most half a frame (error O(h^4) on a smooth
-            // speed; a key between samples rounds its corner). The step count follows the
-            // span, which `attribute_range` bounds for the offset.
-            let span = frame - begin;
-            let steps = 2 * ((span.abs() * 2.0).ceil() as usize / 2 + 1);
-            let h = span / steps as f64;
-            let mut sum = 0.0;
-            for i in 0..=steps {
-                let weight = if i == 0 || i == steps {
-                    1.0
-                } else if i % 2 == 1 {
-                    4.0
-                } else {
-                    2.0
-                };
-                sum += weight * speed(begin + h * i as f64)?;
-            }
-            sum * h / 3.0
-        } else {
-            number(TAKE_SPEED, frame)? * (frame - begin)
-        };
-        let shown = anchor + advanced;
         Ok(Some((take, shown)))
     }
 
     /// The work-area frames node `id`'s take plays on, `[start, end)`: those whose warped take
     /// time lies within the take (held first / last poses are not playing). None when the node
     /// plays no take, or none of it inside the work area. What the timeline draws as its bar.
-    ///
-    /// Linear in the work area whatever is keyed: the take frame at `f` is
-    /// `anchor + C(f) - C(anchor + offset(f))` (`take_frame`), with `C` the speed's running
-    /// integral tabulated once on half frames (Simpson) over every point it is asked at.
     pub fn take_span(&self, id: NodeId) -> Result<Option<(i64, i64)>, String> {
         let Some(clip) = self.take_clip(id)? else {
             return Ok(None);
@@ -3718,82 +3615,8 @@ impl WorldDocument {
             .get(clip)
             .cloned()
             .ok_or_else(|| format!("No take {clip}"))?;
-        let attrs = self.attrs(id)?;
-        // One reader per attribute: the keyed curve directly, a connection through its source.
-        let number = |path: &'static str| {
-            let connected = attrs.conn(path).is_some();
-            let attrs = &attrs;
-            move |at: f64| -> Result<f64, String> {
-                let value = if connected {
-                    self.attribute_value(id, path, at)?
-                } else {
-                    attrs
-                        .eval_at(path, at)
-                        .map(attr_json)
-                        .ok_or_else(|| format!("Unavailable parameter {path}"))?
-                };
-                value
-                    .as_f64()
-                    .filter(|v| v.is_finite())
-                    .ok_or_else(|| format!("{path} must be a finite number"))
-            }
-        };
-        let (offset, speed) = (number(TAKE_OFFSET), number(TAKE_SPEED));
-        let anchor = take.play_start(self.first);
         let frames: Vec<f64> = (self.first..=self.last).map(f64::from).collect();
-        let begins = frames
-            .iter()
-            .map(|f| Ok(anchor + offset(*f)?))
-            .collect::<Result<Vec<f64>, String>>()?;
-        let shown: Vec<f64> = if attrs.is_animated(TAKE_SPEED) || attrs.conn(TAKE_SPEED).is_some() {
-            const H: f64 = 0.5;
-            let lo = begins
-                .iter()
-                .chain(&frames)
-                .copied()
-                .fold(f64::INFINITY, f64::min)
-                .floor();
-            let hi = begins
-                .iter()
-                .chain(&frames)
-                .copied()
-                .fold(f64::NEG_INFINITY, f64::max)
-                .ceil();
-            let steps = ((hi - lo) / H).ceil() as usize;
-            // Running integral at lo + k H, and the speed there (reused by the next step).
-            let mut table = Vec::with_capacity(steps + 1);
-            table.push(0.0);
-            let mut left = speed(lo)?;
-            for k in 0..steps {
-                let x = lo + k as f64 * H;
-                let right = speed(x + H)?;
-                let step = (left + 4.0 * speed(x + H * 0.5)? + right) * H / 6.0;
-                table.push(table[k] + step);
-                left = right;
-            }
-            let integral = |x: f64| -> Result<f64, String> {
-                let k = (((x - lo) / H).floor() as usize).min(steps);
-                let x0 = lo + k as f64 * H;
-                let rest = x - x0;
-                let partial = if rest > 0.0 {
-                    (speed(x0)? + 4.0 * speed(x0 + rest * 0.5)? + speed(x)?) * rest / 6.0
-                } else {
-                    0.0
-                };
-                Ok(table[k] + partial)
-            };
-            frames
-                .iter()
-                .zip(&begins)
-                .map(|(f, begin)| Ok(anchor + integral(*f)? - integral(*begin)?))
-                .collect::<Result<_, String>>()?
-        } else {
-            frames
-                .iter()
-                .zip(&begins)
-                .map(|(f, begin)| Ok(anchor + speed(*f)? * (f - begin)))
-                .collect::<Result<_, String>>()?
-        };
+        let shown = self.warp(id, &take, &frames)?;
         let mut span: Option<(i64, i64)> = None;
         for (frame, shown) in frames.iter().zip(shown) {
             let seconds = take.seconds_at(shown, self.first, self.last, self.fps);
@@ -3803,6 +3626,84 @@ impl WorldDocument {
             }
         }
         Ok(span.map(|(start, last)| (start, last + 1)))
+    }
+
+    /// The time warp of node `id` playing `take`: the frame of the take's own timing shown at
+    /// each of `frames`, `anchor + integral of speed from (anchor + offset(f)) to f`, with
+    /// `anchor` the take's play start. The ONE warp of `take_frame` and `take_span`.
+    ///
+    /// A static speed multiplies. A keyed (or connected) one is integrated by Simpson's rule on
+    /// a half-frame grid swept once over every point asked for (error O(h^4) on a smooth speed;
+    /// a key between samples rounds its corner), so the cost is linear in the span however many
+    /// frames are asked; `attribute_range` bounds the offset and with it the span.
+    fn warp(
+        &self,
+        id: NodeId,
+        take: &crate::takes::Take,
+        frames: &[f64],
+    ) -> Result<Vec<f64>, String> {
+        const H: f64 = 0.5;
+        let node = self.node(id)?;
+        let attrs = self.attrs(id)?;
+        let number = |path: &str, at: f64| -> Result<f64, String> {
+            self.attribute_value_with(id, node, &attrs, path, at)?
+                .as_f64()
+                .filter(|v| v.is_finite())
+                .ok_or_else(|| format!("{path} must be a finite number"))
+        };
+        let anchor = take.play_start(self.first);
+        let begins = frames
+            .iter()
+            .map(|f| Ok(anchor + number(TAKE_OFFSET, *f)?))
+            .collect::<Result<Vec<f64>, String>>()?;
+        if !Self::driven(&attrs, TAKE_SPEED) {
+            return frames
+                .iter()
+                .zip(&begins)
+                .map(|(f, begin)| Ok(anchor + number(TAKE_SPEED, *f)? * (f - begin)))
+                .collect();
+        }
+        let speed = |at: f64| number(TAKE_SPEED, at);
+        // Simpson on [a, b] given the speed at both ends: exact for cubics.
+        let simpson = |a: f64, b: f64, fa: f64, fb: f64| -> Result<f64, String> {
+            Ok((fa + 4.0 * speed((a + b) * 0.5)? + fb) * (b - a) / 6.0)
+        };
+        // Every point the integral is asked at (each frame and its warp start), swept in order:
+        // the running integral from the grid's start reaches each one once.
+        let mut points: Vec<(f64, usize)> = frames
+            .iter()
+            .chain(&begins)
+            .copied()
+            .enumerate()
+            .map(|(slot, x)| (x, slot))
+            .collect();
+        points.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let lo = points.first().map_or(0.0, |p| p.0).floor();
+        let mut integral = vec![0.0; points.len()];
+        let (mut k, mut left, mut sum) = (0u32, speed(lo)?, 0.0);
+        for (x, slot) in points {
+            while lo + f64::from(k + 1) * H <= x {
+                let a = lo + f64::from(k) * H;
+                let right = speed(a + H)?;
+                sum += simpson(a, a + H, left, right)?;
+                (k, left) = (k + 1, right);
+            }
+            let a = lo + f64::from(k) * H;
+            let partial = if x > a {
+                simpson(a, x, left, speed(x)?)?
+            } else {
+                0.0
+            };
+            if let Some(at) = integral.get_mut(slot) {
+                *at = sum + partial;
+            }
+        }
+        let (ends, starts) = integral.split_at(frames.len());
+        Ok(ends
+            .iter()
+            .zip(starts)
+            .map(|(end, start)| anchor + end - start)
+            .collect())
     }
 
     /// The local transform the transform take node `id` plays shows at `frame`; None when it
@@ -3953,32 +3854,42 @@ impl WorldDocument {
         document.active_environment = Some(environment);
         document
     }
-    fn insert(
-        &mut self,
-        kind: WorldKind,
-        name: &str,
-        scene: &Scene,
-        parent: Option<NodeId>,
-    ) -> Result<NodeId, String> {
-        let mut template = scene_json(scene)?;
+    /// The stored `gpu` template of a new `kind` node made from `scene`: exactly its `branches`
+    /// (a fractal's `render` holds only its iterations: the profile renders it). Every node
+    /// evaluates onto this (`evaluated_node`); a snapshot lays a fractal's branches over the
+    /// world's (`snapshot_with_render_profile`). One template for `insert` and `hydrate_schema`.
+    fn node_template(&self, kind: WorldKind, scene: &Scene) -> Result<Value, String> {
         if crate::render_profiles::setting_kind(kind) {
-            template = self.settings_template(kind, scene)?;
-        } else if kind == WorldKind::Fractal {
-            template["render"] = json!({"iterations":scene.render.iterations});
+            return self.settings_template(kind, scene);
         }
-        let mut attrs = Attrs::new();
+        let full = scene_json(scene)?;
+        let mut template = serde_json::Map::new();
         for branch in branches(kind) {
-            if let Some(v) = template.get(*branch) {
-                discover(v, &format!("/{branch}"), &mut attrs);
-            }
+            let value = match *branch {
+                "render" => json!({"iterations": scene.render.iterations}),
+                _ => full
+                    .get(*branch)
+                    .cloned()
+                    .ok_or_else(|| format!("Scene has no {branch}"))?,
+            };
+            template.insert((*branch).into(), value);
         }
+        Ok(Value::Object(template))
+    }
+    /// The attributes a new `kind` node made from `scene` starts with besides its branches: the
+    /// layer flags, its span over the work area, the transform (a fractal's from the scene's
+    /// object), and a camera's orbit and framing radius (the scene's fractal as it is now,
+    /// `CAMERA_FRAMING`). One list for `insert` and `hydrate_schema`.
+    fn base_attrs(&self, kind: WorldKind, scene: &Scene) -> Attrs {
+        let mut attrs = Attrs::new();
         for (path, value) in [
             ("/visible", json!(true)),
             ("/locked", json!(false)),
             ("/solo", json!(false)),
             ("/shy", json!(crate::render_profiles::setting_kind(kind))),
-            ("/start", json!(self.first as f64)),
-            ("/end", json!(self.last as f64 + 1.0)),
+            ("/start", json!(f64::from(self.first))),
+            ("/end", json!(f64::from(self.last) + 1.0)),
+            // `json!` reads a bare `[..]` as a JSON array: the parentheses keep the Rust array.
             ("/transform/position", json!(([0.0; 3]))),
             ("/transform/rotation_degrees", json!(([0.0; 3]))),
             ("/transform/scale", json!(([1.0; 3]))),
@@ -3990,6 +3901,10 @@ impl WorldDocument {
             for path in [CAMERA_ORBIT_SPEED, CAMERA_ORBIT_PHASE] {
                 attrs.set(path, to_attr(&json!(0.0)));
             }
+            attrs.set(
+                CAMERA_FRAMING,
+                to_attr(&json!(scene.formula.framing_radius())),
+            );
         }
         if kind == WorldKind::Fractal {
             attrs.set("/transform/position", to_attr(&json!(scene.object.offset)));
@@ -4001,6 +3916,22 @@ impl WorldDocument {
                 "/transform/scale",
                 to_attr(&json!(([scene.object.scale; 3]))),
             );
+        }
+        attrs
+    }
+    fn insert(
+        &mut self,
+        kind: WorldKind,
+        name: &str,
+        scene: &Scene,
+        parent: Option<NodeId>,
+    ) -> Result<NodeId, String> {
+        let template = self.node_template(kind, scene)?;
+        let mut attrs = self.base_attrs(kind, scene);
+        for branch in branches(kind) {
+            if let Some(v) = template.get(*branch) {
+                discover(v, &format!("/{branch}"), &mut attrs);
+            }
         }
         let id = NodeId::new();
         let metadata = if crate::render_profiles::setting_kind(kind) {
@@ -4056,32 +3987,52 @@ impl WorldDocument {
         self.node_mut(id)?["host"] = serde_json::to_value(attrs).map_err(|e| e.to_string())?;
         Ok(())
     }
+    /// Node `id`'s identity and layer flags, the flags as at the work area's first frame
+    /// ([`Self::info_at`]).
     pub fn info(&self, id: NodeId) -> Result<WorldNodeInfo, String> {
+        self.info_at(id, f64::from(self.first))
+    }
+    /// Node `id`'s identity and its layer flags at `frame`: a keyed `/visible` is its value there,
+    /// so the outliner, the timeline and a render read one evaluated flag ([`Self::nodes_at`]).
+    pub fn info_at(&self, id: NodeId, frame: f64) -> Result<WorldNodeInfo, String> {
         let data = self.node(id)?;
         let a = self.attrs(id)?;
-        self.info_with(id, data, &a)
+        self.info_at_with(id, data, &a, frame)
     }
     fn info_with(&self, id: NodeId, data: &Value, a: &Attrs) -> Result<WorldNodeInfo, String> {
+        self.info_at_with(id, data, a, f64::from(self.first))
+    }
+    fn info_at_with(
+        &self,
+        id: NodeId,
+        data: &Value,
+        a: &Attrs,
+        frame: f64,
+    ) -> Result<WorldNodeInfo, String> {
         let kind: WorldKind =
             serde_json::from_value(data["type"].clone()).map_err(|e| e.to_string())?;
+        // A flag keyed at `frame` is its keyed value (a key turns its base into a discrete index).
+        let flag = |path: &str, default: bool| {
+            self.attribute_value_with(id, data, a, path, frame)
+                .ok()
+                .and_then(|v| v.as_bool())
+                .unwrap_or(default)
+        };
         Ok(WorldNodeInfo {
             id,
             kind,
             name: data["name"].as_str().unwrap_or("").into(),
             parent: data["parent"].as_str().and_then(NodeId::parse),
-            visible: a.get_bool_or("/visible", true),
-            locked: a.get_bool_or("/locked", false),
-            solo: a.get_bool_or("/solo", false),
-            shy: a.get_bool_or("/shy", crate::render_profiles::setting_kind(kind)),
+            visible: flag("/visible", true),
+            locked: flag("/locked", false),
+            solo: flag("/solo", false),
+            shy: flag("/shy", crate::render_profiles::setting_kind(kind)),
             start: f64::from(a.get_float_or("/start", 0.0)),
             end: f64::from(a.get_float_or("/end", self.last as f32 + 1.0)),
         })
     }
-    /// Single capability check for the Material reference exposed by the node
-    /// schema, shared by the Attribute Editor, gallery and assignment command.
-    /// A storage placeholder exists on every node; it is not itself a capability.
-    /// `ids` and all their descendants, as stored node data (UUID -> data).
-    pub fn fragment(&self, ids: &[NodeId]) -> Result<HashMap<String, Value>, String> {
+    /// `ids` and all their descendants.
+    fn subtree(&self, ids: &[NodeId]) -> HashSet<NodeId> {
         let mut set: HashSet<NodeId> = ids.iter().copied().collect();
         let nodes = self.nodes();
         loop {
@@ -4095,17 +4046,24 @@ impl WorldDocument {
                 break;
             }
         }
+        set
+    }
+    /// `ids` and all their descendants, as stored node data (UUID -> data).
+    pub fn fragment(&self, ids: &[NodeId]) -> Result<HashMap<String, Value>, String> {
         let mut out = HashMap::new();
-        for id in set {
+        for id in self.subtree(ids) {
             out.insert(id.to_string(), self.node(id)?.clone());
         }
         Ok(out)
     }
-    /// References of a fragment that point outside it and are absent from this document
-    /// (material, parent), by node key. A paste clears exactly these; the UI reports them.
-    pub fn unresolved_references(
+    /// References of a fragment that resolve in neither it nor this document, by node key and
+    /// field: a material or parent, or a take. Take ids are per document: a fragment from another
+    /// one (`same_document` false) resolves none; from this one a take resolves when the scene
+    /// still has it, of the kind the node plays. What `WorldEditor::insert_fragment` clears.
+    fn unresolved_references(
         &self,
         nodes: &HashMap<String, Value>,
+        same_document: bool,
     ) -> Vec<(String, &'static str)> {
         let resolves = |id: &str| nodes.contains_key(id) || self.graph.nodes.contains_key(id);
         let mut out = Vec::new();
@@ -4115,15 +4073,15 @@ impl WorldDocument {
                     out.push((key.clone(), field));
                 }
             }
-            // A take reference resolves when this scene has a take of the kind the node plays.
             if !data["take"].is_null() {
                 let kind = serde_json::from_value::<WorldKind>(data["type"].clone())
                     .ok()
                     .and_then(take_kind);
-                let fits = data["take"]
-                    .as_u64()
-                    .and_then(|id| self.takes.get(id))
-                    .is_some_and(|take| Some(take.kind()) == kind);
+                let fits = same_document
+                    && data["take"]
+                        .as_u64()
+                        .and_then(|id| self.takes.get(id))
+                        .is_some_and(|take| Some(take.kind()) == kind);
                 if !fits {
                     out.push((key.clone(), "take"));
                 }
@@ -4151,6 +4109,9 @@ impl WorldDocument {
             .filter(|id| self.supports_material(*id))
             .collect()
     }
+    /// Single capability check for the Material reference exposed by the node
+    /// schema, shared by the Attribute Editor, gallery and assignment command.
+    /// A storage placeholder exists on every node; it is not itself a capability.
     pub fn supports_material(&self, id: NodeId) -> bool {
         self.node(id)
             .is_ok_and(|data| data["type"].as_str() == Some("Fractal"))
@@ -4171,12 +4132,18 @@ impl WorldDocument {
         }
         Ok(material)
     }
+    /// Every node in layer order, its flags as at the work area's first frame ([`Self::nodes_at`]).
     pub fn nodes(&self) -> Vec<WorldNodeInfo> {
+        self.nodes_at(f64::from(self.first))
+    }
+    /// Every node in layer order, its layer flags at `frame`: what the outliner and the timeline
+    /// list at the playhead.
+    pub fn nodes_at(&self, frame: f64) -> Vec<WorldNodeInfo> {
         let mut nodes: Vec<_> = self
             .graph
             .nodes
             .keys()
-            .filter_map(|id| NodeId::parse(id).and_then(|id| self.info(id).ok()))
+            .filter_map(|id| NodeId::parse(id).and_then(|id| self.info_at(id, frame).ok()))
             .collect();
         let order: Vec<NodeId> = self
             .graph
@@ -4466,14 +4433,12 @@ impl WorldDocument {
                 }
             }
         }
-        if let Some(conn) = a.conn(path) {
+        if let Some((source, source_path)) = Self::connection(a, path) {
             if !visiting.insert((id, path.into())) {
                 return Err("Attribute connection cycle".into());
             }
-            let source = NodeId(conn.source_layer);
-            let value =
-                self.resolve_attribute_with(source, None, &conn.source_key, frame, visiting)?;
-            return self.with_navigation_offset(source, &conn.source_key, value);
+            let value = self.resolve_attribute_with(source, None, &source_path, frame, visiting)?;
+            return self.with_navigation_offset(source, &source_path, value);
         }
         let value = a
             .eval_at(path, frame)
@@ -4522,6 +4487,107 @@ impl WorldDocument {
             return Some((parent.into(), component));
         }
         None
+    }
+    /// The node and attribute a connection on `path` reads from; a component path keeps its
+    /// component ("/a/1" connected through "/a" reads "<source>/1"). None: not connected.
+    ///
+    /// Connections (Playa `conn`) are an unfinished feature: nothing in the app makes one yet,
+    /// only tests and the legacy migrations. This is the ONE place that reads them: evaluation
+    /// (`resolve_attribute_with`), integration (`integrated_scalar`) and the "static" test
+    /// ([`Self::driven`]) all follow it.
+    fn connection(attrs: &Attrs, path: &str) -> Option<(NodeId, String)> {
+        let (attr, channel) = Self::lane(attrs, path);
+        let conn = attrs.conn(&attr)?;
+        let source = match channel {
+            Some(component) => format!("{}/{component}", conn.source_key),
+            None => conn.source_key.clone(),
+        };
+        Some((NodeId(conn.source_layer), source))
+    }
+    /// Whether `path` varies over time or comes from elsewhere: keyed or connected. What a static
+    /// setting, a constant time warp and the camera's navigation mode must not be.
+    fn driven(attrs: &Attrs, path: &str) -> bool {
+        attrs.is_animated(path) || Self::connection(attrs, path).is_some()
+    }
+    /// The attribute `path` names and the animation channel it selects: a component path
+    /// ("/transform/position/1") names its vector and that channel, any other path the attribute
+    /// and all of its channels (None).
+    fn lane(attrs: &Attrs, path: &str) -> (String, Option<usize>) {
+        match Self::component_path_with(attrs, path) {
+            Some((parent, component)) => (parent, Some(component)),
+            None => (path.to_owned(), None),
+        }
+    }
+    /// Run `edit` on each animation channel of `attr` that `channel` selects (None: all of
+    /// them), with its index; nothing when `attr` is not animated. The ONE channel walk of the
+    /// key commands: keying a component, Remove key, Static, Move keys, Interpolation and the
+    /// curve effects.
+    fn for_channels<E>(
+        attrs: &mut Attrs,
+        attr: &str,
+        channel: Option<usize>,
+        mut edit: impl FnMut(usize, &mut Channel) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let Some(anim) = attrs.anim_mut(attr) else {
+            return Ok(());
+        };
+        for (index, ch) in anim.channels.iter_mut().enumerate() {
+            if channel.is_none_or(|c| c == index) {
+                edit(index, ch)?;
+            }
+        }
+        Ok(())
+    }
+    /// Drop keys of the channels `path` selects (`lane`): every key (`all`), else the one at
+    /// `frame`. A channel left without keys holds the value it showed at `frame`; once none has
+    /// keys the attribute is static and takes that value as its base (a discrete one leaves its
+    /// value dictionary, `set_attribute`). The one unkeying of Remove key and Static.
+    fn unkey(
+        &mut self,
+        id: NodeId,
+        path: &str,
+        frame: f64,
+        all: bool,
+        new: Tan,
+    ) -> Result<(), String> {
+        let held = self.attribute_value(id, path, frame)?;
+        let mut attrs = self.attrs(id)?;
+        let (attr, channel) = Self::lane(&attrs, path);
+        let mut emptied = Vec::new();
+        Self::for_channels(&mut attrs, &attr, channel, |index, ch| {
+            if all {
+                *ch = Channel::new();
+            } else {
+                ch.remove_key(frame);
+            }
+            if ch.is_empty() {
+                emptied.push(index);
+            }
+            Ok::<(), String>(())
+        })?;
+        if attrs.anim(&attr).is_some_and(Animation::is_empty) {
+            attrs.set_anim(&attr, None);
+            self.store_attrs(id, &attrs)?;
+            return self.set_attribute(id, path, held, frame, false, new);
+        }
+        if !emptied.is_empty() {
+            // Some channels of a vector lost their keys: their base components hold the value.
+            let raw = self.without_navigation_offset(id, path, held)?;
+            let mut base = attrs
+                .get(&attr)
+                .cloned()
+                .map(attr_json)
+                .ok_or_else(|| format!("Unavailable parameter {attr}"))?;
+            for index in emptied {
+                let value = match channel {
+                    Some(_) => raw.clone(),
+                    None => raw.get(index).cloned().ok_or("Invalid component")?,
+                };
+                *base.get_mut(index).ok_or("Invalid component")? = value;
+            }
+            attrs.set(&attr, to_attr(&base));
+        }
+        self.store_attrs(id, &attrs)
     }
     /// Refresh the `/formula` choice blob after a Hybrid steps write. Slot edits
     /// land on the `/formula/Hybrid/steps` array entry, while `inactive_reason`
@@ -4576,6 +4642,15 @@ impl WorldDocument {
                 self.require_live_settings(target, expected)?;
             }
         }
+        // A number takes its attribute's stored type (an integer attribute rounds), so an edit
+        // never changes the type a value is stored, evaluated and edited as (`numeric_like`).
+        let value = match (value.as_f64(), self.node(id)?["discrete"].get(path)) {
+            (Some(v), None) => match self.attrs(id)?.get(path).cloned().map(attr_json) {
+                Some(stored) if stored.is_number() => numeric_like(&stored, v),
+                _ => value,
+            },
+            _ => value,
+        };
         // Hard limits hold for every attribute edit (AE, timeline, commands), not per widget.
         let value = clamp_to_range(path, value);
         let value = self.without_navigation_offset(id, path, value)?;
@@ -4589,7 +4664,9 @@ impl WorldDocument {
             }
             let mut a = self.attrs(id)?;
             let mut vector = self.resolve_attribute(id, &parent, frame, &mut HashSet::new())?;
-            vector[component] = value.clone();
+            // The vector comes from evaluation (a connection's source, a discrete value): its
+            // shape is checked here, not assumed.
+            *vector.get_mut(component).ok_or("Invalid component")? = value.clone();
             if key
                 || a.anim(&parent)
                     .and_then(|anim| anim.channels.get(component))
@@ -4604,12 +4681,10 @@ impl WorldDocument {
                     );
                 }
                 let scalar = value.as_f64().ok_or("Component must be numeric")? as f32;
-                if let Some(ch) = a
-                    .anim_mut(&parent)
-                    .and_then(|anim| anim.channels.get_mut(component))
-                {
+                Self::for_channels(&mut a, &parent, Some(component), |_, ch| {
                     ch.upsert_key(Keyframe::with_tan(frame, scalar, key_tan(ch, frame, kind)));
-                }
+                    Ok::<(), String>(())
+                })?;
             } else {
                 a.set(&parent, to_attr(&vector));
                 if parent == "/formula/Hybrid/steps" {
@@ -4637,16 +4712,18 @@ impl WorldDocument {
         let animated = a.is_animated(path);
         if key || animated {
             let attr = if discrete {
-                let data = self.node_mut(id)?;
-                if data["discrete"].get(path).is_none() {
-                    let base = a
-                        .get(path)
-                        .cloned()
-                        .map(attr_json)
-                        .unwrap_or_else(|| value.clone());
-                    data["discrete"][path] = json!([base]);
-                }
-                let dict = data["discrete"][path]
+                let base = a
+                    .get(path)
+                    .cloned()
+                    .map(attr_json)
+                    .unwrap_or_else(|| value.clone());
+                let dict = self
+                    .node_mut(id)?
+                    .get_mut("discrete")
+                    .and_then(Value::as_object_mut)
+                    .ok_or("Invalid discrete dictionaries")?
+                    .entry(path)
+                    .or_insert_with(|| json!([base]))
                     .as_array_mut()
                     .ok_or("Invalid discrete dictionary")?;
                 let index = if let Some(i) = dict.iter().position(|v| v == &value) {
@@ -5038,7 +5115,7 @@ impl WorldDocument {
             if (wanted - raw - added).abs() < 1e-5 {
                 continue;
             }
-            if attrs.conn(path).is_some() {
+            if Self::connection(attrs, path).is_some() {
                 return Err("Camera navigation channel is connected".into());
             }
             let animated = attrs
@@ -5056,20 +5133,22 @@ impl WorldDocument {
                     .ok_or("Invalid camera animation arity")?;
                 let tan = key_tan(ch, frame, kind);
                 ch.upsert_key(Keyframe::with_tan(frame, (wanted - added) as f32, tan));
-            } else if animated {
-                if arity == 1 {
-                    offset = json!(wanted - raw);
-                } else {
-                    offset[component] = json!(wanted - raw);
-                }
-                offset_changed = true;
             } else {
-                if arity == 1 {
-                    base = json!(wanted - added);
+                // A stored offset or base of another shape than the pose is an error, not a panic.
+                let (slot, value) = if animated {
+                    offset_changed = true;
+                    (&mut offset, wanted - raw)
                 } else {
-                    base[component] = json!(wanted - added);
+                    base_changed = true;
+                    (&mut base, wanted - added)
+                };
+                if arity == 1 {
+                    *slot = json!(value);
+                } else {
+                    *slot
+                        .get_mut(component)
+                        .ok_or("Camera channel does not match its pose")? = json!(value);
                 }
-                base_changed = true;
             }
         }
         if base_changed {
@@ -5169,9 +5248,11 @@ impl WorldDocument {
         let v = self.evaluated_node(id, frame)?;
         let mut camera: crate::scene::Camera =
             serde_json::from_value(v["camera"].clone()).map_err(|e| e.to_string())?;
-        let reference: crate::scene::Formula =
-            serde_json::from_value(self.node(id)?["gpu"]["formula"].clone())
-                .map_err(|e| e.to_string())?;
+        let reference =
+            self.attribute_value(id, CAMERA_FRAMING, frame)?
+                .as_f64()
+                .filter(|r| r.is_finite() && *r > 0.0)
+                .ok_or("The camera's framing radius must be a positive number")? as f32;
         camera.yaw_degrees += self.camera_orbit_angle(id, frame)?;
         let m = self.world_matrix(id, frame, &mut HashSet::new())?;
         if m != glam::Mat4::IDENTITY {
@@ -5202,22 +5283,22 @@ impl WorldDocument {
                 .camera_at(shown, self.first, self.last, self.fps)
                 .ok_or_else(|| format!("Take \"{}\" is not a camera take", take.name))?;
         }
-        Ok((camera, reference.framing_radius()))
+        Ok((camera, reference))
     }
 
     /// Sun node `id`'s light at `frame`, its direction turned by its transform (parents
     /// included) into world azimuth / elevation.
-    pub fn sun_light(&self, id: NodeId, frame: f64) -> Result<crate::scene::Lighting, String> {
+    pub fn sun_light(&self, id: NodeId, frame: f64) -> Result<crate::scene::Sun, String> {
         let v = self.evaluated_node(id, frame)?;
-        let mut light: crate::scene::Lighting =
-            serde_json::from_value(v["lighting"].clone()).map_err(|e| e.to_string())?;
+        let mut sun: crate::scene::Sun =
+            serde_json::from_value(v["sun"].clone()).map_err(|e| e.to_string())?;
         let d = self
             .world_matrix(id, frame, &mut HashSet::new())?
-            .transform_vector3(light.direction())
+            .transform_vector3(sun.direction())
             .normalize_or_zero();
-        light.sun_elevation = d.y.clamp(-1.0, 1.0).asin().to_degrees();
-        light.sun_azimuth = d.x.atan2(d.z).to_degrees();
-        Ok(light)
+        sun.elevation = d.y.clamp(-1.0, 1.0).asin().to_degrees();
+        sun.azimuth = d.x.atan2(d.z).to_degrees();
+        Ok(sun)
     }
 
     /// Node `id`'s object-to-world matrix at `frame` (parents included).
@@ -5274,15 +5355,36 @@ impl WorldDocument {
         serde_json::from_value(self.evaluated_node(id, frame)?["material"].clone())
             .map_err(|error| error.to_string())
     }
+    /// A typed scene of the world settings `base` (a complete scene's JSON, the render
+    /// included) with a node's evaluated `branches` laid over it: what a world object packs
+    /// (`snapshot_with_render_profile`). Nodes store only their own branches (`node_template`).
+    fn overlay_scene(base: &Value, branches: Value) -> Result<Scene, String> {
+        let Value::Object(branches) = branches else {
+            return Err("A node's evaluated branches must be an object".into());
+        };
+        let mut value = base.clone();
+        value
+            .as_object_mut()
+            .ok_or("World settings must be an object")?
+            .extend(branches);
+        serde_json::from_value(value).map_err(|e| e.to_string())
+    }
     #[cfg(test)]
     pub fn node_scene(&self, id: NodeId, frame: f64) -> Result<Scene, String> {
-        let mut scene: Scene =
-            serde_json::from_value(self.evaluated_node(id, frame)?).map_err(|e| e.to_string())?;
         let global = self.snapshot(frame)?;
+        let mut base = self
+            .graph
+            .bus_slots
+            .get("world")
+            .cloned()
+            .ok_or("World settings missing")?;
+        base["render"] = serde_json::to_value(global.render).map_err(|e| e.to_string())?;
+        let mut scene = Self::overlay_scene(&base, self.evaluated_node(id, frame)?)?;
         scene.camera = global.camera;
         scene.camera_reference = global.camera_reference;
         scene.environment = global.environment;
-        scene.lighting = global.lighting;
+        scene.sun = global.sun;
+        scene.sky = global.sky;
         let data = self.node(id)?;
         let attrs = self.attrs(id)?;
         let kind = self.info_with(id, data, &attrs)?.kind;
@@ -5333,25 +5435,13 @@ impl WorldDocument {
         }
         let data = self.node(id)?;
         let attrs = self.attrs(id)?;
-        let (storage_path, component) =
-            Self::component_path_with(&attrs, path).unwrap_or_else(|| (path.into(), 0));
-        if let Some(conn) = attrs.conn(&storage_path) {
-            let source_path = if storage_path != path {
-                format!("{}/{}", conn.source_key, component)
-            } else {
-                conn.source_key.clone()
-            };
-            return self.integrated_scalar(
-                NodeId(conn.source_layer),
-                &source_path,
-                from,
-                to,
-                visiting,
-            );
+        if let Some((source, source_path)) = Self::connection(&attrs, path) {
+            return self.integrated_scalar(source, &source_path, from, to, visiting);
         }
+        let (attr, channel) = Self::lane(&attrs, path);
         if let Some(channel) = attrs
-            .anim(&storage_path)
-            .and_then(|a| a.channels.get(component))
+            .anim(&attr)
+            .and_then(|a| a.channels.get(channel.unwrap_or(0)))
             .filter(|channel| !channel.is_empty())
         {
             return Ok(crate::camera_orbit::integrate(channel, from, to));
@@ -5430,13 +5520,7 @@ impl WorldDocument {
         view: View,
     ) -> Result<Scene, String> {
         self.require_live_settings(profile, WorldKind::RenderSettings)?;
-        if self.graph.format_version != playa_graph::SUBNET_FORMAT_VERSION {
-            return Err(format!(
-                "Unsupported world graph version {} (expected {})",
-                self.graph.format_version,
-                playa_graph::SUBNET_FORMAT_VERSION
-            ));
-        }
+        self.check_format()?;
         if !frame.is_finite() {
             return Err("Invalid frame".into());
         }
@@ -5450,15 +5534,15 @@ impl WorldDocument {
             .clone();
         let render_value = serde_json::to_value(effective.render).map_err(|e| e.to_string())?;
         base["render"] = render_value.clone();
-        let mut scene: Scene =
-            serde_json::from_value(base).map_err(|e| format!("Invalid world settings: {e}"))?;
+        let mut scene: Scene = serde_json::from_value(base.clone())
+            .map_err(|e| format!("Invalid world settings: {e}"))?;
         scene.document = None;
         scene.animation = Default::default();
         scene.objects.clear();
         scene.lights.clear();
         scene.world_render = true;
         scene.object_world = None;
-        let nodes = self.nodes();
+        let nodes = self.nodes_at(frame);
         let shown = self.shown_kinds(view, frame)?;
         if let Some(id) = self.active_camera {
             (scene.camera, scene.camera_reference) = self
@@ -5469,20 +5553,19 @@ impl WorldDocument {
             Some(id) if self.shows(id, WorldKind::Environment, frame, shown)? => Some(id),
             _ => None,
         };
-        let environment_light = if let Some(id) = environment {
+        // The sky is the shown Environment's; without one the world is dark behind and around.
+        if let Some(id) = environment {
             let v = self.evaluated_node_with_render(id, frame, Some(&render_value))?;
             scene.environment =
                 serde_json::from_value(v["environment"].clone()).map_err(|e| e.to_string())?;
             scene.environment.revision =
                 self.node(id)?["environment_revision"].as_u64().unwrap_or(0);
-            Some(
-                serde_json::from_value::<crate::scene::Lighting>(v["lighting"].clone())
-                    .map_err(|e| e.to_string())?,
-            )
+            scene.sky = serde_json::from_value(v["sky"].clone()).map_err(|e| e.to_string())?;
         } else {
             scene.environment.enabled = false;
-            None
-        };
+            scene.sky.intensity = 0.0;
+            scene.sky.background = false;
+        }
         let solo = nodes.iter().any(|n| n.solo);
         for node in &nodes {
             if node.kind != WorldKind::DirectionalLight
@@ -5493,19 +5576,10 @@ impl WorldDocument {
             }
             scene.lights.push(self.sun_light(node.id, frame)?);
         }
-        if let Some(light) = scene.lights.first() {
-            scene.lighting = *light;
-        } else {
-            scene.lighting.sun_intensity = 0.0;
-        }
-        if let Some(env) = environment_light {
-            scene.lighting.sky_intensity = env.sky_intensity;
-            scene.lighting.sky_horizon = env.sky_horizon;
-            scene.lighting.sky_zenith = env.sky_zenith;
-            scene.lighting.background = env.background;
-        } else {
-            scene.lighting.sky_intensity = 0.0;
-            scene.lighting.background = false;
+        // The single-object key light is the first sun; without one it is off.
+        match scene.lights.first() {
+            Some(sun) => scene.sun = *sun,
+            None => scene.sun.intensity = 0.0,
         }
         // Visible masks with their scope: the subtree of their parent, the whole scene at the root.
         let mut masks = Vec::new();
@@ -5531,12 +5605,12 @@ impl WorldDocument {
                     in_scope.push(*mask);
                 }
             }
-            let mut object: Scene = serde_json::from_value(self.evaluated_node_with_render(
-                node.id,
-                frame,
-                Some(&render_value),
-            )?)
-            .map_err(|e| e.to_string())?;
+            // The fractal's own branches over the world settings: a fractal without a material
+            // renders the world's.
+            let mut object = Self::overlay_scene(
+                &base,
+                self.evaluated_node_with_render(node.id, frame, Some(&render_value))?,
+            )?;
             if let Some(material) = self.node(node.id)?["material"]
                 .as_str()
                 .and_then(NodeId::parse)
@@ -5556,7 +5630,8 @@ impl WorldDocument {
             object.camera = scene.camera;
             object.camera_reference = scene.camera_reference;
             object.environment = scene.environment.clone();
-            object.lighting = scene.lighting;
+            object.sun = scene.sun;
+            object.sky = scene.sky;
             // Per-object DE parameters stay on the fractal; the top-level scene owns ray settings.
             object.colour = scene.colour.clone();
             object.document = None;
@@ -5596,18 +5671,70 @@ impl WorldDocument {
         Ok(scene)
     }
 
-    /// Decode a persisted `WorldDocument` from JSON text and hydrate any added, removed or renamed
-    /// schema fields in-place so older scene, template and bookmark files load cleanly while
-    /// current documents round-trip byte-for-byte unchanged.
+    /// This document's graph is of the format this build reads and writes.
+    fn check_format(&self) -> Result<(), String> {
+        if self.graph.format_version != playa_graph::SUBNET_FORMAT_VERSION {
+            return Err(format!(
+                "Unsupported world graph version {} (expected {})",
+                self.graph.format_version,
+                playa_graph::SUBNET_FORMAT_VERSION
+            ));
+        }
+        Ok(())
+    }
+
+    /// The invariants every reader of a document relies on: a work area `first <= last` at a
+    /// positive finite rate, world settings that are an object, and nodes of the stored shape
+    /// whose animations have their values' arity (`node_shape`, `check_arity`). Checked when a
+    /// document is decoded, so a malformed or hand-edited file is an error instead of a panic.
+    fn validate(&self) -> Result<(), String> {
+        if self.first > self.last {
+            return Err(format!(
+                "The work area starts at frame {} after it ends at {}",
+                self.first, self.last
+            ));
+        }
+        if !(self.fps.is_finite() && self.fps > 0.0) {
+            return Err(format!("Invalid frame rate {}", self.fps));
+        }
+        if !self
+            .graph
+            .bus_slots
+            .get("world")
+            .is_some_and(Value::is_object)
+        {
+            return Err("World settings missing".into());
+        }
+        for (key, data) in &self.graph.nodes {
+            node_shape(key, data)?;
+            let attrs: Attrs = serde_json::from_value(data["host"].clone())
+                .map_err(|e| format!("Node {key}: {e}"))?;
+            check_arity(&attrs).map_err(|e| format!("Node {key}: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Decode a persisted `WorldDocument` from JSON text: a document of this build's graph format
+    /// whose nodes have the stored shape before anything reads them, and that passes `validate`.
+    ///
+    /// LEGACY, deleted in wave 2 of plan1 once `convert_documents_once` has converted the
+    /// checked-in templates and the user's documents: the dropping of unknown top-level fields and
+    /// the defaults below, and `hydrate_schema`, which upgrades older layouts on the way in (so
+    /// until then a decoded document can differ from its text).
     pub fn decode_json(text: &str) -> Result<Self, String> {
         let mut raw: Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
         let Some(top) = raw.as_object_mut() else {
             return Err("Expected world document object".into());
         };
-        if !top.get("graph").is_some_and(Value::is_object)
-            || !top["graph"].get("nodes").is_some_and(Value::is_object)
-        {
+        let Some(nodes) = top
+            .get("graph")
+            .and_then(|graph| graph.get("nodes"))
+            .and_then(Value::as_object)
+        else {
             return Err("Missing world graph".into());
+        };
+        for (key, data) in nodes {
+            node_shape(key, data)?;
         }
         top.retain(|k, _| {
             matches!(
@@ -5630,16 +5757,21 @@ impl WorldDocument {
         top.entry("fps").or_insert_with(|| json!(24.0));
         top.entry("marks").or_insert_with(|| json!({}));
         let mut document: Self = serde_json::from_value(raw).map_err(|e| e.to_string())?;
+        document.check_format()?;
         document.hydrate_schema()?;
+        document.validate()?;
         Ok(document)
     }
 
-    /// Fill missing parameters from canonical preset schemas and strip removed parameters on
-    /// `bus_slots["world"]`, each node's `gpu` payload, and each node's `host` (`Attrs`).
+    /// LEGACY, deleted whole in wave 2 of plan1 (see `decode_json`): upgrades every older layout
+    /// on the way in. In order: pre-Track animation channels, pre-render-profile documents,
+    /// QualitySettings nodes, the single `lighting` block (split into the Sun's `sun` and the
+    /// Environment's `sky`), the camera's frozen formula copy (now `CAMERA_FRAMING`), a fractal's
+    /// frozen material copy (now a Material node when it differs from the world's), then the
+    /// generic merge that fills missing parameters from the current schema, strips removed ones,
+    /// slims every node's `gpu` to its branches (`node_template`) and aligns numeric types.
+    /// Documents this build writes need none of it: `insert` writes them complete.
     pub fn hydrate_schema(&mut self) -> Result<(), String> {
-        if self.graph.format_version != playa_graph::SUBNET_FORMAT_VERSION {
-            return Ok(());
-        }
         // 1. Upgrade legacy pre-Track animation channels (`{"keys": [...]}`) before deserializing `Attrs`.
         for node in self.graph.nodes.values_mut() {
             let Some(map) = node
@@ -5684,14 +5816,14 @@ impl WorldDocument {
             }
         }
 
-        let default_scene = Scene::preset(crate::params::FAMILY_BULB);
-        let default_scene_json = scene_json(&default_scene)?;
-        let mut default_world = default_scene_json.clone();
+        let default_scene = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
+        let mut default_world = scene_json(&default_scene)?;
         if let Some(obj) = default_world.as_object_mut() {
             obj.remove("render");
         }
-        let formula_presets: Vec<Value> = (0..crate::scene::Formula::COUNT)
-            .filter_map(|family| serde_json::to_value(Scene::preset(family).formula).ok())
+        let formula_presets: Vec<Value> = crate::scene::Formula::PRESETS
+            .iter()
+            .filter_map(|formula| serde_json::to_value(formula).ok())
             .collect();
         let facing_schema = json!({
             "color": [1.0, 1.0, 1.0],
@@ -5750,8 +5882,8 @@ impl WorldDocument {
                         } else if let Some(tail) = path.strip_prefix("/render")
                             && render_val.pointer(tail).is_some()
                         {
-                            let _ =
-                                set_pointer(&mut render_val, tail, attr_json(val.clone()), false);
+                            set_pointer(&mut render_val, tail, attr_json(val.clone()), false)
+                                .map_err(|e| format!("Legacy render setting {path}: {e}"))?;
                         }
                     }
                 }
@@ -5772,9 +5904,8 @@ impl WorldDocument {
                 &formula_presets,
                 &facing_schema,
             );
-            if let Ok(parsed_render) = serde_json::from_value(render_val) {
-                seed_scene.render = parsed_render;
-            }
+            seed_scene.render = serde_json::from_value(render_val)
+                .map_err(|e| format!("Legacy render settings: {e}"))?;
             self.seed_settings(&seed_scene)?;
             if let Some(samples) = legacy_samples {
                 let render_ids: Vec<NodeId> = self
@@ -5784,14 +5915,15 @@ impl WorldDocument {
                     .map(|n| n.id)
                     .collect();
                 for rid in render_ids {
-                    let _ = self.set_attribute(
+                    self.set_attribute(
                         rid,
                         "/quality/samples",
                         json!(samples),
                         0.0,
                         false,
                         Tan::Constant,
-                    );
+                    )
+                    .map_err(|e| format!("Legacy sample count {samples}: {e}"))?;
                 }
             }
         }
@@ -5838,21 +5970,27 @@ impl WorldDocument {
                 .map(attr_json)
                 .and_then(|v| v.as_str().map(str::to_owned))
                 .or_else(|| {
-                    self.graph.nodes[key]["gpu"]
-                        .pointer("/render/quality_id")
+                    self.graph
+                        .nodes
+                        .get(key)?
+                        .pointer("/gpu/render/quality_id")
                         .and_then(Value::as_str)
                         .map(str::to_owned)
                 });
             if let Some(qid) = qid_str
                 && let Some(qnode) = quality_nodes.get(&qid)
             {
-                if let Some(q_gpu) = qnode["gpu"].get("quality").cloned() {
-                    self.graph.nodes.get_mut(key).expect("render node")["gpu"]["quality"] = q_gpu;
+                if let Some(q_gpu) = qnode["gpu"].get("quality").cloned()
+                    && let Some(r_node) = self.graph.nodes.get_mut(key)
+                {
+                    r_node["gpu"]["quality"] = q_gpu;
                 }
                 if let Some(q_disc) = qnode["discrete"].as_object()
-                    && let Some(r_disc) =
-                        self.graph.nodes.get_mut(key).expect("render node")["discrete"]
-                            .as_object_mut()
+                    && let Some(r_disc) = self
+                        .graph
+                        .nodes
+                        .get_mut(key)
+                        .and_then(|r_node| r_node["discrete"].as_object_mut())
                 {
                     for (dk, dv) in q_disc {
                         if dk.starts_with("/quality/") {
@@ -5921,6 +6059,12 @@ impl WorldDocument {
             }
         }
 
+        // 2.6. Split `/lighting/*` attributes into the Sun's `/sun/*` and the Environment's
+        // `/sky/*` (the JSON blobs split in `migrate_legacy_json`); the merge below strips each
+        // kind's foreign half. The disc switch was read from the first Sun: every Environment
+        // takes that one.
+        self.split_lighting_attrs()?;
+
         // 3. Hydrate `bus_slots["world"]`.
         let world_slot = self
             .graph
@@ -5930,7 +6074,11 @@ impl WorldDocument {
         Self::migrate_legacy_json(world_slot);
         Self::merge_schema_value(world_slot, &default_world, &formula_presets, &facing_schema);
 
-        // Precompute all valid `/formula/<Family>/*` attributes across all 8 formula families.
+        // 3.5. Frozen copies in the old full-scene `gpu` blobs become explicit data before the
+        // merge slims every blob to its branches.
+        self.thaw_frozen_copies(&formula_presets, &facing_schema)?;
+
+        // Precompute all valid `/formula/<Family>/*` attributes across every formula family.
         let mut all_formula_attrs = Attrs::new();
         for preset in &formula_presets {
             discover(preset, "/formula", &mut all_formula_attrs);
@@ -5947,7 +6095,7 @@ impl WorldDocument {
                 continue;
             };
             let gpu_schema = if crate::render_profiles::setting_kind(kind) {
-                let mut schema = self.settings_template(kind, &default_scene)?;
+                let mut schema = self.node_template(kind, &default_scene)?;
                 for ref_path in [
                     "/viewport/moving_id",
                     "/viewport/still_id",
@@ -5961,12 +6109,8 @@ impl WorldDocument {
                     }
                 }
                 schema
-            } else if kind == WorldKind::Fractal {
-                let mut schema = default_world.clone();
-                schema["render"] = json!({"iterations": default_scene.render.iterations});
-                schema
             } else {
-                default_scene_json.clone()
+                self.node_template(kind, &default_scene)?
             };
 
             {
@@ -6053,24 +6197,8 @@ impl WorldDocument {
                     discover(v, &format!("/{branch}"), &mut canonical_attrs);
                 }
             }
-            for (path, value) in [
-                ("/visible", json!(true)),
-                ("/locked", json!(false)),
-                ("/solo", json!(false)),
-                ("/shy", json!(crate::render_profiles::setting_kind(kind))),
-                ("/start", json!(self.first as f64)),
-                ("/end", json!(self.last as f64 + 1.0)),
-                ("/transform/position", json!([0.0, 0.0, 0.0])),
-                ("/transform/rotation_degrees", json!([0.0, 0.0, 0.0])),
-                ("/transform/scale", json!([1.0, 1.0, 1.0])),
-                ("/transform/pivot", json!([0.0, 0.0, 0.0])),
-            ] {
-                canonical_attrs.set(path, to_attr(&value));
-            }
-            if kind == WorldKind::Camera {
-                for path in [CAMERA_ORBIT_SPEED, CAMERA_ORBIT_PHASE] {
-                    canonical_attrs.set(path, to_attr(&json!(0.0)));
-                }
+            for (path, value) in self.base_attrs(kind, &default_scene).iter() {
+                canonical_attrs.set(path, value.clone());
             }
 
             // Hydrate JSON blobs stored in `attrs` (`/formula`, `/material/facing`) and discover their children.
@@ -6221,6 +6349,162 @@ impl WorldDocument {
         Ok(())
     }
 
+    /// LEGACY step of `hydrate_schema`: every `/lighting/<field>` attribute (value, keys,
+    /// connection, discrete values) moves to its `/sun/..` or `/sky/..` path
+    /// ([`LIGHTING_SPLIT`]). The Environment's disc switch becomes the first Sun's, the one the
+    /// renderer read.
+    fn split_lighting_attrs(&mut self) -> Result<(), String> {
+        const DISC: &str = "/lighting/sun_disc";
+        let mut disc = None;
+        if let Some(sun) = self
+            .nodes()
+            .into_iter()
+            .find(|n| n.kind == WorldKind::DirectionalLight)
+        {
+            let attrs = self.attrs(sun.id)?;
+            if let Some(value) = attrs.get(DISC).cloned() {
+                let values = self.node(sun.id)?["discrete"].get(DISC).cloned();
+                disc = Some((value, attrs.anim(DISC).cloned(), values));
+            }
+        }
+        let keys: Vec<String> = self.graph.nodes.keys().cloned().collect();
+        for key in keys {
+            let Some(id) = NodeId::parse(&key) else {
+                continue;
+            };
+            let mut attrs = self.attrs(id)?;
+            let mut moved = false;
+            let mut renames = Vec::new();
+            for (old, branch, field) in LIGHTING_SPLIT {
+                let (from, to) = (format!("/lighting/{old}"), format!("/{branch}/{field}"));
+                let Some(value) = attrs.get(&from).cloned() else {
+                    continue;
+                };
+                let (anim, conn) = (attrs.anim(&from).cloned(), attrs.conn(&from).cloned());
+                attrs.remove(&from);
+                attrs.set(&to, value);
+                attrs.set_anim(&to, anim);
+                if conn.is_some() {
+                    attrs.set_conn(&to, conn);
+                }
+                renames.push((from, to));
+                moved = true;
+            }
+            let environment = self.node(id)?["type"].as_str() == Some("Environment");
+            if environment && let Some((value, anim, _)) = &disc {
+                attrs.set("/sky/sun_disc", value.clone());
+                attrs.set_anim("/sky/sun_disc", anim.clone());
+                moved = true;
+            }
+            if !moved {
+                continue;
+            }
+            self.store_attrs(id, &attrs)?;
+            let dict = self
+                .node_mut(id)?
+                .get_mut("discrete")
+                .and_then(Value::as_object_mut)
+                .ok_or_else(|| format!("Node {key} has no discrete values"))?;
+            for (from, to) in renames {
+                if let Some(values) = dict.remove(&from) {
+                    dict.insert(to, values);
+                }
+            }
+            if environment && let Some((_, _, values)) = &disc {
+                dict.remove("/sky/sun_disc");
+                if let Some(values) = values {
+                    dict.insert("/sky/sun_disc".into(), values.clone());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// LEGACY step of `hydrate_schema`, run before the merge slims every node's `gpu` to its
+    /// branches: what a node read from its old full-scene blob becomes explicit data. A camera
+    /// without `CAMERA_FRAMING` takes the framing radius of its frozen formula; a fractal
+    /// without a material whose frozen material differs from the world's (which it renders now,
+    /// `snapshot_with_render_profile`) gets a Material node holding it.
+    fn thaw_frozen_copies(
+        &mut self,
+        formula_presets: &[Value],
+        facing_schema: &Value,
+    ) -> Result<(), String> {
+        let default_scene = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
+        let material_schema =
+            serde_json::to_value(&default_scene.material).map_err(|e| e.to_string())?;
+        let world_material: crate::scene::Material = serde_json::from_value(
+            self.graph
+                .bus_slots
+                .get("world")
+                .and_then(|w| w.get("material"))
+                .cloned()
+                .ok_or("World settings have no material")?,
+        )
+        .map_err(|e| format!("World material: {e}"))?;
+        let keys: Vec<String> = self.graph.nodes.keys().cloned().collect();
+        for key in keys {
+            let Some(id) = NodeId::parse(&key) else {
+                continue;
+            };
+            let (kind, name, assigned, formula, material) = {
+                let node = self.node(id)?;
+                (
+                    node["type"].as_str().map(str::to_owned),
+                    node["name"].as_str().unwrap_or("Fractal").to_owned(),
+                    !node["material"].is_null(),
+                    node["gpu"].get("formula").cloned(),
+                    node["gpu"].get("material").cloned(),
+                )
+            };
+            match kind.as_deref() {
+                Some("Camera") => {
+                    let mut attrs = self.attrs(id)?;
+                    if attrs.contains(CAMERA_FRAMING) {
+                        continue;
+                    }
+                    let mut formula = formula.ok_or_else(|| {
+                        format!("Camera {key} has neither a framing radius nor a formula")
+                    })?;
+                    let schema = Self::formula_schema(&formula, formula_presets);
+                    Self::merge_schema_value(&mut formula, &schema, formula_presets, facing_schema);
+                    let formula: crate::scene::Formula = serde_json::from_value(formula)
+                        .map_err(|e| format!("Camera {key} formula: {e}"))?;
+                    attrs.set(CAMERA_FRAMING, to_attr(&json!(formula.framing_radius())));
+                    self.store_attrs(id, &attrs)?;
+                }
+                Some("Fractal") if !assigned => {
+                    let Some(mut material) = material else {
+                        continue;
+                    };
+                    Self::merge_schema_value(
+                        &mut material,
+                        &material_schema,
+                        formula_presets,
+                        facing_schema,
+                    );
+                    let material: crate::scene::Material = serde_json::from_value(material)
+                        .map_err(|e| format!("Fractal {key} material: {e}"))?;
+                    if material != world_material {
+                        let scene = Scene {
+                            material,
+                            ..default_scene.clone()
+                        };
+                        let created = self.insert(
+                            WorldKind::Material,
+                            &format!("{name} material"),
+                            &scene,
+                            None,
+                        )?;
+                        self.node_mut(id)?["material"] = json!(created);
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
     fn formula_schema(target_formula: &Value, formula_presets: &[Value]) -> Value {
         if let Some(variant) = target_formula.as_object().and_then(|map| map.keys().next())
             && let Some(preset) = formula_presets
@@ -6248,6 +6532,18 @@ impl WorldDocument {
         if map.get("julia").is_some_and(Value::is_array) && !map.contains_key("julia_mix") {
             map.insert("julia_mix".into(), json!(1.0));
         }
+        // The single `lighting` block splits into `sun` and `sky` ([`LIGHTING_SPLIT`]).
+        if let Some(Value::Object(lighting)) = map.remove("lighting") {
+            let (mut sun, mut sky) = (serde_json::Map::new(), serde_json::Map::new());
+            for (old, branch, field) in LIGHTING_SPLIT {
+                if let Some(value) = lighting.get(old) {
+                    let part = if branch == "sun" { &mut sun } else { &mut sky };
+                    part.insert(field.into(), value.clone());
+                }
+            }
+            map.entry("sun").or_insert(Value::Object(sun));
+            map.entry("sky").or_insert(Value::Object(sky));
+        }
     }
 
     fn merge_schema_value(
@@ -6262,7 +6558,9 @@ impl WorldDocument {
                     *target = schema.clone();
                     return;
                 }
-                let tmap = target.as_object_mut().expect("checked object");
+                let Some(tmap) = target.as_object_mut() else {
+                    return;
+                };
                 tmap.retain(|k, _| smap.contains_key(k));
                 for (k, sv) in smap {
                     if k == "formula" {
@@ -6315,17 +6613,11 @@ impl WorldDocument {
                     *target = schema.clone();
                 }
             }
-            Value::Number(sn) => {
-                if let Value::Number(tn) = target {
-                    if sn.is_f64() && (tn.is_i64() || tn.is_u64()) {
-                        *target = json!(tn.as_f64().unwrap_or(0.0));
-                    } else if (sn.is_i64() || sn.is_u64()) && tn.is_f64() {
-                        *target = json!(tn.as_f64().unwrap_or(0.0).round() as i64);
-                    }
-                } else {
-                    *target = schema.clone();
-                }
-            }
+            Value::Number(sn) => match target.as_f64() {
+                Some(v) if sn.is_f64() != target.is_f64() => *target = numeric_like(schema, v),
+                Some(_) => {}
+                None => *target = schema.clone(),
+            },
             Value::Bool(_) => {
                 if !target.is_boolean() {
                     *target = schema.clone();
@@ -6344,6 +6636,22 @@ impl WorldDocument {
         }
     }
 }
+
+/// LEGACY (deleted with `hydrate_schema` in wave 2 of plan1): where each field of the old single
+/// `lighting` block went, `(old field, branch, field)`: the Sun's `sun` or the Environment's
+/// `sky` (`scene::Sun`, `scene::Sky`).
+const LIGHTING_SPLIT: [(&str, &str, &str); 10] = [
+    ("sun_azimuth", "sun", "azimuth"),
+    ("sun_elevation", "sun", "elevation"),
+    ("sun_color", "sun", "color"),
+    ("sun_intensity", "sun", "intensity"),
+    ("sun_angle", "sun", "angle"),
+    ("sky_intensity", "sky", "intensity"),
+    ("sky_horizon", "sky", "horizon"),
+    ("sky_zenith", "sky", "zenith"),
+    ("background", "sky", "background"),
+    ("sun_disc", "sky", "sun_disc"),
+];
 
 fn attribute_base_path(path: &str) -> &str {
     match path.rsplit_once('/') {
@@ -6398,16 +6706,9 @@ fn attribute_order(path: &str) -> u16 {
         p if p.starts_with("/viewport/show/") => 50,
         p if p.starts_with("/viewport/select/") => 60,
 
-        // Output: format, dimensions & final denoise first, then encoding & color management
-        "/output/format" => 10,
-        "/output/width" => 11,
-        "/output/height" => 12,
+        // Output: the recipe and final denoise first, then color management
+        "/output/preset" => 10,
         "/output/denoise_at_completion" => 13,
-        "/output/encoder" => 20,
-        "/output/qp" => 21,
-        "/output/png" => 30,
-        "/output/png_peak_nits" => 31,
-        "/output/png_video" => 32,
         "/output/output_display" => 40,
         "/output/output_view" => 41,
 
@@ -6480,22 +6781,23 @@ fn attribute_order(path: &str) -> u16 {
         "/camera/sensor_height" => 22,
         "/camera/orbit_speed_degrees" => 30,
         "/camera/orbit_phase_degrees" => 31,
+        CAMERA_FRAMING => 40,
 
-        // Environment & Light: HDRI first, then sun, then sky
+        // Environment: HDRI first, then the sky; Light: the sun
         "/environment/enabled" => 10,
         "/environment/path" => 11,
         "/environment/intensity" => 12,
         "/environment/rotation_degrees" => 13,
-        "/lighting/sun_intensity" => 20,
-        "/lighting/sun_color" => 21,
-        "/lighting/sun_azimuth" => 22,
-        "/lighting/sun_elevation" => 23,
-        "/lighting/sun_angle" => 24,
-        "/lighting/sun_disc" => 25,
-        "/lighting/sky_intensity" => 30,
-        "/lighting/sky_horizon" => 31,
-        "/lighting/sky_zenith" => 32,
-        "/lighting/background" => 33,
+        "/sun/intensity" => 20,
+        "/sun/color" => 21,
+        "/sun/azimuth" => 22,
+        "/sun/elevation" => 23,
+        "/sun/angle" => 24,
+        "/sky/intensity" => 30,
+        "/sky/horizon" => 31,
+        "/sky/zenith" => 32,
+        "/sky/background" => 33,
+        "/sky/sun_disc" => 34,
 
         // Mask & Array
         "/mask/shape" => 10,
@@ -6514,7 +6816,6 @@ fn attribute_order(path: &str) -> u16 {
         // Transform: TRS + Pivot
         "/transform/position" => 10,
         "/transform/rotation_degrees" => 11,
-        "/transform/rotation" => 12,
         "/transform/scale" => 13,
         "/transform/pivot" => 14,
 

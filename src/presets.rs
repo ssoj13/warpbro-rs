@@ -1,38 +1,30 @@
-//! Portable animated worlds authored through the same commands as the editor.
-use crate::params::{FAMILY_APOLLONIAN, FAMILY_BOX, FAMILY_BULB, FAMILY_KIFS, FAMILY_QUAT};
-use crate::scene::{Coloring, Facing, Formula, Kifs, KifsKind, MaterialModel, Scene};
+//! Portable animated worlds authored through the same commands as the editor. The built-in
+//! template table (`templates::BUILTINS`) names them and is their only entry point; the other
+//! animated showcase scenes there are authored documents (JSON).
+use crate::scene::{
+    Coloring, Facing, Formula, Kifs, KifsKind, MandelBox, MaterialModel, Quat, Scene,
+};
 use crate::world::{
     CAMERA_ORBIT_PHASE, CAMERA_ORBIT_SPEED, NodeId, WorldCommand, WorldDocument, WorldEditor,
 };
 use curves::Tan;
 use serde_json::{Value, json};
 
-pub struct AnimatedPreset {
-    pub name: &'static str,
-    pub description: &'static str,
+/// The animated worlds this module authors (`templates::BUILTINS` gives their names and
+/// descriptions).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Animated {
+    /// Cool metallic Mandelbox folds.
+    ChromeCathedral,
+    /// A pearlescent quaternion Julia.
+    OpalJulia,
+    /// A jade octahedral KIFS.
+    VerdantFold,
 }
-pub const ANIMATED: [AnimatedPreset; 5] = [
-    AnimatedPreset {
-        name: "Ember Bloom",
-        description: "A copper Mandelbulb opens and twists under warm light.",
-    },
-    AnimatedPreset {
-        name: "Chrome Cathedral",
-        description: "Cool metallic Mandelbox folds breathe through a slow camera arc.",
-    },
-    AnimatedPreset {
-        name: "Opal Julia",
-        description: "A pearlescent quaternion Julia shifts through violet and blue.",
-    },
-    AnimatedPreset {
-        name: "Verdant Fold",
-        description: "A jade octahedral KIFS unfolds against a deep green sky.",
-    },
-    AnimatedPreset {
-        name: "Luminous Web",
-        description: "Golden Apollonian filaments change density under a dusk gradient.",
-    },
-];
+impl Animated {
+    #[cfg(test)]
+    pub const ALL: [Self; 3] = [Self::ChromeCathedral, Self::OpalJulia, Self::VerdantFold];
+}
 const TIMES: [f64; 3] = [0.0, 124.0, 249.0];
 
 fn track(commands: &mut Vec<WorldCommand>, id: NodeId, path: &str, values: [Value; 3]) {
@@ -57,91 +49,85 @@ fn track(commands: &mut Vec<WorldCommand>, id: NodeId, path: &str, values: [Valu
     });
 }
 
-pub fn scene(index: usize) -> Result<Scene, String> {
-    let preset = ANIMATED.get(index).ok_or("Unknown animation preset")?;
-    let family = [
-        FAMILY_BULB,
-        FAMILY_BOX,
-        FAMILY_QUAT,
-        FAMILY_KIFS,
-        FAMILY_APOLLONIAN,
-    ][index];
-    let mut base = Scene::preset(family);
-    base.name = preset.name.into();
+/// The world `preset` named `name`: 250 frames at 24 fps, the camera orbiting and pulling back
+/// while the fractal unfolds.
+pub fn scene(preset: Animated, name: &str) -> Result<Scene, String> {
+    let mut base = Scene::preset(match preset {
+        Animated::ChromeCathedral => Formula::Mandelbox(MandelBox::PRESET),
+        Animated::OpalJulia => Formula::QuaternionJulia(Quat::PRESET),
+        Animated::VerdantFold => Formula::Kifs(Kifs::preset(KifsKind::Tetrahedron)),
+    });
+    base.name = name.into();
     base.animation.first = 0;
     base.animation.last = 249;
     base.animation.fps = 24.0;
-    base.camera.distance = [3.8, 3.1, 2.6, 3.8, 3.1][index];
+    base.camera.distance = match preset {
+        Animated::ChromeCathedral => 3.1,
+        Animated::OpalJulia => 2.6,
+        Animated::VerdantFold => 3.8,
+    };
     base.camera.pitch_degrees = 14.0;
     base.camera.f_number = 0.0;
     base.render.max_bounces = 4;
     base.render.exposure_stops = 0.0;
     base.material.model = MaterialModel::Fast;
-    base.material.specular_roughness = [0.27, 0.30, 0.23, 0.3, 0.25][index];
-    base.material.metalness = [0.75, 0.9, 0.12, 0.28, 0.65][index];
+    (base.material.specular_roughness, base.material.metalness) = match preset {
+        Animated::ChromeCathedral => (0.30, 0.9),
+        Animated::OpalJulia => (0.23, 0.12),
+        Animated::VerdantFold => (0.3, 0.28),
+    };
     base.coloring = Coloring::TrapOrigin;
     base.trap_scale = 1.25;
-    let (palette, horizon, zenith, sun) = match index {
-        0 => (
-            crate::palette::PaletteScheme::Ember,
-            [0.045, 0.014, 0.007],
-            [0.035, 0.055, 0.11],
-            [1.0, 0.68, 0.42],
-        ),
-        1 => (
+    let (palette, horizon, zenith, sun) = match preset {
+        Animated::ChromeCathedral => (
             crate::palette::PaletteScheme::Ice,
             [0.12, 0.16, 0.22],
             [0.008, 0.014, 0.025],
             [0.78, 0.88, 1.0],
         ),
-        2 => (
+        Animated::OpalJulia => (
             crate::palette::PaletteScheme::Amethyst,
             [0.055, 0.025, 0.09],
             [0.045, 0.09, 0.16],
             [1.0, 0.8, 0.95],
         ),
-        3 => (
+        Animated::VerdantFold => (
             crate::palette::PaletteScheme::Verdant,
             [0.014, 0.04, 0.027],
             [0.055, 0.105, 0.09],
             [0.86, 1.0, 0.72],
         ),
-        _ => (
-            crate::palette::PaletteScheme::Copper,
-            [0.05, 0.022, 0.065],
-            [0.035, 0.07, 0.14],
-            [1.0, 0.82, 0.52],
-        ),
     };
     base.palette = palette;
-    base.lighting.sky_horizon = horizon;
-    base.lighting.sky_zenith = zenith;
-    base.lighting.sun_color = sun;
-    base.lighting.sky_intensity = 4.5;
-    base.lighting.sun_intensity = if index == 1 { 4.0 } else { 2.5 };
-    base.lighting.sun_angle = 3.0;
-    base.lighting.sun_azimuth = -35.0;
-    base.lighting.sun_elevation = 48.0;
-    base.lighting.background = true;
-    if index == 1
-        && let Formula::Mandelbox(parameters) = &mut base.formula
-    {
-        parameters.scale = -1.5;
-    }
-    if index == 4 {
-        base.material.base_tint = [1.0, 0.88, 0.64];
-    }
-    if index == 2 {
-        base.material.facing = Some(Facing {
-            color: [0.18, 0.65, 0.9],
-            roughness: 0.28,
-            metallic: 0.35,
-            exponent: 2.3,
-        });
-        base.material.thin_film_thickness = 420.0;
-    }
-    if index == 3 {
-        base.formula = Formula::Kifs(Kifs::preset(KifsKind::Octahedron));
+    base.sky.horizon = horizon;
+    base.sky.zenith = zenith;
+    base.sun.color = sun;
+    base.sky.intensity = 4.5;
+    base.sun.intensity = if preset == Animated::ChromeCathedral {
+        4.0
+    } else {
+        2.5
+    };
+    base.sun.angle = 3.0;
+    base.sun.azimuth = -35.0;
+    base.sun.elevation = 48.0;
+    base.sky.background = true;
+    match preset {
+        Animated::ChromeCathedral => {
+            if let Formula::Mandelbox(parameters) = &mut base.formula {
+                parameters.scale = -1.5;
+            }
+        }
+        Animated::OpalJulia => {
+            base.material.facing = Some(Facing {
+                color: [0.18, 0.65, 0.9],
+                roughness: 0.28,
+                metallic: 0.35,
+                exponent: 2.3,
+            });
+            base.material.thin_film_thickness = 420.0;
+        }
+        Animated::VerdantFold => base.formula = Formula::Kifs(Kifs::preset(KifsKind::Octahedron)),
     }
     let mut editor = WorldEditor::new(WorldDocument::from_scene(&base));
     let object = editor.selection.ok_or("Preset has no fractal")?;
@@ -161,10 +147,12 @@ pub fn scene(index: usize) -> Result<Scene, String> {
             end: 250.0,
         });
     }
-    for (path, value) in [
-        (CAMERA_ORBIT_SPEED, 6.0 + index as f64),
-        (CAMERA_ORBIT_PHASE, 0.0),
-    ] {
+    let orbit_speed = match preset {
+        Animated::ChromeCathedral => 7.0,
+        Animated::OpalJulia => 8.0,
+        Animated::VerdantFold => 9.0,
+    };
+    for (path, value) in [(CAMERA_ORBIT_SPEED, orbit_speed), (CAMERA_ORBIT_PHASE, 0.0)] {
         commands.push(WorldCommand::SetAttribute {
             id: camera,
             path: path.into(),
@@ -219,10 +207,9 @@ pub fn scene(index: usize) -> Result<Scene, String> {
         "/camera/pitch_degrees",
         [json!(14.0), json!(17.0), json!(20.0)],
     );
-    let iterations = match index {
-        0 => [6.0, 13.0, 20.0],
-        1 => [6.0, 10.0, 14.0],
-        _ => [3.0, 8.0, 14.0],
+    let iterations = match preset {
+        Animated::ChromeCathedral => [6.0, 10.0, 14.0],
+        Animated::OpalJulia | Animated::VerdantFold => [3.0, 8.0, 14.0],
     };
     track(
         &mut commands,
@@ -230,28 +217,8 @@ pub fn scene(index: usize) -> Result<Scene, String> {
         "/render/iterations",
         iterations.map(|n| json!(n)),
     );
-    match index {
-        0 => {
-            track(
-                &mut commands,
-                object,
-                "/formula/Mandelbulb/angle_scale",
-                [json!([0.5, 0.5]), json!([1.0, 1.0]), json!([1.5, 1.5])],
-            );
-            track(
-                &mut commands,
-                object,
-                "/formula/Mandelbulb/power",
-                [json!(3.0), json!(5.5), json!(8.0)],
-            );
-            track(
-                &mut commands,
-                object,
-                "/formula/Mandelbulb/angle_phase_degrees/0",
-                [json!(0.0), json!(3.0), json!(6.0)],
-            );
-        }
-        1 => {
+    match preset {
+        Animated::ChromeCathedral => {
             track(
                 &mut commands,
                 object,
@@ -265,7 +232,7 @@ pub fn scene(index: usize) -> Result<Scene, String> {
                 [json!(0.5), json!(0.4), json!(0.3)],
             );
         }
-        2 => {
+        Animated::OpalJulia => {
             track(
                 &mut commands,
                 object,
@@ -279,7 +246,7 @@ pub fn scene(index: usize) -> Result<Scene, String> {
                 [json!(-0.07), json!(0.0), json!(0.07)],
             );
         }
-        3 => {
+        Animated::VerdantFold => {
             track(
                 &mut commands,
                 object,
@@ -291,20 +258,6 @@ pub fn scene(index: usize) -> Result<Scene, String> {
                 object,
                 "/formula/Kifs/rotation_degrees/1",
                 [json!(-3.0), json!(0.5), json!(4.0)],
-            );
-        }
-        _ => {
-            track(
-                &mut commands,
-                object,
-                "/formula/Apollonian/scale",
-                [json!(1.2), json!(1.3), json!(1.4)],
-            );
-            track(
-                &mut commands,
-                object,
-                "/trap_scale",
-                [json!(1.0), json!(1.325), json!(1.65)],
             );
         }
     }
@@ -324,9 +277,11 @@ mod tests {
 
     #[test]
     fn animated_presets_remain_finite_visible_and_authored_for_all_250_frames() {
-        for (index, animated) in ANIMATED.iter().enumerate() {
-            let preset = scene(index).unwrap();
-            let document = preset.document.as_ref().unwrap();
+        for preset in Animated::ALL {
+            let name = format!("{preset:?}");
+            let authored = scene(preset, &name).unwrap();
+            assert_eq!(authored.name, name);
+            let document = authored.document.as_ref().unwrap();
             assert_eq!(
                 (document.first, document.last, document.fps),
                 (0, 249, 24.0)
@@ -359,7 +314,7 @@ mod tests {
             );
             for frame in 0..250 {
                 let snapshot = document.snapshot(f64::from(frame)).unwrap();
-                assert_eq!(snapshot.objects.len(), 1, "{}", animated.name);
+                assert_eq!(snapshot.objects.len(), 1, "{name}");
                 assert!(snapshot.pack(320, 180).iter().all(|v| v.is_finite()));
                 assert!(
                     snapshot.objects[0]
@@ -377,14 +332,12 @@ mod tests {
                 );
             }
         }
-        assert!(scene(ANIMATED.len()).is_err());
     }
 
     #[test]
     fn unfolding_controls_are_monotonic_across_the_whole_work_area() {
-        for index in 0..ANIMATED.len() {
-            let preset = scene(index).unwrap();
-            let document = preset.document.unwrap();
+        for preset in Animated::ALL {
+            let document = scene(preset, "unfolding").unwrap().document.unwrap();
             let mut previous = document.snapshot(0.0).unwrap();
             for frame in 1..250 {
                 let current = document.snapshot(f64::from(frame)).unwrap();
@@ -392,12 +345,6 @@ mod tests {
                 assert!(current.camera.distance >= previous.camera.distance);
                 assert!(current.camera.pitch_degrees >= previous.camera.pitch_degrees);
                 match (&previous.formula, &current.formula) {
-                    (Formula::Mandelbulb(a), Formula::Mandelbulb(b)) => {
-                        assert!(b.power >= a.power);
-                        for axis in 0..2 {
-                            assert!(b.angle_scale[axis] >= a.angle_scale[axis]);
-                        }
-                    }
                     (Formula::Mandelbox(a), Formula::Mandelbox(b)) => {
                         assert!(b.scale <= a.scale);
                         assert!(b.min_radius_ratio <= a.min_radius_ratio);
@@ -407,7 +354,6 @@ mod tests {
                         assert!(b.slice_w >= a.slice_w);
                     }
                     (Formula::Kifs(a), Formula::Kifs(b)) => assert!(b.scale >= a.scale),
-                    (Formula::Apollonian(a), Formula::Apollonian(b)) => assert!(b.scale >= a.scale),
                     _ => panic!("Preset changed formula family"),
                 }
                 previous = current;
@@ -417,9 +363,8 @@ mod tests {
 
     #[test]
     fn preset_documents_roundtrip_and_evaluate_identically_in_reverse_and_at_subframes() {
-        for index in 0..ANIMATED.len() {
-            let preset = scene(index).unwrap();
-            let document = preset.document.unwrap();
+        for preset in Animated::ALL {
+            let document = scene(preset, "roundtrip").unwrap().document.unwrap();
             let restored: WorldDocument =
                 serde_json::from_str(&serde_json::to_string(&document).unwrap()).unwrap();
             let frames = [0.0, 13.25, 62.5, 124.0, 186.75, 249.0];

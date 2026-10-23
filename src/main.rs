@@ -1,11 +1,18 @@
 #![recursion_limit = "256"]
-//! WarpBro: a path-traced 3D fractal browser. Rust CUDA kernels (cuda-oxide) port ofx-rs
-//! `ofx-fractal` (eight distance-estimated families, DE sphere tracing) and render-rs
-//! (`pt-integrator` path tracing, `standard-surface-bsdf`); the UI is egui.
+//! WarpBro: a path-traced 3D fractal browser. The render worker drives the fractal-rs CUDA
+//! kernels (cuda-oxide) or their WGSL port: 28 distance-estimated families (the 8 classic ones on
+//! both backends, the extended ones on WGPU), DE sphere tracing, `pt-integrator` path tracing and
+//! `standard-surface-bsdf`. The UI is egui.
 //!
-//!   WarpBro                                  the browser
-//!   WarpBro --gallery DIR [W H SPP]          render every gallery preset to DIR/*.png
-//!   WarpBro --bench [W H SPP]                time every preset
+//!   WarpBro                                          the browser
+//!   WarpBro --gallery DIR [W H SPP] [--hdr] [--display-exr]
+//!                                                    render every gallery preset to DIR
+//!   WarpBro --bench [W H SPP]                        time every gallery preset
+//!   WarpBro --world-bench [DIR] [W H SPP] [--case NAME] [--seed N] [--batch 4|8] [--adaptive T]
+//!                                                    measure evaluated worlds (`render_bench`)
+//!   WarpBro --animated-fixtures [DIR] [W H SPP] [--all-frames]
+//!                                                    render the animated presets' frames
+//!   WarpBro --warmup-cuda                            initialize the embedded CUDA module
 
 mod animation;
 // The parameter ABI is shared with the CUDA kernels and with ofx-rs through fractal-rs; host code
@@ -28,11 +35,11 @@ mod hotkeys;
 mod io_service;
 mod material_gallery;
 mod materials;
-#[allow(dead_code)]
 mod ocio;
 mod overlay;
 mod palette;
-#[allow(dead_code)] // Integrated into CUDA after the unchanged-policy baseline is captured.
+// Unwired roulette / clamp policies awaiting a decision (plan1 Q4): no kernel uses them yet.
+#[allow(dead_code)]
 mod path_convergence;
 mod presets;
 mod preview;
@@ -48,7 +55,6 @@ mod takes;
 mod templates;
 #[cfg(test)]
 mod test_gpu;
-mod transfer;
 mod window;
 mod window_shot;
 mod world;
@@ -86,8 +92,16 @@ pub fn new_out_dir(root: &std::path::Path) -> Result<std::path::PathBuf, String>
 }
 
 /// Render (or only time) every gallery preset offscreen.
-fn headless(out: Option<&str>, w: usize, h: usize, spp: u32, hdr: bool, display_exr: bool) {
-    let mut gpu = render::Gpu::new().unwrap_or_else(|e| panic!("{e}"));
+fn headless(
+    out: Option<&str>,
+    w: usize,
+    h: usize,
+    spp: u32,
+    hdr: bool,
+    display_exr: bool,
+) -> anyhow::Result<()> {
+    render::validate_size(w, h, spp)?;
+    let mut gpu = render::Gpu::new()?;
     println!("GPU: {}  ·  {w}x{h}, {spp} spp", gpu.name);
     println!(
         "{:<28} {:>16} {:>9} {:>11}",
@@ -99,15 +113,10 @@ fn headless(out: Option<&str>, w: usize, h: usize, spp: u32, hdr: bool, display_
             scene.colour.display = "Rec.2100-PQ - Display".into();
             scene.colour.view = color::HDR_VIEW.into();
         }
-        let mut t = gpu.target(w, h);
-        gpu.step(&mut t, &scene, 1, 0, None, spp <= 1); // warm-up
-        let batch = 8u32;
+        let mut t = render::Target::new(w, h);
+        gpu.step(&mut t, &scene, 1, 0, spp <= 1)?; // warm-up
         let t0 = Instant::now();
-        while !t.complete(spp) {
-            let n = batch.min(spp - t.samples);
-            let final_pass = t.samples + n >= spp;
-            gpu.step(&mut t, &scene, n, 0, None, final_pass);
-        }
+        while !gpu.advance(&mut t, &scene, spp, 0, render::Batch::Fixed(8))? {}
         let secs = t0.elapsed().as_secs_f64();
         let traced = (spp - 1).max(1) as f64;
         println!(
@@ -118,22 +127,26 @@ fn headless(out: Option<&str>, w: usize, h: usize, spp: u32, hdr: bool, display_
             (w * h) as f64 * traced / secs / 1e6
         );
         if let Some(dir) = out {
-            let encoding = crate::render_service::PngEncoding::displayed(t.light_kind.hdr());
+            let frame = render_service::Frame::snapshot(&t, 0, false, false, 100.0);
+            let encoding = render_service::PngEncoding::displayed(frame.light_kind.hdr());
             let dir = std::path::Path::new(dir);
             let stem = fs_name::stem(&scene.name);
             let path = dir.join(fs_name::frame_file(&stem, None, encoding.suffix()));
-            t.save_png(&path, encoding, crate::color::BT2408_SDR_WHITE_NITS, true)
-                .expect("save png");
+            frame
+                .save_png(&path, encoding, color::BT2408_SDR_WHITE_NITS, true)
+                .map_err(anyhow::Error::msg)?;
             if display_exr {
-                let exr = crate::render_service::FrameFile::DisplayExr.suffix();
-                t.save_display_exr(
-                    &dir.join(fs_name::frame_file(&stem, None, exr)),
-                    crate::color::BT2408_SDR_WHITE_NITS,
-                )
-                .expect("save display EXR");
+                let exr = render_service::FrameFile::DisplayExr.suffix();
+                frame
+                    .save_display_exr(
+                        &dir.join(fs_name::frame_file(&stem, None, exr)),
+                        color::BT2408_SDR_WHITE_NITS,
+                    )
+                    .map_err(anyhow::Error::msg)?;
             }
         }
     }
+    Ok(())
 }
 
 fn animated_fixtures(
@@ -143,22 +156,15 @@ fn animated_fixtures(
     samples: u32,
     all_frames: bool,
 ) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        width > 0
-            && height > 0
-            && width <= 16384
-            && height <= 16384
-            && width.checked_mul(height).is_some_and(|n| n <= 67_108_864),
-        "Invalid fixture resolution"
-    );
-    anyhow::ensure!(
-        samples > 0 && samples <= 1_000_000,
-        "Invalid fixture samples"
-    );
+    render::validate_size(width, height, samples)?;
     std::fs::create_dir_all(dir)?;
-    let mut gpu = render::Gpu::new().map_err(anyhow::Error::msg)?;
-    for (index, descriptor) in presets::ANIMATED.iter().enumerate() {
-        let scene = presets::scene(index).map_err(anyhow::Error::msg)?;
+    let mut gpu = render::Gpu::new()?;
+    let animated = templates::BUILTINS
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| templates::ANIMATED.contains(index));
+    for (index, descriptor) in animated {
+        let scene = templates::builtin_scene(index).map_err(anyhow::Error::msg)?;
         let document = scene
             .document
             .as_ref()
@@ -182,37 +188,22 @@ fn animated_fixtures(
                 document.last,
             ]
         };
-        let mut target = gpu.target(width, height);
         for frame in frames {
             let evaluated = document
                 .snapshot(f64::from(frame))
                 .map_err(anyhow::Error::msg)?;
             let start = Instant::now();
-            // Fixed seed keeps regression images repeatable. One target is reused between frames.
-            for first_sample in (0..samples).step_by(8) {
-                let count = 8.min(samples - first_sample);
-                gpu.step(
-                    &mut target,
-                    &evaluated,
-                    count,
-                    0,
-                    None,
-                    first_sample + count == samples,
-                );
-                if let Some(error) = &target.colour_error {
-                    anyhow::bail!("{error}");
-                }
-            }
-            anyhow::ensure!(
-                target.samples == samples,
-                "Fixture accumulation did not complete"
-            );
-            let encoding = crate::render_service::PngEncoding::displayed(target.light_kind.hdr());
-            target
+            // A fixed seed keeps regression images repeatable. Every frame gets its own target,
+            // so identical consecutive frames never accumulate into one another.
+            let mut target = render::Target::new(width, height);
+            while !gpu.advance(&mut target, &evaluated, samples, 0, render::Batch::Fixed(8))? {}
+            let image = render_service::Frame::snapshot(&target, 0, false, false, 100.0);
+            let encoding = render_service::PngEncoding::displayed(image.light_kind.hdr());
+            image
                 .save_png(
                     &output.join(fs_name::frame_file("frame", Some(frame), encoding.suffix())),
                     encoding,
-                    crate::color::BT2408_SDR_WHITE_NITS,
+                    color::BT2408_SDR_WHITE_NITS,
                     true,
                 )
                 .map_err(anyhow::Error::msg)?;
@@ -237,7 +228,7 @@ fn main() -> anyhow::Result<()> {
         // this does not populate the Timeline frame cache or wait on the UI thread.
         Some("--warmup-cuda") => {
             let started = std::time::Instant::now();
-            let gpu = render::Gpu::new().map_err(anyhow::Error::msg)?;
+            let gpu = render::Gpu::new()?;
             println!("CUDA ready: {} ({:?})", gpu.name, started.elapsed());
             Ok(())
         }
@@ -260,20 +251,16 @@ fn main() -> anyhow::Result<()> {
                 arg(&args, 5, 64),
                 args.iter().any(|a| a == "--hdr"),
                 args.iter().any(|a| a == "--display-exr"),
-            );
-            Ok(())
+            )
         }
-        Some("--bench") => {
-            headless(
-                None,
-                arg(&args, 2, 960),
-                arg(&args, 3, 540),
-                arg(&args, 4, 32),
-                false,
-                false,
-            );
-            Ok(())
-        }
+        Some("--bench") => headless(
+            None,
+            arg(&args, 2, 960),
+            arg(&args, 3, 540),
+            arg(&args, 4, 32),
+            false,
+            false,
+        ),
         _ => app::run(),
     }
 }

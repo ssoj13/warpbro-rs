@@ -13,40 +13,48 @@ pub enum Source {
     /// A scene file in the templates directory.
     File(PathBuf),
 }
+/// What a built-in template is made of: one payload per template, whatever opens it (the
+/// Templates menu, the gallery fixtures, the world benchmark).
 #[derive(Clone, Copy)]
 enum BuiltinPayload {
-    Preset(usize),
+    /// Authored by code (`presets::scene`).
+    Generated(crate::presets::Animated),
+    /// An authored document.
     Json(&'static str),
 }
+/// One built-in template: the only table of their names, descriptions and payloads.
 pub struct BuiltinTemplate {
     pub name: &'static str,
     pub description: &'static str,
     payload: BuiltinPayload,
 }
+/// The animated showcase scenes among [`BUILTINS`] (its first entries): what the gallery
+/// fixtures (`--animated-fixtures`) and the world benchmark render.
+pub const ANIMATED: std::ops::Range<usize> = 0..5;
 pub const BUILTINS: [BuiltinTemplate; 14] = [
     BuiltinTemplate {
         name: "Ember Bloom",
-        description: crate::presets::ANIMATED[0].description,
+        description: "A copper Mandelbulb opens and twists under warm light.",
         payload: BuiltinPayload::Json(include_str!("../templates/ember-bloom.frac.json")),
     },
     BuiltinTemplate {
         name: "Chrome Cathedral",
-        description: crate::presets::ANIMATED[1].description,
-        payload: BuiltinPayload::Preset(1),
+        description: "Cool metallic Mandelbox folds breathe through a slow camera arc.",
+        payload: BuiltinPayload::Generated(crate::presets::Animated::ChromeCathedral),
     },
     BuiltinTemplate {
         name: "Opal Julia",
-        description: crate::presets::ANIMATED[2].description,
-        payload: BuiltinPayload::Preset(2),
+        description: "A pearlescent quaternion Julia shifts through violet and blue.",
+        payload: BuiltinPayload::Generated(crate::presets::Animated::OpalJulia),
     },
     BuiltinTemplate {
         name: "Verdant Fold",
-        description: crate::presets::ANIMATED[3].description,
-        payload: BuiltinPayload::Preset(3),
+        description: "A jade octahedral KIFS unfolds against a deep green sky.",
+        payload: BuiltinPayload::Generated(crate::presets::Animated::VerdantFold),
     },
     BuiltinTemplate {
         name: "Luminous Web",
-        description: crate::presets::ANIMATED[4].description,
+        description: "Golden Apollonian filaments change density under a dusk gradient.",
         payload: BuiltinPayload::Json(include_str!("../templates/luminous-web.frac.json")),
     },
     BuiltinTemplate {
@@ -95,10 +103,11 @@ pub const BUILTINS: [BuiltinTemplate; 14] = [
         payload: BuiltinPayload::Json(include_str!("../templates/q-julia2.json")),
     },
 ];
+/// The scene of built-in template `index`, named as the table names it.
 pub fn builtin_scene(index: usize) -> Result<crate::scene::Scene, String> {
     let entry = BUILTINS.get(index).ok_or("Unknown built-in template")?;
     match entry.payload {
-        BuiltinPayload::Preset(preset) => crate::presets::scene(preset),
+        BuiltinPayload::Generated(preset) => crate::presets::scene(preset, entry.name),
         BuiltinPayload::Json(text) => {
             let mut scene = crate::io_service::decode_scene(text)?;
             scene.name = entry.name.to_owned();
@@ -141,10 +150,11 @@ pub fn catalog(directory: &Path) -> Result<Vec<Entry>, String> {
     for entry in read {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
+        // A name that is not Unicode cannot be matched against the scene suffixes or shown.
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            log::warn!("Template file name is not Unicode: {}", path.display());
+            continue;
+        };
         let scene = format!(".{}", crate::fs_name::SCENE_SUFFIX);
         let Some(stem) = name
             .strip_suffix(scene.as_str())
@@ -241,7 +251,7 @@ mod tests {
         assert!(!dir.exists(), "the catalog never creates the directory");
         std::fs::create_dir_all(&dir).unwrap();
         let first = BUILTINS[0].name;
-        let text = serde_json::to_string(&crate::presets::scene(0).unwrap().document).unwrap();
+        let text = serde_json::to_string(&builtin_scene(1).unwrap().document).unwrap();
         let replaced = dir.join(crate::fs_name::frame_file(
             &crate::fs_name::stem(first),
             None,
@@ -265,5 +275,23 @@ mod tests {
             crate::io_service::decode_scene(&std::fs::read_to_string(&user).unwrap()).unwrap();
         assert_eq!(scene.document.unwrap().last, 249);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+    /// One table: every built-in has its own name (a file overrides by it), and each animated
+    /// showcase scene is an animated document of that name.
+    #[test]
+    fn builtin_names_are_unique_and_the_animated_scenes_animate() {
+        let mut names: Vec<_> = BUILTINS
+            .iter()
+            .map(|b| crate::fs_name::slug(b.name))
+            .collect();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), BUILTINS.len());
+        for index in ANIMATED {
+            let scene = builtin_scene(index).unwrap();
+            assert_eq!(scene.name, BUILTINS[index].name);
+            let document = scene.document.unwrap();
+            assert!(document.last > document.first, "{}", scene.name);
+        }
     }
 }

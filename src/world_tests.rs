@@ -1,4 +1,5 @@
 use super::*;
+use crate::scene::{Bulb, Formula, Hybrid, MandelBox};
 
 #[test]
 fn glass_node_transmission_is_keyable_shared_and_roundtrips() {
@@ -146,8 +147,7 @@ fn camera_recording_rejects_locked_and_changed_documents_without_partial_edits()
         Recording::new(&e.document, e.revision(), 0.0, &scene, Options::default()).unwrap();
     recording.capture(1.0, scene.camera).unwrap();
     let id = recording.camera;
-    e.execute(WorldCommand::SetLocked { id, locked: true })
-        .unwrap();
+    set(&mut e, id, "/locked", json!(true), 0.0);
     let locked = e.document.clone();
     assert!(e.record_camera(&recording).is_err());
     assert_eq!(e.document, locked);
@@ -640,7 +640,7 @@ fn snapshot_bridge_never_generates_camera_keys_and_navigation_noop_is_clean() {
 
 #[test]
 fn camera_orbit_defaults_are_authored_at_creation_and_preserve_camera_pose() {
-    let scene = Scene::preset(0);
+    let scene = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
     let e = editor();
     let id = find(&e, WorldKind::Camera);
     let before = serde_json::to_value(&e.document).unwrap();
@@ -1027,7 +1027,9 @@ fn environment_reload_revision_is_authoritative_and_undoable() {
     assert_eq!(e.document.snapshot(0.0).unwrap().environment.revision, 0);
 }
 fn editor() -> WorldEditor {
-    WorldEditor::new(WorldDocument::from_scene(&Scene::preset(0)))
+    WorldEditor::new(WorldDocument::from_scene(&Scene::preset(
+        Formula::Mandelbulb(Bulb::PRESET),
+    )))
 }
 fn find(e: &WorldEditor, kind: WorldKind) -> NodeId {
     e.document
@@ -1036,6 +1038,16 @@ fn find(e: &WorldEditor, kind: WorldKind) -> NodeId {
         .find(|n| n.kind == kind)
         .unwrap()
         .id
+}
+/// A layer switch (`/visible`, `/locked`, `/solo`) set statically, as the outliner and the
+/// timeline send it.
+fn switch(id: NodeId, path: &str, on: bool) -> WorldCommand {
+    WorldCommand::SetAttribute {
+        id,
+        path: path.into(),
+        value: json!(on),
+        frame: 0.0,
+    }
 }
 fn set(e: &mut WorldEditor, id: NodeId, path: &str, value: Value, frame: f64) {
     e.execute(WorldCommand::SetAttribute {
@@ -1049,13 +1061,15 @@ fn set(e: &mut WorldEditor, id: NodeId, path: &str, value: Value, frame: f64) {
 #[test]
 fn constructs_all_formula_families_without_dropping_parameters() {
     for family in 0..crate::scene::Formula::COUNT {
-        let s = Scene::preset(family);
+        let s = Scene::preset(Formula::PRESETS[family as usize]);
         let world = WorldDocument::from_scene(&s);
         let snapshot = world.snapshot(0.0).unwrap();
         assert_eq!(snapshot.formula, s.formula);
         assert_eq!(snapshot.material, s.material);
         let mut expected_render = s.render;
-        expected_render.iterations = Scene::preset(crate::params::FAMILY_BULB).render.iterations;
+        expected_render.iterations = Scene::preset(Formula::Mandelbulb(Bulb::PRESET))
+            .render
+            .iterations;
         assert_eq!(snapshot.render, expected_render);
         assert_eq!(snapshot.camera, s.camera);
         assert_eq!(snapshot.environment, s.environment);
@@ -1070,7 +1084,7 @@ fn constructs_all_formula_families_without_dropping_parameters() {
 }
 #[test]
 fn numeric_component_keys_and_render_keys_share_playa_evaluation() {
-    let mut s = Scene::preset(0);
+    let mut s = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
     s.camera.target = [10.0, 20.0, 30.0];
     let w = WorldDocument::from_scene(&s);
     let mut e = WorldEditor::new(w);
@@ -1222,7 +1236,8 @@ fn parent_nonuniform_rotation_chain_is_full_matrix_and_span_half_open() {
     assert_eq!(matrix, (p * c).to_cols_array_2d());
     let snapshot = e.document.snapshot(4.0).unwrap();
     let bounds = snapshot.framing_bounds();
-    let radius = Scene::preset(0).pack(1, 1)[crate::params::P_CLIP_RADIUS];
+    let radius =
+        Scene::preset(Formula::Mandelbulb(Bulb::PRESET)).pack(1, 1)[crate::params::P_CLIP_RADIUS];
     let matrix = glam::Mat4::from_cols_array_2d(&matrix);
     for x in [-1.0, 1.0] {
         for y in [-1.0, 1.0] {
@@ -1265,7 +1280,7 @@ fn graph_transactions_rollback_cycles_and_undo_atomically() {
             id,
             name: "Changed".into(),
         },
-        WorldCommand::SetVisible { id, visible: false },
+        switch(id, "/visible", false),
     ]))
     .unwrap();
     assert_eq!(e.selected, vec![id, camera]);
@@ -1311,11 +1326,7 @@ fn duplicate_retains_independent_keys_and_all_visible_objects() {
             .attribute_value(duplicate, "/transform/position", 10.0)
             .unwrap()
     );
-    e.execute(WorldCommand::SetSolo {
-        id: duplicate,
-        solo: true,
-    })
-    .unwrap();
+    e.execute(switch(duplicate, "/solo", true)).unwrap();
     assert_eq!(e.document.snapshot(5.0).unwrap().objects.len(), 1);
 }
 #[test]
@@ -1329,7 +1340,7 @@ fn export_frozen_document_uses_identical_preview_snapshot() {
     })
     .unwrap();
     set(&mut e, camera, "/camera/distance", json!(5.0), 24.0);
-    let mut exported = Scene::preset(0);
+    let mut exported = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
     exported.document = Some(Box::new(e.document.clone()));
     for frame in [0.0, 3.5, 12.0, 24.0] {
         assert_eq!(
@@ -1395,7 +1406,7 @@ fn camera_reference_survives_visibility_reorder_and_formula_differences() {
         &mut e,
         second,
         "/formula",
-        serde_json::to_value(Scene::preset(1).formula).unwrap(),
+        serde_json::to_value(Scene::preset(Formula::Mandelbox(MandelBox::PRESET)).formula).unwrap(),
         0.0,
     );
     e.execute(WorldCommand::Reorder {
@@ -1403,11 +1414,7 @@ fn camera_reference_survives_visibility_reorder_and_formula_differences() {
     })
     .unwrap();
     let reordered = e.document.snapshot(0.0).unwrap().pack(8, 8);
-    e.execute(WorldCommand::SetVisible {
-        id: first,
-        visible: false,
-    })
-    .unwrap();
+    e.execute(switch(first, "/visible", false)).unwrap();
     let hidden = e.document.snapshot(0.0).unwrap().pack(8, 8);
     let origin = crate::params::P_CAM_ORIGIN;
     assert_eq!(
@@ -1415,12 +1422,76 @@ fn camera_reference_survives_visibility_reorder_and_formula_differences() {
         &reordered[origin..origin + 3]
     );
     assert_eq!(&baseline[origin..origin + 3], &hidden[origin..origin + 3]);
+    // The two fractals swapped their slots; every other node kept its own.
+    let slot = |document: &WorldDocument, id: NodeId| {
+        document.nodes().iter().position(|n| n.id == id).unwrap()
+    };
     let restored: WorldDocument =
         serde_json::from_value(serde_json::to_value(&e.document).unwrap()).unwrap();
-    assert_eq!(restored.nodes()[0].id, second);
+    assert!(slot(&restored, second) < slot(&restored, first));
     assert!(e.undo());
     assert!(e.undo());
-    assert_ne!(e.document.nodes()[0].id, second);
+    assert!(slot(&e.document, first) < slot(&e.document, second));
+}
+
+#[test]
+fn reorder_of_a_filtered_view_keeps_the_hidden_nodes_slots() {
+    let mut e = editor();
+    let before: Vec<NodeId> = e.document.nodes().iter().map(|n| n.id).collect();
+    // The timeline without its shy nodes (the settings), its last track moved to the top.
+    let mut shown: Vec<NodeId> = e
+        .document
+        .nodes()
+        .iter()
+        .filter(|n| !n.shy)
+        .map(|n| n.id)
+        .collect();
+    let last = shown.pop().unwrap();
+    shown.insert(0, last);
+    e.execute(WorldCommand::Reorder { ids: shown.clone() })
+        .unwrap();
+    let after: Vec<NodeId> = e.document.nodes().iter().map(|n| n.id).collect();
+    for (old, new) in before.iter().zip(&after) {
+        if !shown.contains(old) {
+            assert_eq!(old, new, "a hidden node keeps its slot");
+        }
+    }
+    let shown_after: Vec<NodeId> = after.into_iter().filter(|id| shown.contains(id)).collect();
+    assert_eq!(shown_after, shown);
+}
+
+#[test]
+fn delete_prunes_layer_order_and_refuses_locked_descendants() {
+    let mut e = editor();
+    e.execute(WorldCommand::Create {
+        kind: WorldKind::Group,
+        name: "Rig".into(),
+        parent: None,
+    })
+    .unwrap();
+    let group = e.selection.unwrap();
+    e.execute(WorldCommand::Create {
+        kind: WorldKind::Group,
+        name: "Child".into(),
+        parent: Some(group),
+    })
+    .unwrap();
+    let child = e.selection.unwrap();
+    e.execute(switch(child, "/locked", true)).unwrap();
+    let before = e.document.clone();
+    assert!(e.execute(WorldCommand::Delete(group)).is_err());
+    assert_eq!(e.document, before);
+    e.execute(switch(child, "/locked", false)).unwrap();
+    e.execute(WorldCommand::Delete(group)).unwrap();
+    let order = e.document.graph.bus_slots["layer_order"]
+        .as_array()
+        .unwrap();
+    for id in [group, child] {
+        assert!(
+            !order.contains(&json!(id)),
+            "a deleted node leaves the layer order"
+        );
+    }
 }
 #[test]
 fn parent_camera_pose_environment_visibility_and_ancestor_lock() {
@@ -1480,22 +1551,11 @@ fn parent_camera_pose_environment_visibility_and_ancestor_lock() {
         .transform_vector3(initial.camera.orientation() * glam::Vec3::Z)
         .normalize();
     assert!((a - b).length() < 1e-5);
-    e.execute(WorldCommand::SetVisible {
-        id: parent,
-        visible: false,
-    })
-    .unwrap();
+    e.execute(switch(parent, "/visible", false)).unwrap();
     assert!(!e.document.snapshot(0.0).unwrap().environment.enabled);
-    assert_eq!(
-        e.document.snapshot(0.0).unwrap().lighting.sky_intensity,
-        0.0
-    );
-    assert!(!e.document.snapshot(0.0).unwrap().lighting.background);
-    e.execute(WorldCommand::SetLocked {
-        id: parent,
-        locked: true,
-    })
-    .unwrap();
+    assert_eq!(e.document.snapshot(0.0).unwrap().sky.intensity, 0.0);
+    assert!(!e.document.snapshot(0.0).unwrap().sky.background);
+    e.execute(switch(parent, "/locked", true)).unwrap();
     assert!(
         e.execute(WorldCommand::Rename {
             id: camera,
@@ -1503,11 +1563,7 @@ fn parent_camera_pose_environment_visibility_and_ancestor_lock() {
         })
         .is_err()
     );
-    e.execute(WorldCommand::SetLocked {
-        id: parent,
-        locked: false,
-    })
-    .unwrap();
+    e.execute(switch(parent, "/locked", false)).unwrap();
     e.execute(WorldCommand::Rename {
         id: camera,
         name: "Allowed".into(),
@@ -1557,15 +1613,16 @@ fn fractal_schema_offers_all_formula_defaults_and_keeps_custom_values() {
     for (family, choice) in descriptor.choices.into_iter().enumerate() {
         assert_eq!(
             choice,
-            serde_json::to_value(Scene::preset(family as u32).formula).unwrap()
+            serde_json::to_value(Scene::preset(Formula::PRESETS[family]).formula).unwrap()
         );
         set(&mut e, id, "/formula", choice, 0.0);
         assert_eq!(
             e.document.node_scene(id, 0.0).unwrap().formula,
-            Scene::preset(family as u32).formula
+            Scene::preset(Formula::PRESETS[family]).formula
         );
     }
-    let mut custom = serde_json::to_value(Scene::preset(0).formula).unwrap();
+    let mut custom =
+        serde_json::to_value(Scene::preset(Formula::Mandelbulb(Bulb::PRESET)).formula).unwrap();
     let variant = custom.as_object_mut().unwrap().values_mut().next().unwrap();
     variant["power"] = json!(11.0);
     set(&mut e, id, "/formula", custom.clone(), 0.0);
@@ -1621,7 +1678,7 @@ fn julia_mix_and_orbit_controls_are_keyable_clamped_numbers() {
 }
 #[test]
 fn render_schema_filters_fractal_controls_but_keeps_world_settings_keys() {
-    let scene = Scene::preset(0);
+    let scene = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
     let mut editor = WorldEditor::new(WorldDocument::from_scene(&scene));
     let settings = editor.document.viewport_settings_id().unwrap();
     for (frame, value) in [(0.0, 0.0), (12.0, 2.5)] {
@@ -1725,24 +1782,33 @@ fn clipboard_copy_paste_and_duplicate_remap_ids_in_one_undo_step() {
     // Ctrl+C / Ctrl+V: fresh UUIDs; an outside reference that exists is kept.
     let text = e.document.copy_fragment(&[fractal]).unwrap();
     e.execute(WorldCommand::Delete(fractal)).unwrap();
-    e.execute(WorldCommand::Paste(text.clone())).unwrap();
+    assert_eq!(e.paste(&text).unwrap().roots, 1);
     let pasted = e.selection.unwrap();
     assert_ne!(pasted, fractal, "paste never reuses the source UUID");
     assert_eq!(
         e.document.assigned_material(pasted).unwrap(),
         Some(material)
     );
-    e.execute(WorldCommand::Paste(text)).unwrap();
+    e.paste(&text).unwrap();
     assert_ne!(e.selection.unwrap(), pasted, "every paste is a new node");
 
     // A copy holds the material's UUID, not the material: once the material is gone the
-    // reference is reported as unresolved and the paste clears it.
+    // reference is unresolved, the paste clears it and reports it as a material.
     let text = e.document.copy_fragment(&[pasted]).unwrap();
     let nodes = parse_clipboard(&text).unwrap().1;
-    assert!(e.document.unresolved_references(&nodes).is_empty());
+    assert!(e.document.unresolved_references(&nodes, true).is_empty());
     e.execute(WorldCommand::Delete(material)).unwrap();
-    assert_eq!(e.document.unresolved_references(&nodes).len(), 1);
-    e.execute(WorldCommand::Paste(text)).unwrap();
+    assert_eq!(e.document.unresolved_references(&nodes, true).len(), 1);
+    let report = e.paste(&text).unwrap();
+    assert_eq!(
+        report,
+        Pasted {
+            roots: 1,
+            materials: 1,
+            parents: 0,
+            takes: 0
+        }
+    );
     assert_eq!(
         e.document.assigned_material(e.selection.unwrap()).unwrap(),
         None
@@ -1751,17 +1817,14 @@ fn clipboard_copy_paste_and_duplicate_remap_ids_in_one_undo_step() {
     // Foreign clipboard text is not WarpBro nodes and changes nothing.
     assert!(parse_clipboard("hello").is_none());
     let before = e.document.nodes().len();
-    assert!(
-        e.execute(WorldCommand::Paste("{\"nodes\":{}}".into()))
-            .is_err()
-    );
+    assert!(e.paste("{\"nodes\":{}}").is_err());
     assert_eq!(e.document.nodes().len(), before);
 }
 
 #[test]
 fn fractal_slider_endpoints_pack_finite_and_hybrid_spans_match_standalone() {
     for family in 0..crate::scene::Formula::COUNT {
-        let scene = crate::scene::Scene::preset(family);
+        let scene = crate::scene::Scene::preset(Formula::PRESETS[family as usize]);
         let document = WorldDocument::from_scene(&scene);
         let id = document
             .nodes()
@@ -1822,7 +1885,9 @@ fn fractal_slider_endpoints_pack_finite_and_hybrid_spans_match_standalone() {
 fn every_numeric_parameter_has_a_slider_and_hard_limits_hold_in_the_document() {
     let mut colors = std::collections::BTreeSet::new();
     for family in 0..crate::scene::Formula::COUNT {
-        let doc = WorldDocument::from_scene(&crate::scene::Scene::preset(family));
+        let doc = WorldDocument::from_scene(&crate::scene::Scene::preset(
+            Formula::PRESETS[family as usize],
+        ));
         for node in doc.nodes() {
             for a in doc.attributes(node.id, 0.0).unwrap() {
                 let numeric = a.value.is_number()
@@ -1846,10 +1911,12 @@ fn every_numeric_parameter_has_a_slider_and_hard_limits_hold_in_the_document() {
         }
     }
     // Every RGB slot `Scene::pack` writes with put_rgb that the presets expose.
-    assert!(colors.contains("/lighting/sky_horizon") && colors.contains("/material/base_tint"));
+    assert!(colors.contains("/sky/horizon") && colors.contains("/material/base_tint"));
     assert!(colors.len() >= 10, "{colors:?}");
 
-    let mut e = WorldEditor::new(WorldDocument::from_scene(&crate::scene::Scene::preset(0)));
+    let mut e = WorldEditor::new(WorldDocument::from_scene(&crate::scene::Scene::preset(
+        Formula::Mandelbulb(Bulb::PRESET),
+    )));
     let material = e
         .document
         .nodes()
@@ -1968,12 +2035,15 @@ fn hybrid_marks_unpacked_sub_formula_parameters_and_limits_keep_their_floor() {
         );
     }
     assert!(inactive_reason("/formula/Hybrid/mandelbox/scale", value).is_none());
-    assert_eq!(
-        numeric_like(&json!(0), 0.0005),
-        json!(0.0005),
-        "a float floor never rounds away"
-    );
-    assert_eq!(numeric_like(&json!(9), 2.0), json!(2));
+    assert_eq!(numeric_like(&json!(9), 2.4), json!(2));
+    assert_eq!(numeric_like(&json!(9.5), 2.0), json!(2.0));
+    // An integer typed into a float attribute is a float there, so its floor never rounds away.
+    let mut e = editor();
+    let still = e.document.output_render_profile().unwrap();
+    let path = "/quality/adaptive/noise_threshold";
+    set(&mut e, still, path, json!(0), 0.0);
+    let value = e.document.attribute_value(still, path, 0.0).unwrap();
+    assert!(value.is_f64() && (value.as_f64().unwrap() - 0.0005).abs() < 1e-9);
 }
 
 #[test]
@@ -1985,7 +2055,7 @@ fn hybrid_step_slots_edit_and_never_packed_rows_stay_hidden() {
         &mut e,
         id,
         "/formula",
-        serde_json::to_value(Scene::preset(crate::params::FAMILY_HYBRID).formula).unwrap(),
+        serde_json::to_value(Scene::preset(Formula::Hybrid(Hybrid::PRESET)).formula).unwrap(),
         0.0,
     );
     let attrs = e.document.attributes(id, 0.0).unwrap();
@@ -2078,14 +2148,15 @@ fn hybrid_step_slots_edit_and_never_packed_rows_stay_hidden() {
 fn every_attribute_has_a_hover_hint() {
     let mut missing = std::collections::BTreeSet::new();
     // Optional attributes appear only when set: a facing blend.
-    let mut optional = Scene::preset(crate::params::FAMILY_BULB);
+    let mut optional = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
     optional.material.facing = Some(crate::scene::Facing {
         color: [1.0, 0.5, 0.2],
         roughness: 0.3,
         metallic: 0.5,
         exponent: 2.0,
     });
-    for scene in (0..crate::scene::Formula::COUNT)
+    for scene in crate::scene::Formula::PRESETS
+        .into_iter()
         .map(Scene::preset)
         .chain([optional])
     {
@@ -2207,7 +2278,7 @@ fn snapshot_and_gpu_upload_reject_invalid_lens_payload_without_repair() {
             .contains("sensor height")
     );
     assert_eq!(e.document, before);
-    let mut scene = Scene::preset(0);
+    let mut scene = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
     scene.world_render = true;
     scene.camera.f_number = -1.0;
     assert!(
@@ -2219,7 +2290,7 @@ fn snapshot_and_gpu_upload_reject_invalid_lens_payload_without_repair() {
 
 #[test]
 fn current_world_format_roundtrips_but_old_and_future_graph_versions_are_rejected() {
-    let mut scene = Scene::preset(0);
+    let mut scene = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
     scene.animation = crate::animation::Animation {
         first: 17,
         last: 91,
@@ -2522,7 +2593,7 @@ fn assigned_profiles_guard_delete_and_explicit_reassignment_allows_atomic_delete
 
 #[test]
 fn legacy_quality_settings_nodes_and_profile_look_fields_migrate_into_unified_profiles() {
-    let doc = WorldDocument::from_scene(&Scene::preset(0));
+    let doc = WorldDocument::from_scene(&Scene::preset(Formula::Mandelbulb(Bulb::PRESET)));
     let mut raw = serde_json::to_value(&doc).unwrap();
     let out_id = doc.output_render_profile().unwrap();
     let vp_id = doc.viewport_settings_id().unwrap();
@@ -2582,7 +2653,7 @@ fn legacy_quality_settings_nodes_and_profile_look_fields_migrate_into_unified_pr
 #[test]
 fn profile_fast_materials_are_evaluated_only_and_preserve_transmission_and_geometry() {
     use crate::scene::MaterialModel;
-    let mut scene = Scene::preset(0);
+    let mut scene = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
     scene.material.model = MaterialModel::StandardSurface;
     scene.material.transmission = 0.0;
     let mut e = WorldEditor::new(WorldDocument::from_scene(&scene));
@@ -2775,7 +2846,7 @@ fn output_settings_node_is_the_typed_static_export_recipe() {
         e.document.output_settings().unwrap(),
         OutputSettings::default()
     );
-    // Every field is a static row: no keys, enums as choices, numbers inside their limits.
+    // Every field is a static row: no keys; the encode recipe is one atomic row.
     let original = e.document.clone();
     for attr in e
         .document
@@ -2793,36 +2864,32 @@ fn output_settings_node_is_the_typed_static_export_recipe() {
             })
             .is_err()
         );
-        if attr.path == "/output/format" {
-            assert_eq!(attr.choices.len(), ExportFormat::ALL.len());
-        }
+        assert!(!attr.path.starts_with("/output/preset/"), "{}", attr.path);
     }
     assert_eq!(e.document, original);
-    // The panel's edits: one command per changed field, and the document reads them back.
-    let png = OutputSettings {
-        format: ExportFormat::Png,
-        png: video_io::export::PngEncoding::Hdr10,
-        width: 640,
-        ..OutputSettings::default()
-    };
+    // The panel's edits: one command per changed top-level field (the whole recipe is one),
+    // and the document reads them back.
+    let mut png = OutputSettings::default();
+    png.preset.format = ExportFormat::Png;
+    png.preset.png = video_io::export::PngEncoding::Hdr10;
+    png.preset.width = 640;
+    png.denoise_at_completion = !png.denoise_at_completion;
     let edits =
         crate::render_profiles::output_edits(recipe, &OutputSettings::default(), &png).unwrap();
-    assert_eq!(edits.len(), 3);
+    assert_eq!(edits.len(), 2);
     e.execute(WorldCommand::Batch(edits)).unwrap();
     assert_eq!(e.document.output_settings().unwrap(), png);
-    // Hard limits hold on edit; a cross-field rule waits for the export start.
-    set(&mut e, recipe, "/output/width", json!(99999), 0.0);
-    assert_eq!(e.document.output_settings().unwrap().width, 16384);
-    set(&mut e, recipe, "/output/width", json!(17), 0.0);
-    set(
-        &mut e,
-        recipe,
-        "/output/format",
-        json!(ExportFormat::Hevc),
-        0.0,
+    // The recipe's rules (limits, cross-field) wait for the export start.
+    let mut odd = png.clone();
+    odd.preset.format = ExportFormat::Video;
+    odd.preset.width = 17;
+    let edits = crate::render_profiles::output_edits(recipe, &png, &odd).unwrap();
+    e.execute(WorldCommand::Batch(edits)).unwrap();
+    assert_eq!(e.document.output_settings().unwrap(), odd);
+    assert!(
+        odd.preset.validate().is_err(),
+        "HEVC 4:2:0 needs even sizes"
     );
-    let odd = e.document.output_settings().unwrap();
-    assert!(odd.validate().is_err(), "HEVC needs even sizes");
     // Catalog: a bound copy is one Undo step with a new UUID; templates must be instantiated.
     let before = e.document.clone();
     e.execute(WorldCommand::CreateOutputSettings {
@@ -2965,7 +3032,10 @@ fn check_template(text: &str) -> Result<serde_json::Map<String, Value>, String> 
         let detail = first_diff("", &encoded, &file).unwrap_or_default();
         return Err(format!("document does not round-trip unchanged ({detail})"));
     }
-    doc.output_settings()?.validate()?;
+    doc.output_settings()?
+        .preset
+        .validate()
+        .map_err(|e| e.to_string())?;
     let (first, last) = (f64::from(doc.first), f64::from(doc.last));
     for frame in [first, ((first + last) * 0.5).floor(), last] {
         doc.snapshot(frame)
@@ -2976,16 +3046,14 @@ fn check_template(text: &str) -> Result<serde_json::Map<String, Value>, String> 
             let v = doc.evaluated_node(node.id, frame)?;
             let typed = |key: &str| v[key].clone();
             let checked: Result<(), String> = match node.kind {
-                WorldKind::Fractal => serde_json::from_value::<Scene>(v.clone())
-                    .map(drop)
-                    .map_err(|e| e.to_string()),
+                WorldKind::Fractal => doc.node_scene(node.id, frame).map(drop),
                 WorldKind::Camera => {
                     serde_json::from_value::<crate::scene::Camera>(typed("camera"))
                         .map_err(|e| e.to_string())
                         .and_then(|camera| camera.validate_lens())
                 }
                 WorldKind::DirectionalLight => {
-                    serde_json::from_value::<crate::scene::Lighting>(typed("lighting"))
+                    serde_json::from_value::<crate::scene::Sun>(typed("sun"))
                         .map(drop)
                         .map_err(|e| e.to_string())
                 }
@@ -2993,8 +3061,7 @@ fn check_template(text: &str) -> Result<serde_json::Map<String, Value>, String> 
                     serde_json::from_value::<crate::environment::Environment>(typed("environment"))
                         .map(drop)
                         .and_then(|()| {
-                            serde_json::from_value::<crate::scene::Lighting>(typed("lighting"))
-                                .map(drop)
+                            serde_json::from_value::<crate::scene::Sky>(typed("sky")).map(drop)
                         })
                         .map_err(|e| e.to_string())
                 }
@@ -3041,7 +3108,7 @@ fn check_template(text: &str) -> Result<serde_json::Map<String, Value>, String> 
 #[ignore = "writes WARPBRO_REFERENCE_OUT"]
 fn templates_reference_document() {
     let out = std::env::var("WARPBRO_REFERENCE_OUT").expect("WARPBRO_REFERENCE_OUT");
-    let doc = WorldDocument::from_scene(&Scene::preset(0));
+    let doc = WorldDocument::from_scene(&Scene::preset(Formula::Mandelbulb(Bulb::PRESET)));
     std::fs::write(out, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
 }
 
@@ -3455,13 +3522,13 @@ fn the_take_row_lists_takes_of_the_nodes_kind_and_copies_keep_their_take_in_one_
     assert_eq!(e.document.take_clip(frac).unwrap(), Some(id));
     // A copy pasted into the same scene plays the same take; into another scene, none.
     let text = e.document.copy_fragment(&[frac]).unwrap();
-    e.execute(WorldCommand::Paste(text.clone())).unwrap();
+    assert_eq!(e.paste(&text).unwrap().takes, 0);
     assert_eq!(
         e.document.take_clip(e.selection.unwrap()).unwrap(),
         Some(id)
     );
     let mut other = editor();
-    other.execute(WorldCommand::Paste(text)).unwrap();
+    assert_eq!(other.paste(&text).unwrap().takes, 1, "reported as a take");
     assert_eq!(
         other.document.take_clip(other.selection.unwrap()).unwrap(),
         None
@@ -3522,11 +3589,11 @@ fn a_copy_whose_take_is_gone_pastes_playing_none_and_a_release_joins_its_gesture
     let nodes = parse_clipboard(&text).unwrap().1;
     assert!(
         e.document
-            .unresolved_references(&nodes)
+            .unresolved_references(&nodes, true)
             .iter()
             .any(|(_, field)| *field == "take")
     );
-    e.execute(WorldCommand::Paste(text)).unwrap();
+    e.paste(&text).unwrap();
     assert_eq!(e.document.take_clip(e.selection.unwrap()).unwrap(), None);
     // A drag that releases a played take is one undo step with its writes.
     let id = e.add_take(
@@ -3561,13 +3628,13 @@ fn a_copy_whose_take_is_gone_pastes_playing_none_and_a_release_joins_its_gesture
 }
 
 #[test]
-fn the_suns_disc_setting_reaches_the_camera_sun_parameter() {
+fn the_skys_disc_setting_reaches_the_camera_sun_parameter() {
     let mut e = editor();
-    let sun = find(&e, WorldKind::DirectionalLight);
+    let sky = find(&e, WorldKind::Environment);
     let packed =
         |e: &WorldEditor| e.document.snapshot(0.0).unwrap().pack(8, 8)[crate::params::P_CAMERA_SUN];
     assert_eq!(packed(&e), 1.0, "the disc shows by default");
-    set(&mut e, sun, "/lighting/sun_disc", json!(false), 0.0);
+    set(&mut e, sky, "/sky/sun_disc", json!(false), 0.0);
     assert_eq!(packed(&e), 0.0);
 }
 
@@ -3748,7 +3815,9 @@ fn a_takes_span_is_where_it_plays_under_its_warp() {
 
 #[test]
 fn a_click_selects_alone_shift_toggles_and_nothing_clears() {
-    let mut e = WorldEditor::new(WorldDocument::from_scene(&Scene::preset(0)));
+    let mut e = WorldEditor::new(WorldDocument::from_scene(&Scene::preset(
+        Formula::Mandelbulb(Bulb::PRESET),
+    )));
     let ids: Vec<NodeId> = e.document.nodes().iter().take(3).map(|n| n.id).collect();
     e.click_select(Some(ids[0]), false);
     assert_eq!(
@@ -3806,7 +3875,7 @@ fn a_ray_enters_a_bounds_cube_in_its_own_space() {
 
 #[test]
 fn a_new_scene_starts_with_marks_one_and_two_on_its_range_ends() {
-    let document = WorldDocument::from_scene(&Scene::preset(0));
+    let document = WorldDocument::from_scene(&Scene::preset(Formula::Mandelbulb(Bulb::PRESET)));
     assert_eq!(
         document.marks,
         std::collections::BTreeMap::from([(1, document.first), (2, document.last)])
@@ -3878,7 +3947,7 @@ fn a_mask_array_is_a_line_or_a_ring_and_cells_are_not_copies() {
 
 #[test]
 fn decode_scene_hydrates_missing_and_removed_schema_parameters() {
-    let original = WorldDocument::from_scene(&Scene::preset(0));
+    let original = WorldDocument::from_scene(&Scene::preset(Formula::Mandelbulb(Bulb::PRESET)));
     let mut raw = serde_json::to_value(&original).unwrap();
     raw.as_object_mut()
         .unwrap()
@@ -3915,102 +3984,288 @@ fn decode_scene_hydrates_missing_and_removed_schema_parameters() {
     assert_eq!(*hydrated, original);
 }
 
-#[test]
-#[ignore = "upgrades operator templates in WARPBRO_TEMPLATES in place"]
-fn templates_upgrade_in_place() {
-    let dir = std::env::var("WARPBRO_TEMPLATES").expect("WARPBRO_TEMPLATES");
-    let mut files: Vec<_> = std::fs::read_dir(&dir)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|path| path.extension().is_some_and(|e| e == "json"))
-        .collect();
-    files.sort();
-    assert!(!files.is_empty(), "no templates in {dir}");
-    for path in files {
-        let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        let text = std::fs::read_to_string(&path).unwrap();
-        let scene = crate::io_service::decode_scene(&text)
-            .unwrap_or_else(|e| panic!("{name}: decode failed: {e}"));
-        let mut doc = *scene.document.expect("document");
-        let policy = doc.viewport_policy(0.0).unwrap();
-        let out_id = doc.output_render_profile().unwrap();
-        if out_id != policy.still_id
-            && out_id != policy.moving_id
-            && out_id != policy.manual_id
-            && doc.node(out_id).unwrap()["name"].as_str() == Some("Output")
-        {
-            let still_key = policy.still_id.to_string();
-            let out_key = out_id.to_string();
-            doc.graph
-                .bus_slots
-                .insert("output_render".into(), json!(still_key));
-            doc.graph.nodes.remove(&out_key);
-            if let Some(order) = doc
-                .graph
-                .bus_slots
-                .get_mut("layer_order")
-                .and_then(Value::as_array_mut)
-            {
-                order.retain(|v| v.as_str() != Some(out_key.as_str()));
+/// The world documents a conversion covers: `templates/*.json` of the repository and, when
+/// `WARPBRO_CONVERT_DIR` is set, every `*.json` under that directory (recursively: the user's
+/// `~/.warpbro` templates and bookmarks). Files that are not world documents (settings, take
+/// clips) are left out by `convert_documents_once`.
+fn conversion_files() -> Vec<std::path::PathBuf> {
+    fn walk(dir: &std::path::Path, recursive: bool, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                if recursive {
+                    walk(&path, true, out);
+                }
+            } else if path.extension().is_some_and(|e| e == "json") {
+                out.push(path);
             }
         }
-        let moving_key = policy.moving_id.to_string();
-        if let Some(m_node) = doc.graph.nodes.get_mut(&moving_key) {
-            m_node["gpu"]["render"]["method"] = json!("Fast");
-            m_node["gpu"]["render"]["display"] = json!("PathTraced");
-            m_node["gpu"]["quality"]["samples"] = json!(8);
-            m_node["gpu"]["quality"]["resolution_scale"] = json!(1.0);
-            m_node["gpu"]["quality"]["max_bounces"] = json!(2);
-            m_node["gpu"]["quality"]["adaptive"]["enabled"] = json!(false);
-        }
-        let mut m_attrs = doc.attrs(policy.moving_id).unwrap();
-        m_attrs.set("/render/method", AttrValue::Str("Fast".into()));
-        m_attrs.set("/render/display", AttrValue::Str("PathTraced".into()));
-        m_attrs.set("/quality/samples", AttrValue::Int64(8));
-        m_attrs.set("/quality/resolution_scale", AttrValue::Float(1.0));
-        m_attrs.set("/quality/max_bounces", AttrValue::Int64(2));
-        m_attrs.set("/quality/adaptive/enabled", AttrValue::Bool(false));
-        doc.store_attrs(policy.moving_id, &m_attrs).unwrap();
-
-        if let Some(render) = doc
-            .graph
-            .bus_slots
-            .get_mut("world")
-            .and_then(|w| w.pointer_mut("/render"))
-            .and_then(Value::as_object_mut)
-            && render.contains_key("exposure_stops")
-        {
-            render.insert("exposure_stops".into(), json!(0.0));
-        }
-        let node_ids: Vec<_> = doc.nodes().into_iter().map(|n| n.id).collect();
-        for node_id in node_ids {
-            let key = node_id.to_string();
-            if let Some(node) = doc.graph.nodes.get_mut(&key)
-                && let Some(render) = node.pointer_mut("/gpu/render")
-                && let Some(obj) = render.as_object_mut()
-                && obj.contains_key("exposure_stops")
-            {
-                obj.insert("exposure_stops".into(), json!(0.0));
-            }
-            if let Ok(mut attrs) = doc.attrs(node_id)
-                && attrs.contains("/render/exposure_stops")
-            {
-                attrs.set("/render/exposure_stops", AttrValue::Float(0.0));
-                doc.store_attrs(node_id, &attrs).unwrap();
-            }
-        }
-
-        let existing: Value = serde_json::from_str(&text).unwrap();
-        let saved = serde_json::to_string_pretty(&doc).unwrap();
-        let hydrated: Value = serde_json::from_str(&saved).unwrap();
-        if existing != hydrated {
-            std::fs::write(&path, &saved).unwrap();
-            println!("{name}: UPGRADED");
-        } else {
-            println!("{name}: unchanged");
-        }
-        let reloaded = std::fs::read_to_string(&path).unwrap();
-        check_template(&reloaded)
-            .unwrap_or_else(|e| panic!("{name}: post-upgrade check_template failed: {e}"));
     }
+    let mut files = Vec::new();
+    let templates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
+    walk(&templates, false, &mut files);
+    if let Ok(dir) = std::env::var("WARPBRO_CONVERT_DIR") {
+        walk(std::path::Path::new(&dir), true, &mut files);
+    }
+    files.sort();
+    files
+}
+
+/// ONE-TIME converter (plan1 Q1): decodes every world document of `conversion_files` with the
+/// current `decode_json` (its legacy migrations included), keeps the original once as
+/// `<file>.bak`, and writes it back in the current format (lighting split, slim `gpu` blobs,
+/// explicit camera framing radius). The written text must decode to the same document. Run by
+/// hand before wave 2 deletes the migrations:
+/// `cargo test convert_documents_once -- --ignored --nocapture` (with `WARPBRO_CONVERT_DIR`
+/// for the user's files).
+#[test]
+#[ignore = "rewrites templates/ and WARPBRO_CONVERT_DIR in place (keeps .bak copies)"]
+fn convert_documents_once() {
+    let mut failures = Vec::new();
+    for path in conversion_files() {
+        let name = path.display().to_string();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let raw: Value = match serde_json::from_str(&text) {
+            Ok(raw) => raw,
+            Err(_) => {
+                println!("{name}: skipped (not JSON)");
+                continue;
+            }
+        };
+        if !raw.pointer("/graph/nodes").is_some_and(Value::is_object) {
+            println!("{name}: skipped (not a world document)");
+            continue;
+        }
+        let document = match WorldDocument::decode_json(&text) {
+            Ok(document) => document,
+            Err(error) => {
+                println!("{name}: FAILED: {error}");
+                failures.push(name);
+                continue;
+            }
+        };
+        let converted = serde_json::to_string_pretty(&document).unwrap();
+        let current: Value = serde_json::from_str(&converted).unwrap();
+        if current == raw {
+            println!("{name}: current");
+            continue;
+        }
+        let backup = path.with_extension("json.bak");
+        if !backup.exists() {
+            std::fs::copy(&path, &backup).unwrap();
+        }
+        std::fs::write(&path, &converted).unwrap();
+        let reread = WorldDocument::decode_json(&converted).unwrap();
+        assert_eq!(
+            reread, document,
+            "{name}: the converted text decodes to the same document"
+        );
+        println!("{name}: CONVERTED (original in {})", backup.display());
+    }
+    assert!(failures.is_empty(), "failed: {failures:?}");
+}
+
+/// The shipped templates are in the current format: they decode with no migration step
+/// (re-encoding gives their text back) and evaluate (`check_template`). Fails until
+/// `convert_documents_once` has run; it is what lets wave 2 delete the migrations.
+#[test]
+fn shipped_templates_are_current() {
+    let templates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
+    let mut failures = Vec::new();
+    for entry in std::fs::read_dir(&templates).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "json") {
+            continue;
+        }
+        if let Err(error) = check_template(&std::fs::read_to_string(&path).unwrap()) {
+            failures.push(format!("{}: {error}", path.display()));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+#[test]
+fn malformed_documents_are_errors_not_panics() {
+    let document = WorldDocument::from_scene(&Scene::preset(Formula::Mandelbulb(Bulb::PRESET)));
+    let raw = serde_json::to_value(&document).unwrap();
+    let decode = |raw: &Value| WorldDocument::decode_json(&raw.to_string());
+    assert!(decode(&raw).is_ok());
+    // A work area that ends before it starts.
+    let mut bad = raw.clone();
+    bad["first"] = json!(50);
+    bad["last"] = json!(10);
+    assert!(decode(&bad).unwrap_err().contains("work area"));
+    // A settings node whose metadata is not an object.
+    let mut bad = raw.clone();
+    let key = document.output_render_profile().unwrap().to_string();
+    bad["graph"]["nodes"][&key]["metadata"] = json!("text");
+    assert!(decode(&bad).unwrap_err().contains("metadata"));
+    // A node that is not an object.
+    let mut bad = raw.clone();
+    bad["graph"]["nodes"][&key] = json!(7);
+    assert!(decode(&bad).is_err());
+    // An animation whose channels do not match its value.
+    let mut e = WorldEditor::new(document.clone());
+    let camera = find(&e, WorldKind::Camera);
+    e.execute(WorldCommand::Key {
+        id: camera,
+        path: "/camera/target".into(),
+        frame: 0.0,
+    })
+    .unwrap();
+    let mut bad = serde_json::to_value(&e.document).unwrap();
+    let channels = bad["graph"]["nodes"][camera.to_string()]["host"]["map"]["/camera/target"]
+        ["anim"]["channels"]
+        .as_array_mut()
+        .unwrap();
+    channels.pop();
+    assert!(decode(&bad).unwrap_err().contains("animation channels"));
+}
+
+#[test]
+fn undo_history_keeps_to_its_byte_budget_and_its_newest_step() {
+    let mut e = editor();
+    let fractal = find(&e, WorldKind::Fractal);
+    let step = graph_bytes(&e.document);
+    e.undo_budget = step * 3;
+    for i in 0..10 {
+        set(
+            &mut e,
+            fractal,
+            "/julia_mix",
+            json!(f64::from(i) * 0.1),
+            0.0,
+        );
+    }
+    assert!(
+        !e.undo.is_empty() && e.undo.len() <= 3,
+        "{} steps",
+        e.undo.len()
+    );
+    let mut undone = 0;
+    while e.undo() {
+        undone += 1;
+    }
+    assert_eq!(undone, e.redo.len());
+    e.undo_budget = 0;
+    set(&mut e, fractal, "/julia_mix", json!(1.0), 0.0);
+    assert_eq!(e.undo.len(), 1, "the newest step stays whatever its size");
+}
+
+#[test]
+fn keyed_visibility_is_one_value_at_the_frame() {
+    let mut e = editor();
+    let fractal = find(&e, WorldKind::Fractal);
+    e.execute(WorldCommand::Key {
+        id: fractal,
+        path: "/visible".into(),
+        frame: 0.0,
+    })
+    .unwrap();
+    set(&mut e, fractal, "/visible", json!(false), 10.0);
+    let at = |frame: f64| e.document.info_at(fractal, frame).unwrap().visible;
+    assert!(at(0.0));
+    assert!(!at(10.0));
+    let shown = |frame: f64| !e.document.snapshot(frame).unwrap().objects.is_empty();
+    assert_eq!(shown(10.0), at(10.0));
+}
+
+#[test]
+fn suns_and_the_sky_author_only_their_own_fields() {
+    let e = editor();
+    let sun = find(&e, WorldKind::DirectionalLight);
+    let sky = find(&e, WorldKind::Environment);
+    let paths = |id| {
+        e.document
+            .attributes(id, 0.0)
+            .unwrap()
+            .into_iter()
+            .map(|a| a.path)
+            .collect::<Vec<_>>()
+    };
+    assert!(paths(sun).iter().all(|p| !p.starts_with("/sky/")));
+    assert!(paths(sun).iter().any(|p| p == "/sun/intensity"));
+    assert!(paths(sky).iter().all(|p| !p.starts_with("/sun/")));
+    assert!(paths(sky).iter().any(|p| p == "/sky/sun_disc"));
+    // Every node stores only its own branches.
+    assert_eq!(
+        e.document.node(sun).unwrap()["gpu"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        vec!["sun"]
+    );
+}
+
+#[test]
+fn the_camera_frames_by_its_own_radius_whatever_the_fractal_becomes() {
+    let mut e = editor();
+    let camera = find(&e, WorldKind::Camera);
+    let fractal = find(&e, WorldKind::Fractal);
+    let before = e.document.snapshot(0.0).unwrap().camera_reference;
+    set(
+        &mut e,
+        fractal,
+        "/formula",
+        serde_json::to_value(Scene::preset(Formula::Mandelbox(MandelBox::PRESET)).formula).unwrap(),
+        0.0,
+    );
+    assert_eq!(e.document.snapshot(0.0).unwrap().camera_reference, before);
+    set(&mut e, camera, CAMERA_FRAMING, json!(2.0), 0.0);
+    assert_eq!(
+        e.document.snapshot(0.0).unwrap().camera_reference,
+        Some(2.0)
+    );
+}
+
+#[test]
+fn component_key_commands_walk_only_their_channel() {
+    let mut e = editor();
+    let fractal = find(&e, WorldKind::Fractal);
+    for (frame, x) in [(0.0, 0.0), (10.0, 5.0)] {
+        set(&mut e, fractal, "/transform/position/0", json!(x), frame);
+        e.execute(WorldCommand::Key {
+            id: fractal,
+            path: "/transform/position/0".into(),
+            frame,
+        })
+        .unwrap();
+    }
+    e.execute(WorldCommand::MoveKeys {
+        id: fractal,
+        path: "/transform/position/0".into(),
+        frames: vec![10.0],
+        delta: 2.0,
+    })
+    .unwrap();
+    let attrs = e.document.attributes(fractal, 0.0).unwrap();
+    let frames = |path: &str| {
+        attrs
+            .iter()
+            .find(|a| a.path == path)
+            .unwrap()
+            .frames
+            .clone()
+    };
+    assert_eq!(frames("/transform/position/0"), vec![0.0, 12.0]);
+    assert!(frames("/transform/position/1").is_empty());
+    e.execute(WorldCommand::RemoveKey {
+        id: fractal,
+        path: "/transform/position/0".into(),
+        frame: 12.0,
+    })
+    .unwrap();
+    e.execute(WorldCommand::RemoveKey {
+        id: fractal,
+        path: "/transform/position/0".into(),
+        frame: 0.0,
+    })
+    .unwrap();
+    assert!(
+        !e.document
+            .attrs(fractal)
+            .unwrap()
+            .is_animated("/transform/position")
+    );
 }

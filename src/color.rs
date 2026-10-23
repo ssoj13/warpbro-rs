@@ -154,12 +154,17 @@ enum EncodedSource {
 
 struct Cached {
     selection: crate::ocio::Sel,
+    /// The config load it was built from (`Ocio::serial`): a reloaded config rebuilds it.
+    serial: u64,
     linear: vfx_ocio::GpuBufferExecutor,
     encoded: EncodedSource,
     light: DisplayLight,
 }
 #[cfg(test)]
 type DisplayPixels = (Vec<[f32; 4]>, Vec<[f32; 4]>, DisplayLight);
+/// The renderer's display transforms (`render::Gpu`): per selection, the linear transform to
+/// display light and the SDR preview codes, compiled for the shared GPU and cached by selection
+/// and config load. The config itself is the process-wide shared one (`ocio::shared`).
 pub struct ColorPipeline {
     cached: Vec<Cached>,
 }
@@ -168,26 +173,39 @@ impl ColorPipeline {
         Self { cached: Vec::new() }
     }
 
-    fn ensure_cached(&mut self, sel: &crate::ocio::Sel) -> Result<(), String> {
-        if self.cached.iter().any(|c| c.selection == *sel) {
-            return Ok(());
+    /// The index of `sel`'s cached transforms, built on a miss.
+    fn ensure_cached(&mut self, sel: &crate::ocio::Sel) -> Result<usize, String> {
+        let ocio = crate::ocio::shared(&crate::ocio::source(&sel.config))?;
+        let serial = ocio.serial();
+        if let Some(index) = self
+            .cached
+            .iter()
+            .position(|c| c.serial == serial && c.selection == *sel)
+        {
+            return Ok(index);
         }
-        let ocio = crate::ocio::Ocio::load(&crate::ocio::source(&sel.config))
-            .map_err(|e| e.to_string())?;
-        let names = ocio.resolve(sel, true).map_err(|e| e.to_string())?;
-        let light = ocio.transform(&names, true).map_err(|e| e.to_string())?;
+        let names = ocio.resolve(sel, true).map_err(|e| format!("{e:#}"))?;
+        let light = ocio.transform(&names, true).map_err(|e| format!("{e:#}"))?;
         let absolute = light.absolute();
         let preview_names = if absolute {
-            let mut sdr = sel.clone();
-            sdr.display = "sRGB - Display".into();
-            sdr.view = SDR_VIEW.into();
-            ocio.resolve(&sdr, false).map_err(|e| e.to_string())?
+            // An HDR view's codes are not SDR codes: the preview renders through the config's
+            // own SDR choice (video-io's output-view policy), never a hard-coded display name.
+            // The peak argument only ranks HDR views.
+            let (display, view) = ocio
+                .output_transform(sel, crate::ocio::OutputKind::Sdr, BT2408_SDR_WHITE_NITS)
+                .map_err(|e| format!("SDR preview of {}: {e:#}", names.view))?;
+            let sdr = crate::ocio::Sel {
+                display,
+                view,
+                ..sel.clone()
+            };
+            ocio.resolve(&sdr, false).map_err(|e| format!("{e:#}"))?
         } else {
             names
         };
         let encoded_transform = ocio
             .transform(&preview_names, false)
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("{e:#}"))?;
         let mut probe_lin = [
             [0.0f32, 0.0, 0.0, 1.0],
             [0.001, 0.02, 0.05, 1.0],
@@ -209,28 +227,25 @@ impl ColorPipeline {
             });
         // Everything fallible first: a failure keeps the cache as it was.
         let kind = light.light()?;
-        let linear =
-            vfx_ocio::GpuBufferExecutor::compile(light.processor()).map_err(|e| e.to_string())?;
+        let linear = compile(light.processor())?;
         let encoded = if is_identity {
             EncodedSource::Identity
         } else if is_srgb_oetf {
             EncodedSource::SrgbOetf
         } else {
-            EncodedSource::Executor(Box::new(
-                vfx_ocio::GpuBufferExecutor::compile(encoded_transform.processor())
-                    .map_err(|e| e.to_string())?,
-            ))
+            EncodedSource::Executor(Box::new(compile(encoded_transform.processor())?))
         };
         if self.cached.len() == 8 {
             self.cached.remove(0);
         }
         self.cached.push(Cached {
             selection: sel.clone(),
+            serial,
             linear,
             encoded,
             light: kind,
         });
-        Ok(())
+        Ok(self.cached.len() - 1)
     }
 
     /// Write the selected monitor rendering in display light into `light_out`, and its packed
@@ -245,6 +260,13 @@ impl ColorPipeline {
         sdr_pixels_out: &mut [u32],
     ) -> Result<DisplayLight, String> {
         let (width, height) = dims;
+        if pixels.len() != width * height || sdr_pixels_out.len() != pixels.len() {
+            return Err(format!(
+                "Display buffers do not match {width}x{height}: {} pixels, {} preview codes",
+                pixels.len(),
+                sdr_pixels_out.len()
+            ));
+        }
         if !sel.on || reinhard {
             // Display primaries first: Reinhard is a display operator, and `oetf` encodes Rec.709.
             light_out.resize(pixels.len(), [0.0; 4]);
@@ -278,10 +300,11 @@ impl ColorPipeline {
             }
             return Ok(DisplayLight::Relative);
         }
-        self.ensure_cached(sel)?;
-        let Some(c) = self.cached.iter().find(|c| c.selection == *sel) else {
-            return Err("Colour cache lost its selection".into());
-        };
+        let index = self.ensure_cached(sel)?;
+        let c = self
+            .cached
+            .get(index)
+            .ok_or("Colour cache lost its selection")?;
         *light_out = c
             .linear
             .execute(width as u32, height as u32, pixels)
@@ -363,10 +386,11 @@ impl ColorPipeline {
                 .collect();
             return Ok((light, encoded, kind));
         }
-        self.ensure_cached(sel)?;
-        let Some(c) = self.cached.iter().find(|c| c.selection == *sel) else {
-            return Err("Colour cache lost its selection".into());
-        };
+        let index = self.ensure_cached(sel)?;
+        let c = self
+            .cached
+            .get(index)
+            .ok_or("Colour cache lost its selection")?;
         let light = c
             .linear
             .execute(width as u32, height as u32, pixels)
@@ -383,6 +407,30 @@ impl ColorPipeline {
         };
         Ok((light, encoded, c.light))
     }
+}
+
+/// Compile `processor` for the shared GPU (`gpu_info::shared_device`, which vfx-ocio runs on). A
+/// transform that samples LUT textures needs `FLOAT32_FILTERABLE` (vfx-ocio binds them with a
+/// filtering sampler): without it the selection gets a typed error saying so, not a wgpu
+/// validation failure.
+fn compile(processor: &vfx_ocio::Processor) -> Result<vfx_ocio::GpuBufferExecutor, String> {
+    let luts = !vfx_ocio::GpuProcessor::from_processor_wgsl(processor)
+        .and_then(|gpu| gpu.generate_shader(vfx_ocio::GpuLanguage::Wgsl))
+        .map_err(|e| e.to_string())?
+        .textures()
+        .is_empty();
+    let filterable = gpu_info::shared_device().is_some_and(|g| {
+        g.device
+            .features()
+            .contains(wgpu::Features::FLOAT32_FILTERABLE)
+    });
+    if luts && !filterable {
+        return Err(
+            "This transform samples LUT textures, and this GPU cannot filter 32-bit float textures"
+                .into(),
+        );
+    }
+    vfx_ocio::GpuBufferExecutor::compile(processor).map_err(|e| e.to_string())
 }
 
 /// The SDR video code of relative display light (1.0 = SDR white): BT.1886's inverse EOTF

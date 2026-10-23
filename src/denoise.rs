@@ -231,6 +231,8 @@ pub enum Mode {
     ColorAlbedoNormal,
 }
 impl Mode {
+    /// Every variant: the Attribute Editor's choices (`world::attribute_choices`).
+    pub const ALL: [Self; 3] = [Self::Color, Self::ColorAlbedo, Self::ColorAlbedoNormal];
     fn native(self) -> OidnMode {
         match self {
             Self::Color => OidnMode::Color,
@@ -246,7 +248,7 @@ pub enum Quality {
     Balanced,
 }
 impl Quality {
-    #[cfg(test)]
+    /// Every variant: the Attribute Editor's choices (`world::attribute_choices`).
     pub const ALL: [Self; 2] = [Self::Fast, Self::Balanced];
     fn native(self) -> pt_denoise_oidn::Quality {
         match self {

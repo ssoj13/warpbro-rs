@@ -57,7 +57,7 @@ fn swatch_scene(preset: &crate::materials::MaterialPreset) -> Scene {
 
 /// Render the evaluated Material-node value; the card never owns authoring state.
 fn material_preview_scene(material: Material) -> Scene {
-    let mut s = Scene::preset(crate::params::FAMILY_QUAT);
+    let mut s = Scene::preset(Formula::QuaternionJulia(Quat::PRESET));
     if let Formula::QuaternionJulia(q) = &mut s.formula {
         q.constant = [0.0; 4];
     }
@@ -69,12 +69,12 @@ fn material_preview_scene(material: Material) -> Scene {
     s.render.iterations = 8.0;
     s.render.exposure_stops = -0.5;
     // Neutral grey "studio" sky so metals show their own tint, not the blue sky's.
-    s.lighting.sun_azimuth = 45.0;
-    s.lighting.sun_elevation = 40.0;
-    s.lighting.sun_intensity = 3.0;
-    s.lighting.sky_horizon = [0.03, 0.03, 0.03];
-    s.lighting.sky_zenith = [0.14, 0.14, 0.14];
-    s.lighting.sky_intensity = 5.0;
+    s.sun.azimuth = 45.0;
+    s.sun.elevation = 40.0;
+    s.sun.intensity = 3.0;
+    s.sky.horizon = [0.03, 0.03, 0.03];
+    s.sky.zenith = [0.14, 0.14, 0.14];
+    s.sky.intensity = 5.0;
     s.material = material;
     s
 }
@@ -939,14 +939,6 @@ impl App {
                 soluwell_viewport::display::state_id(),
             )
         });
-        // Colour chooses the rendering/export target; SDR presentation has its own preview.
-        self.colour.set_hdr(true);
-        self.colour
-            .set_filterable(gpu_info::shared_device().is_some_and(|g| {
-                g.device
-                    .features()
-                    .contains(wgpu::Features::FLOAT32_FILTERABLE)
-            }));
         let mut browse = false;
         let mut changed = false;
         let mut category = self.prefs.selected;
@@ -1277,11 +1269,7 @@ impl App {
     fn draw_overlays(&mut self, ui: &egui::Ui, rect: egui::Rect) {
         let frame = f64::from(self.world_ui.playhead);
         let aspect = rect.width() / rect.height().max(1.0);
-        let selected: Vec<_> = if self.world.selected.is_empty() {
-            self.world.selection.into_iter().collect()
-        } else {
-            self.world.selected.clone()
-        };
+        let selected = self.world.targets(None);
         let key = (
             playa_graph::NodeId(self.world.document.graph.id),
             self.world.revision(),
@@ -1371,11 +1359,7 @@ impl App {
         };
         let frame = f64::from(self.world_ui.playhead);
         let document = &self.world.document;
-        let selected: Vec<_> = if self.world.selected.is_empty() {
-            self.world.selection.into_iter().collect()
-        } else {
-            self.world.selected.clone()
-        };
+        let selected = self.world.targets(None);
         let policy = match document.viewport_policy(frame) {
             Ok(policy) => policy,
             Err(error) => {
@@ -1591,7 +1575,9 @@ impl App {
         if changed {
             self.scene.render.reinhard = false;
             self.scene.colour = self.colour.sel.clone();
-            let _ = self.renderer.try_command(Command::ReloadColour);
+            if let Err(error) = self.renderer.try_command(Command::ReloadColour) {
+                self.status = format!("Colour reload: {error}");
+            }
         }
     }
 
@@ -1617,7 +1603,9 @@ impl App {
             ) {
                 self.status = error;
             }
-            let _ = self.renderer.try_command(Command::ReloadColour);
+            if let Err(error) = self.renderer.try_command(Command::ReloadColour) {
+                self.status = format!("Colour reload: {error}");
+            }
         }
         match self.changed_settings_json() {
             Ok(Some(json)) => {
@@ -1629,7 +1617,7 @@ impl App {
     }
 
     fn settings_match(&self, saved: &Settings) -> bool {
-        let export = &self.export.settings().job;
+        let export = &self.export.job;
         let previous = &saved.export;
         saved.display == self.display
             && saved.colour == self.scene.colour
@@ -1684,7 +1672,7 @@ impl App {
             camera_slots: self.camera_slots,
             fonts: self.fonts.clone(),
             layouts: self.layouts.store.clone(),
-            export: self.export.settings().job.clone(),
+            export: self.export.job.clone(),
             gui_fps: self.gui_fps,
             status_layout: self.status_layout.clone(),
             status_resizable: self.status_resizable,
@@ -1953,8 +1941,7 @@ impl App {
         self.material_gallery.invalidate();
         self.origin = scene.clone();
         scene.document = Some(Box::new(document));
-        self.colour.sel = scene.colour.clone();
-        self.colour.rebuild();
+        self.colour.set_sel(&scene.colour);
         self.scene = self
             .world
             .document
@@ -1972,10 +1959,16 @@ impl App {
         if self.thumb_pending.is_some() {
             return true;
         }
+        use crate::material_gallery::ThumbId;
+        use crate::render_service::CommandError;
+        // Every card renders at the same quality: this seed, and at most this many bounces on
+        // the evaluated scene (the worker caps after evaluation: a bookmark's frozen world
+        // carries its own render settings).
+        const SEED: u32 = 7;
+        const MAX_BOUNCES: u32 = 3;
         let material_request = self.material_gallery.next_thumbnail();
         let item = material_request
             .map(|request| {
-                let _node = request.node;
                 (
                     request.id,
                     material_preview_scene(request.material),
@@ -1989,7 +1982,15 @@ impl App {
                     .iter()
                     .enumerate()
                     .find(|(_, e)| e.thumb.is_none())
-                    .map(|(i, e)| (i as u64, e.scene.clone(), THUMB_W, THUMB_H, THUMB_SPP))
+                    .map(|(i, e)| {
+                        (
+                            ThumbId::Gallery(i).encode(),
+                            e.scene.clone(),
+                            THUMB_W,
+                            THUMB_H,
+                            THUMB_SPP,
+                        )
+                    })
                     .or_else(|| {
                         self.bookmarks
                             .iter()
@@ -1997,7 +1998,7 @@ impl App {
                             .find(|(_, e)| e.thumb.is_none())
                             .map(|(i, e)| {
                                 (
-                                    1_000_000 + i as u64,
+                                    ThumbId::Bookmark(i).encode(),
                                     e.scene.clone(),
                                     THUMB_W,
                                     THUMB_H,
@@ -2006,37 +2007,46 @@ impl App {
                             })
                     })
                     .or_else(|| {
-                        self.swatches.iter().position(Option::is_none).map(|i| {
-                            (
-                                2_000_000 + i as u64,
-                                swatch_scene(&crate::materials::PRESETS[i]),
-                                SWATCH,
-                                SWATCH,
-                                SWATCH_SPP,
-                            )
-                        })
+                        crate::materials::PRESETS
+                            .iter()
+                            .zip(&self.swatches)
+                            .enumerate()
+                            .find(|(_, (_, slot))| slot.is_none())
+                            .map(|(i, (preset, _))| {
+                                (
+                                    ThumbId::Swatch(i).encode(),
+                                    swatch_scene(preset),
+                                    SWATCH,
+                                    SWATCH,
+                                    SWATCH_SPP,
+                                )
+                            })
                     })
             });
-        let Some((id, mut scene, width, height, spp)) = item else {
+        let Some((id, scene, width, height, spp)) = item else {
             return false;
         };
-        if id < 2_000_000 {
-            scene.render.max_bounces = scene.render.max_bounces.min(3);
-        }
-        if self
-            .renderer
-            .try_command(Command::Thumbnail {
-                id,
-                scene: Box::new(scene.clone()),
-                width,
-                height,
-                spp,
-            })
-            .is_ok()
-        {
-            self.thumb_pending = Some((id, scene));
-        } else if id & crate::material_gallery::THUMBNAIL_ID_MASK != 0 {
-            self.material_gallery.retry_thumbnail(id);
+        let material = matches!(ThumbId::decode(id), ThumbId::Material(_));
+        match self.renderer.try_command(Command::Thumbnail {
+            id,
+            scene: Box::new(scene.clone()),
+            width,
+            height,
+            spp,
+            seed: SEED,
+            budget_ms: crate::render_service::BACKGROUND_BUDGET_MS,
+            max_bounces: MAX_BOUNCES,
+        }) {
+            Ok(()) => self.thumb_pending = Some((id, scene)),
+            // A full queue is retried on a later frame.
+            Err(CommandError::Full) if material => self.material_gallery.retry_thumbnail(id),
+            Err(CommandError::Full) => {}
+            Err(error) => {
+                if material {
+                    self.material_gallery.fail_thumbnail(id, error.to_string());
+                }
+                self.status = format!("Thumbnail: {error}");
+            }
         }
         true
     }
@@ -2074,11 +2084,7 @@ impl App {
             self.material_targets.clear();
         }
         self.material_selection_stamp = Some(stamp);
-        let selected = if self.world.selected.is_empty() {
-            self.world.selection.as_slice()
-        } else {
-            &self.world.selected
-        };
+        let selected = self.world.targets(None);
         let eligible = selected
             .iter()
             .copied()
@@ -2775,37 +2781,37 @@ impl App {
             self.world.revision(),
             f64::from(self.world_ui.playhead).to_bits(),
         );
-        if self
+        let cached = self
             .viewport_scene
             .as_ref()
-            .is_none_or(|cached| (cached.0, cached.1, cached.2) != profile_key)
-        {
-            match self.world.document.snapshot_with_render_profile(
+            .filter(|cached| (cached.0, cached.1, cached.2) == profile_key)
+            .map(|cached| cached.3.clone());
+        let mut snapshot = match cached {
+            Some(scene) => scene,
+            None => match self.world.document.snapshot_with_render_profile(
                 effective.profile,
                 f64::from(self.world_ui.playhead),
                 crate::world::View::Viewport,
             ) {
                 Ok(scene) => {
-                    self.viewport_scene = Some((profile_key.0, profile_key.1, profile_key.2, scene))
+                    self.viewport_scene =
+                        Some((profile_key.0, profile_key.1, profile_key.2, scene.clone()));
+                    scene
                 }
                 Err(error) => {
                     self.viewport_render = None;
                     self.status = error;
                     return;
                 }
-            }
-        }
-        let mut snapshot = self
-            .viewport_scene
-            .as_ref()
-            .expect("evaluated selected profile")
-            .3
-            .clone();
+            },
+        };
         // Navigation is authored at the end of this UI frame; use the current pose immediately.
         snapshot.camera = self.scene.camera;
         snapshot.colour = self.scene.colour.clone();
         snapshot.animation = Default::default();
-        snapshot.render = effective.render;
+        // The one profile application (idempotent on the cached snapshot): it keeps the scene's
+        // iterations and Direct's adaptive-off, which a plain `render` overwrite undid.
+        effective.apply_to(&mut snapshot);
         let (width, height) = scaled_extent((w, h), effective.resolution_scale);
         self.target_spp = effective.samples;
         // Only the Moving binding is a disposable proxy; Locked motion keeps Manual's film.
@@ -2897,17 +2903,29 @@ impl App {
             } else if let RenderEvent::PreviewFrame { frame, .. } = &event {
                 self.preview.recycle(frame.clone());
             }
-            self.export.handle(&event, &self.renderer);
             match event {
                 RenderEvent::Ready { name } => self.gpu_name = name,
-                RenderEvent::Error(error) => {
-                    if let Some((id, _)) = self.thumb_pending.take() {
+                // Viewport and worker errors: never a thumbnail's (that is `ThumbnailFailed`).
+                RenderEvent::Error(error) => self.status = error,
+                RenderEvent::Picked { id, hit } => self.picked(id, hit),
+                RenderEvent::ThumbnailFailed { id, error } => {
+                    if self
+                        .thumb_pending
+                        .as_ref()
+                        .is_some_and(|(pending_id, _)| *pending_id == id)
+                    {
+                        self.thumb_pending = None;
+                    }
+                    if matches!(
+                        crate::material_gallery::ThumbId::decode(id),
+                        crate::material_gallery::ThumbId::Material(_)
+                    ) {
                         self.material_gallery.fail_thumbnail(id, error.clone());
                     }
-                    self.status = error;
+                    self.status = format!("Thumbnail: {error}");
                 }
-                RenderEvent::Picked { id, hit } => self.picked(id, hit),
                 RenderEvent::Thumbnail { id, frame } => {
+                    use crate::material_gallery::ThumbId;
                     let pending = if self
                         .thumb_pending
                         .as_ref()
@@ -2917,8 +2935,8 @@ impl App {
                     } else {
                         None
                     };
-                    let material_thumb = id & crate::material_gallery::THUMBNAIL_ID_MASK != 0;
-                    if material_thumb {
+                    let card = ThumbId::decode(id);
+                    if let ThumbId::Material(_) = card {
                         if let Err(error) = self
                             .material_gallery
                             .refresh(&self.world, f64::from(self.world_ui.playhead))
@@ -2941,24 +2959,25 @@ impl App {
                         to_image(&frame),
                         TextureOptions::LINEAR,
                     );
-                    if material_thumb {
-                        self.material_gallery.accept_thumbnail(id, texture);
-                    } else if id >= 2_000_000 {
-                        if let Some(slot) = self.swatches.get_mut((id - 2_000_000) as usize) {
-                            *slot = Some(texture);
+                    let entries = match card {
+                        ThumbId::Material(_) => {
+                            self.material_gallery.accept_thumbnail(id, texture);
+                            continue;
                         }
-                    } else {
-                        let entries = if id >= 1_000_000 {
-                            &mut self.bookmarks
-                        } else {
-                            &mut self.gallery
-                        };
-                        if let Some((pending_id, scene)) = pending
-                            && pending_id == id
-                            && let Some(index) = pending_thumbnail_entry(entries, &scene)
-                        {
-                            entries[index].thumb = Some(texture);
+                        ThumbId::Swatch(index) => {
+                            if let Some(slot) = self.swatches.get_mut(index) {
+                                *slot = Some(texture);
+                            }
+                            continue;
                         }
+                        ThumbId::Bookmark(_) => &mut self.bookmarks,
+                        ThumbId::Gallery(_) => &mut self.gallery,
+                    };
+                    if let Some((pending_id, scene)) = pending
+                        && pending_id == id
+                        && let Some(index) = pending_thumbnail_entry(entries, &scene)
+                    {
+                        entries[index].thumb = Some(texture);
                     }
                 }
                 _ => {}
@@ -3001,25 +3020,17 @@ impl App {
             self.takes_hotkeys(ctx);
             return;
         }
-        let selected = if self.world.selected.is_empty() {
-            self.world.selection.into_iter().collect()
-        } else {
-            self.world.selected.clone()
-        };
+        let selected = self.world.targets(None);
         if hotkeys::consume(ctx, Scope::Global, Hotkey::Duplicate) && !selected.is_empty() {
             self.world.finish_edit();
-            let count = selected.len();
-            self.status = match self
-                .world
-                .execute(crate::world::WorldCommand::Duplicate(selected.clone()))
-            {
-                Ok(()) => format!("Duplicated {count} node(s)"),
+            self.status = match self.world.duplicate(None) {
+                Ok(count) => format!("Duplicated {count} node(s)"),
                 Err(error) => error,
             };
         }
         if hotkeys::consume(ctx, Scope::Outliner, Hotkey::Delete) && !selected.is_empty() {
             self.world.finish_edit();
-            self.world_ui.delete(&mut self.world, selected.clone());
+            self.world_ui.delete(&mut self.world, None);
         }
         if hotkeys::take_copy(ctx, !selected.is_empty()) {
             self.status = match self.world.document.copy_fragment(&selected) {
@@ -3033,25 +3044,15 @@ impl App {
         if let Some(text) =
             hotkeys::take_paste(ctx, |text| crate::world::parse_clipboard(text).is_some())
         {
-            let unresolved = crate::world::parse_clipboard(&text)
-                .map(|(_, nodes)| self.world.document.unresolved_references(&nodes))
-                .unwrap_or_default();
             self.world.finish_edit();
-            self.status = match self.world.execute(crate::world::WorldCommand::Paste(text)) {
-                Ok(()) if unresolved.is_empty() => {
-                    format!("Pasted {} node(s)", self.world.selected.len())
+            self.status = match self.world.paste(&text) {
+                Ok(p) if p.materials + p.parents + p.takes == 0 => {
+                    format!("Pasted {} node(s)", p.roots)
                 }
-                Ok(()) => {
-                    let materials = unresolved
-                        .iter()
-                        .filter(|(_, field)| *field == "material")
-                        .count();
-                    let parents = unresolved.len() - materials;
-                    format!(
-                        "Pasted {} node(s); not in this scene, cleared: {materials} material and {parents} parent reference(s)",
-                        self.world.selected.len()
-                    )
-                }
+                Ok(p) => format!(
+                    "Pasted {} node(s); not in this scene, cleared: {} material, {} parent and {} take reference(s)",
+                    p.roots, p.materials, p.parents, p.takes
+                ),
                 Err(error) => error,
             };
         }
@@ -3066,7 +3067,7 @@ impl App {
         let effective = self.world.document.output_render_profile().and_then(|id| {
             self.world
                 .document
-                .effective_render(id, f64::from(self.export.settings.job.first))
+                .effective_render(id, f64::from(self.export.job.first))
         });
         self.export.quality = effective
             .as_ref()
@@ -3083,7 +3084,7 @@ impl App {
             .output_settings_id()
             .and_then(|id| Ok((id, self.world.document.output_settings_of(id)?)));
         match &recipe {
-            Ok((_, output)) => self.export.settings.output = output.clone(),
+            Ok((_, output)) => self.export.output = output.clone(),
             Err(error) => {
                 ui.colored_label(egui::Color32::LIGHT_RED, error);
                 self.status = error.clone();
@@ -3096,7 +3097,7 @@ impl App {
             self.world_ui.playhead,
         );
         let scene = &self.scene;
-        let ocio = self.colour.config().ok();
+        let ocio = self.colour.config();
         let mut actions = crate::render_profiles_ui::Actions::default();
         self.export.ui(
             ui,
@@ -3117,17 +3118,16 @@ impl App {
         let Ok((id, before)) = recipe else {
             return;
         };
-        let authored =
-            crate::render_profiles::output_edits(id, &before, &self.export.settings.output)
-                .and_then(|commands| {
-                    if commands.is_empty() {
-                        return Ok(());
-                    }
-                    self.world.execute_edit(
-                        crate::world::WorldCommand::Batch(commands),
-                        soluwell_panels::attr_grid::edit_gesture(ui.ctx()),
-                    )
-                });
+        let authored = crate::render_profiles::output_edits(id, &before, &self.export.output)
+            .and_then(|commands| {
+                if commands.is_empty() {
+                    return Ok(());
+                }
+                self.world.execute_edit(
+                    crate::world::WorldCommand::Batch(commands),
+                    soluwell_panels::attr_grid::edit_gesture(ui.ctx()),
+                )
+            });
         if let Err(error) = authored {
             self.status = error;
         }
@@ -3372,11 +3372,7 @@ impl App {
             .unwrap_or(self.scene.formula.framing_radius())
             .max(1e-4);
         if self.scene.world_render {
-            let selected: Vec<_> = if self.world.selected.is_empty() {
-                self.world.selection.into_iter().collect()
-            } else {
-                self.world.selected.clone()
-            };
+            let selected = self.world.targets(None);
             let matches_selection = |node: Option<crate::world::NodeId>| {
                 let Some(node) = node else {
                     return false;
@@ -3657,8 +3653,6 @@ impl App {
                 ui.separator();
                 if ui.button("Reset scene").clicked() {
                     self.load(self.origin.clone(), Load::Same);
-                    self.colour.sel = self.scene.colour.clone();
-                    self.colour.rebuild();
                     ui.close();
                 }
                 if ui.button("Copy scene JSON").clicked()
@@ -4116,7 +4110,7 @@ impl App {
             ndc,
         }) {
             Ok(()) => self.pick_pending = Some(pending),
-            Err(error) => self.status = error,
+            Err(error) => self.status = error.to_string(),
         }
     }
 
@@ -4492,6 +4486,7 @@ impl App {
             height: size.1,
             spp,
             seed: self.seed,
+            budget_ms: crate::render_service::BACKGROUND_BUDGET_MS,
             output_hdr: key.output_hdr,
             white_nits: f32::from_bits(key.white_nits_bits),
             cache_fraction: 0.05,
@@ -4742,7 +4737,7 @@ impl App {
         let before = self.snapshot_before.take();
         let thumbs_pending = self.render_one_thumbnail(&ctx);
         self.poll_events(&ctx);
-        self.export.update(&self.renderer);
+        self.export.update();
         self.viewport_visible = false;
         self.remember_material_targets();
 
@@ -5655,7 +5650,7 @@ mod tests {
     fn file_load_completion_preserves_document_and_discards_stale_requests() {
         let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
-        let mut scene = Scene::preset(crate::params::FAMILY_BOX);
+        let mut scene = Scene::preset(Formula::Mandelbox(MandelBox::PRESET));
         let document = crate::world::WorldDocument::from_scene(&scene);
         let expected = serde_json::to_value(&document).unwrap();
         scene.document = Some(Box::new(document));
@@ -5677,11 +5672,13 @@ mod tests {
         assert_eq!(app.world.revision(), revision);
         assert_eq!(app.snapshot_clones, clones);
         app.scene_file_pending = Some((8, app.load_revision, crate::templates::FileAction::Open));
-        app.load(Scene::preset(crate::params::FAMILY_BULB), Load::New);
+        app.load(Scene::preset(Formula::Mandelbulb(Bulb::PRESET)), Load::New);
         app.scene_file_event(crate::io_service::SceneEvent {
             id: 8,
             path: PathBuf::from("stale.frac.json"),
-            result: Ok(Some(Box::new(Scene::preset(crate::params::FAMILY_BOX)))),
+            result: Ok(Some(Box::new(Scene::preset(Formula::Mandelbox(
+                MandelBox::PRESET,
+            ))))),
         });
         assert!(matches!(
             app.scene.formula,
@@ -5703,7 +5700,7 @@ mod tests {
                         &mut (),
                         (frame, frame + 250, 24.0, frame),
                         &app.renderer,
-                        None,
+                        Err("No OCIO config in this test".into()),
                         &crate::color::default_selection(),
                         |_, _| {},
                         |_| panic!("An idle export panel must not clone the authoring document"),
@@ -5738,7 +5735,7 @@ mod tests {
         app.fonts.face = "Custom face".into();
         app.status_layout.widths = vec![210.0, 100.0];
         app.gui_fps = 144;
-        let mut export = app.export.settings().job.clone();
+        let mut export = app.export.job.clone();
         export.name = "new".into();
         export.last = 19;
         app.export.restore(export);
@@ -6296,7 +6293,7 @@ mod tests {
     #[test]
     fn duplicate_bookmark_thumbnails_fill_the_next_empty_entry() {
         let _gpu_test = crate::test_gpu::lock();
-        let scene = Scene::preset(crate::params::FAMILY_BULB);
+        let scene = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
         let mut rendered = scene.clone();
         rendered.render.max_bounces = rendered.render.max_bounces.min(3);
         let ctx = egui::Context::default();
@@ -6809,7 +6806,8 @@ mod tests {
             }
             assert!(!fly.update_dynamics(1.0 / 60.0), "{name} must settle");
         }
-        let mut old = serde_json::to_value(Scene::preset(0)).unwrap();
+        let mut old =
+            serde_json::to_value(Scene::preset(Formula::Mandelbulb(Bulb::PRESET))).unwrap();
         old["camera"]
             .as_object_mut()
             .unwrap()
@@ -6902,7 +6900,7 @@ mod tests {
     fn scenes_made_from_one_template_and_save_as_copies_are_distinct_documents() {
         let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
-        let preset = Scene::preset(crate::params::FAMILY_BULB);
+        let preset = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
         let mut template = preset.clone();
         template.document = Some(Box::new(crate::world::WorldDocument::from_scene(&preset)));
         app.load(template.clone(), Load::New);
@@ -7035,7 +7033,8 @@ mod tests {
         assert_eq!(app.export.quality, Err(expected.to_string()));
         let frozen = freeze_world_scene(&app.scene, &app.world.document);
         assert_eq!(
-            app.export.start(&frozen, &app.renderer),
+            app.export
+                .start(&frozen, &app.renderer, app.colour.config()),
             Err(expected.to_string())
         );
     }

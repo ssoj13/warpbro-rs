@@ -14,6 +14,10 @@ pub enum RenderMethod {
     Fast,
     Full,
 }
+impl RenderMethod {
+    /// Every variant: the Attribute Editor's choices (`world::attribute_choices`).
+    pub const ALL: [Self; 2] = [Self::Fast, Self::Full];
+}
 /// Compute backend for fractal rendering: `Auto` uses CUDA when available and falls back to WGPU;
 /// `Cuda` and `Wgpu` require that specific backend without silent fallback.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -42,6 +46,10 @@ pub enum Display {
     PathTraced,
     Direct,
     Bounds,
+}
+impl Display {
+    /// Every variant: the Attribute Editor's choices (`world::attribute_choices`).
+    pub const ALL: [Self; 3] = [Self::PathTraced, Self::Direct, Self::Bounds];
 }
 /// The Direct display's shading (fractal-kernels `kernels/direct.rs`, OFX's Direct mode): a
 /// soft shadow per light and five-probe ambient occlusion over the sky's harmonics. Defaults
@@ -96,6 +104,10 @@ pub struct DirectRender {
 pub enum ViewportMode {
     Auto,
     Locked,
+}
+impl ViewportMode {
+    /// Every variant: the Attribute Editor's choices (`world::attribute_choices`).
+    pub const ALL: [Self; 2] = [Self::Auto, Self::Locked];
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProfileTarget {

@@ -499,7 +499,6 @@ impl App {
                         }
                     }
                     ui.separator();
-                    self.colour.set_hdr(true);
                     let changed = self.colour.quick_view_ui(ui);
                     self.apply_colour_change(changed);
                     if ui

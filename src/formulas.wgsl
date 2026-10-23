@@ -1,28 +1,10 @@
 // =============================================================================
-// Extended 3D Fractals & Procedural Distance Estimators (Families 8..27)
-// All parameters read from the per-object formula slot block starting at P_BULB_POWER (39).
+// Extended 3D Fractals & Procedural Distance Estimators (Families 8..27), WGPU only.
+// Parameters are read from the per-object formula slot block starting at P_BULB_POWER: offsets
+// 0..EXT_SLOTS of `formulas::pack_extended_formula` (const-asserted to end before
+// P_COLOR_MODE). The FAMILY_* codes, SIGNED_MASK and ITERATING_MASK are emitted from
+// `formulas::FORMULAS` by `render_wgpu::shader_source`.
 // =============================================================================
-
-const FAMILY_AMAZING_SURFACE: u32 = 8u;
-const FAMILY_BRISTORBROT: u32 = 9u;
-const FAMILY_BURNING_SHIP: u32 = 10u;
-const FAMILY_KALEIDO_TWIST: u32 = 11u;
-const FAMILY_POLYHEDRAL_KIFS: u32 = 12u;
-const FAMILY_HARMONIC_BULB: u32 = 13u;
-const FAMILY_MANDELBAR: u32 = 14u;
-const FAMILY_MOBIUS_IFS: u32 = 15u;
-const FAMILY_GYROID_TPMS: u32 = 16u;
-const FAMILY_LIDINOID_TPMS: u32 = 17u;
-const FAMILY_ATTRACTOR_TUBE: u32 = 18u;
-const FAMILY_TORUS_KNOT: u32 = 19u;
-const FAMILY_HOPF_FIBRATION: u32 = 20u;
-const FAMILY_DUPIN_CYCLIDE: u32 = 21u;
-const FAMILY_SUPERFORMULA: u32 = 22u;
-const FAMILY_PHYLLOTAXIS: u32 = 23u;
-const FAMILY_NAUTILUS: u32 = 24u;
-const FAMILY_VORONOI_FOAM: u32 = 25u;
-const FAMILY_CRYSTAL_GEODE: u32 = 26u;
-const FAMILY_ASTROLABE: u32 = 27u;
 
 fn ext_slot(is_world: bool, obj: u32, offset: u32) -> f32 {
     return pr(is_world, obj, P_BULB_POWER + offset);
@@ -30,16 +12,6 @@ fn ext_slot(is_world: bool, obj: u32, offset: u32) -> f32 {
 
 fn ext_slot3(is_world: bool, obj: u32, offset: u32) -> vec3<f32> {
     return pr3(is_world, obj, P_BULB_POWER + offset);
-}
-
-fn ext_signed_family(family: u32) -> bool {
-    return family == FAMILY_KIFS
-        || family == FAMILY_KLEINIAN
-        || family == FAMILY_PSEUDO_KLEINIAN
-        || family == FAMILY_AMAZING_SURFACE
-        || family == FAMILY_KALEIDO_TWIST
-        || family == FAMILY_POLYHEDRAL_KIFS
-        || family >= FAMILY_MOBIUS_IFS;
 }
 
 // 1. Amazing Surface (KaliBox)

@@ -1,13 +1,14 @@
-//! CUDA rendering is owned by one worker. UI requests and completed viewport frames
-//! occupy single replaceable slots; commands and completion events have bounded queues.
+//! Rendering is owned by one worker thread, which drives CUDA or WGPU through `render::Gpu`.
+//! UI requests and completed viewport frames occupy single replaceable slots; commands and
+//! completion events have bounded queues.
 use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::mpsc::{SyncSender, TrySendError};
-use std::sync::{Arc, Condvar, Mutex, TryLockError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::render::{Gpu, Target};
+use crate::render::{Batch, Gpu, RenderError, Target, validate_size};
 use crate::scene::Scene;
 
 pub use video_io::export::{HdrLevels, PngEncoding, hdr_scale, write_png};
@@ -15,6 +16,11 @@ pub use video_io::export::{HdrLevels, PngEncoding, hdr_scale, write_png};
 use video_io::{color::HLG_REF_PEAK, export::HdrScale};
 
 const QUEUE_LIMIT: usize = 16;
+
+/// The batch budget callers give background jobs (exports, preview caching, thumbnails) in
+/// their requests. A GPU launch cannot be preempted, so a background batch that may run while
+/// the viewport moves stays this short ([`background_batch_allowed`]).
+pub const BACKGROUND_BUDGET_MS: f32 = 8.0;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewportRequest {
@@ -66,7 +72,7 @@ pub struct Frame {
     pub height: usize,
     pub pixels: Vec<u32>,
     pub light: Vec<[f32; 4]>,
-    /// Unexposed linear ACEScg radiance, populated for final export frames only.
+    /// Unexposed linear ACEScg radiance, populated for final EXR export frames only.
     pub radiance: Vec<[f32; 4]>,
     /// Relative (SDR view) or absolute (HDR view, with its peak) display light.
     pub light_kind: crate::color::DisplayLight,
@@ -135,12 +141,29 @@ pub(crate) fn hdr_canvas_bytes_into(light: &[[f32; 4]], gain: f32, out: &mut Vec
         chunks.iter_mut().zip(light.iter()).for_each(encode_pixel);
     }
 }
+#[cfg(test)]
 pub(crate) fn hdr_canvas_bytes(light: &[[f32; 4]], gain: f32) -> Vec<u8> {
     let mut out = Vec::with_capacity(light.len() * 16);
     hdr_canvas_bytes_into(light, gain, &mut out);
     out
 }
+/// Clear and refill a frame's shared byte buffer in place while the frame is its only owner,
+/// or start a new one while the UI's upload still holds the old one (it is never written).
+fn refill(bytes: &mut Arc<Vec<u8>>, fill: impl FnOnce(&mut Vec<u8>)) {
+    match Arc::get_mut(bytes) {
+        Some(owned) => {
+            owned.clear();
+            fill(owned);
+        }
+        None => {
+            let mut fresh = Vec::new();
+            fill(&mut fresh);
+            *bytes = Arc::new(fresh);
+        }
+    }
+}
 impl Frame {
+    /// A CPU copy of `target`'s display in fresh buffers ([`Self::snapshot_into`]).
     pub(crate) fn snapshot(
         target: &Target,
         generation: u64,
@@ -148,51 +171,63 @@ impl Frame {
         output_hdr: bool,
         white_nits: f32,
     ) -> Self {
-        let pixels = target.pixels.clone();
-        let light = target.light.clone();
-        let sdr_bytes = Arc::new(bytemuck::cast_slice(&pixels).to_vec());
+        let mut frame = empty_presentation();
+        frame.snapshot_into(target, generation, preview, output_hdr, white_nits);
+        frame
+    }
+    /// Copy `target`'s display into this frame, reusing its buffers: the viewport publishes into
+    /// pooled frames ([`PresentationPool`]) instead of allocating about 0.3 GB per 4K publish.
+    /// The scene-linear radiance is not part of a display copy (exports read it separately).
+    pub(crate) fn snapshot_into(
+        &mut self,
+        target: &Target,
+        generation: u64,
+        preview: bool,
+        output_hdr: bool,
+        white_nits: f32,
+    ) {
+        self.pixels.clone_from(&target.pixels);
+        self.light.clone_from(&target.light);
+        refill(&mut self.sdr_bytes, |bytes| {
+            bytes.extend_from_slice(bytemuck::cast_slice(&target.pixels))
+        });
         let gain = if target.light_kind.hdr() && output_hdr {
             100.0 / white_nits.max(1.0)
         } else {
             1.0
         };
-        let hdr_bytes = if output_hdr {
-            Arc::new(hdr_canvas_bytes(&light, gain))
+        refill(&mut self.hdr_bytes, |bytes| {
+            if output_hdr {
+                hdr_canvas_bytes_into(&target.light, gain, bytes);
+            }
+        });
+        self.generation = generation;
+        self.preview = preview;
+        self.width = target.width;
+        self.height = target.height;
+        self.radiance.clear();
+        self.light_kind = target.light_kind;
+        self.colour_error.clone_from(&target.colour_error);
+        // What the image shows: a raw viewport A/B reports no denoise.
+        self.denoised_samples = if target.denoise_shown() {
+            target.denoise.last_samples
         } else {
-            Arc::new(Vec::new())
+            0
         };
-        Self {
-            generation,
-            preview,
-            width: target.width,
-            height: target.height,
-            pixels,
-            light,
-            radiance: Vec::new(),
-            light_kind: target.light_kind,
-            colour_error: target.colour_error.clone(),
-            // What the image shows: a raw viewport A/B reports no denoise.
-            denoised_samples: if target.denoise_shown() {
-                target.denoise.last_samples
-            } else {
-                0
-            },
-            denoise_ms: target.denoise.last_ms,
-            denoise_error: target.denoise.error.clone(),
-            samples: target.samples,
-            active_tiles: target.active_tiles,
-            converged: target.converged,
-            last_ms: target.last_ms,
-            last_spp: target.last_spp,
-            unresolved: target.unresolved,
-            sdr_bytes,
-            hdr_bytes,
-        }
+        self.denoise_ms = target.denoise.last_ms;
+        self.denoise_error.clone_from(&target.denoise.error);
+        self.samples = target.samples;
+        self.active_tiles = target.active_tiles;
+        self.converged = target.converged;
+        self.last_ms = target.last_ms;
+        self.last_spp = target.last_spp;
+        self.unresolved = target.unresolved;
     }
     /// Finished for a target of `spp`: all samples taken, or adaptive sampling converged.
     pub fn complete(&self, spp: u32) -> bool {
         self.samples >= spp || self.converged
     }
+    /// Samples per second of the last traced batch, in millions (status bars, the GPU bench).
     pub fn msamples_per_s(&self) -> f64 {
         if self.last_ms <= 0.0 {
             return 0.0;
@@ -255,20 +290,31 @@ impl Frame {
 
 pub enum Command {
     /// The scene is boxed in both render commands so Command stays small in every queue
-    /// and in Result<(), Command> hand-backs.
+    /// and in Result<(), Command> hand-backs. A thumbnail's quality is its request's: `spp`,
+    /// `seed`, the batch budget and `max_bounces`, the bounce cap applied to the evaluated
+    /// scene (a bookmark's frozen world carries its own render settings).
     Thumbnail {
         id: u64,
         scene: Box<Scene>,
         width: usize,
         height: usize,
         spp: u32,
+        seed: u32,
+        budget_ms: f32,
+        max_bounces: u32,
     },
+    /// One export frame at the request's quality: `spp`, `seed` and the batch budget.
     RenderExport {
         id: u64,
         scene: Box<Scene>,
         width: usize,
         height: usize,
         spp: u32,
+        seed: u32,
+        budget_ms: f32,
+        /// Read the scene-linear radiance back at completion (`Frame::radiance`): only the
+        /// formats that store it (EXR) pay for the extra readback.
+        radiance: bool,
         /// A sequence coordinator receives these directly, independently of GUI polling.
         reply: Option<SyncSender<RenderEvent>>,
     },
@@ -304,15 +350,43 @@ pub enum Command {
         frame: Arc<Frame>,
     },
 }
+
+/// Why a command was not queued ([`RenderPort::try_command`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CommandError {
+    /// The queue (or the preview mailbox) is momentarily full: retry on a later tick.
+    Full,
+    /// The render worker is gone (it failed to start, panicked or shut down).
+    Stopped,
+    /// The request can never be accepted.
+    Invalid(String),
+}
+impl std::fmt::Display for CommandError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Full => f.write_str("Renderer queue is full; retry next UI tick"),
+            Self::Stopped => f.write_str("Render worker is unavailable"),
+            Self::Invalid(error) => f.write_str(error),
+        }
+    }
+}
+impl std::error::Error for CommandError {}
+
 #[derive(Clone)]
 pub enum RenderEvent {
     Ready {
         name: String,
     },
+    /// A viewport or worker error for the status line; never a job's terminal event.
     Error(String),
     Thumbnail {
         id: u64,
         frame: Arc<Frame>,
+    },
+    /// [`Command::Thumbnail`]'s failure: admission or a render step failed.
+    ThumbnailFailed {
+        id: u64,
+        error: String,
     },
     /// [`Command::Pick`]'s answer: the hit object's index in the picked scene's objects and the
     /// hit's depth along the view axis, None on a miss.
@@ -371,6 +445,8 @@ struct Mailbox {
     pending_failure: Option<RenderEvent>,
     /// The newest pick answer when the event queue is full (a click is never lost).
     pending_pick: Option<RenderEvent>,
+    /// The newest thumbnail failure when the event queue is full (its card never waits forever).
+    pending_thumbnail: Option<RenderEvent>,
     last_error: Option<String>,
     preview_generation: Option<u64>,
     preview_control: Option<Command>,
@@ -384,6 +460,11 @@ struct Shared {
     state: Mutex<Mailbox>,
     wake: Condvar,
 }
+/// The mailbox, also after a panic poisoned its lock: the worker's panic handler and every
+/// producer must still reach it to report the failure and stop.
+fn lock(shared: &Shared) -> MutexGuard<'_, Mailbox> {
+    shared.state.lock().unwrap_or_else(PoisonError::into_inner)
+}
 pub struct RenderService {
     shared: Arc<Shared>,
     #[cfg(test)]
@@ -396,9 +477,9 @@ impl RenderService {
             wake: Condvar::new(),
         });
         let worker = shared.clone();
-        // CUDA objects are constructed here, not on the caller and moved between threads.
-        let _worker_thread = thread::Builder::new()
-            .name("frac-cuda".into())
+        // The GPU objects are constructed here, on the worker, never moved between threads.
+        let spawned = thread::Builder::new()
+            .name("render-worker".into())
             .spawn(move || {
                 let result =
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_worker(&worker)));
@@ -407,9 +488,9 @@ impl RenderService {
                         .downcast_ref::<String>()
                         .cloned()
                         .or_else(|| error.downcast_ref::<&str>().map(|s| (*s).to_owned()))
-                        .unwrap_or_else(|| "CUDA worker panicked".into());
+                        .unwrap_or_else(|| "Render worker panicked".into());
                     let (export_id, reply) = {
-                        let mut state = worker.state.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut state = lock(&worker);
                         (
                             state.active_export_id.take(),
                             state.active_export_reply.take(),
@@ -426,22 +507,32 @@ impl RenderService {
                         );
                     }
                     push_event(&worker, RenderEvent::Error(message));
-                    worker
-                        .state
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .stopping = true;
+                    lock(&worker).stopping = true;
                 }
-            })
-            .expect("start CUDA worker");
+            });
+        let worker_thread = match spawned {
+            Ok(handle) => Some(handle),
+            Err(error) => {
+                // No worker: the service reports itself stopped and says why.
+                push_event(
+                    &shared,
+                    RenderEvent::Error(format!("Render worker did not start: {error}")),
+                );
+                lock(&shared).stopping = true;
+                None
+            }
+        };
+        // Production never joins the worker (`Drop`); it runs detached until it sees `stopping`.
+        #[cfg(not(test))]
+        drop(worker_thread);
         Self {
             shared,
             #[cfg(test)]
-            worker_thread: Some(_worker_thread),
+            worker_thread,
         }
     }
     pub fn request_viewport(&self, request: ViewportRequest) {
-        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = lock(&self.shared);
         state.requested_generation = request.generation;
         state.requested_interactive =
             request.active && !request.paused && request.interactive && request.preview;
@@ -449,25 +540,27 @@ impl RenderService {
         self.shared.wake.notify_one();
     }
     pub fn take_latest_frame(&self) -> Option<Arc<Frame>> {
-        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = lock(&self.shared);
         let frame = state.latest.take()?;
         frame_eligible(&frame, &state).then_some(frame)
     }
     pub fn drain_events(&self) -> Vec<RenderEvent> {
-        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = lock(&self.shared);
         let mut events: Vec<_> = state.events.drain(..).collect();
         events.extend(state.pending_export.take());
         events.extend(state.pending_failure.take());
         events.extend(state.pending_pick.take());
+        events.extend(state.pending_thumbnail.take());
         events.extend(state.last_error.take().map(RenderEvent::Error));
         events.extend(state.pending_preview_frame.take());
         events.extend(state.pending_preview_status.take());
         self.shared.wake.notify_one();
         events
     }
-    /// Replaceable preview intents never wait for a renderer/cache mutex on the UI.
+    /// Replaceable preview intents never wait for a renderer/cache mutex on the UI; a refused
+    /// command comes back for the next tick.
     pub fn try_preview_command(&self, command: Command) -> Result<(), Command> {
-        queue_preview_command(&self.shared, command)
+        queue_preview_command(&self.shared, command).map_err(|refused| refused.0)
     }
 
     pub(crate) fn preview_stopped(&self) -> bool {
@@ -483,19 +576,43 @@ impl RenderService {
             shared: self.shared.clone(),
         }
     }
-    pub fn try_command(&self, command: Command) -> Result<(), String> {
+    pub fn try_command(&self, command: Command) -> Result<(), CommandError> {
         self.port().try_command(command)
     }
 }
 
-fn queue_preview_command(shared: &Shared, command: Command) -> Result<(), Command> {
+/// Keep `frame` in the first free slot unless it is already there: the one recycle of the fixed
+/// presentation slots (UI hand-backs, replaced preview results, the presentation pools, the
+/// preview controller). Every slot taken: the frame comes back.
+pub(crate) fn put_slot(
+    slots: &mut [Option<Arc<Frame>>],
+    frame: Arc<Frame>,
+) -> Result<(), Arc<Frame>> {
+    if slots.iter().flatten().any(|old| Arc::ptr_eq(old, &frame)) {
+        return Ok(());
+    }
+    match slots.iter_mut().find(|slot| slot.is_none()) {
+        Some(slot) => {
+            *slot = Some(frame);
+            Ok(())
+        }
+        None => Err(frame),
+    }
+}
+
+/// Queue a replaceable preview intent in its mailbox slot. A refused command comes back with
+/// the reason; boxed because `Command` is large and refusals are rare.
+fn queue_preview_command(
+    shared: &Shared,
+    command: Command,
+) -> Result<(), Box<(Command, CommandError)>> {
     let mut state = match shared.state.try_lock() {
         Ok(state) => state,
         Err(TryLockError::Poisoned(error)) => error.into_inner(),
-        Err(TryLockError::WouldBlock) => return Err(command),
+        Err(TryLockError::WouldBlock) => return Err(Box::new((command, CommandError::Full))),
     };
     if state.stopping {
-        return Err(command);
+        return Err(Box::new((command, CommandError::Stopped)));
     }
     match command {
         command @ Command::BeginPreview { .. } => {
@@ -532,23 +649,19 @@ fn queue_preview_command(shared: &Shared, command: Command) -> Result<(), Comman
             }
         }
         Command::RecyclePreviewFrame { frame } => {
-            if !state
-                .recycled_preview
-                .iter()
-                .flatten()
-                .any(|old| Arc::ptr_eq(old, &frame))
-            {
-                let Some(slot) = state
-                    .recycled_preview
-                    .iter_mut()
-                    .find(|slot| slot.is_none())
-                else {
-                    return Err(Command::RecyclePreviewFrame { frame });
-                };
-                *slot = Some(frame);
+            if let Err(frame) = put_slot(&mut state.recycled_preview, frame) {
+                return Err(Box::new((
+                    Command::RecyclePreviewFrame { frame },
+                    CommandError::Full,
+                )));
             }
         }
-        other => return Err(other),
+        other => {
+            return Err(Box::new((
+                other,
+                CommandError::Invalid("Not a preview command".into()),
+            )));
+        }
     }
     shared.wake.notify_one();
     Ok(())
@@ -561,27 +674,21 @@ pub struct RenderPort {
 }
 impl RenderPort {
     pub fn is_available(&self) -> bool {
-        !self
-            .shared
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .stopping
+        !lock(&self.shared).stopping
     }
-    #[allow(dead_code)] // Availability alias for shutdown-aware background consumers.
-    pub fn is_stopped(&self) -> bool {
-        !self.is_available()
-    }
-    pub fn try_command(&self, command: Command) -> Result<(), String> {
+    /// Validate and queue `command`. A full queue ([`CommandError::Full`]) is worth a retry; a
+    /// stopped worker or an invalid request is not.
+    pub fn try_command(&self, command: Command) -> Result<(), CommandError> {
         match &command {
             Command::Thumbnail {
                 width, height, spp, ..
             }
             | Command::RenderExport {
                 width, height, spp, ..
-            } => validate_size(*width, *height, *spp)?,
+            } => validate_size(*width, *height, *spp)
+                .map_err(|error| CommandError::Invalid(error.to_string()))?,
             Command::BeginPreview { request, .. } | Command::CacheViewport { request, .. } => {
-                request.validate()?
+                request.validate().map_err(CommandError::Invalid)?
             }
             _ => {}
         }
@@ -593,12 +700,11 @@ impl RenderPort {
                 | Command::CancelPreview { .. }
                 | Command::RecyclePreviewFrame { .. }
         ) {
-            return queue_preview_command(&self.shared, command)
-                .map_err(|_| "Renderer mailbox is busy; retry next UI tick".to_string());
+            return queue_preview_command(&self.shared, command).map_err(|refused| refused.1);
         }
-        let mut state = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = lock(&self.shared);
         if state.stopping {
-            return Err("CUDA worker is unavailable".into());
+            return Err(CommandError::Stopped);
         }
         if matches!(command, Command::CancelExport) {
             state.cancel_export = true;
@@ -607,7 +713,7 @@ impl RenderPort {
                 .retain(|c| !matches!(c, Command::RenderExport { .. }));
         } else {
             if state.commands.len() >= QUEUE_LIMIT {
-                return Err("Renderer command queue is full; retry next UI tick".into());
+                return Err(CommandError::Full);
             }
             state.commands.push_back(command);
         }
@@ -617,11 +723,7 @@ impl RenderPort {
 }
 impl Drop for RenderService {
     fn drop(&mut self) {
-        self.shared
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .stopping = true;
+        lock(&self.shared).stopping = true;
         self.shared.wake.notify_one();
         // Production never joins the UI thread. Tests must release the adapter only after the
         // worker has dropped its CUDA/OIDN resources, otherwise the next test races teardown.
@@ -629,29 +731,18 @@ impl Drop for RenderService {
         if let Some(worker) = self.worker_thread.take()
             && worker.join().is_err()
         {
-            log::error!("CUDA test worker panicked during shutdown");
+            log::error!("Render test worker panicked during shutdown");
         }
     }
 }
 fn recycle_mailbox_frame(state: &mut Mailbox, frame: Arc<Frame>) {
-    if state
-        .recycled_preview
-        .iter()
-        .flatten()
-        .any(|old| Arc::ptr_eq(old, &frame))
-    {
-        return;
-    }
-    if let Some(slot) = state
-        .recycled_preview
-        .iter_mut()
-        .find(|slot| slot.is_none())
-    {
-        *slot = Some(frame);
+    if let Err(frame) = put_slot(&mut state.recycled_preview, frame) {
+        // Every slot is taken: this presentation is freed instead of reused.
+        drop(frame);
     }
 }
 fn push_event(shared: &Shared, event: RenderEvent) {
-    let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+    let mut state = lock(shared);
     match &event {
         RenderEvent::PreviewFrame { generation, .. } => {
             if state.preview_generation == Some(*generation) {
@@ -707,6 +798,7 @@ fn push_event(shared: &Shared, event: RenderEvent) {
             event @ RenderEvent::ExportFrame { .. } => state.pending_export = Some(event),
             event @ RenderEvent::ExportFailed { .. } => state.pending_failure = Some(event),
             event @ RenderEvent::Picked { .. } => state.pending_pick = Some(event),
+            event @ RenderEvent::ThumbnailFailed { .. } => state.pending_thumbnail = Some(event),
             RenderEvent::Error(error) => state.last_error = Some(error),
             _ => {}
         }
@@ -726,7 +818,10 @@ fn dispatch_export(
         return;
     };
     if matches!(event, RenderEvent::ExportProgress { .. }) {
-        let _ = reply.try_send(event);
+        // Progress is replaceable: a full channel drops this one and the next replaces it.
+        if let Err(TrySendError::Disconnected(_)) = reply.try_send(event) {
+            log::debug!("export progress dropped: its coordinator has gone");
+        }
         return;
     }
     loop {
@@ -734,11 +829,14 @@ fn dispatch_export(
             Ok(()) | Err(TrySendError::Disconnected(_)) => return,
             Err(TrySendError::Full(returned)) => event = returned,
         }
-        let state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = lock(shared);
         if state.stopping || state.cancel_export {
             return;
         }
-        let _ = shared.wake.wait_timeout(state, Duration::from_millis(5));
+        let (_state, _timeout) = shared
+            .wake
+            .wait_timeout(state, Duration::from_millis(5))
+            .unwrap_or_else(PoisonError::into_inner);
     }
 }
 
@@ -751,73 +849,38 @@ fn frame_eligible(frame: &Frame, state: &Mailbox) -> bool {
             && frame.generation < state.requested_generation)
 }
 fn publish_frame(shared: &Shared, frame: Arc<Frame>) {
-    let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+    let mut state = lock(shared);
     if frame_eligible(&frame, &state) && frame.generation >= state.newest_completed_generation {
         state.newest_completed_generation = frame.generation;
         state.latest = Some(frame);
     }
 }
 
-fn trace_key(request: &ViewportRequest) -> Vec<f32> {
-    use crate::params::*;
-    let mut key = request
-        .scene
-        .pack(request.width as u32, request.height as u32);
-    for index in [
-        P_EXPOSURE,
-        P_SATURATION,
-        P_TONEMAP,
-        P_SAMPLE_BEGIN,
-        P_SPP,
-        P_SEED,
-    ] {
-        key[index] = 0.0;
-    }
-    key.extend(crate::render::scene_trace_data(&request.scene));
-    key.push(request.scene.render.backend as u8 as f32);
-    key
-}
 struct Viewport {
     request: ViewportRequest,
-    key: Vec<f32>,
     target: Option<Target>,
     dirty: bool,
     last_preview: bool,
     last_publish: Instant,
+    /// The frames this viewport publishes, reused once the UI dropped them.
+    pool: PresentationPool,
 }
 impl Viewport {
     fn new(request: ViewportRequest) -> Self {
-        let key = trace_key(&request);
         Self {
             request,
-            key,
             target: None,
             dirty: true,
             last_preview: false,
             last_publish: Instant::now() - Duration::from_millis(20),
+            pool: PresentationPool::default(),
         }
     }
     fn update(&mut self, request: ViewportRequest) {
-        let scene_or_dims_changed = request.width != self.request.width
-            || request.height != self.request.height
-            || request.scene != self.request.scene;
-        if scene_or_dims_changed || request.seed != self.request.seed {
-            let key = if scene_or_dims_changed {
-                trace_key(&request)
-            } else {
-                self.key.clone()
-            };
-            if key != self.key
-                || request.scene.palette != self.request.scene.palette
-                || request.scene.environment.key() != self.request.scene.environment.key()
-                || request.seed != self.request.seed
-            {
-                // Seed is deliberately absent from Gpu's accumulation key, so explicitly discard its targets.
-                if request.seed != self.request.seed {
-                    self.target = None;
-                }
-                self.key = key;
-            }
+        // The seed is deliberately absent from Gpu's accumulation key (every other traced input
+        // resets the film there), so a new seed starts a new film here.
+        if request.seed != self.request.seed {
+            self.target = None;
         }
         self.dirty |= self.request != request;
         self.request = request;
@@ -828,6 +891,11 @@ struct RenderJob {
     scene: Scene,
     target: Target,
     spp: u32,
+    /// The job's seed and batch budget: its request's, never the worker's.
+    seed: u32,
+    budget_ms: f32,
+    /// Read the scene-linear radiance at completion (EXR exports).
+    radiance: bool,
     reply: Option<SyncSender<RenderEvent>>,
 }
 
@@ -865,16 +933,9 @@ impl PresentationPool {
         Some(Arc::new(empty_presentation()))
     }
     fn recycle(&mut self, frame: Arc<Frame>) {
-        if self
-            .slots
-            .iter()
-            .flatten()
-            .any(|old| Arc::ptr_eq(old, &frame))
-        {
-            return;
-        }
-        if let Some(slot) = self.slots.iter_mut().find(|slot| slot.is_none()) {
-            *slot = Some(frame);
+        if let Err(frame) = put_slot(&mut self.slots, frame) {
+            // Every slot is taken: this presentation is freed instead of reused.
+            drop(frame);
         }
     }
 }
@@ -903,7 +964,7 @@ fn empty_presentation() -> Frame {
     }
 }
 fn preview_current(shared: &Shared, generation: u64) -> bool {
-    let state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+    let state = lock(shared);
     !state.stopping && state.preview_generation == Some(generation)
 }
 fn fail_preview(session: &mut PreviewSession, shared: &Shared, error: String) {
@@ -917,6 +978,16 @@ fn fail_preview(session: &mut PreviewSession, shared: &Shared, error: String) {
             error,
         },
     );
+}
+/// The cache's progress for the UI: the one builder of [`RenderEvent::PreviewProgress`].
+fn progress(cache: &crate::preview::PreviewCache) -> RenderEvent {
+    RenderEvent::PreviewProgress {
+        generation: cache.request.generation,
+        completed: cache.count(),
+        total: cache.frames(),
+        bytes: cache.bytes(),
+        resident: cache.resident(),
+    }
 }
 fn present_preview(
     session: &mut PreviewSession,
@@ -932,11 +1003,12 @@ fn present_preview(
     let Some(mut frame) = pool.acquire() else {
         return false;
     };
-    if session
-        .cache
-        .get_into(number, Arc::get_mut(&mut frame).expect("unique pool frame"))
-        .is_none()
-    {
+    // The pool hands out frames nothing else holds.
+    let filled = match Arc::get_mut(&mut frame) {
+        Some(owned) => session.cache.get_into(number, owned).is_some(),
+        None => false,
+    };
+    if !filled {
         pool.recycle(frame);
         return false;
     }
@@ -964,11 +1036,7 @@ fn step_preview(
     }
     let mut worked = present_preview(session, pool, shared);
     if session.job.is_none() && !interactive {
-        let count = session
-            .cache
-            .request
-            .frame_count()
-            .expect("validated range");
+        let count = session.cache.frames();
         let number = if session.fill {
             while session.next_fill < count
                 && session
@@ -1003,8 +1071,8 @@ fn step_preview(
                 Ok(request.scene.as_ref().clone())
             };
             let scene = match scene.and_then(|scene| {
-                gpu.prepare_scene(&scene, request.width, request.height)
-                    .map(|()| scene)
+                gpu.prepare_scene(&scene, request.width, request.height)?;
+                Ok(scene)
             }) {
                 Ok(scene) => scene,
                 Err(error) => {
@@ -1021,8 +1089,11 @@ fn step_preview(
                     target: session
                         .target
                         .take()
-                        .unwrap_or_else(|| gpu.target(request.width, request.height)),
+                        .unwrap_or_else(|| Target::new(request.width, request.height)),
                     spp: request.spp,
+                    seed: request.seed,
+                    budget_ms: request.budget_ms,
+                    radiance: false,
                     reply: None,
                 },
             ));
@@ -1031,78 +1102,56 @@ fn step_preview(
     let Some((_, _, job)) = &mut session.job else {
         return worked;
     };
-    if !background_batch_allowed(job.target.last_ms, job.target.last_spp, interactive) {
+    if !background_batch_allowed(
+        job.target.last_ms,
+        job.target.last_spp,
+        job.budget_ms,
+        interactive,
+    ) {
         return worked;
     }
-    gpu.prepare_target(&mut job.target, &job.scene, None);
-    let batch = batch_size(&job.target, job.spp.saturating_sub(job.target.samples));
-    let final_pass = job.target.samples.saturating_add(batch) >= job.spp;
-    gpu.step_with_display(
+    let advanced = gpu.advance(
         &mut job.target,
         &job.scene,
-        batch,
-        session.cache.request.seed,
-        None,
-        final_pass,
-        |target| target.complete(job.spp),
+        job.spp,
+        job.seed,
+        Batch::Budget(job.budget_ms),
     );
     worked = true;
-    if !preview_current(shared, generation) {
-        return worked;
-    }
-    if job.target.complete(job.spp) {
-        let (number, epoch, job) = session.job.take().expect("completed preview job");
-        let request = &session.cache.request;
-        let frame = Frame::snapshot(
-            &job.target,
-            generation,
-            true,
-            request.output_hdr,
-            request.white_nits,
-        );
-        session.target = Some(job.target);
-        if let Err(error) = session.cache.store(number, &frame, epoch) {
-            fail_preview(session, shared, error);
+    let complete = match advanced {
+        Ok(complete) => complete,
+        Err(error) => {
+            fail_preview(session, shared, error.to_string());
             return worked;
         }
-        if session.fill && number == session.cache.request.first + session.next_fill {
-            session.next_fill += 1;
-        }
-        push_event(
-            shared,
-            RenderEvent::PreviewProgress {
-                generation,
-                completed: session.cache.count(),
-                total: session
-                    .cache
-                    .request
-                    .frame_count()
-                    .expect("validated range"),
-                bytes: session.cache.bytes(),
-                resident: session.cache.resident(),
-            },
-        );
-        worked |= present_preview(session, pool, shared);
+    };
+    if !preview_current(shared, generation) || !complete {
+        return worked;
     }
+    let Some((number, epoch, job)) = session.job.take() else {
+        return worked;
+    };
+    let request = &session.cache.request;
+    let frame = Frame::snapshot(
+        &job.target,
+        generation,
+        true,
+        request.output_hdr,
+        request.white_nits,
+    );
+    session.target = Some(job.target);
+    if let Err(error) = session.cache.store(number, &frame, epoch) {
+        fail_preview(session, shared, error);
+        return worked;
+    }
+    if session.fill && number == session.cache.request.first + session.next_fill {
+        session.next_fill += 1;
+    }
+    push_event(shared, progress(&session.cache));
+    worked |= present_preview(session, pool, shared);
     worked
 }
 
-pub(crate) fn validate_size(width: usize, height: usize, spp: u32) -> Result<(), String> {
-    if width == 0
-        || height == 0
-        || width > 16384
-        || height > 16384
-        || width.checked_mul(height).is_none_or(|n| n > 67_108_864)
-    {
-        return Err(
-            "Render dimensions must be positive and at most 64 megapixels / 16384 per axis".into(),
-        );
-    }
-    if spp == 0 || spp > 1_000_000 {
-        return Err("Sample count must be 1..=1000000".into());
-    }
-    Ok(())
-}
 /// Move cache ownership between quality profiles without cloning pixels. Scene
 /// edits fail compatibility and cannot reuse an old profile's rendered content.
 fn switch_preview_cache(
@@ -1123,20 +1172,503 @@ fn switch_preview_cache(
     }
 }
 
+/// Admission of a viewport, export or thumbnail request on the worker: the one size rule, then
+/// the backend, packing and environment of the exact dimensions ([`Gpu::prepare_scene`]).
+fn admit(
+    gpu: &mut Gpu,
+    scene: &Scene,
+    width: usize,
+    height: usize,
+    spp: u32,
+) -> Result<(), RenderError> {
+    validate_size(width, height, spp)?;
+    gpu.prepare_scene(scene, width, height)
+}
+
+/// What one worker iteration takes from the mailbox, under one lock.
+struct Mail {
+    request: Option<ViewportRequest>,
+    command: Option<Command>,
+    cancel: bool,
+    preview_control: Option<Command>,
+    preview_seek: Option<(u64, u32)>,
+    preview_store: Option<Command>,
+    recycled: [Option<Arc<Frame>>; 3],
+}
+
+/// Everything the render worker owns: the GPU and its jobs. Lives on the worker thread only.
+/// Every dequeued intent is applied ([`Self::receive`]): a failure becomes that intent's typed
+/// event, never a skipped iteration that would drop the rest of the mail.
+struct Worker {
+    gpu: Gpu,
+    viewport: Option<Viewport>,
+    export: Option<RenderJob>,
+    thumbnail: Option<RenderJob>,
+    preview: Option<PreviewSession>,
+    /// Keep the other quality profile resident when switching draft/final transport.
+    /// Both caches retain Playa's byte budget and eviction policy.
+    parked_preview: Option<crate::preview::PreviewCache>,
+    presentations: PresentationPool,
+}
+
+impl Worker {
+    /// The next mail, or None once the service is stopping.
+    fn take(&self, shared: &Shared) -> Option<Mail> {
+        let mut state = lock(shared);
+        if state.stopping {
+            return None;
+        }
+        // Allocate background render targets only once motion settles; allocation itself
+        // can be expensive for final-resolution exports.
+        let moving = self.viewport.as_ref().is_some_and(viewport_interactive)
+            || state
+                .viewport
+                .as_ref()
+                .is_some_and(|r| r.active && !r.paused && r.interactive);
+        let index = state.commands.iter().position(|command| match command {
+            Command::Thumbnail { .. } => {
+                !moving && self.thumbnail.is_none() && state.events.len() < QUEUE_LIMIT
+            }
+            Command::RenderExport { reply, .. } => {
+                !moving
+                    && self.export.is_none()
+                    && (reply.is_some() || state.pending_export.is_none())
+            }
+            _ => true,
+        });
+        let command = index.and_then(|index| state.commands.remove(index));
+        Some(Mail {
+            request: state.viewport.take(),
+            command,
+            cancel: std::mem::take(&mut state.cancel_export),
+            preview_control: state.preview_control.take(),
+            preview_seek: state.preview_seek.take(),
+            preview_store: state.preview_store.take(),
+            recycled: std::mem::take(&mut state.recycled_preview),
+        })
+    }
+
+    fn receive(&mut self, shared: &Shared, mail: Mail) {
+        for frame in mail.recycled.into_iter().flatten() {
+            self.presentations.recycle(frame);
+        }
+        if mail.cancel {
+            self.end_export(shared);
+        }
+        if let Some(request) = mail.request {
+            self.admit_viewport(shared, request);
+        }
+        if let Some(control) = mail.preview_control {
+            self.preview_control(shared, control);
+        }
+        if let Some(store) = mail.preview_store {
+            self.preview_store(shared, store);
+        }
+        if let Some((generation, number)) = mail.preview_seek
+            && let Some(session) = self
+                .preview
+                .as_mut()
+                .filter(|p| p.cache.request.generation == generation)
+            && session.cache.index(number).is_some()
+        {
+            session.cache.manager.increment_generation();
+            session.wanted = Some(number);
+            // Presentation is served below after a reusable pool slot becomes available.
+        }
+        if let Some(command) = mail.command {
+            self.command(shared, command);
+        }
+    }
+
+    /// A refused request leaves the previous viewport idle instead of rendering a stale scene;
+    /// the next accepted request resumes it.
+    fn admit_viewport(&mut self, shared: &Shared, request: ViewportRequest) {
+        if let Err(error) = admit(
+            &mut self.gpu,
+            &request.scene,
+            request.width,
+            request.height,
+            request.target_spp,
+        ) {
+            if let Some(viewport) = &mut self.viewport {
+                viewport.request.active = false;
+            }
+            push_event(shared, RenderEvent::Error(error.to_string()));
+        } else if let Some(viewport) = &mut self.viewport {
+            viewport.update(request);
+        } else {
+            self.viewport = Some(Viewport::new(request));
+        }
+    }
+
+    fn preview_control(&mut self, shared: &Shared, control: Command) {
+        match control {
+            Command::BeginPreview { request, cache_all } => {
+                let generation = request.generation;
+                if let Some(session) = self
+                    .preview
+                    .as_mut()
+                    .filter(|session| session.cache.request.compatible_content(&request))
+                {
+                    let first = request.first;
+                    if let Err(error) = session.cache.restart(request, cache_all) {
+                        session.cache.request.generation = generation;
+                        fail_preview(session, shared, error);
+                        return;
+                    }
+                    session.wanted = Some(first);
+                    session.next_fill = 0;
+                    session.fill = cache_all;
+                    if let Some((_, _, job)) = &mut session.job {
+                        job.id = generation;
+                    }
+                    if let Some(v) = &mut self.viewport {
+                        v.request.active = false;
+                    }
+                    push_event(shared, progress(&session.cache));
+                } else {
+                    match switch_preview_cache(
+                        &mut self.preview,
+                        &mut self.parked_preview,
+                        request,
+                        cache_all,
+                    ) {
+                        Ok(cache) => {
+                            if let Some(v) = &mut self.viewport {
+                                v.request.active = false;
+                            }
+                            push_event(shared, progress(&cache));
+                            self.preview = Some(PreviewSession {
+                                wanted: Some(cache.request.first),
+                                next_fill: 0,
+                                fill: cache_all,
+                                cache,
+                                job: None,
+                                target: None,
+                            });
+                        }
+                        Err(error) => {
+                            push_event(shared, RenderEvent::PreviewFailed { generation, error })
+                        }
+                    }
+                }
+            }
+            Command::CancelPreview { generation } => {
+                if let Some(session) = self
+                    .preview
+                    .as_mut()
+                    .filter(|p| p.cache.request.generation == generation)
+                {
+                    session.fill = false;
+                    session.wanted = None;
+                    session.job = None;
+                    session.cache.manager.increment_generation();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn preview_store(&mut self, shared: &Shared, store: Command) {
+        let Command::CacheViewport {
+            request,
+            number,
+            frame,
+        } = store
+        else {
+            return;
+        };
+        let generation = request.generation;
+        if !preview_current(shared, generation) {
+            return;
+        }
+        if self
+            .preview
+            .as_ref()
+            .is_none_or(|s| !s.cache.request.compatible_content(&request))
+        {
+            match switch_preview_cache(&mut self.preview, &mut self.parked_preview, request, false)
+            {
+                Ok(cache) => {
+                    self.preview = Some(PreviewSession {
+                        cache,
+                        wanted: None,
+                        next_fill: 0,
+                        fill: false,
+                        job: None,
+                        target: None,
+                    })
+                }
+                Err(error) => {
+                    push_event(shared, RenderEvent::PreviewFailed { generation, error });
+                    return;
+                }
+            }
+        }
+        if let Some(session) = self
+            .preview
+            .as_mut()
+            .filter(|s| s.cache.request.generation == generation)
+        {
+            let epoch = session.cache.manager.current_epoch();
+            match session.cache.store(number, &frame, epoch) {
+                Ok(()) => push_event(shared, progress(&session.cache)),
+                Err(error) => push_event(shared, RenderEvent::PreviewFailed { generation, error }),
+            }
+        }
+    }
+
+    fn command(&mut self, shared: &Shared, command: Command) {
+        match command {
+            // Preview intents travel through their own mailbox slots (`queue_preview_command`).
+            Command::BeginPreview { .. }
+            | Command::CacheViewport { .. }
+            | Command::SeekPreview { .. }
+            | Command::CancelPreview { .. }
+            | Command::RecyclePreviewFrame { .. } => {}
+            Command::CancelExport => self.end_export(shared),
+            Command::Pick {
+                id,
+                scene,
+                width,
+                height,
+                ndc,
+            } => {
+                let hit = validate_size(width, height, 1)
+                    .and_then(|()| self.gpu.pick(&scene, width, height, ndc))
+                    .map_err(|error| error.to_string());
+                // Its parameters replaced the viewport's: the next viewport launch sets its own.
+                push_event(shared, RenderEvent::Picked { id, hit });
+            }
+            Command::ReloadColour => {
+                self.gpu.invalidate_colour();
+                if let Some(v) = &mut self.viewport {
+                    v.dirty = true;
+                }
+            }
+            Command::RenderExport {
+                id,
+                scene,
+                width,
+                height,
+                spp,
+                seed,
+                budget_ms,
+                radiance,
+                reply,
+            } => {
+                if let Err(error) = admit(&mut self.gpu, &scene, width, height, spp) {
+                    dispatch_export(
+                        shared,
+                        reply.as_ref(),
+                        RenderEvent::ExportFailed {
+                            id,
+                            error: error.to_string(),
+                        },
+                    );
+                } else {
+                    {
+                        let mut state = lock(shared);
+                        state.active_export_id = Some(id);
+                        state.active_export_reply = reply.clone();
+                    }
+                    self.export = Some(RenderJob {
+                        id,
+                        scene: *scene,
+                        target: Target::new(width, height),
+                        spp,
+                        seed,
+                        budget_ms,
+                        radiance,
+                        reply,
+                    });
+                }
+            }
+            Command::Thumbnail {
+                id,
+                scene,
+                width,
+                height,
+                spp,
+                seed,
+                budget_ms,
+                max_bounces,
+            } => {
+                let admitted = thumbnail_snapshot(*scene, max_bounces).and_then(|scene| {
+                    admit(&mut self.gpu, &scene, width, height, spp)?;
+                    Ok(scene)
+                });
+                match admitted {
+                    Ok(scene) => {
+                        self.thumbnail = Some(RenderJob {
+                            id,
+                            scene,
+                            target: Target::new(width, height),
+                            spp,
+                            seed,
+                            budget_ms,
+                            radiance: false,
+                            reply: None,
+                        })
+                    }
+                    Err(error) => push_event(shared, RenderEvent::ThumbnailFailed { id, error }),
+                }
+            }
+        }
+    }
+
+    /// Drop the export job (cancelled, finished or failed) and its panic-path registration.
+    fn end_export(&mut self, shared: &Shared) {
+        self.export = None;
+        let mut state = lock(shared);
+        state.active_export_id = None;
+        state.active_export_reply = None;
+    }
+
+    /// One step of every job that has work. Returns whether any GPU work ran.
+    fn work(&mut self, shared: &Shared) -> bool {
+        let interactive = self.viewport.as_ref().is_some_and(viewport_interactive);
+        let mut worked = false;
+        if let Some(viewport) = self.viewport.as_mut() {
+            match step_viewport(&mut self.gpu, viewport, shared) {
+                Ok(stepped) => worked |= stepped,
+                Err(error) => {
+                    // Rendering the same request again would fail the same way.
+                    viewport.request.active = false;
+                    push_event(shared, RenderEvent::Error(error.to_string()));
+                }
+            }
+        }
+        worked |= self.step_export(shared, interactive);
+        if self.export.is_none()
+            && let Some(session) = &mut self.preview
+        {
+            worked |= step_preview(
+                &mut self.gpu,
+                session,
+                &mut self.presentations,
+                shared,
+                interactive,
+            );
+        }
+        worked |= self.step_thumbnail(shared, interactive);
+        worked
+    }
+
+    fn step_export(&mut self, shared: &Shared, interactive: bool) -> bool {
+        let Some(job) = self.export.as_mut() else {
+            return false;
+        };
+        if !background_batch_allowed(
+            job.target.last_ms,
+            job.target.last_spp,
+            job.budget_ms,
+            interactive,
+        ) {
+            return false;
+        }
+        let outcome = self
+            .gpu
+            .advance(
+                &mut job.target,
+                &job.scene,
+                job.spp,
+                job.seed,
+                Batch::Budget(job.budget_ms),
+            )
+            .and_then(|complete| {
+                if !complete {
+                    return Ok(None);
+                }
+                let mut frame = Frame::snapshot(&job.target, job.id, false, false, 100.0);
+                if job.radiance {
+                    frame.radiance = self.gpu.scene_linear(&job.target)?;
+                }
+                Ok(Some(frame))
+            });
+        let cancelled = lock(shared).cancel_export;
+        match outcome {
+            Err(error) => {
+                let (id, reply) = (job.id, job.reply.take());
+                self.end_export(shared);
+                dispatch_export(
+                    shared,
+                    reply.as_ref(),
+                    RenderEvent::ExportFailed {
+                        id,
+                        error: error.to_string(),
+                    },
+                );
+            }
+            Ok(_) if cancelled => {}
+            Ok(Some(frame)) => {
+                dispatch_export(
+                    shared,
+                    job.reply.as_ref(),
+                    RenderEvent::ExportFrame {
+                        id: job.id,
+                        frame: Arc::new(frame),
+                    },
+                );
+                self.end_export(shared);
+            }
+            Ok(None) => dispatch_export(
+                shared,
+                job.reply.as_ref(),
+                RenderEvent::ExportProgress {
+                    id: job.id,
+                    samples: job.target.samples,
+                    total: job.spp,
+                },
+            ),
+        }
+        true
+    }
+
+    fn step_thumbnail(&mut self, shared: &Shared, interactive: bool) -> bool {
+        let Some(job) = self.thumbnail.as_mut() else {
+            return false;
+        };
+        let mut worked = false;
+        if !interactive && !job.target.complete(job.spp) {
+            worked = true;
+            if let Err(error) = self.gpu.advance(
+                &mut job.target,
+                &job.scene,
+                job.spp,
+                job.seed,
+                Batch::Budget(job.budget_ms),
+            ) {
+                let id = job.id;
+                self.thumbnail = None;
+                push_event(
+                    shared,
+                    RenderEvent::ThumbnailFailed {
+                        id,
+                        error: error.to_string(),
+                    },
+                );
+                return worked;
+            }
+        }
+        if job.target.complete(job.spp) && lock(shared).events.len() < QUEUE_LIMIT {
+            let frame = Arc::new(Frame::snapshot(&job.target, job.id, false, false, 100.0));
+            push_event(shared, RenderEvent::Thumbnail { id: job.id, frame });
+            self.thumbnail = None;
+        }
+        worked
+    }
+}
+
 fn run_worker(shared: &Shared) {
-    if shared
-        .state
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .stopping
-    {
+    if lock(shared).stopping {
         return;
     }
-    let mut gpu = match Gpu::new() {
+    let gpu = match Gpu::new() {
         Ok(gpu) => gpu,
         Err(error) => {
-            push_event(shared, RenderEvent::Error(error));
-            shared.state.lock().unwrap().stopping = true;
+            push_event(shared, RenderEvent::Error(error.to_string()));
+            lock(shared).stopping = true;
             return;
         }
     };
@@ -1146,480 +1678,118 @@ fn run_worker(shared: &Shared) {
             name: gpu.name.clone(),
         },
     );
-    let mut viewport: Option<Viewport> = None;
-    let mut export: Option<RenderJob> = None;
-    let mut thumbnail: Option<RenderJob> = None;
-    let mut preview: Option<PreviewSession> = None;
-    // Keep the other quality profile resident when switching draft/final transport.
-    // Both caches retain Playa's byte budget and eviction policy.
-    let mut parked_preview: Option<crate::preview::PreviewCache> = None;
-    let mut presentations = PresentationPool::default();
-    loop {
-        let (request, command, cancel, preview_control, preview_seek, preview_store, recycled) = {
-            let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
-            if state.stopping {
-                return;
-            }
-            // Allocate background render targets only once motion settles; allocation itself
-            // can be expensive for final-resolution exports.
-            let moving = viewport.as_ref().is_some_and(viewport_interactive)
-                || state
-                    .viewport
-                    .as_ref()
-                    .is_some_and(|r| r.active && !r.paused && r.interactive);
-            let index = state.commands.iter().position(|command| match command {
-                Command::Thumbnail { .. } => {
-                    !moving && thumbnail.is_none() && state.events.len() < QUEUE_LIMIT
-                }
-                Command::RenderExport { reply, .. } => {
-                    !moving
-                        && export.is_none()
-                        && (reply.is_some() || state.pending_export.is_none())
-                }
-                _ => true,
-            });
-            let command = index.and_then(|index| state.commands.remove(index));
-            (
-                state.viewport.take(),
-                command,
-                std::mem::take(&mut state.cancel_export),
-                state.preview_control.take(),
-                state.preview_seek.take(),
-                state.preview_store.take(),
-                std::mem::take(&mut state.recycled_preview),
-            )
-        };
-        for frame in recycled.into_iter().flatten() {
-            presentations.recycle(frame);
+    let mut worker = Worker {
+        gpu,
+        viewport: None,
+        export: None,
+        thumbnail: None,
+        preview: None,
+        parked_preview: None,
+        presentations: PresentationPool::default(),
+    };
+    while let Some(mail) = worker.take(shared) {
+        worker.receive(shared, mail);
+        if worker.work(shared) {
+            continue;
         }
-        if cancel {
-            export = None;
-            let mut state = shared.state.lock().unwrap();
-            state.active_export_id = None;
-            state.active_export_reply = None;
+        let state = lock(shared);
+        if state.stopping {
+            return;
         }
-        if let Some(request) = request {
-            if let Err(error) = validate_size(request.width, request.height, request.target_spp)
-                .and_then(|()| gpu.prepare_scene(&request.scene, request.width, request.height))
-            {
-                push_event(shared, RenderEvent::Error(error));
-            } else if let Some(active) = &mut viewport {
-                active.update(request);
-            } else {
-                viewport = Some(Viewport::new(request));
-            }
-        }
-        if let Some(control) = preview_control {
-            match control {
-                Command::BeginPreview { request, cache_all } => {
-                    let generation = request.generation;
-                    if let Some(session) = preview
-                        .as_mut()
-                        .filter(|session| session.cache.request.compatible_content(&request))
-                    {
-                        let first = request.first;
-                        if let Err(error) = session.cache.restart(request, cache_all) {
-                            session.cache.request.generation = generation;
-                            fail_preview(session, shared, error);
-                            continue;
-                        }
-                        session.wanted = Some(first);
-                        session.next_fill = 0;
-                        session.fill = cache_all;
-                        if let Some((_, _, job)) = &mut session.job {
-                            job.id = generation;
-                        }
-                        if let Some(v) = &mut viewport {
-                            v.request.active = false;
-                        }
-                        push_event(
-                            shared,
-                            RenderEvent::PreviewProgress {
-                                generation,
-                                completed: session.cache.count(),
-                                total: session
-                                    .cache
-                                    .request
-                                    .frame_count()
-                                    .expect("validated range"),
-                                bytes: session.cache.bytes(),
-                                resident: session.cache.resident(),
-                            },
-                        );
-                    } else {
-                        match switch_preview_cache(
-                            &mut preview,
-                            &mut parked_preview,
-                            request,
-                            cache_all,
-                        ) {
-                            Ok(cache) => {
-                                if let Some(v) = &mut viewport {
-                                    v.request.active = false;
-                                }
-                                push_event(
-                                    shared,
-                                    RenderEvent::PreviewProgress {
-                                        generation,
-                                        completed: cache.count(),
-                                        total: cache
-                                            .request
-                                            .frame_count()
-                                            .expect("validated range"),
-                                        bytes: cache.bytes(),
-                                        resident: cache.resident(),
-                                    },
-                                );
-                                preview = Some(PreviewSession {
-                                    wanted: Some(cache.request.first),
-                                    next_fill: 0,
-                                    fill: cache_all,
-                                    cache,
-                                    job: None,
-                                    target: None,
-                                });
-                            }
-                            Err(error) => {
-                                push_event(shared, RenderEvent::PreviewFailed { generation, error })
-                            }
-                        }
-                    }
-                }
-                Command::CancelPreview { generation } => {
-                    if let Some(session) = preview
-                        .as_mut()
-                        .filter(|p| p.cache.request.generation == generation)
-                    {
-                        session.fill = false;
-                        session.wanted = None;
-                        session.job = None;
-                        session.cache.manager.increment_generation();
-                    }
-                }
-                _ => {}
-            }
-        }
-        if let Some(Command::CacheViewport {
-            request,
-            number,
-            frame,
-        }) = preview_store
+        if state.viewport.is_none()
+            && !state.cancel_export
+            && state.preview_control.is_none()
+            && state.preview_seek.is_none()
+            && state.preview_store.is_none()
+            && state.recycled_preview.iter().all(Option::is_none)
         {
-            let generation = request.generation;
-            if preview_current(shared, generation) {
-                if preview
-                    .as_ref()
-                    .is_none_or(|s| !s.cache.request.compatible_content(&request))
-                {
-                    match switch_preview_cache(&mut preview, &mut parked_preview, request, false) {
-                        Ok(cache) => {
-                            preview = Some(PreviewSession {
-                                cache,
-                                wanted: None,
-                                next_fill: 0,
-                                fill: false,
-                                job: None,
-                                target: None,
-                            })
-                        }
-                        Err(error) => {
-                            push_event(shared, RenderEvent::PreviewFailed { generation, error });
-                            continue;
-                        }
-                    }
-                }
-                if let Some(session) = preview
-                    .as_mut()
-                    .filter(|s| s.cache.request.generation == generation)
-                {
-                    let epoch = session.cache.manager.current_epoch();
-                    match session.cache.store(number, &frame, epoch) {
-                        Ok(()) => push_event(
-                            shared,
-                            RenderEvent::PreviewProgress {
-                                generation,
-                                completed: session.cache.count(),
-                                total: session
-                                    .cache
-                                    .request
-                                    .frame_count()
-                                    .expect("validated range"),
-                                bytes: session.cache.bytes(),
-                                resident: session.cache.resident(),
-                            },
-                        ),
-                        Err(error) => {
-                            push_event(shared, RenderEvent::PreviewFailed { generation, error })
-                        }
-                    }
-                }
-            }
-        }
-        if let Some((generation, number)) = preview_seek
-            && let Some(session) = preview
-                .as_mut()
-                .filter(|p| p.cache.request.generation == generation)
-            && session.cache.index(number).is_some()
-        {
-            session.cache.manager.increment_generation();
-            session.wanted = Some(number);
-            // Presentation is served below after a reusable pool slot becomes available.
-        }
-        if let Some(command) = command {
-            match command {
-                Command::BeginPreview { .. }
-                | Command::CacheViewport { .. }
-                | Command::SeekPreview { .. }
-                | Command::CancelPreview { .. }
-                | Command::RecyclePreviewFrame { .. } => {}
-                Command::CancelExport => export = None,
-                Command::Pick {
-                    id,
-                    scene,
-                    width,
-                    height,
-                    ndc,
-                } => {
-                    let hit = validate_size(width, height, 1)
-                        .and_then(|()| gpu.pick(&scene, width, height, ndc));
-                    // Its parameters replaced the viewport's: the next viewport launch sets its own.
-                    push_event(shared, RenderEvent::Picked { id, hit });
-                }
-                Command::ReloadColour => {
-                    gpu.invalidate_colour();
-                    if let Some(v) = &mut viewport {
-                        v.dirty = true;
-                    }
-                }
-                Command::RenderExport {
-                    id,
-                    scene,
-                    width,
-                    height,
-                    spp,
-                    reply,
-                } => {
-                    if let Err(error) = validate_size(width, height, spp)
-                        .and_then(|()| gpu.prepare_scene(&scene, width, height))
-                    {
-                        dispatch_export(
-                            shared,
-                            reply.as_ref(),
-                            RenderEvent::ExportFailed { id, error },
-                        );
-                    } else {
-                        {
-                            let mut state = shared.state.lock().unwrap();
-                            state.active_export_id = Some(id);
-                            state.active_export_reply = reply.clone();
-                        }
-                        export = Some(RenderJob {
-                            id,
-                            scene: *scene,
-                            target: gpu.target(width, height),
-                            spp,
-                            reply,
-                        });
-                    }
-                }
-                Command::Thumbnail {
-                    id,
-                    scene,
-                    width,
-                    height,
-                    spp,
-                } => {
-                    let scene = match thumbnail_snapshot(*scene) {
-                        Ok(scene) => scene,
-                        Err(error) => {
-                            push_event(shared, RenderEvent::Error(error));
-                            continue;
-                        }
-                    };
-                    if let Err(error) = validate_size(width, height, spp)
-                        .and_then(|()| gpu.prepare_scene(&scene, width, height))
-                    {
-                        push_event(shared, RenderEvent::Error(error));
-                    } else {
-                        thumbnail = Some(RenderJob {
-                            id,
-                            scene,
-                            target: gpu.target(width, height),
-                            spp,
-                            reply: None,
-                        });
-                    }
-                }
-            }
-        }
-        let mut worked = false;
-        let interactive = viewport.as_ref().is_some_and(viewport_interactive);
-        if let Some(active) = viewport.as_mut() {
-            worked |= step_viewport(&mut gpu, active, shared);
-        }
-        if let Some(job) = export.as_mut().filter(|job| {
-            background_batch_allowed(job.target.last_ms, job.target.last_spp, interactive)
-        }) {
-            let batch = batch_size(&job.target, job.spp.saturating_sub(job.target.samples));
-            let final_pass = job.target.samples.saturating_add(batch) >= job.spp;
-            gpu.step_with_display(
-                &mut job.target,
-                &job.scene,
-                batch,
-                job.id as u32,
-                None,
-                final_pass,
-                |target| target.complete(job.spp),
-            );
-            worked = true;
-            let cancelled = shared.state.lock().unwrap().cancel_export;
-            if !cancelled {
-                if job.target.complete(job.spp) {
-                    let mut frame = Frame::snapshot(&job.target, job.id, false, false, 100.0);
-                    frame.radiance = gpu.scene_linear(&job.target);
-                    dispatch_export(
-                        shared,
-                        job.reply.as_ref(),
-                        RenderEvent::ExportFrame {
-                            id: job.id,
-                            frame: Arc::new(frame),
-                        },
-                    );
-                    export = None;
-                    let mut state = shared.state.lock().unwrap();
-                    state.active_export_id = None;
-                    state.active_export_reply = None;
-                } else {
-                    dispatch_export(
-                        shared,
-                        job.reply.as_ref(),
-                        RenderEvent::ExportProgress {
-                            id: job.id,
-                            samples: job.target.samples,
-                            total: job.spp,
-                        },
-                    );
-                }
-            }
-        }
-        if export.is_none()
-            && let Some(session) = &mut preview
-        {
-            worked |= step_preview(&mut gpu, session, &mut presentations, shared, interactive);
-        }
-        if let Some(job) = &mut thumbnail {
-            if !interactive && !job.target.complete(job.spp) {
-                let batch = batch_size(&job.target, job.spp.saturating_sub(job.target.samples));
-                let final_pass = job.target.samples.saturating_add(batch) >= job.spp;
-                gpu.step_with_display(
-                    &mut job.target,
-                    &job.scene,
-                    batch,
-                    7,
-                    None,
-                    final_pass,
-                    |target| target.complete(job.spp),
-                );
-                worked = true;
-            }
-            if job.target.complete(job.spp)
-                && shared.state.lock().unwrap().events.len() < QUEUE_LIMIT
-            {
-                let frame = Arc::new(Frame::snapshot(&job.target, job.id, false, false, 100.0));
-                push_event(shared, RenderEvent::Thumbnail { id: job.id, frame });
-                thumbnail = None;
-            }
-        }
-        if !worked {
-            let state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
-            if state.stopping {
-                return;
-            }
-            if state.viewport.is_none()
-                && !state.cancel_export
-                && state.preview_control.is_none()
-                && state.preview_seek.is_none()
-                && state.preview_store.is_none()
-                && state.recycled_preview.iter().all(Option::is_none)
-            {
-                let _ = shared.wake.wait_timeout(state, Duration::from_millis(20));
-            }
+            let (_state, _timeout) = shared
+                .wake
+                .wait_timeout(state, Duration::from_millis(20))
+                .unwrap_or_else(PoisonError::into_inner);
         }
     }
 }
-fn thumbnail_snapshot(mut scene: Scene) -> Result<Scene, String> {
+/// The scene a thumbnail renders: its world evaluated at its first frame, then the request's
+/// bounce cap on the evaluated root (a bookmark's frozen document carries its own render
+/// settings, so the cap cannot be applied before evaluation).
+fn thumbnail_snapshot(scene: Scene, max_bounces: u32) -> Result<Scene, String> {
     let document = crate::world::WorldDocument::from_scene(&scene);
-    scene = document.snapshot(f64::from(document.first))?;
-    scene.render.max_bounces = scene.render.max_bounces.min(3);
+    let mut scene = document.snapshot(f64::from(document.first))?;
+    scene.render.max_bounces = scene.render.max_bounces.min(max_bounces);
     Ok(scene)
 }
 
 fn viewport_interactive(viewport: &Viewport) -> bool {
     viewport.request.active && !viewport.request.paused && viewport.request.interactive
 }
-fn background_batch_allowed(last_ms: f32, last_spp: u32, interactive: bool) -> bool {
-    // A CUDA kernel cannot be preempted here. If even one previously measured sample
-    // exceeds the interactive budget (or its cost is unknown), defer it until motion ends.
-    !interactive || (last_spp > 0 && last_ms > 0.0 && last_ms / last_spp as f32 <= 8.0)
+/// A background batch may run while the viewport moves only when one previously measured
+/// sample fits the job's own `budget_ms`: a GPU launch cannot be preempted, so an unknown or
+/// larger cost waits until motion ends.
+fn background_batch_allowed(
+    last_ms: f32,
+    last_spp: u32,
+    budget_ms: f32,
+    interactive: bool,
+) -> bool {
+    !interactive || (last_spp > 0 && last_ms > 0.0 && last_ms / last_spp as f32 <= budget_ms)
 }
-pub(crate) fn batch_size(target: &Target, remaining: u32) -> u32 {
-    batch_size_for_budget(target, remaining, 8.0)
-}
-fn batch_size_for_budget(target: &Target, remaining: u32, budget_ms: f32) -> u32 {
-    if remaining == 0 {
-        return 0;
-    }
-    let per_sample = target.last_ms / target.last_spp.max(1) as f32;
-    let batch = if per_sample > 0.0 {
-        (budget_ms / per_sample) as u32
-    } else {
-        1
-    };
-    batch.clamp(1, 4).min(remaining)
-}
-fn step_viewport(gpu: &mut Gpu, active: &mut Viewport, shared: &Shared) -> bool {
+/// One viewport step: prepare (once), size the batch from the request's budget, trace, and
+/// publish into a pooled frame when the display is due. Returns whether samples were traced.
+fn step_viewport(
+    gpu: &mut Gpu,
+    active: &mut Viewport,
+    shared: &Shared,
+) -> Result<bool, RenderError> {
     let request = &active.request;
     if !request.active {
-        return false;
+        return Ok(false);
     }
     let preview = request.preview;
     let (width, height) = (request.width, request.height);
     // Profiles share the film whenever their effective trace inputs and extent agree.
-    let slot = &mut active.target;
-    let fresh = slot
+    if active
+        .target
         .as_ref()
-        .is_none_or(|t| t.width != width || t.height != height);
-    if fresh {
-        *slot = Some(gpu.target(width, height));
+        .is_some_and(|t| t.width != width || t.height != height)
+    {
+        active.target = None;
     }
-    let target = slot.as_mut().unwrap();
+    let fresh = active.target.is_none();
+    let target = active
+        .target
+        .get_or_insert_with(|| Target::new(width, height));
     // Detect accumulation resets without the extra tonemap/OCIO/readback that a zero-spp
     // step would perform. The selected traced or display-only batch runs exactly once.
-    if active.dirty || fresh || active.last_preview != preview {
-        gpu.prepare_target(target, &request.scene, None);
-    }
+    let changed = active.dirty || fresh || active.last_preview != preview;
+    let prepared = if changed {
+        Some(gpu.prepare(target, &request.scene)?)
+    } else {
+        None
+    };
     target.raw_view = request.raw;
     let goal = request.target_spp;
     let spp = if request.paused {
         0
     } else {
-        batch_size_for_budget(
-            target,
-            goal.saturating_sub(target.samples),
-            request.batch_budget_ms,
-        )
+        Batch::Budget(request.batch_budget_ms).size(target, goal.saturating_sub(target.samples))
     };
-    if spp == 0 && !active.dirty && !fresh && active.last_preview == preview {
-        return false;
+    if spp == 0 && !changed {
+        return Ok(false);
     }
+    let launch = match prepared {
+        Some(launch) => launch,
+        None => gpu.prepare(target, &request.scene)?,
+    };
     let final_pass = target.samples.saturating_add(spp) >= goal;
-    let mut publish = active.dirty || fresh || active.last_preview != preview;
+    // A restarted film is always shown, so the viewport never keeps the old accumulation.
+    let mut publish = changed || launch.reset;
     gpu.step_with_display(
         target,
         &request.scene,
+        &launch,
         spp,
         request.seed,
-        None,
         final_pass,
         |target| {
             publish |= target.complete(goal)
@@ -1627,33 +1797,50 @@ fn step_viewport(gpu: &mut Gpu, active: &mut Viewport, shared: &Shared) -> bool 
                     >= Duration::from_secs_f32(1.0 / request.target_fps);
             publish
         },
-    );
+    )?;
     if publish {
-        let frame = Arc::new(Frame::snapshot(
-            target,
-            request.generation,
-            preview,
-            request.output_hdr,
-            request.white_nits,
-        ));
+        let mut frame = active
+            .pool
+            .acquire()
+            .unwrap_or_else(|| Arc::new(empty_presentation()));
+        match Arc::get_mut(&mut frame) {
+            Some(owned) => owned.snapshot_into(
+                target,
+                request.generation,
+                preview,
+                request.output_hdr,
+                request.white_nits,
+            ),
+            None => {
+                frame = Arc::new(Frame::snapshot(
+                    target,
+                    request.generation,
+                    preview,
+                    request.output_hdr,
+                    request.white_nits,
+                ))
+            }
+        }
+        active.pool.recycle(frame.clone());
         publish_frame(shared, frame);
         active.last_publish = Instant::now();
     }
     active.dirty = false;
     active.last_preview = preview;
-    spp > 0
+    Ok(spp > 0)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::{Bulb, Formula, Kifs, KifsKind, MandelBox};
 
     #[test]
     #[ignore = "requires CUDA; verifies Playa cache then play through the real worker"]
     fn cuda_preview_caches_inclusive_range_then_replays_native_presentation() {
         let _gpu_test = crate::test_gpu::lock();
         let service = RenderService::spawn();
-        let mut scene = Scene::preset(crate::params::FAMILY_BULB);
+        let mut scene = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
         scene.colour.on = false;
         scene.render.denoise.enabled = false;
         let request = crate::preview::PreviewRequest {
@@ -1671,6 +1858,7 @@ mod tests {
             white_nits: 203.0,
             cache_fraction: 0.01,
             reserve_gb: 0.0,
+            budget_ms: BACKGROUND_BUDGET_MS,
         };
         service
             .try_command(Command::BeginPreview {
@@ -1751,6 +1939,7 @@ mod tests {
             white_nits: 100.0,
             cache_fraction: 0.01,
             reserve_gb: 0.0,
+            budget_ms: BACKGROUND_BUDGET_MS,
         };
         let mut cache = crate::preview::PreviewCache::new(full.clone(), false).unwrap();
         let mut frame = completed_frame(41, false);
@@ -1833,6 +2022,7 @@ mod tests {
             white_nits: 100.0,
             cache_fraction: 0.01,
             reserve_gb: 0.0,
+            budget_ms: BACKGROUND_BUDGET_MS,
         };
         assert!(
             queue_preview_command(
@@ -1931,13 +2121,14 @@ mod tests {
             white_nits: 100.0,
             cache_fraction: 0.01,
             reserve_gb: 0.0,
+            budget_ms: BACKGROUND_BUDGET_MS,
         };
         let mut controller = crate::preview::PreviewController::default();
         controller.start(req, false).unwrap();
         assert_eq!(controller.update(0.01, &service), None);
         assert_eq!(controller.position(), None);
         assert!(!controller.running());
-        assert_eq!(controller.error(), Some("CUDA worker is unavailable"));
+        assert_eq!(controller.error(), Some("Render worker is unavailable"));
     }
 
     #[test]
@@ -1965,7 +2156,7 @@ mod tests {
     fn request() -> ViewportRequest {
         ViewportRequest {
             generation: 1,
-            scene: Scene::preset(crate::params::FAMILY_KIFS),
+            scene: Scene::preset(Formula::Kifs(Kifs::preset(KifsKind::Tetrahedron))),
             width: 32,
             height: 24,
             target_spp: 8,
@@ -2245,14 +2436,14 @@ mod tests {
     fn cuda_export_forces_oidn_below_interval_and_publishes_linear_result() {
         let _gpu_test = crate::test_gpu::lock();
         let service = RenderService::spawn();
-        let mut scene = Scene::preset(crate::params::FAMILY_BULB);
+        let mut scene = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
         scene.world_render = true;
         scene.camera.target = [1000.0; 3];
-        scene.lighting.sun_intensity = 0.0;
-        scene.lighting.sky_intensity = 1.0;
-        scene.lighting.sky_horizon = [4.0, 2.0, 1.0];
-        scene.lighting.sky_zenith = [4.0, 2.0, 1.0];
-        scene.lighting.background = true;
+        scene.sun.intensity = 0.0;
+        scene.sky.intensity = 1.0;
+        scene.sky.horizon = [4.0, 2.0, 1.0];
+        scene.sky.zenith = [4.0, 2.0, 1.0];
+        scene.sky.background = true;
         scene.colour.on = false;
         scene.render.reinhard = false;
         scene.render.exposure_stops = 2.0;
@@ -2267,6 +2458,9 @@ mod tests {
                 width: 33,
                 height: 25,
                 spp: 2,
+                seed: 401,
+                budget_ms: BACKGROUND_BUDGET_MS,
+                radiance: true,
                 reply: Some(reply),
             })
             .unwrap();
@@ -2393,84 +2587,51 @@ mod tests {
     #[test]
     fn interactive_export_batches_require_a_known_small_gpu_cost() {
         let _gpu_test = crate::test_gpu::lock();
-        assert!(!background_batch_allowed(0.0, 0, true));
-        assert!(!background_batch_allowed(32.0, 1, true));
-        assert!(background_batch_allowed(16.0, 4, true));
-        assert!(background_batch_allowed(32.0, 1, false));
-        assert!(background_batch_allowed(0.0, 0, false));
+        assert!(!background_batch_allowed(0.0, 0, 8.0, true));
+        assert!(!background_batch_allowed(32.0, 1, 8.0, true));
+        assert!(background_batch_allowed(16.0, 4, 8.0, true));
+        assert!(background_batch_allowed(32.0, 1, 8.0, false));
+        assert!(background_batch_allowed(0.0, 0, 8.0, false));
+        assert!(
+            background_batch_allowed(32.0, 1, 40.0, true),
+            "the job's own budget"
+        );
     }
 
+    /// The seed is absent from Gpu's accumulation key, so only a new seed drops the viewport's
+    /// film; every other change (camera, display, pause) keeps it and lets Gpu decide.
     #[test]
-    fn display_and_pause_changes_reuse_the_trace_key_but_camera_changes_do_not() {
-        let _gpu_test = crate::test_gpu::lock();
-        let original = request();
-        let mut changed = original.clone();
-        changed.scene.render.exposure_stops += 1.0;
-        changed.scene.render.saturation = 0.5;
-        changed.scene.colour.view = "another display".into();
-        changed.scene.render.denoise.enabled = false;
-        changed.scene.render.denoise.interval = 256;
-        changed.scene.render.denoise.quality = crate::denoise::Quality::Fast;
-        changed.scene.render.denoise.mode = crate::denoise::Mode::Color;
-        changed.paused = true;
-        changed.raw = true;
-        changed.output_hdr = true;
-        changed.white_nits = 200.0;
-        assert_eq!(trace_key(&original), trace_key(&changed));
+    fn viewport_drops_its_film_only_for_a_new_seed() {
+        let mut viewport = Viewport::new(request());
+        viewport.target = Some(Target::new(32, 24));
+        let mut changed = request();
         changed.scene.camera.yaw_degrees += 1.0;
-        assert_ne!(trace_key(&original), trace_key(&changed));
+        changed.scene.render.exposure_stops += 1.0;
+        changed.paused = true;
+        viewport.update(changed.clone());
+        assert!(viewport.target.is_some() && viewport.dirty);
+        changed.seed += 1;
+        viewport.update(changed);
+        assert!(viewport.target.is_none());
     }
     #[test]
     fn bookmark_thumbnail_evaluates_frozen_world_at_first_frame_before_quality_cap() {
         let _gpu_test = crate::test_gpu::lock();
-        let mut scene = Scene::preset(crate::params::FAMILY_BULB);
+        let mut scene = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
         scene.render.max_bounces = 8;
         let document = crate::world::WorldDocument::from_scene(&scene);
         let expected = document.snapshot(document.first as f64).unwrap();
         scene.document = Some(Box::new(document));
-        let thumbnail = thumbnail_snapshot(scene).unwrap();
+        let thumbnail = thumbnail_snapshot(scene, 3).unwrap();
         assert!(thumbnail.document.is_none() && thumbnail.world_render);
         assert_eq!(thumbnail.objects, expected.objects);
         assert_eq!(thumbnail.lights, expected.lights);
         assert_eq!(thumbnail.render.max_bounces, 3);
-        let mut preset = Scene::preset(crate::params::FAMILY_BOX);
+        let mut preset = Scene::preset(Formula::Mandelbox(MandelBox::PRESET));
         preset.render.max_bounces = 7;
-        let preset = thumbnail_snapshot(preset).unwrap();
+        let preset = thumbnail_snapshot(preset, 3).unwrap();
         assert!(preset.world_render && !preset.objects.is_empty());
         assert_eq!(preset.render.max_bounces, 3);
-    }
-    #[test]
-    fn world_trace_key_tracks_evaluated_objects_and_lights_but_ignores_labels() {
-        let _gpu_test = crate::test_gpu::lock();
-        let mut original = request();
-        original.scene.world_render = true;
-        original
-            .scene
-            .objects
-            .push(Scene::preset(crate::params::FAMILY_BULB));
-        original
-            .scene
-            .lights
-            .push(crate::scene::Lighting::default());
-        let mut changed = original.clone();
-        changed.scene.objects[0].name = "rename".into();
-        changed.scene.objects[0].material.preset = Some("label".into());
-        assert_eq!(trace_key(&original), trace_key(&changed));
-        changed.scene.objects[0].material.base += 0.1;
-        assert_ne!(trace_key(&original), trace_key(&changed));
-        changed = original.clone();
-        changed.scene.objects[0].object_world =
-            Some(glam::Mat4::from_translation(glam::Vec3::X).to_cols_array_2d());
-        assert_ne!(trace_key(&original), trace_key(&changed));
-        changed = original.clone();
-        changed.scene.lights[0].sun_azimuth += 1.0;
-        assert_ne!(trace_key(&original), trace_key(&changed));
-        changed = original.clone();
-        changed.scene.objects[0].palette = crate::palette::PaletteScheme::Fire;
-        assert_ne!(trace_key(&original), trace_key(&changed));
-        changed = original.clone();
-        changed.scene.objects.clear();
-        assert_ne!(trace_key(&original), trace_key(&changed));
     }
     #[test]
     fn latest_mailbox_coalesces_and_commands_are_bounded_with_priority_cancel() {
@@ -2502,7 +2663,10 @@ mod tests {
         for _ in 0..QUEUE_LIMIT {
             service.try_command(Command::ReloadColour).unwrap();
         }
-        assert!(service.try_command(Command::ReloadColour).is_err());
+        assert_eq!(
+            service.try_command(Command::ReloadColour),
+            Err(CommandError::Full)
+        );
         service.try_command(Command::CancelExport).unwrap();
         assert!(service.shared.state.lock().unwrap().cancel_export);
     }
@@ -2575,7 +2739,11 @@ mod tests {
             QUEUE_LIMIT
         );
         drop(service);
-        assert!(port.is_stopped());
+        assert!(!port.is_available());
+        assert_eq!(
+            port.try_command(Command::ReloadColour),
+            Err(CommandError::Stopped)
+        );
     }
 
     #[test]
@@ -2630,5 +2798,45 @@ mod tests {
         assert!(validate_size(0, 1, 1).is_err());
         assert!(validate_size(16384, 16384, 1).is_err());
         assert!(validate_size(32, 24, 0).is_err());
+    }
+
+    /// A thumbnail failure is a typed terminal event that survives a full event queue (plan1
+    /// 1.7), and an invalid request is refused as such, not as a full queue (1.9).
+    #[test]
+    fn thumbnail_failures_survive_backpressure_and_invalid_requests_are_typed() {
+        let service = RenderService {
+            worker_thread: None,
+            shared: Arc::new(Shared {
+                state: Mutex::new(Mailbox::default()),
+                wake: Condvar::new(),
+            }),
+        };
+        for _ in 0..QUEUE_LIMIT {
+            push_event(&service.shared, RenderEvent::Error("busy".into()));
+        }
+        push_event(
+            &service.shared,
+            RenderEvent::ThumbnailFailed {
+                id: 9,
+                error: "no kernel".into(),
+            },
+        );
+        assert!(
+            service
+                .drain_events()
+                .iter()
+                .any(|e| matches!(e, RenderEvent::ThumbnailFailed { id: 9, .. }))
+        );
+        let refused = service.try_command(Command::Thumbnail {
+            id: 1,
+            scene: Box::new(request().scene),
+            width: 8,
+            height: 8,
+            spp: 0,
+            seed: 7,
+            budget_ms: BACKGROUND_BUDGET_MS,
+            max_bounces: 3,
+        });
+        assert!(matches!(refused, Err(CommandError::Invalid(_))));
     }
 }

@@ -11,7 +11,7 @@ use std::time::Instant;
 use anyhow::{Context, ensure};
 use serde_json::json;
 
-use crate::render::Gpu;
+use crate::render::{Batch, Gpu, Target};
 use crate::scene::{Material, MaterialModel};
 
 const CASES: [(&str, usize, u32, bool); 10] = [
@@ -77,18 +77,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         position += 2;
     }
     let [width, height, samples] = dimensions;
-    ensure!(
-        width > 0
-            && height > 0
-            && width <= 16384
-            && height <= 16384
-            && width.checked_mul(height).is_some_and(|n| n <= 67_108_864),
-        "Invalid benchmark resolution"
-    );
-    ensure!(
-        (1..=1_000_000).contains(&samples),
-        "Invalid benchmark samples"
-    );
+    let samples = u32::try_from(samples).context("Invalid benchmark samples")?;
+    crate::render::validate_size(width, height, samples)?;
     ensure!(batch == 4 || batch == 8, "Benchmark batch must be 4 or 8");
     ensure!(
         seed <= 16_777_216,
@@ -98,9 +88,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         case.is_none_or(|name| CASES.iter().any(|c| c.0 == name)),
         "Unknown benchmark case"
     );
-    let samples = samples as u32;
     std::fs::create_dir_all(directory)?;
-    let mut gpu = Gpu::new().map_err(anyhow::Error::msg)?;
+    let mut gpu = Gpu::new()?;
     println!(
         "World benchmark GPU: {} · {width}x{height} · {samples} spp · seed {seed} · batch {batch}",
         gpu.name
@@ -109,7 +98,10 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         if case.is_some_and(|chosen| chosen != name) {
             continue;
         }
-        let authored = crate::presets::scene(preset).map_err(anyhow::Error::msg)?;
+        let template = crate::templates::BUILTINS
+            .get(preset)
+            .context("Unknown built-in template")?;
+        let authored = crate::templates::builtin_scene(preset).map_err(anyhow::Error::msg)?;
         let document = authored
             .document
             .as_ref()
@@ -162,35 +154,36 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             "cavity" => scene.camera.distance *= 0.45,
             _ => {}
         }
-        gpu.prepare_scene(&scene, width, height)
-            .map_err(anyhow::Error::msg)?;
+        gpu.prepare_scene(&scene, width, height)?;
         {
-            let mut warmup = gpu.target(width, height);
-            gpu.step(&mut warmup, &scene, 1, seed, None, false);
+            let mut warmup = Target::new(width, height);
+            gpu.step(&mut warmup, &scene, 1, seed, false)?;
             ensure!(
                 warmup.colour_error.is_none(),
                 "Warm-up display error: {:?}",
                 warmup.colour_error
             );
         }
-        let mut target = gpu.target(width, height);
-        gpu.prepare_target(&mut target, &scene, None);
+        // The film is allocated outside the timed steps.
+        let mut target = Target::new(width, height);
+        gpu.prepare(&mut target, &scene)?;
         let mut batches = Vec::with_capacity(samples.div_ceil(batch) as usize);
         let start = Instant::now();
-        while !target.complete(samples) {
-            let count = batch.min(samples - target.samples);
-            let final_pass = target.samples + count == samples;
-            gpu.step(&mut target, &scene, count, seed, None, final_pass);
-            ensure!(
-                target.colour_error.is_none(),
-                "Display error: {:?}",
-                target.colour_error
-            );
-            batches.push((count, target.last_ms));
+        loop {
+            let complete = gpu.advance(&mut target, &scene, samples, seed, Batch::Fixed(batch))?;
+            batches.push((target.last_spp, target.last_ms));
+            if complete {
+                break;
+            }
         }
         let elapsed = start.elapsed().as_secs_f64();
+        ensure!(
+            target.colour_error.is_none(),
+            "Display error: {:?}",
+            target.colour_error
+        );
         let readback_start = Instant::now();
-        let pixels = gpu.raw_scene_linear(&target);
+        let pixels = gpu.raw_scene_linear(&target)?;
         let readback_seconds = readback_start.elapsed().as_secs_f64();
         ensure!(
             pixels.iter().all(|p| p[..3].iter().all(|c| c.is_finite())),
@@ -198,7 +191,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         );
         let stem = format!("{name}.seed-{seed}.spp-{samples}");
         let base = Path::new(directory);
-        let raw_path = base.join(format!("{stem}.rgb.f32"));
+        let raw_name = format!("{stem}.rgb.f32");
+        let raw_path = base.join(&raw_name);
         let mut raw = BufWriter::new(File::create(&raw_path)?);
         for pixel in &pixels {
             for channel in &pixel[..3] {
@@ -206,18 +200,18 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             }
         }
         raw.flush()?;
-        let encoding = crate::render_service::PngEncoding::displayed(target.light_kind.hdr());
-        target
-            .save_png(
-                &base.join(crate::fs_name::frame_file(&stem, None, encoding.suffix())),
-                encoding,
-                crate::color::BT2408_SDR_WHITE_NITS,
-                true,
-            )
-            .map_err(anyhow::Error::msg)?;
+        let shot = crate::render_service::Frame::snapshot(&target, 0, false, false, 100.0);
+        let encoding = crate::render_service::PngEncoding::displayed(shot.light_kind.hdr());
+        shot.save_png(
+            &base.join(crate::fs_name::frame_file(&stem, None, encoding.suffix())),
+            encoding,
+            crate::color::BT2408_SDR_WHITE_NITS,
+            true,
+        )
+        .map_err(anyhow::Error::msg)?;
         let metadata = json!({
             "schema": 1,
-            "case": name, "preset": crate::presets::ANIMATED[preset].name, "frame": frame,
+            "case": name, "preset": template.name, "frame": frame,
             "gpu": &gpu.name, "width": width, "height": height, "samples": samples,
             "seed": seed, "batch": batch, "world_render": true,
             "adaptive_threshold": adaptive_threshold, "samples_taken": target.samples,
@@ -226,8 +220,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             "elapsed_seconds": elapsed, "raw_readback_seconds": readback_seconds,
             "ms_per_sample": elapsed * 1000.0 / f64::from(samples),
             "million_samples_per_second": (width * height) as f64 * f64::from(samples) / elapsed / 1e6,
-            "timing_scope": "Gpu::step including per-batch display/readback; excludes warmup, target allocation, artifact writes and final raw readback",
-            "raw": {"file": raw_path.file_name().unwrap().to_string_lossy(),
+            "timing_scope": "Gpu::advance batches, display/readback on the completing batch only; excludes warmup, target allocation, artifact writes and final raw readback",
+            "raw": {"file": raw_name,
                 "format": "little-endian f32 RGB, row-major top-to-bottom, scene-linear ACEScg, no header"},
             "batches": batches.iter().map(|(count, ms)| json!({"samples": count, "step_ms": ms})).collect::<Vec<_>>(),
             "authoring_world": document,

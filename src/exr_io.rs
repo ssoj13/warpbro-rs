@@ -14,7 +14,7 @@ use exr_core::attr::{Chromaticities, ChromaticitiesAttribute, Compression, Float
 use exr_core::{ChannelData, Image};
 use imath_rs::{Box2i, Half, V2i};
 use vfx_ocio::color_matrix::Primaries;
-use video_io::still::{Channels, ExrCompression, ExrDepth};
+use video_io::still::{Channels, DWA_LEVEL, ExrCompression, ExrDepth};
 
 ///Largest environment map accepted, checked from the header BEFORE any pixel is allocated.
 const MAX_ENV_PIXELS: u64 = 16_777_216;
@@ -43,7 +43,7 @@ pub fn write_rgb(
         white_nits,
         ExrDepth::Float,
         ExrCompression::Zip,
-        45.0,
+        DWA_LEVEL,
         Channels::Rgb,
         overwrite,
     )
@@ -152,9 +152,12 @@ pub struct RgbImage {
 }
 
 /// Read the R, G, B channels of a single-part flat EXR as linear float RGB, raster order over the
-/// data window. Any channel type is widened to f32; a file without all three is an error, never a
-/// guessed fill. The size is checked from the header before the pixels are read. Also returns the
-/// file's primaries: its `chromaticities`, or OpenEXR's BT.709/D65 default when untagged.
+/// data window. Any channel type is widened to f32; a file without all three, or with a plane of
+/// another size than the data window, is an error, never a guessed fill or a truncated image.
+/// Multipart, deep and subsampled files are refused by exr-core's single-part reader
+/// (`Image::read_header_only` / `Image::read`: `ExrError::Unsupported`), before any pixel is read.
+/// The size is checked from the header before the pixels are read. Also returns the file's
+/// primaries: its `chromaticities`, or OpenEXR's BT.709/D65 default when untagged.
 pub fn read_rgb(path: &Path) -> Result<RgbImage, String> {
     let err = |e: exr_core::ExrError| format!("EXR {}: {e}", path.display());
     let header = Image::read_header_only(path).map_err(err)?;
@@ -176,6 +179,8 @@ pub fn read_rgb(path: &Path) -> Result<RgbImage, String> {
             )
         })?,
     };
+    // Bounded by the checks above, so the product cannot overflow.
+    let count = (w * h) as usize;
     let plane = |name: &str| -> Result<Vec<f32>, String> {
         if image.sampling(name).is_some_and(|s| s != (1, 1)) {
             return Err(format!(
@@ -183,12 +188,23 @@ pub fn read_rgb(path: &Path) -> Result<RgbImage, String> {
                 path.display()
             ));
         }
-        image.channel(name).map(ChannelData::to_f32).ok_or_else(|| {
-            format!(
-                "EXR {}: no {name} channel (an RGB image is required)",
-                path.display()
-            )
-        })
+        let samples = image
+            .channel(name)
+            .map(ChannelData::to_f32)
+            .ok_or_else(|| {
+                format!(
+                    "EXR {}: no {name} channel (an RGB image is required)",
+                    path.display()
+                )
+            })?;
+        if samples.len() != count {
+            return Err(format!(
+                "EXR {}: channel {name} has {} samples for a {w}x{h} data window",
+                path.display(),
+                samples.len()
+            ));
+        }
+        Ok(samples)
     };
     let (r, g, b) = (plane("R")?, plane("G")?, plane("B")?);
     let pixels = r

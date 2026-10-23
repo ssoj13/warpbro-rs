@@ -639,15 +639,17 @@ fn catalog_buttons(
 ) -> Actions {
     let mut actions = Actions::default();
     let mut nodes = world.document.settings_nodes(kind, None);
-    nodes.sort_by(|a, b| {
-        a.name
-            .cmp(&b.name)
-            .then_with(|| a.id.to_string().cmp(&b.id.to_string()))
-    });
+    // A UUID orders as its text does: no strings to build per comparison.
+    nodes.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
     ui.horizontal_wrapped(|ui| {
         for node in nodes {
-            let template =
-                world.document.catalog_role(node.id).ok().flatten() == Some(CatalogRole::Template);
+            let template = match world.document.catalog_role(node.id) {
+                Ok(role) => role == Some(CatalogRole::Template),
+                Err(error) => {
+                    actions.error = Some(error);
+                    false
+                }
+            };
             let label = if template {
                 format!("{} {}", ph::FILE, node.name)
             } else {
@@ -741,8 +743,13 @@ fn settings_menu(
             ui.close();
         }
     }
-    if world.document.catalog_role(id).ok().flatten() != Some(CatalogRole::Template) {
-        return actions;
+    match world.document.catalog_role(id) {
+        Ok(Some(CatalogRole::Template)) => {}
+        Ok(_) => return actions,
+        Err(error) => {
+            actions.error = Some(error);
+            return actions;
+        }
     }
     let apply: Vec<(String, NameOperation)> = match kind {
         WorldKind::RenderSettings => [
@@ -792,7 +799,13 @@ pub(crate) fn node_actions(
     if !crate::render_profiles::setting_kind(kind) {
         return actions;
     }
-    let before = world.document.catalog_role(id).ok().flatten();
+    let before = match world.document.catalog_role(id) {
+        Ok(role) => role,
+        Err(error) => {
+            actions.error = Some(error);
+            return actions;
+        }
+    };
     let mut role = before;
     ui.horizontal_wrapped(|ui| {
         egui::ComboBox::from_id_salt(("catalog_role", id))
@@ -830,6 +843,7 @@ pub(crate) fn node_actions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::{Bulb, Formula};
     fn text_center(output: &egui::FullOutput, label: &str) -> egui::Pos2 {
         fn find(shape: &egui::epaint::Shape, label: &str) -> Option<egui::Pos2> {
             match shape {
@@ -883,7 +897,7 @@ mod tests {
     fn toolbar_pause_uses_node_command_and_preserves_output() {
         let at = 0.0;
         let mut world = WorldEditor::new(crate::world::WorldDocument::from_scene(
-            &crate::scene::Scene::preset(crate::params::FAMILY_BULB),
+            &crate::scene::Scene::preset(Formula::Mandelbulb(Bulb::PRESET)),
         ));
         let output = world.document.output_render_profile().unwrap();
         let original = world.document.clone();
@@ -908,7 +922,7 @@ mod tests {
     #[test]
     fn settings_new_profile_button_creates_profile_in_one_undo() {
         let mut world = WorldEditor::new(crate::world::WorldDocument::from_scene(
-            &crate::scene::Scene::preset(crate::params::FAMILY_BULB),
+            &crate::scene::Scene::preset(Formula::Mandelbulb(Bulb::PRESET)),
         ));
         let original = world.document.clone();
         let ctx = egui::Context::default();
@@ -934,7 +948,7 @@ mod tests {
     #[test]
     fn named_profile_button_recalls_live_output_with_one_undo() {
         let mut world = WorldEditor::new(crate::world::WorldDocument::from_scene(
-            &crate::scene::Scene::preset(crate::params::FAMILY_BULB),
+            &crate::scene::Scene::preset(Formula::Mandelbulb(Bulb::PRESET)),
         ));
         world
             .execute(WorldCommand::CreateRenderProfile {
@@ -969,7 +983,7 @@ mod tests {
     #[test]
     fn named_template_button_applies_independent_profile_with_one_undo() {
         let mut world = WorldEditor::new(crate::world::WorldDocument::from_scene(
-            &crate::scene::Scene::preset(crate::params::FAMILY_BULB),
+            &crate::scene::Scene::preset(Formula::Mandelbulb(Bulb::PRESET)),
         ));
         world
             .execute(WorldCommand::CreateRenderProfile {
@@ -1034,7 +1048,7 @@ mod tests {
     fn profile_assignments_use_typed_node_refs_and_output_is_separate() {
         let at = 0.0;
         let mut world = WorldEditor::new(crate::world::WorldDocument::from_scene(
-            &crate::scene::Scene::preset(crate::params::FAMILY_BULB),
+            &crate::scene::Scene::preset(Formula::Mandelbulb(Bulb::PRESET)),
         ));
         let viewport = world.document.viewport_settings_id().unwrap();
         let output = world.document.output_render_profile().unwrap();

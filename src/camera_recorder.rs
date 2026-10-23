@@ -2,7 +2,7 @@
 //! shared fitter. A camera take goes through the camera's navigation pose solver ([`Recording`]),
 //! a transform take writes its node's `/transform` channels ([`bake_transform`]). The takes
 //! themselves live in `takes`.
-use crate::scene::{Camera, Scene};
+use crate::scene::{Bulb, Camera, Formula, Scene};
 use crate::takes::{Poses, Sample, Take};
 use crate::world::{NodeId, WorldDocument};
 use curves::{Fitter, Track, nearest_euler};
@@ -110,7 +110,7 @@ impl Recording {
             return Err("Not a camera take".into());
         };
         let first = samples.first().ok_or("The take has no samples")?;
-        let mut scene = Scene::preset(0);
+        let mut scene = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
         scene.camera = first.pose;
         let options = Options {
             timing: take.timing,
@@ -151,7 +151,7 @@ impl Recording {
             &self.document,
         )?;
         let mut data: BTreeMap<&'static str, Vec<Vec<(f64, f64)>>> = BTreeMap::new();
-        let mut scene = Scene::preset(0);
+        let mut scene = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
         for sample in &self.samples {
             let frame = first + (last - first) * (sample.seconds / duration);
             scene.camera = sample.pose;
@@ -343,8 +343,9 @@ fn continuous_rotation(components: &mut [Vec<(f64, f64)>]) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::{Bulb, Formula};
     fn recording(timing: Timing) -> Recording {
-        let scene = Scene::preset(0);
+        let scene = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
         let document = WorldDocument::from_scene(&scene);
         let scene = document.snapshot(0.0).unwrap();
         Recording::new(

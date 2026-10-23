@@ -1,8 +1,13 @@
-// WarpBro WGPU compute kernels — 1:1 port of fractal-kernels (CUDA) and ofx-fractal (WGSL).
+// WarpBro WGPU compute kernels: a port of fractal-kernels (CUDA, the reference, at the
+// fractal-rs revision pinned in Cargo.lock) plus the WGPU-only extended families
+// (`formulas.wgsl`). The classic estimates, orbit traps, scene masks and arrays, normal
+// stencils and material inputs follow CUDA; the march, the integrator's light sampling and the
+// camera sample layout still differ (plan1.md section 2).
 //
 // Pre-prepended by `render_wgpu::shader_source()`:
 // 1. `standard_surface_bsdf::wgsl_source()`
-// 2. All `P_*`, `O_*`, `M_*`, `FAMILY_*`, `MASK_*`, `ARRAY_*`, `PALETTE_SAMPLES` constants.
+// 2. All `P_*`, `O_*`, `M_*`, `FAMILY_*`, `MASK_*`, `ARRAY_*`, `PALETTE_SAMPLES` constants and
+//    the `SIGNED_MASK` / `ITERATING_MASK` family bit sets of `formulas::FORMULAS`.
 
 @group(0) @binding(0) var<uniform> params_u: array<vec4<f32>, 64>;
 @group(0) @binding(1) var<storage, read> lut: array<vec4<f32>>;
@@ -133,8 +138,17 @@ fn resolved_family(is_world: bool, obj: u32, family_override: u32) -> u32 {
     return family_override;
 }
 
-fn unsigned_family(family: u32) -> bool {
-    return !ext_signed_family(family);
+// Whether `family`'s estimate is signed (negative inside): its normal stencil is centred on the
+// hit, an unsigned family's one footprint back along the ray. `SIGNED_MASK` is emitted from
+// `formulas::FORMULAS` (fractal-kernels `family_signed` for the classic eight).
+fn family_signed(family: u32) -> bool {
+    return ((SIGNED_MASK >> family) & 1u) != 0u;
+}
+
+// Whether `family` runs an iteration loop controlled by `P_ITERATIONS` (`ITERATING_MASK`, from
+// `formulas::FORMULAS`): only those have a fractional-iteration endpoint to blend.
+fn family_iterates(family: u32) -> bool {
+    return ((ITERATING_MASK >> family) & 1u) != 0u;
 }
 
 fn orbit_constant(is_world: bool, obj: u32, p: vec3<f32>) -> vec4<f32> {
@@ -191,29 +205,29 @@ fn load_trap3(is_world: bool, obj: u32, mode: u32) -> Trap3 {
     return Trap3(mode, pr3(is_world, obj, P_TRAP_POINT), pr3(is_world, obj, P_TRAP_NORMAL));
 }
 
+// fractal-kernels `trap3`: 1 the orbit's distance to the origin, 2 to the plane through the trap
+// point, 3 (TrapPoint) to the trap point itself.
 fn eval_trap3(t: Trap3, v: vec3<f32>) -> f32 {
     if t.mode == 1u {
         return length(v);
     }
     let rel = v - t.point;
-    let proj = dot(rel, t.normal);
     if t.mode == 2u {
-        return abs(proj);
+        return abs(dot(rel, t.normal));
     }
-    return length(rel - t.normal * proj);
+    return length(rel);
 }
 
+// The quaternion trap (fractal-kernels `quat_distance`): the trap geometry embedded at w = 0.
 fn eval_trap4(t: Trap3, q: vec4<f32>) -> f32 {
     if t.mode == 1u {
         return length(q);
     }
     let rel = q.xyz - t.point;
-    let proj = dot(rel, t.normal);
     if t.mode == 2u {
-        return abs(proj);
+        return abs(dot(rel, t.normal));
     }
-    let o = rel - t.normal * proj;
-    return sqrt(dot(o, o) + q.w * q.w);
+    return sqrt(dot(rel, rel) + q.w * q.w);
 }
 
 struct Fraction {
@@ -298,28 +312,31 @@ fn bulb_step_cfg(
     dr_constant: f32,
 ) -> bool {
     if cfg.fast8 {
+        // Power 8, unit angle scales, no phase, no rotation (fractal-kernels `bulb_step`): z^8
+        // from the double angles 2θ / 2φ and two more doublings instead of acos / atan2 / pow.
         let r2 = r * r;
         let r4 = r2 * r2;
-        let r7 = r4 * r2 * r;
-        let growth = 8.0 * r7;
+        let growth = 8.0 * r4 * r2 * r;
         if *dr > DERIVATIVE_LIMIT / growth {
             return false;
         }
-        let x2 = (*z).x * (*z).x;
-        let y2 = (*z).y * (*z).y;
-        let xy2 = x2 + y2;
-        if xy2 <= 1.0e-30 {
-            *dr = growth * (*dr) + dr_constant;
-            *z = vec3<f32>(0.0, 0.0, r4 * r4) + c;
+        *dr = growth * (*dr) + dr_constant;
+        let x = (*z).x;
+        let y = (*z).y;
+        let w = (*z).z;
+        let rxy2 = x * x + y * y;
+        let r8 = r4 * r4;
+        if rxy2 < 1.0e-20 {
+            *z = vec3<f32>(0.0, 0.0, r8) + c;
             return true;
         }
-        let inv_r = 1.0 / r;
-        let inv_xy = inverseSqrt(xy2);
-        var ct = (*z).z * inv_r;
-        var st = xy2 * inv_xy * inv_r;
-        var cp = (*z).x * inv_xy;
-        var sp = (*z).y * inv_xy;
-        for (var k = 0u; k < 3u; k = k + 1u) {
+        let inv_r2 = 1.0 / r2;
+        var ct = 2.0 * w * w * inv_r2 - 1.0;
+        var st = 2.0 * w * sqrt(rxy2) * inv_r2;
+        let inv_rxy2 = 1.0 / rxy2;
+        var cp = (x * x - y * y) * inv_rxy2;
+        var sp = 2.0 * x * y * inv_rxy2;
+        for (var k = 0u; k < 2u; k = k + 1u) {
             let nct = ct * ct - st * st;
             st = 2.0 * st * ct;
             ct = nct;
@@ -327,9 +344,7 @@ fn bulb_step_cfg(
             sp = 2.0 * sp * cp;
             cp = ncp;
         }
-        let r8 = r4 * r4;
-        *dr = growth * (*dr) + dr_constant;
-        *z = vec3<f32>(st * cp, st * sp, ct) * r8 + c;
+        *z = vec3<f32>(st * cp * r8, st * sp * r8, ct * r8) + c;
         return true;
     }
     let turned = apply_iter_rot(rot, *z);
@@ -687,8 +702,10 @@ fn kifs_distance(
     return fraction_blend(frac, kifs_estimate_cfg(cfg, z, dr), trap);
 }
 
-fn kleinian_wrap(x: f32, a: f32, s: f32) -> f32 {
-    return x - s * floor(x / s + 0.5 * (1.0 - a));
+// `x` wrapped into [left, left + width).
+fn kleinian_wrap(x: f32, width: f32, left: f32) -> f32 {
+    let shifted = x - left;
+    return shifted - width * floor(shifted / width) + left;
 }
 
 fn exact_sign(x: f32) -> f32 {
@@ -708,68 +725,73 @@ fn kleinian_distance(
     trap_mode: u32,
     iter_override: f32,
 ) -> vec2<f32> {
+    // fractal-kernels `kleinian_distance`: the Maskit slice wrapped into its strip, reflected
+    // across the separation line, then inverted; it stops on escape or on a 2-cycle.
     let a = pr(is_world, obj, P_KLEIN_A);
     let b = pr(is_world, obj, P_KLEIN_B);
-    let f = select(1.0, -1.0, b < 0.0);
-    let disc = max(a * a - b * (b - 2.0), 0.0);
-    let e = 0.5 * f * sqrt(disc);
-    let l1 = 0.5 * a + e;
-    let l2 = b - 1.0;
-    let l3 = 0.5 * a - e;
     let skew = pr(is_world, obj, P_KLEIN_SKEW);
-    let amp = pr(is_world, obj, P_KLEIN_LINE_AMP);
-    let rate = pr(is_world, obj, P_KLEIN_LINE_RATE);
-    let rot = load_iter_rot(is_world, obj);
+    let line_amp = pr(is_world, obj, P_KLEIN_LINE_AMP);
+    let line_rate = pr(is_world, obj, P_KLEIN_LINE_RATE);
     let trap_cfg = load_trap3(is_world, obj, trap_mode);
-    let face_camera = vec3<f32>(q.x, q.z, -q.y);
-    let oc = orbit_constant(is_world, obj, face_camera);
-    var z = oc.xyz;
-    var dr = 1.0;
-    var trap = TRAP_START;
     var frac = fraction_new(is_world, obj, iter_override);
-    for (var i = 0u; i < frac.run; i = i + 1u) {
-        if fraction_due(frac, i) {
+    let half_a = 0.5 * a;
+    let half_b = 0.5 * b;
+    let sign_b = exact_sign(b);
+    // face_camera: (x, z, -y), then half a cell up.
+    var z = vec3<f32>(q.x, q.z + half_a, -q.y);
+    var dr = 1.0;
+    var previous = z;
+    var before = z;
+    var trap = TRAP_START;
+    for (var n = 0u; n < frac.run; n = n + 1u) {
+        if fraction_due(frac, n) {
             fraction_save(&frac, min(z.y, 0.05) / max(dr, 1.0), trap);
         }
-        z = apply_iter_rot(rot, z);
-        if amp != 0.0 {
-            let push = exp(-abs(z.y));
-            z.x = z.x + push * amp * sin(rate * z.x);
-            z.z = z.z + push * amp * cos(rate * z.z);
+        var x = z.x;
+        var y = z.y;
+        var w = z.z;
+        let s = skew * y;
+        x = kleinian_wrap(x + s, 2.0, -1.0) - s;
+        w = kleinian_wrap(w, 2.0, -1.0);
+        let u = x + half_b;
+        let line = half_a + sign_b * line_amp * exact_sign(u) * (1.0 - exp(-line_rate * abs(u)));
+        if y >= line {
+            x = -b - x;
+            y = a - y;
+            w = -w;
         }
-        z.x = z.x + b / a * z.y;
-        z.x = kleinian_wrap(z.x, skew, 2.0);
-        z.z = kleinian_wrap(z.z, skew, 2.0);
-        z.x = z.x - b / a * z.y;
-        let line = l2 + l1 * z.y * (l3 - z.y);
-        if z.x >= line {
-            z = vec3<f32>(-b - z.x, a - z.y, -z.z);
-        }
-        let inv = 1.0 / max(dot(z, z), 1.0e-30);
-        if dr > DERIVATIVE_LIMIT / inv {
+        let r2 = x * x + y * y + w * w;
+        if r2 < 1.0e-30 {
             break;
         }
-        z = z * inv;
-        dr = dr * inv;
+        let inverse = 1.0 / r2;
+        if inverse > 1.0 && dr > DERIVATIVE_LIMIT / inverse {
+            break;
+        }
+        z = vec3<f32>(x * inverse - b, a - y * inverse, -w * inverse);
+        dr = dr * inverse;
         if trap_mode != 0u {
             trap = min(trap, eval_trap3(trap_cfg, z));
         }
-        let x0 = z.x + 0.5 * b;
-        let fl = floor(z.z + 0.5);
-        let sq = x0 * x0 + z.y * z.y + (z.z - fl) * (z.z - fl);
-        let diff = z.z - 0.5 - fl;
-        if exact_sign(diff) * sq < diff {
+        if dot(z, z) > 100.0 {
             break;
         }
+        if n >= 1u {
+            let gap = z - before;
+            if dot(gap, gap) < 1.0e-12 {
+                break;
+            }
+        }
+        before = previous;
+        previous = z;
     }
     return fraction_blend(frac, min(z.y, 0.05) / max(dr, 1.0), trap);
 }
 
-fn pseudo_kleinian_estimate(z: vec3<f32>, dr: f32, offset: f32, thickness: f32) -> f32 {
-    let o = z - vec3<f32>(0.0, 0.0, offset);
-    let rxy = length(o.xy);
-    let thingy = abs(rxy * o.z) - thickness;
-    return 0.5 * thingy / max(sqrt(dot(o, o) + abs(thickness)), 1.0e-30) / max(dr, 1.0e-30);
+fn pseudo_kleinian_estimate(z: vec3<f32>, dr: f32, offset: vec3<f32>, thickness: f32) -> f32 {
+    let o = z - offset;
+    let thingy = abs(sqrt(o.x * o.x + o.y * o.y) * o.z) - thickness;
+    return 0.5 * thingy / max(sqrt(dot(o, o) + abs(thickness)), 1.0e-30) / dr;
 }
 
 fn pseudo_kleinian_distance(
@@ -782,9 +804,8 @@ fn pseudo_kleinian_distance(
     let csize = pr3(is_world, obj, P_PK_BOX);
     let size = pr(is_world, obj, P_PK_SIZE);
     let c = pr3(is_world, obj, P_PK_C);
-    let offset = pr(is_world, obj, P_PK_OFFSET);
+    let offset = pr3(is_world, obj, P_PK_OFFSET);
     let thickness = pr(is_world, obj, P_PK_THICKNESS);
-    let rot = load_iter_rot(is_world, obj);
     let trap_cfg = load_trap3(is_world, obj, trap_mode);
     var p = q;
     var dr = 1.0;
@@ -794,10 +815,9 @@ fn pseudo_kleinian_distance(
         if fraction_due(frac, i) {
             fraction_save(&frac, pseudo_kleinian_estimate(p, dr, offset, thickness), trap);
         }
-        p = apply_iter_rot(rot, p);
         p = clamp(p, -csize, csize) * 2.0 - p;
         let r2 = dot(p, p);
-        if r2 <= 0.0 {
+        if r2 < 1.0e-30 {
             break;
         }
         let k = max(size / r2, 1.0);
@@ -813,27 +833,20 @@ fn pseudo_kleinian_distance(
     return fraction_blend(frac, pseudo_kleinian_estimate(p, dr, offset, thickness), trap);
 }
 
-fn apollonian_step_cfg(
-    scale: f32,
-    rot: IterRot,
-    z: ptr<function, vec3<f32>>,
-    dr: ptr<function, f32>,
-) -> bool {
-    var p = apply_iter_rot(rot, *z);
-    p = vec3<f32>(
-        2.0 * fract(0.5 * (p.x + 1.0)) - 1.0,
-        2.0 * fract(0.5 * (p.y + 1.0)) - 1.0,
-        2.0 * fract(0.5 * (p.z + 1.0)) - 1.0,
-    );
-    let r2 = dot(p, p);
-    if r2 <= 0.0 {
+// fractal-kernels `apollonian_step`: the lattice wrap into [-1, 1)^3, then the inversion
+// k = max(scale / r2, 0.1). No per-iteration rotation, also inside a Hybrid. Returns false to stop.
+fn apollonian_step_cfg(scale: f32, z: ptr<function, vec3<f32>>, dr: ptr<function, f32>) -> bool {
+    let h = (*z) * 0.5 + vec3<f32>(0.5);
+    let w = vec3<f32>(-1.0) + (h - floor(h)) * 2.0;
+    let r2 = dot(w, w);
+    if r2 < 1.0e-30 {
         return false;
     }
     let k = max(scale / r2, 0.1);
     if *dr > DERIVATIVE_LIMIT / k {
         return false;
     }
-    *z = p * k;
+    *z = w * k;
     *dr = (*dr) * k;
     return true;
 }
@@ -849,14 +862,13 @@ fn apollonian_distance(
     var dr = 1.0;
     var trap = TRAP_START;
     let scale = pr(is_world, obj, P_APOLLO_SCALE);
-    let rot = load_iter_rot(is_world, obj);
     let trap_cfg = load_trap3(is_world, obj, trap_mode);
     var frac = fraction_new(is_world, obj, iter_override);
     for (var i = 0u; i < frac.run; i = i + 1u) {
         if fraction_due(frac, i) {
             fraction_save(&frac, 0.25 * abs(z.y) / dr, trap);
         }
-        if !apollonian_step_cfg(scale, rot, &z, &dr) {
+        if !apollonian_step_cfg(scale, &z, &dr) {
             break;
         }
         if trap_mode != 0u {
@@ -866,13 +878,9 @@ fn apollonian_distance(
     return fraction_blend(frac, 0.25 * abs(z.y) / dr, trap);
 }
 
-fn hybrid_estimate(r: f32, dr: f32, bailout: f32) -> f32 {
-    if r <= bailout || dr <= 0.0 {
-        return 0.0;
-    }
-    return 0.5 * r / dr;
-}
-
+// fractal-kernels `hybrid_distance`: up to four step slots (3 bits each, 1 bulb, 2 box, 3 KIFS
+// fold, 4 Apollonian inversion, any other code a no-op) cycled per iteration, estimate
+// 0.5 r / dr with no logarithm (a Hybrid's bailout may be below 1).
 fn hybrid_distance(
     is_world: bool,
     obj: u32,
@@ -885,7 +893,7 @@ fn hybrid_distance(
     var dr = 1.0;
     var trap = TRAP_START;
     let bailout = pr(is_world, obj, P_BAILOUT);
-    let count = clamp(u32(pr(is_world, obj, P_HYBRID_COUNT)), 1u, 4u);
+    let count = max(u32(pr(is_world, obj, P_HYBRID_COUNT)), 1u);
     let steps = u32(pr(is_world, obj, P_HYBRID_STEPS));
     let bulb_cfg = load_bulb_config(is_world, obj);
     let box_cfg = load_box_config(is_world, obj);
@@ -897,23 +905,21 @@ fn hybrid_distance(
     for (var i = 0u; i < frac.run; i = i + 1u) {
         let r = length(z);
         if fraction_due(frac, i) {
-            fraction_save(&frac, hybrid_estimate(r, dr, bailout), trap);
+            fraction_save(&frac, 0.5 * r / dr, trap);
         }
         if r > bailout {
             break;
         }
         let step = (steps >> (3u * (i % count))) & 7u;
-        var ok = false;
-        if step == 0u {
-            ok = true;
-        } else if step == 1u {
+        var ok = true;
+        if step == 1u {
             ok = r >= 1.0e-8 && bulb_step_cfg(bulb_cfg, rot, &z, &dr, r, c, 1.0);
         } else if step == 2u {
             ok = box_step_cfg(box_cfg, rot, &z, &dr, c, 1.0);
         } else if step == 3u {
             ok = kifs_step_cfg(kifs_cfg, rot, &z, &dr);
         } else if step == 4u {
-            ok = apollo_scale != 0.0 && apollonian_step_cfg(apollo_scale, rot, &z, &dr);
+            ok = apollonian_step_cfg(apollo_scale, &z, &dr);
         }
         if !ok {
             break;
@@ -922,7 +928,7 @@ fn hybrid_distance(
             trap = min(trap, eval_trap3(trap_cfg, z));
         }
     }
-    return fraction_blend(frac, hybrid_estimate(length(z), dr, bailout), trap);
+    return fraction_blend(frac, 0.5 * length(z) / dr, trap);
 }
 
 fn family_distance(
@@ -1068,13 +1074,16 @@ fn mask_point(base: u32, x: vec3<f32>) -> vec3<f32> {
     return vec3<f32>(dot(rx, x) + tx, dot(ry, x) + ty, dot(rz, x) + tz);
 }
 
-fn cell_removed(cell: vec3<i32>, density: f32, seed: u32) -> bool {
-    var h = ss_lowbias32(bitcast<u32>(cell.x) ^ seed);
-    h = ss_lowbias32(h ^ bitcast<u32>(cell.y));
-    h = ss_lowbias32(h ^ bitcast<u32>(cell.z));
-    return f32(h) * (1.0 / 4294967296.0) < density;
+// Scene masks: a 1:1 port of fractal-kernels `mask_distance` and its array placement
+// (`fractal_core::mask_array`), so a mask cuts the same geometry on both backends.
+
+// Whether a Cells mask removes the cell of hash `h`: its top 24 bits as a unit value fall below
+// `density`. A cell's hash is `lowbias32(x ^ lowbias32(y ^ lowbias32(z ^ seed)))`.
+fn cell_removed(h: u32, density: f32) -> bool {
+    return f32(h >> 8u) * (1.0 / 16777216.0) < density;
 }
 
+// Signed distance of one sphere or box at the local origin.
 fn shape_distance(shape: u32, q: vec3<f32>, size: vec3<f32>) -> f32 {
     if shape == MASK_SPHERE {
         return length(q) - size.x;
@@ -1085,140 +1094,175 @@ fn shape_distance(shape: u32, q: vec3<f32>, size: vec3<f32>) -> f32 {
     return length(outside) + inside;
 }
 
-fn ring_basis(axis: u32) -> array<vec3<f32>, 3> {
+// `mask_array::angle`: radial copy `index` of `count`, in radians. A `sweep` of 0 is a full
+// circle (no copy on top of the first); otherwise the copies span `sweep` end to end.
+fn mask_array_angle(index: u32, count: u32, sweep: f32) -> f32 {
+    let i = f32(index);
+    if sweep == 0.0 {
+        return i * MX_TWO_PI / f32(count);
+    }
+    if count <= 1u {
+        return 0.0;
+    }
+    return i * sweep / (f32(count) - 1.0);
+}
+
+// `mask_array::ring_point`: centre of the radial copy at angle (`sn`, `cs`) on a ring of
+// `radius` about `axis` (0 X, 1 Y, larger codes Z).
+fn ring_point(axis: u32, radius: f32, sn: f32, cs: f32) -> vec3<f32> {
+    switch axis {
+        case 0u: {
+            return vec3<f32>(0.0, radius * cs, radius * sn);
+        }
+        case 1u: {
+            return vec3<f32>(radius * cs, 0.0, radius * sn);
+        }
+        default: {
+            return vec3<f32>(radius * cs, radius * sn, 0.0);
+        }
+    }
+}
+
+// `mask_array::ring_basis`: the aligned copy's local axes as rows (outward, up = the ring axis,
+// tangent), so `local = rows * (p - centre)`.
+fn ring_basis(axis: u32, sn: f32, cs: f32) -> array<vec3<f32>, 3> {
     switch axis {
         case 0u: {
             return array<vec3<f32>, 3>(
-                vec3<f32>(0.0, 1.0, 0.0),
-                vec3<f32>(0.0, 0.0, 1.0),
+                vec3<f32>(0.0, cs, sn),
                 vec3<f32>(1.0, 0.0, 0.0),
+                vec3<f32>(0.0, sn, -cs),
             );
         }
-        case 2u: {
+        case 1u: {
             return array<vec3<f32>, 3>(
-                vec3<f32>(1.0, 0.0, 0.0),
+                vec3<f32>(cs, 0.0, sn),
                 vec3<f32>(0.0, 1.0, 0.0),
-                vec3<f32>(0.0, 0.0, 1.0),
+                vec3<f32>(-sn, 0.0, cs),
             );
         }
         default: {
             return array<vec3<f32>, 3>(
-                vec3<f32>(1.0, 0.0, 0.0),
+                vec3<f32>(cs, sn, 0.0),
                 vec3<f32>(0.0, 0.0, 1.0),
-                vec3<f32>(0.0, 1.0, 0.0),
+                vec3<f32>(sn, -cs, 0.0),
             );
         }
     }
 }
 
-fn mask_array_angle(index: u32, count: u32, sweep_deg: f32) -> f32 {
-    if count <= 1u {
-        return 0.0;
-    }
-    let sweep = clamp(sweep_deg, -360.0, 360.0);
-    let step = select(sweep / f32(count - 1u), sweep / f32(count), abs(sweep) >= 359.999);
-    return radians(step * f32(index));
-}
-
-fn ring_point(q: vec3<f32>, axis: u32, angle: f32, radius: f32, align: bool) -> vec3<f32> {
-    let basis = ring_basis(axis);
-    let u = basis[0];
-    let v = basis[1];
-    let w = basis[2];
-    let s = sin(angle);
-    let c = cos(angle);
-    let radial = u * c + v * s;
-    let rel = q - radial * radius;
-    if !align {
-        return rel;
-    }
-    let tangent = v * c - u * s;
-    return u * dot(rel, radial) + v * dot(rel, tangent) + w * dot(rel, w);
-}
-
+// Distance to copy `index` of the linear or radial array of the mask row at `base`. Align turns
+// a box into the copy's ring basis; a sphere ignores it.
 fn array_copy_distance(
     base: u32,
     shape: u32,
-    q: vec3<f32>,
+    p: vec3<f32>,
     size: vec3<f32>,
-    mode: u32,
     count: u32,
     index: u32,
 ) -> f32 {
-    var local = q;
-    if mode == ARRAY_LINEAR {
-        let off = vec3<f32>(
+    if objects[base + M_ARRAY] != f32(ARRAY_RADIAL) {
+        let offset = vec3<f32>(
             objects[base + M_ARRAY_OFFSET],
             objects[base + M_ARRAY_OFFSET + 1u],
             objects[base + M_ARRAY_OFFSET + 2u],
         );
-        local = q - off * f32(index);
-    } else if mode == ARRAY_RADIAL {
-        let axis = u32(objects[base + M_ARRAY_AXIS]);
-        let sweep = objects[base + M_ARRAY_SWEEP];
-        let radius = objects[base + M_ARRAY_RADIUS];
-        let align = objects[base + M_ARRAY_ALIGN] != 0.0;
-        let angle = mask_array_angle(index, count, sweep);
-        local = ring_point(q, axis, angle, radius, align);
+        return shape_distance(shape, p - offset * f32(index), size);
     }
-    return shape_distance(shape, local, size);
+    let angle = mask_array_angle(index, count, objects[base + M_ARRAY_SWEEP]);
+    let sn = sin(angle);
+    let cs = cos(angle);
+    let axis = u32(objects[base + M_ARRAY_AXIS]);
+    let d = p - ring_point(axis, objects[base + M_ARRAY_RADIUS], sn, cs);
+    if objects[base + M_ARRAY_ALIGN] == 0.0 || shape != MASK_BOX {
+        return shape_distance(shape, d, size);
+    }
+    let rows = ring_basis(axis, sn, cs);
+    return shape_distance(shape, vec3<f32>(dot(d, rows[0]), dot(d, rows[1]), dot(d, rows[2])), size);
 }
 
-fn array_union(base: u32, shape: u32, q: vec3<f32>, size: vec3<f32>) -> f32 {
-    let mode = u32(objects[base + M_ARRAY]);
+// Union of the array copies (`mask_array::count` of them).
+fn array_union(base: u32, shape: u32, p: vec3<f32>, size: vec3<f32>) -> f32 {
     let count = clamp(u32(objects[base + M_ARRAY_COUNT]), 1u, ARRAY_MAX);
-    var d = array_copy_distance(base, shape, q, size, mode, count, 0u);
+    var best = array_copy_distance(base, shape, p, size, count, 0u);
     for (var i = 1u; i < count; i = i + 1u) {
-        d = min(d, array_copy_distance(base, shape, q, size, mode, count, i));
+        let d = array_copy_distance(base, shape, p, size, count, i);
+        if d < best {
+            best = d;
+        }
     }
-    return d;
+    return best;
 }
 
+// Per axis, the distance to the neighbour cell at offset -1 / +1 (0 for offset 0), `t` the
+// point's place in its own cell.
+fn cell_gap(t: f32, offset: i32) -> f32 {
+    if offset < 0 {
+        return t;
+    }
+    if offset > 0 {
+        return 1.0 - t;
+    }
+    return 0.0;
+}
+
+// A Cells mask in mask space, in cell edges times `edge`: the distance to the nearest of the 26
+// neighbour cells in the other state (exact within the 3x3x3 block), else the block's boundary
+// as the lower bound; positive in a removed cell. The zero set is exactly the border between
+// removed and kept cells.
+fn cells_distance(base: u32, p: vec3<f32>, edge: f32) -> f32 {
+    let f = p / edge;
+    let cell = floor(f);
+    let t = f - cell;
+    let c = vec3<i32>(cell);
+    // The host packs the integer seed as an f32 (`render_prep::mask_row`).
+    let seed = u32(objects[base + M_SEED]);
+    let density = objects[base + M_DENSITY];
+    // The hash's inner levels of the 3x3x3 block, shared by its cells: z (3), then y and z (9).
+    var zy: array<u32, 9>;
+    for (var k = 0; k < 3; k = k + 1) {
+        let hz = ss_lowbias32(bitcast<u32>(c.z + k - 1) ^ seed);
+        for (var j = 0; j < 3; j = j + 1) {
+            zy[j * 3 + k] = ss_lowbias32(bitcast<u32>(c.y + j - 1) ^ hz);
+        }
+    }
+    let removed = cell_removed(ss_lowbias32(bitcast<u32>(c.x) ^ zy[4]), density);
+    var best = 1.0 + min(min(min(t.x, 1.0 - t.x), min(t.y, 1.0 - t.y)), min(t.z, 1.0 - t.z));
+    for (var n = 0; n < 27; n = n + 1) {
+        let o = vec3<i32>(n / 9 - 1, (n / 3) % 3 - 1, n % 3 - 1);
+        // A cell no nearer than the best so far cannot lower it: its hash is skipped.
+        let near = length(vec3<f32>(cell_gap(t.x, o.x), cell_gap(t.y, o.y), cell_gap(t.z, o.z)));
+        if n != 13
+            && near < best
+            && cell_removed(ss_lowbias32(bitcast<u32>(c.x + o.x) ^ zy[n % 9]), density) != removed
+        {
+            best = near;
+        }
+    }
+    return select(-edge * best, edge * best, removed);
+}
+
+// A scene mask's distance at world point `x` (a lower bound in world units, positive where the
+// mask removes): the shape's signed distance in mask space, scaled conservatively, and negated
+// when inverted (every shape, Cells included).
 fn mask_distance(base: u32, x: vec3<f32>) -> f32 {
-    let q = mask_point(base, x);
-    let scale = objects[base + M_SCALE];
+    let p = mask_point(base, x);
     let shape = u32(objects[base + M_SHAPE]);
     let size = vec3<f32>(
         objects[base + M_SIZE],
         objects[base + M_SIZE + 1u],
         objects[base + M_SIZE + 2u],
     );
+    var local: f32;
     if shape == MASK_CELLS {
-        let pitch = max(size.x, 1.0e-4);
-        let fill = clamp(size.y, 0.05, 1.0);
-        let half = vec3<f32>(0.5 * pitch * fill);
-        let density = clamp(objects[base + M_DENSITY], 0.0, 1.0);
-        if density <= 0.0 {
-            return -TRAP_START;
-        }
-        let seed = bitcast<u32>(objects[base + M_SEED]);
-        let inv = 1.0 / pitch;
-        let cx = i32(floor(q.x * inv));
-        let cy = i32(floor(q.y * inv));
-        let cz = i32(floor(q.z * inv));
-        var d = 1.5 * pitch;
-        for (var dz = -1; dz <= 1; dz = dz + 1) {
-            for (var dy = -1; dy <= 1; dy = dy + 1) {
-                for (var dx = -1; dx <= 1; dx = dx + 1) {
-                    let cell = vec3<i32>(cx + dx, cy + dy, cz + dz);
-                    if cell_removed(cell, density, seed) {
-                        let center = vec3<f32>(
-                            (f32(cell.x) + 0.5) * pitch,
-                            (f32(cell.y) + 0.5) * pitch,
-                            (f32(cell.z) + 0.5) * pitch,
-                        );
-                        d = min(d, shape_distance(MASK_BOX, q - center, half));
-                    }
-                }
-            }
-        }
-        return -d * scale;
+        local = cells_distance(base, p, size.x);
+    } else if objects[base + M_ARRAY] != 0.0 {
+        local = array_union(base, shape, p, size);
+    } else {
+        local = shape_distance(shape, p, size);
     }
-    var d = array_union(base, shape, q, size) * scale;
-    if objects[base + M_INVERT] != 0.0 {
-        d = -d;
-    }
-    return d;
+    let d = local * objects[base + M_SCALE];
+    return select(d, -d, objects[base + M_INVERT] != 0.0);
 }
 
 fn masked(obj: u32, x: vec3<f32>, unmasked: f32) -> f32 {
@@ -1237,15 +1281,19 @@ fn masked(obj: u32, x: vec3<f32>, unmasked: f32) -> f32 {
     return d;
 }
 
-fn distance_and_trap(
+// The (distance, trap) of the object's formula at its own point `q`, intersected with the
+// formula's ball (`P_BOUND_RADIUS`): through the spherical inversion pre-transform when its
+// strength is nonzero (`fractal_core::inversion::apply`, the distance divided by the map's
+// largest stretch), as fractal-kernels `inverted_estimate` / `bounded_distance_and_trap`. The
+// one estimate path of every march, stencil and probe, before the object's clip and scale.
+fn formula_estimate(
     is_world: bool,
     obj: u32,
     family_override: u32,
-    x: vec3<f32>,
+    q: vec3<f32>,
     trap_mode: u32,
     iter_override: f32,
 ) -> vec2<f32> {
-    let q = object_point(is_world, obj, x);
     let s = pr(is_world, obj, P_INVERT_STRENGTH);
     if s != 0.0 {
         let center = pr3(is_world, obj, P_INVERT_CENTER);
@@ -1261,6 +1309,8 @@ fn distance_and_trap(
     return vec2<f32>(formula_bound(is_world, obj, q, dt.x), dt.y);
 }
 
+// [`formula_estimate`] at object point `q` (scene point `x`, `len_q = |q|` in a world) clipped by
+// the object's sphere, then scaled to the scene (or world) and intersected with the masks.
 fn clipped_distance_and_trap_q(
     is_world: bool,
     obj: u32,
@@ -1271,24 +1321,9 @@ fn clipped_distance_and_trap_q(
     trap_mode: u32,
     iter_override: f32,
 ) -> vec2<f32> {
-    let s = pr(is_world, obj, P_INVERT_STRENGTH);
-    var d: f32;
-    var trap: f32;
-    if s != 0.0 {
-        let center = pr3(is_world, obj, P_INVERT_CENTER);
-        let radius = pr(is_world, obj, P_INVERT_RADIUS);
-        let u = q - center;
-        let r2 = max(dot(u, u), 1.0e-30);
-        let g = (1.0 - s) + s * radius * radius / r2;
-        let p = center + u * g;
-        let dt = family_distance(is_world, obj, family_override, p, trap_mode, iter_override);
-        d = formula_bound(is_world, obj, p, dt.x) / g;
-        trap = dt.y;
-    } else {
-        let dt = family_distance(is_world, obj, family_override, q, trap_mode, iter_override);
-        d = formula_bound(is_world, obj, q, dt.x);
-        trap = dt.y;
-    }
+    let dt = formula_estimate(is_world, obj, family_override, q, trap_mode, iter_override);
+    var d = dt.x;
+    let trap = dt.y;
     if is_world {
         let base = obj * OBJECT_STRIDE;
         let clip_r = objects[base + O_CLIP_RADIUS];
@@ -1894,6 +1929,57 @@ fn march_exit(
     return last;
 }
 
+// Step halvings of the normal stencils (fractal-kernels `NORMAL_STEP_HALVINGS`).
+const NORMAL_STEP_HALVINGS: u32 = 3u;
+
+// The normalized central-difference gradient of object `obj`'s estimate around `center`, step
+// `h` halved until every probe of an unsigned family lies outside, else `fallback`: the probe
+// pattern of fractal-kernels `endpoint_normal` and Direct `direct_stencil`, which differ in what
+// they accept. The path tracer (`direct` false) normalizes by the largest component first, so
+// tiny but nonzero gradients keep their direction, and halves on until every component is
+// finite and one nonzero. Direct takes the first qualifying step, its gradient when at least
+// 1e-7 long, else the fallback. `n_iter` >= 0 overrides `P_ITERATIONS`.
+fn stencil_normal(
+    is_world: bool,
+    obj: u32,
+    family_override: u32,
+    center: vec3<f32>,
+    h_in: f32,
+    n_iter: f32,
+    fallback: vec3<f32>,
+    direct: bool,
+) -> vec3<f32> {
+    let signed = family_signed(resolved_family(is_world, obj, family_override));
+    var h = h_in;
+    for (var k = 0u; k <= NORMAL_STEP_HALVINGS; k = k + 1u) {
+        let xp = clipped_distance_and_trap(is_world, obj, family_override, center + vec3<f32>(h, 0.0, 0.0), 0u, n_iter).x;
+        let xm = clipped_distance_and_trap(is_world, obj, family_override, center - vec3<f32>(h, 0.0, 0.0), 0u, n_iter).x;
+        let yp = clipped_distance_and_trap(is_world, obj, family_override, center + vec3<f32>(0.0, h, 0.0), 0u, n_iter).x;
+        let ym = clipped_distance_and_trap(is_world, obj, family_override, center - vec3<f32>(0.0, h, 0.0), 0u, n_iter).x;
+        let zp = clipped_distance_and_trap(is_world, obj, family_override, center + vec3<f32>(0.0, 0.0, h), 0u, n_iter).x;
+        let zm = clipped_distance_and_trap(is_world, obj, family_override, center - vec3<f32>(0.0, 0.0, h), 0u, n_iter).x;
+        if signed || (xp > 0.0 && xm > 0.0 && yp > 0.0 && ym > 0.0 && zp > 0.0 && zm > 0.0) {
+            let g = vec3<f32>(xp - xm, yp - ym, zp - zm);
+            if direct {
+                if length(g) >= 1.0e-7 {
+                    return normalize(g);
+                }
+                return fallback;
+            }
+            let scale = max(abs(g.x), max(abs(g.y), abs(g.z)));
+            // Every component finite: `max` ignores a NaN, so `scale` alone would pass one on.
+            if scale > 0.0 && all(abs(g) <= vec3<f32>(TRAP_START)) {
+                return normalize(g / scale);
+            }
+        }
+        h = 0.5 * h;
+    }
+    return fallback;
+}
+
+// The surface normal at hit `x` of object `obj` (fractal-kernels `endpoint_normal`): a
+// quarter-footprint stencil centred on the hit for a signed family, one footprint back along
+// `dir` for an unsigned one, `-dir` when no step qualifies.
 fn endpoint_normal(
     is_world: bool,
     obj: u32,
@@ -1903,61 +1989,52 @@ fn endpoint_normal(
     eps: f32,
     n_iter: f32,
 ) -> vec3<f32> {
-    let family = resolved_family(is_world, obj, family_override);
-    var p = x;
-    if unsigned_family(family) {
-        p = x - dir * eps;
-    }
-    let k0 = vec3<f32>(1.0, -1.0, -1.0);
-    let k1 = vec3<f32>(-1.0, -1.0, 1.0);
-    let k2 = vec3<f32>(-1.0, 1.0, -1.0);
-    let k3 = vec3<f32>(1.0, 1.0, 1.0);
-    var h = 0.25 * eps;
-    for (var tries = 0u; tries < 4u; tries = tries + 1u) {
-        let s = h * 0.57735027;
-        let d0 = clipped_distance_and_trap(is_world, obj, family_override, p + k0 * s, 0u, n_iter).x;
-        let d1 = clipped_distance_and_trap(is_world, obj, family_override, p + k1 * s, 0u, n_iter).x;
-        let d2 = clipped_distance_and_trap(is_world, obj, family_override, p + k2 * s, 0u, n_iter).x;
-        let d3 = clipped_distance_and_trap(is_world, obj, family_override, p + k3 * s, 0u, n_iter).x;
-        let g = k0 * d0 + k1 * d1 + k2 * d2 + k3 * d3;
-        let m = max(abs(g.x), max(abs(g.y), abs(g.z)));
-        if m > 0.0 {
-            let s_vec = g * (1.0 / m);
-            return s_vec * inverseSqrt(dot(s_vec, s_vec));
-        }
-        h = 0.5 * h;
-    }
-    return -dir;
+    let signed = family_signed(resolved_family(is_world, obj, family_override));
+    let center = select(x - dir * eps, x, signed);
+    return stencil_normal(is_world, obj, family_override, center, 0.25 * eps, n_iter, -dir, false);
 }
 
-fn fractional_normal(
+// The shading normal of a hit (fractal-kernels `surface_normal`) for the ray `rd` arriving at
+// `x`, `inside` an object's medium or not. An integer `P_ITERATIONS` (or a family that does not
+// iterate) takes one endpoint stencil. A fractional count n = whole + weight blends the normals
+// of the two integer endpoints, each oriented against `rd`, along their great circle by
+// `weight`: normalizing the blended field's gradient instead jumps where one endpoint's gradient
+// vanishes. CUDA re-marches the ray for each endpoint (`endpoint_ray_normal`); this evaluates
+// both stencils at `x`.
+fn surface_normal(
     is_world: bool,
     obj: u32,
     family_override: u32,
     x: vec3<f32>,
-    dir: vec3<f32>,
+    rd: vec3<f32>,
+    inside: bool,
     eps: f32,
 ) -> vec3<f32> {
+    // An exit hit's stencil looks back from outside the solid.
+    let dir = select(rd, -rd, inside);
     let n = max(pr(is_world, obj, P_ITERATIONS), 0.0);
     let whole = floor(n);
-    let f = n - whole;
-    let n0 = endpoint_normal(is_world, obj, family_override, x, dir, eps, whole);
-    if f <= 0.0 {
-        return n0;
+    let weight = n - whole;
+    if weight == 0.0 || !family_iterates(resolved_family(is_world, obj, family_override)) {
+        return endpoint_normal(is_world, obj, family_override, x, dir, eps, -1.0);
     }
-    let n1 = endpoint_normal(is_world, obj, family_override, x, dir, eps, whole + 1.0);
-    let c = clamp(dot(n0, n1), -1.0, 1.0);
-    if c > 0.9995 {
-        return unit_or(n0 + (n1 - n0) * f, n0);
+    var lower = endpoint_normal(is_world, obj, family_override, x, dir, eps, whole);
+    lower = select(lower, -lower, dot(lower, rd) > 0.0);
+    var upper = endpoint_normal(is_world, obj, family_override, x, dir, eps, whole + 1.0);
+    upper = select(upper, -upper, dot(upper, rd) > 0.0);
+    let cosine = clamp(dot(lower, upper), -1.0, 1.0);
+    var tangent = upper - lower * cosine;
+    let sine = length(tangent);
+    if sine > 0.0 {
+        tangent = tangent * (1.0 / sine);
+    } else {
+        // Exactly parallel endpoints turn by zero; exactly opposite ones need a deterministic
+        // great circle.
+        let axis = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(lower.x) < 0.8);
+        tangent = normalize(axis - lower * dot(axis, lower));
     }
-    if c < -0.9995 {
-        return n0;
-    }
-    let omega = acos(c);
-    let inv_sin = 1.0 / sin(omega);
-    let w0 = sin((1.0 - f) * omega) * inv_sin;
-    let w1 = sin(f * omega) * inv_sin;
-    return unit_or(n0 * w0 + n1 * w1, n0);
+    let turn = weight * atan2(sine, cosine);
+    return normalize(lower * cos(turn) + tangent * sin(turn));
 }
 
 fn palette_base(is_world: bool, obj: u32) -> u32 {
@@ -2471,13 +2548,23 @@ fn fast_smith_g1(a2: f32, nv: f32) -> f32 {
     return 2.0 * nv / (nv + sqrt(a2 + (1.0 - a2) * nv * nv));
 }
 
-fn fast_material(
+// A hit's base colour, specular roughness and metalness: the palette `palette_rgb` (or the
+// material's solid colour, `P_COLOR_SOURCE`) mixed toward the facing material at grazing angles
+// of `view` to the normal `n` (usd-rs pt-material-ext facing mix; exponent 0 is off). The one
+// source of both material models and of the Direct albedo guide, as in fractal-kernels.
+struct Facing {
+    color: vec3<f32>,
+    roughness: f32,
+    metalness: f32,
+}
+
+fn facing_mix(
     is_world: bool,
     obj: u32,
     palette_rgb: vec3<f32>,
-    normal: vec3<f32>,
+    n: vec3<f32>,
     view: vec3<f32>,
-) -> FastMaterial {
+) -> Facing {
     var color = palette_rgb;
     if u32(pr(is_world, obj, P_COLOR_SOURCE)) != 0u {
         color = pr3(is_world, obj, P_BASE_COLOR);
@@ -2486,7 +2573,7 @@ fn fast_material(
     var metalness = pr(is_world, obj, P_METALNESS);
     let facing_exp = pr(is_world, obj, P_FACING_EXPONENT);
     if facing_exp > 0.0 {
-        let weight = pow(max(1.0 - abs(dot(normal, view)), 0.0), facing_exp);
+        let weight = pow(max(1.0 - abs(dot(n, view)), 0.0), facing_exp);
         let fc = pr3(is_world, obj, P_FACING_COLOR);
         let fr = pr(is_world, obj, P_FACING_ROUGHNESS);
         let fm = pr(is_world, obj, P_FACING_METALLIC);
@@ -2494,7 +2581,13 @@ fn fast_material(
         roughness = roughness + (fr - roughness) * weight;
         metalness = metalness + (fm - metalness) * weight;
     }
-    let base = (color * pr(is_world, obj, P_BASE)) * pr3(is_world, obj, P_BASE_TINT);
+    return Facing(color, roughness, metalness);
+}
+
+fn fast_material(is_world: bool, obj: u32, f: Facing) -> FastMaterial {
+    let roughness = f.roughness;
+    let metalness = f.metalness;
+    let base = (f.color * pr(is_world, obj, P_BASE)) * pr3(is_world, obj, P_BASE_TINT);
     let ior = pr(is_world, obj, P_SPECULAR_IOR);
     let r0 = (ior - 1.0) / (ior + 1.0);
     let f0d = r0 * r0 * pr(is_world, obj, P_SPECULAR);
@@ -2555,29 +2648,13 @@ fn fast_sample(mat: FastMaterial, n: vec3<f32>, wo: vec3<f32>, u: vec3<f32>) -> 
     return FastSample(wi, ev.xyz / ev.w, ev.w, true);
 }
 
-fn surface_inputs(
-    is_world: bool,
-    obj: u32,
-    palette_rgb: vec3<f32>,
-    normal: vec3<f32>,
-    view: vec3<f32>,
-) -> SsInputs {
-    var color = palette_rgb;
-    if u32(pr(is_world, obj, P_COLOR_SOURCE)) != 0u {
-        color = pr3(is_world, obj, P_BASE_COLOR);
-    }
-    var roughness = pr(is_world, obj, P_SPECULAR_ROUGHNESS);
-    var metalness = pr(is_world, obj, P_METALNESS);
-    let facing_exp = pr(is_world, obj, P_FACING_EXPONENT);
-    if facing_exp > 0.0 {
-        let weight = pow(max(1.0 - abs(dot(normal, view)), 0.0), facing_exp);
-        let fc = pr3(is_world, obj, P_FACING_COLOR);
-        let fr = pr(is_world, obj, P_FACING_ROUGHNESS);
-        let fm = pr(is_world, obj, P_FACING_METALLIC);
-        color = color + (fc - color) * weight;
-        roughness = roughness + (fr - roughness) * weight;
-        metalness = metalness + (fm - metalness) * weight;
-    }
+// The full model's inputs (fractal-kernels `surface_inputs`): the facing-mixed colour times
+// `P_BASE_TINT` as base colour; the transmission tint applies at interfaces only when volume
+// absorption is off.
+fn surface_inputs(is_world: bool, obj: u32, f: Facing) -> SsInputs {
+    let color = f.color;
+    let roughness = f.roughness;
+    let metalness = f.metalness;
     let trans_col = select(
         pr3(is_world, obj, P_TRANSMISSION_COLOR),
         vec3<f32>(1.0),
@@ -2716,6 +2793,96 @@ fn volume_transmittance(color: vec3<f32>, depth: f32, distance: f32) -> vec3<f32
     return exp(log(c) * factor);
 }
 
+// The BSDF of one path vertex as light sampling sees it: the fast model, or the full model with
+// its layers and lobe weights prepared once per vertex. `frame.n` is the shading normal of both.
+struct VertexBsdf {
+    fast: bool,
+    mat: FastMaterial,
+    inputs: SsInputs,
+    frame: SsFrame,
+    layers: SsLayers,
+    lobes: array<f32, SS_LOBE_COUNT>,
+}
+
+// `f cos` of `b` toward `wi`; `w` holds the fast model's pdf (the full model's comes from
+// `vertex_pdf`, evaluated only once a light sample is visible).
+fn vertex_eval(b: VertexBsdf, wo: vec3<f32>, wi: vec3<f32>) -> vec4<f32> {
+    if b.fast {
+        return fast_eval(b.mat, b.frame.n, wo, wi);
+    }
+    let lobes = ss_eval_light_prepared(b.inputs, b.frame, b.layers, wo, wi);
+    return vec4<f32>(lobes.base + lobes.specular + lobes.transmission, 0.0);
+}
+
+// The BSDF sampling density of `b` toward `wi`, `ev` its `vertex_eval`.
+fn vertex_pdf(b: VertexBsdf, wo: vec3<f32>, wi: vec3<f32>, ev: vec4<f32>) -> f32 {
+    if b.fast {
+        return ev.w;
+    }
+    return ss_pdf_prepared(b.layers, wo, wi, b.lobes);
+}
+
+// Next-event estimation at a path vertex outside any medium, hit `point` by the ray `rd`: every
+// delta sun (a world's lights with `P_SUN_CONE_PDF` 0, else the single sun), then one
+// environment sample MIS-weighted against `b`, each behind a shadow ray. Adds
+// `throughput * f * light` to `radiance`; an unresolved shadow ray counts as blocked and sets
+// `unresolved`. Draws two random numbers. One codepath for both material models.
+fn nee(
+    is_world: bool,
+    family_override: u32,
+    b: VertexBsdf,
+    point: vec3<f32>,
+    rd: vec3<f32>,
+    eps: f32,
+    shadow_base: f32,
+    throughput: vec3<f32>,
+    radiance: ptr<function, vec3<f32>>,
+    unresolved: ptr<function, bool>,
+    rng: ptr<function, Rng>,
+) {
+    let wo = -rd;
+    let n = b.frame.n;
+    let suns = select(1u, u32(param(P_LIGHT_COUNT)), is_world);
+    for (var i = 0u; i < suns; i = i + 1u) {
+        if lp(is_world, i, P_SUN_CONE_PDF) <= 0.0 {
+            let ld = lp3(is_world, i, P_LIGHT_DIR);
+            let f = vertex_eval(b, wo, ld).xyz;
+            if any(f > vec3<f32>(0.0)) {
+                let sray = leave_ray(point, n, rd, ld, eps);
+                let sm = visibility_leaving(is_world, family_override, sray.origin, sray.retreat, sray.dir, shadow_base);
+                if sm.unresolved {
+                    *unresolved = true;
+                }
+                if !sm.hit && !sm.unresolved {
+                    let sun = lp3(is_world, i, P_LIGHT_COLOR) * lp(is_world, i, P_LIGHT_INTENSITY);
+                    *radiance = *radiance + throughput * f * sun;
+                }
+            }
+        }
+    }
+
+    let u1 = rand(rng);
+    let u2 = rand(rng);
+    let ls = env_sample(is_world, u1, u2);
+    let ld = ls.xyz;
+    let l_pdf = ls.w;
+    if l_pdf > 0.0 {
+        let ev = vertex_eval(b, wo, ld);
+        if any(ev.xyz > vec3<f32>(0.0)) {
+            let sray = leave_ray(point, n, rd, ld, eps);
+            let sm = visibility_leaving(is_world, family_override, sray.origin, sray.retreat, sray.dir, shadow_base);
+            if sm.unresolved {
+                *unresolved = true;
+            }
+            if !sm.hit && !sm.unresolved {
+                let w = ss_power_heuristic(l_pdf, vertex_pdf(b, wo, ld, ev));
+                let li = env_radiance(is_world, ld);
+                *radiance = *radiance + throughput * ev.xyz * (li * (w / l_pdf));
+            }
+        }
+    }
+}
+
 fn trace_path(
     is_world: bool,
     family_override: u32,
@@ -2808,16 +2975,11 @@ fn trace_path(
             break;
         }
 
-        var outward: vec3<f32>;
-        if bounce == 0u || inside {
-            outward = fractional_normal(is_world, m.object, family_override, m.point, rd, m.eps);
-        } else {
-            outward = endpoint_normal(is_world, m.object, family_override, m.point, rd, m.eps, -1.0);
-        }
-        let n = select(outward, -outward, inside);
+        let n = surface_normal(is_world, m.object, family_override, m.point, rd, inside, m.eps);
         let wo = -rd;
-        let geo_normal = select(-n, n, dot(n, wo) > 0.0);
-        let pal = hit_palette(is_world, m.object, m.point, outward, m.trap);
+        let geo_normal = select(n, -n, dot(n, rd) > 0.0);
+        let pal = hit_palette(is_world, m.object, m.point, n, m.trap);
+        let facing = facing_mix(is_world, m.object, pal, geo_normal, wo);
         let shadow_base = max(
             slope * param(P_SECONDARY_EPS) * length(m.point - cam_origin),
             m.eps,
@@ -2827,7 +2989,7 @@ fn trace_path(
                 || (mat_spec == MAT_DISPATCH && u32(pr(is_world, m.object, P_MATERIAL_MODEL)) == 0u));
 
         if use_fast {
-            let mat = fast_material(is_world, m.object, pal, geo_normal, wo);
+            let mat = fast_material(is_world, m.object, facing);
             if bounce == 0u {
                 guide_albedo = mat.albedo;
                 guide_normal = geo_normal;
@@ -2842,61 +3004,15 @@ fn trace_path(
                 throughput = throughput / p_continue;
             }
 
-            if is_world {
-                let n_lights = u32(param(P_LIGHT_COUNT));
-                for (var i = 0u; i < n_lights; i = i + 1u) {
-                    if lp(true, i, P_SUN_CONE_PDF) <= 0.0 {
-                        let ld = lp3(true, i, P_LIGHT_DIR);
-                        let ev = fast_eval(mat, geo_normal, wo, ld);
-                        if any(ev.xyz > vec3<f32>(0.0)) {
-                            let sray = leave_ray(m.point, geo_normal, rd, ld, m.eps);
-                            let sm = visibility_leaving(true, family_override, sray.origin, sray.retreat, sray.dir, shadow_base);
-                            if sm.unresolved {
-                                unresolved = true;
-                            }
-                            if !sm.hit && !sm.unresolved {
-                                let sun = lp3(true, i, P_LIGHT_COLOR) * lp(true, i, P_LIGHT_INTENSITY);
-                                radiance = radiance + throughput * ev.xyz * sun;
-                            }
-                        }
-                    }
-                }
-            } else if param(P_SUN_CONE_PDF) <= 0.0 {
-                let ld = param3(P_LIGHT_DIR);
-                let ev = fast_eval(mat, geo_normal, wo, ld);
-                if any(ev.xyz > vec3<f32>(0.0)) {
-                    let sray = leave_ray(m.point, geo_normal, rd, ld, m.eps);
-                    let sm = visibility_leaving(false, family_override, sray.origin, sray.retreat, sray.dir, shadow_base);
-                    if sm.unresolved {
-                        unresolved = true;
-                    }
-                    if !sm.hit && !sm.unresolved {
-                        let sun = param3(P_LIGHT_COLOR) * param(P_LIGHT_INTENSITY);
-                        radiance = radiance + throughput * ev.xyz * sun;
-                    }
-                }
-            }
-
-            let u1 = rand(&rng);
-            let u2 = rand(&rng);
-            let ls = env_sample(is_world, u1, u2);
-            let ld = ls.xyz;
-            let l_pdf = ls.w;
-            if l_pdf > 0.0 {
-                let ev = fast_eval(mat, geo_normal, wo, ld);
-                if any(ev.xyz > vec3<f32>(0.0)) {
-                    let sray = leave_ray(m.point, geo_normal, rd, ld, m.eps);
-                    let sm = visibility_leaving(is_world, family_override, sray.origin, sray.retreat, sray.dir, shadow_base);
-                    if sm.unresolved {
-                        unresolved = true;
-                    }
-                    if !sm.hit && !sm.unresolved {
-                        let w = ss_power_heuristic(l_pdf, ev.w);
-                        let li = env_radiance(is_world, ld);
-                        radiance = radiance + throughput * ev.xyz * (li * (w / l_pdf));
-                    }
-                }
-            }
+            let bsdf = VertexBsdf(
+                true,
+                mat,
+                SsInputs(),
+                SsFrame(geo_normal, vec3<f32>(0.0), false, 0.0),
+                SsLayers(),
+                array<f32, SS_LOBE_COUNT>(),
+            );
+            nee(is_world, family_override, bsdf, m.point, rd, m.eps, shadow_base, throughput, &radiance, &unresolved, &rng);
 
             let u = vec3<f32>(rand(&rng), rand(&rng), rand(&rng));
             let s = fast_sample(mat, geo_normal, wo, u);
@@ -2911,8 +3027,8 @@ fn trace_path(
             retreat = next_ray.retreat;
             rd = next_ray.dir;
         } else {
-            let inputs = surface_inputs(is_world, m.object, pal, geo_normal, wo);
-            let frame = SsFrame(geo_normal, object_tangent_y(is_world, m.object), inside, 1.0);
+            let inputs = surface_inputs(is_world, m.object, facing);
+            let frame = SsFrame(geo_normal, object_tangent_y(is_world, m.object), inside, 0.0);
             if bounce == 0u {
                 guide_albedo = ss_guide_albedo(inputs);
                 guide_normal = geo_normal;
@@ -2933,65 +3049,8 @@ fn trace_path(
             let lobes = ss_lobe_weights_prepared(inputs, layers, wo);
 
             if !inside {
-                if is_world {
-                    let n_lights = u32(param(P_LIGHT_COUNT));
-                    for (var i = 0u; i < n_lights; i = i + 1u) {
-                        if lp(true, i, P_SUN_CONE_PDF) <= 0.0 {
-                            let ld = lp3(true, i, P_LIGHT_DIR);
-                            let bsdf_lobes = ss_eval_light_prepared(inputs, frame, layers, wo, ld);
-                            let bsdf = bsdf_lobes.base + bsdf_lobes.specular + bsdf_lobes.transmission;
-                            if any(bsdf > vec3<f32>(0.0)) {
-                                let sray = leave_ray(m.point, geo_normal, rd, ld, m.eps);
-                                let sm = visibility_leaving(true, family_override, sray.origin, sray.retreat, sray.dir, shadow_base);
-                                if sm.unresolved {
-                                    unresolved = true;
-                                }
-                                if !sm.hit && !sm.unresolved {
-                                    let sun = lp3(true, i, P_LIGHT_COLOR) * lp(true, i, P_LIGHT_INTENSITY);
-                                    radiance = radiance + throughput * bsdf * sun;
-                                }
-                            }
-                        }
-                    }
-                } else if param(P_SUN_CONE_PDF) <= 0.0 {
-                    let ld = param3(P_LIGHT_DIR);
-                    let bsdf_lobes = ss_eval_light_prepared(inputs, frame, layers, wo, ld);
-                    let bsdf = bsdf_lobes.base + bsdf_lobes.specular + bsdf_lobes.transmission;
-                    if any(bsdf > vec3<f32>(0.0)) {
-                        let sray = leave_ray(m.point, geo_normal, rd, ld, m.eps);
-                        let sm = visibility_leaving(false, family_override, sray.origin, sray.retreat, sray.dir, shadow_base);
-                        if sm.unresolved {
-                            unresolved = true;
-                        }
-                        if !sm.hit && !sm.unresolved {
-                            let sun = param3(P_LIGHT_COLOR) * param(P_LIGHT_INTENSITY);
-                            radiance = radiance + throughput * bsdf * sun;
-                        }
-                    }
-                }
-
-                let u1 = rand(&rng);
-                let u2 = rand(&rng);
-                let ls = env_sample(is_world, u1, u2);
-                let ld = ls.xyz;
-                let l_pdf = ls.w;
-                if l_pdf > 0.0 {
-                    let bsdf_lobes = ss_eval_light_prepared(inputs, frame, layers, wo, ld);
-                    let bsdf = bsdf_lobes.base + bsdf_lobes.specular + bsdf_lobes.transmission;
-                    if any(bsdf > vec3<f32>(0.0)) {
-                        let sray = leave_ray(m.point, geo_normal, rd, ld, m.eps);
-                        let sm = visibility_leaving(is_world, family_override, sray.origin, sray.retreat, sray.dir, shadow_base);
-                        if sm.unresolved {
-                            unresolved = true;
-                        }
-                        if !sm.hit && !sm.unresolved {
-                            let b_pdf = ss_pdf_prepared(layers, wo, ld, lobes);
-                            let w = ss_power_heuristic(l_pdf, b_pdf);
-                            let li = env_radiance(is_world, ld);
-                            radiance = radiance + throughput * bsdf * (li * (w / l_pdf));
-                        }
-                    }
-                }
+                let bsdf = VertexBsdf(false, FastMaterial(), inputs, frame, layers, lobes);
+                nee(is_world, family_override, bsdf, m.point, rd, m.eps, shadow_base, throughput, &radiance, &unresolved, &rng);
             }
 
             let u = vec3<f32>(rand(&rng), rand(&rng), rand(&rng));
@@ -3032,39 +3091,6 @@ fn direct_camera_ray(px: i32, py: i32, jx: f32, jy: f32) -> Ray {
     let hh = param(P_HALF_H);
     let dir = normalize(fwd + right * (nx * hw) + up * (ny * hh));
     return Ray(origin, dir, origin);
-}
-
-fn direct_stencil(
-    is_world: bool,
-    obj: u32,
-    family_override: u32,
-    center: vec3<f32>,
-    h_in: f32,
-    fallback: vec3<f32>,
-) -> vec3<f32> {
-    let family = resolved_family(is_world, obj, family_override);
-    let signed_fam = !unsigned_family(family);
-    let k0 = vec3<f32>(1.0, -1.0, -1.0);
-    let k1 = vec3<f32>(-1.0, -1.0, 1.0);
-    let k2 = vec3<f32>(-1.0, 1.0, -1.0);
-    let k3 = vec3<f32>(1.0, 1.0, 1.0);
-    var h = h_in;
-    for (var k = 0u; k <= 3u; k = k + 1u) {
-        let s = h * 0.57735027;
-        let d0 = clipped_distance_and_trap(is_world, obj, family_override, center + k0 * s, 0u, -1.0).x;
-        let d1 = clipped_distance_and_trap(is_world, obj, family_override, center + k1 * s, 0u, -1.0).x;
-        let d2 = clipped_distance_and_trap(is_world, obj, family_override, center + k2 * s, 0u, -1.0).x;
-        let d3 = clipped_distance_and_trap(is_world, obj, family_override, center + k3 * s, 0u, -1.0).x;
-        if signed_fam || (d0 > 0.0 && d1 > 0.0 && d2 > 0.0 && d3 > 0.0) {
-            let g = k0 * d0 + k1 * d1 + k2 * d2 + k3 * d3;
-            if length(g) >= 1.0e-7 {
-                return normalize(g);
-            }
-            return fallback;
-        }
-        h = 0.5 * h;
-    }
-    return fallback;
 }
 
 fn direct_gsaa_variance(n: vec3<f32>, fine: vec3<f32>) -> f32 {
@@ -3184,13 +3210,13 @@ fn direct_shade(
     point: vec3<f32>,
     n: vec3<f32>,
     view: vec3<f32>,
-    palette_rgb: vec3<f32>,
+    material: Facing,
     eps: f32,
     variance: f32,
 ) -> vec3<f32> {
     let facing = select(-n, n, dot(n, view) > 0.0);
     let frame = SsFrame(facing, object_tangent_y(is_world, obj), false, 0.0);
-    var inputs = surface_inputs(is_world, obj, palette_rgb, facing, view);
+    var inputs = surface_inputs(is_world, obj, material);
     inputs.specular_roughness = direct_filter_roughness(inputs.specular_roughness, variance);
     inputs.coat_roughness = direct_filter_roughness(inputs.coat_roughness, variance);
     let ao = direct_ao(is_world, family_override, point, n);
@@ -3280,33 +3306,27 @@ fn trace_direct(
         return TraceOut(bg, vec3<f32>(0.0), vec3<f32>(0.0), unresolved, sky_alpha());
     }
     let family = resolved_family(is_world, m.object, family_override);
-    let center = select(m.point, m.point - ray.dir * m.eps, unsigned_family(family));
-    let fine = direct_stencil(is_world, m.object, family_override, center, 0.5 * m.eps, -ray.dir);
+    let center = select(m.point - ray.dir * m.eps, m.point, family_signed(family));
+    let fine = stencil_normal(is_world, m.object, family_override, center, 0.5 * m.eps, -1.0, -ray.dir, true);
     let cone = param(P_SAMPLE_CONE);
     var n = fine;
     if cone > 1.0 {
-        n = direct_stencil(
+        n = stencil_normal(
             is_world,
             m.object,
             family_override,
             m.point + fine * (m.eps * cone),
             0.5 * m.eps * cone,
+            -1.0,
             fine,
+            true,
         );
     }
     let variance = direct_gsaa_variance(n, fine);
     let view = -ray.dir;
     let pal = hit_palette(is_world, m.object, m.point, n, m.trap);
-    var guide_albedo = pal;
-    if u32(pr(is_world, m.object, P_COLOR_SOURCE)) != 0u {
-        guide_albedo = pr3(is_world, m.object, P_BASE_COLOR);
-    }
-    let facing_exp = pr(is_world, m.object, P_FACING_EXPONENT);
     let facing = select(-n, n, dot(n, view) > 0.0);
-    if facing_exp > 0.0 {
-        let f = pow(max(1.0 - abs(dot(facing, view)), 0.0), facing_exp);
-        guide_albedo = guide_albedo + (pr3(is_world, m.object, P_FACING_COLOR) - guide_albedo) * f;
-    }
+    let material = facing_mix(is_world, m.object, pal, facing, view);
     let radiance = direct_shade(
         is_world,
         m.object,
@@ -3314,11 +3334,12 @@ fn trace_direct(
         m.point,
         n,
         view,
-        pal,
+        material,
         m.eps,
         variance,
     );
-    return TraceOut(radiance, guide_albedo, n, unresolved, 1.0);
+    // The albedo guide is the facing-mixed colour (fractal-kernels Direct `trace_direct`).
+    return TraceOut(radiance, material.color, n, unresolved, 1.0);
 }
 
 fn trace_pixel(
@@ -3372,7 +3393,6 @@ fn trace_pixel(
 
     let sample_end = sample_begin + spp;
     let ofx = is_ofx();
-    var primary_hits = 0.0;
     for (var s = sample_begin; s < sample_end; s = s + 1u) {
         var out: TraceOut;
         if is_direct {
@@ -3381,7 +3401,6 @@ fn trace_pixel(
             out = trace_path(is_world, family_override, mat_spec, px, py, s, start);
         }
         let rad = select(out.radiance, out.radiance * out.alpha, ofx);
-        primary_hits = primary_hits + out.alpha;
         acc = vec4<f32>(acc.xyz + rad, acc.w + 1.0);
         alb = vec4<f32>(alb.xyz + out.albedo, alb.w + 1.0);
         nrm = vec4<f32>(nrm.xyz + out.normal, nrm.w + select(1.0, out.alpha, ofx));
@@ -3661,15 +3680,10 @@ fn pack_srgb_rgba8(rgb: vec3<f32>) -> u32 {
     return r | (g << 8u) | (b << 16u) | (255u << 24u);
 }
 
-@compute @workgroup_size(128, 1, 1)
-fn tonemap(@builtin(global_invocation_id) gid: vec3<u32>) {
-    let i = gid.x;
-    let size = tile_size();
-    let width = size.x;
-    let height = size.y;
-    if i >= width * height {
-        return;
-    }
+// The scene-linear display value of row-major pixel `i` of a `width`-wide frame: the tiled
+// accumulator's mean times `P_EXPOSURE`, its saturation scaled about its luminance. Shared by
+// `tonemap` and `tonemap_display`.
+fn display_raw(i: u32, width: u32) -> vec3<f32> {
     let x = i % width;
     let y = i / width;
     let tiles_x = (width + 7u) / 8u;
@@ -3679,29 +3693,27 @@ fn tonemap(@builtin(global_invocation_id) gid: vec3<u32>) {
     let c = a.xyz * inv;
     let l = luminance(c);
     let sat = param(P_SATURATION);
-    aux_out[i] = vec4<f32>(l + (c - vec3<f32>(l)) * sat, 1.0);
+    return l + (c - vec3<f32>(l)) * sat;
+}
+
+@compute @workgroup_size(128, 1, 1)
+fn tonemap(@builtin(global_invocation_id) gid: vec3<u32>) {
+    let i = gid.x;
+    let size = tile_size();
+    if i >= size.x * size.y {
+        return;
+    }
+    aux_out[i] = vec4<f32>(display_raw(i, size.x), 1.0);
 }
 
 @compute @workgroup_size(128, 1, 1)
 fn tonemap_display(@builtin(global_invocation_id) gid: vec3<u32>) {
     let i = gid.x;
     let size = tile_size();
-    let width = size.x;
-    let height = size.y;
-    if i >= width * height {
+    if i >= size.x * size.y {
         return;
     }
-    let x = i % width;
-    let y = i / width;
-    let tiles_x = (width + 7u) / 8u;
-    let tile = (y / 4u) * tiles_x + (x / 8u);
-    let a = accum[tile * 32u + (y % 4u) * 8u + (x % 8u)];
-    let inv = select(0.0, param(P_EXPOSURE) / a.w, a.w > 0.0);
-    let c = a.xyz * inv;
-    let l = luminance(c);
-    let sat = param(P_SATURATION);
-    let raw = l + (c - vec3<f32>(l)) * sat;
-    var rgb = to_709_rgb(raw);
+    var rgb = to_709_rgb(display_raw(i, size.x));
     if param(P_TONEMAP) != 0.0 {
         let m = max(rgb, vec3<f32>(0.0));
         rgb = m / (vec3<f32>(1.0) + m);

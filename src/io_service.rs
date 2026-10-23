@@ -1,8 +1,11 @@
-//! Background filesystem work. Settings are coalesced; explicit saves are bounded.
+//! Background filesystem work. Settings are coalesced; explicit saves are bounded. Each command
+//! runs contained: a panic in one becomes that command's error, and the worker keeps serving.
+//! Dropping the service closes its queue and waits for the worker, so the last coalesced settings
+//! reach the disk before the process exits.
 use crate::render_service::Frame;
 use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex, mpsc},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex, PoisonError, mpsc},
     thread,
 };
 
@@ -25,6 +28,56 @@ fn describe_scene(event: &SceneEvent) -> String {
         Err(error) => error.clone(),
     };
     format!("scene {} {}: {outcome}", event.id, event.path.display())
+}
+
+/// Run one command's work; a panic in it becomes the error `panicked` makes of its message, so
+/// the requester gets an answer and the worker (and every later save) survives.
+fn guarded<T, E>(
+    work: impl FnOnce() -> Result<T, E>,
+    panicked: impl FnOnce(String) -> E,
+) -> Result<T, E> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work)).unwrap_or_else(|payload| {
+        let message = payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_owned())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".to_owned());
+        Err(panicked(format!("File worker panicked: {message}")))
+    })
+}
+
+/// Write `text` to `path` through the sibling `<file>.tmp`, flushed to the disk, then renamed over
+/// the file: a failed or interrupted write leaves the old file intact, and a temp the rename could
+/// not move is removed.
+fn write(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut name = path
+        .file_name()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("{} names no file", path.display()),
+            )
+        })?
+        .to_os_string();
+    name.push(".tmp");
+    let tmp = path.with_file_name(name);
+    let result = std::fs::File::create(&tmp)
+        .and_then(|mut file| {
+            file.write_all(text.as_bytes())?;
+            file.sync_all()
+        })
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if result.is_err()
+        && let Err(error) = std::fs::remove_file(&tmp)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        log::warn!("Temporary file {} not removed: {error}", tmp.display());
+    }
+    result
 }
 
 pub enum Command {
@@ -89,9 +142,143 @@ pub(crate) fn decode_scene(text: &str) -> Result<crate::scene::Scene, String> {
     Ok(scene)
 }
 
+/// The senders of the worker's results, one per kind of answer.
+struct Replies {
+    done: mpsc::Sender<Result<String, String>>,
+    scene: mpsc::Sender<SceneEvent>,
+    templates: mpsc::Sender<Result<Vec<crate::templates::Entry>, String>>,
+    window: mpsc::Sender<WindowEvent>,
+    take: mpsc::Sender<Result<crate::takes::Take, String>>,
+}
+
+/// Run one command and answer it on its channel; a panic in its work is its error.
+fn run(command: Command, replies: &Replies) {
+    match command {
+        Command::SaveFrame {
+            frame,
+            path,
+            file,
+            sdr_white_nits,
+        } => {
+            let result = guarded(|| frame.save(&path, file, sdr_white_nits), |e| e);
+            report(
+                &replies.done,
+                result.map(|_| format!("Saved {}", path.display())),
+            );
+        }
+        Command::SaveWindow {
+            shot,
+            capture,
+            device,
+        } => {
+            let quit = shot.quit;
+            let result = guarded(
+                || {
+                    capture
+                        .wait(&device)
+                        .map_err(crate::window_shot::ShotError::from)
+                        .and_then(|capture| crate::window_shot::save(&shot, &capture))
+                },
+                crate::window_shot::ShotError::Worker,
+            );
+            deliver(&replies.window, WindowEvent { quit, result }, |event| {
+                format!("window screenshot: {:?}", event.result)
+            });
+        }
+        Command::Write { path, text } => {
+            let result = guarded(|| write(&path, &text).map_err(|e| e.to_string()), |e| e);
+            report(
+                &replies.done,
+                result.map(|_| format!("Saved {}", path.display())),
+            );
+        }
+        Command::OpenScene { id, path } => {
+            let result = guarded(
+                || {
+                    std::fs::read_to_string(&path)
+                        .map_err(|error| error.to_string())
+                        .and_then(|text| decode_scene(&text))
+                        .map(|scene| Some(Box::new(scene)))
+                },
+                |e| e,
+            );
+            deliver(
+                &replies.scene,
+                SceneEvent { id, path, result },
+                describe_scene,
+            );
+        }
+        Command::SaveScene { id, path, document } => {
+            let result = guarded(
+                || {
+                    serde_json::to_string_pretty(&document)
+                        .map_err(|error| error.to_string())
+                        .and_then(|text| write(&path, &text).map_err(|error| error.to_string()))
+                        .map(|_| None)
+                },
+                |e| e,
+            );
+            deliver(
+                &replies.scene,
+                SceneEvent { id, path, result },
+                describe_scene,
+            );
+        }
+        Command::OpenTake { path } => {
+            let result = guarded(
+                || {
+                    std::fs::read_to_string(&path)
+                        .map_err(|error| format!("{}: {error}", path.display()))
+                        .and_then(|text| crate::takes::Take::from_clip(&text))
+                },
+                |e| e,
+            );
+            deliver(&replies.take, result, |result| match result {
+                Ok(take) => format!("take {}", take.name),
+                Err(error) => error.clone(),
+            });
+        }
+        Command::RefreshTemplates { directory } => {
+            let result = guarded(|| crate::templates::catalog(&directory), |e| e);
+            deliver(&replies.templates, result, |result| match result {
+                Ok(entries) => format!("{} templates", entries.len()),
+                Err(error) => error.clone(),
+            });
+        }
+        Command::Delete(path) => {
+            if let Err(e) = guarded(
+                || std::fs::remove_file(&path).map_err(|e| e.to_string()),
+                |e| e,
+            ) {
+                report(&replies.done, Err(format!("{}: {e}", path.display())));
+            }
+        }
+    }
+}
+
+/// The latest settings text not yet written: written between commands, and last when the queue
+/// closes.
+type Pending = Arc<Mutex<Option<(PathBuf, String)>>>;
+
+/// Write the pending settings, if any; `failed` gets the error.
+fn flush(pending: &Pending, failed: impl FnOnce(String)) {
+    let next = pending
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take();
+    if let Some((path, text)) = next
+        && let Err(error) = guarded(|| write(&path, &text).map_err(|e| e.to_string()), |e| e)
+    {
+        failed(format!("Settings save {} failed: {error}", path.display()));
+    }
+}
+
 pub struct IoService {
-    tx: mpsc::SyncSender<Command>,
-    settings: Arc<Mutex<Option<(PathBuf, String)>>>,
+    /// The command queue; taken by `Drop` to close it before joining the worker.
+    tx: Option<mpsc::SyncSender<Command>>,
+    /// The worker, joined by `Drop`; None when its thread could not start (every `send` says so).
+    worker: Option<thread::JoinHandle<()>>,
+    settings: Pending,
     events: mpsc::Receiver<Result<String, String>>,
     scene_events: mpsc::Receiver<SceneEvent>,
     template_events: mpsc::Receiver<Result<Vec<crate::templates::Entry>, String>>,
@@ -102,121 +289,46 @@ impl IoService {
     pub fn spawn() -> Self {
         let (tx, rx) = mpsc::sync_channel(8);
         let (done, events) = mpsc::channel();
-        let (scene_done, scene_events) = mpsc::channel();
-        let (template_done, template_events) = mpsc::channel();
-        let (window_done, window_events) = mpsc::channel();
-        let (take_done, take_events) = mpsc::channel();
-        let settings = Arc::new(Mutex::new(None::<(PathBuf, String)>));
+        let (scene, scene_events) = mpsc::channel();
+        let (templates, template_events) = mpsc::channel();
+        let (window, window_events) = mpsc::channel();
+        let (take, take_events) = mpsc::channel();
+        let settings: Pending = Arc::new(Mutex::new(None));
         let pending = settings.clone();
-        thread::Builder::new()
+        let replies = Replies {
+            done,
+            scene,
+            templates,
+            window,
+            take,
+        };
+        let worker = thread::Builder::new()
             .name("frac-file-writer".into())
             .spawn(move || {
-                let write = |path: &std::path::Path, text: &str| {
-                    if let Some(dir) = path.parent() {
-                        std::fs::create_dir_all(dir)?;
-                    }
-                    // Write a sibling then replace: a failed write leaves the old file intact.
-                    let tmp = path.with_extension("json.tmp");
-                    std::fs::write(&tmp, text)?;
-                    std::fs::rename(tmp, path)
-                };
                 loop {
                     match rx.recv_timeout(std::time::Duration::from_millis(50)) {
-                        Ok(Command::SaveFrame {
-                            frame,
-                            path,
-                            file,
-                            sdr_white_nits,
-                        }) => {
-                            let result = frame.save(&path, file, sdr_white_nits);
-                            report(&done, result.map(|_| format!("Saved {}", path.display())));
-                        }
-                        Ok(Command::SaveWindow {
-                            shot,
-                            capture,
-                            device,
-                        }) => {
-                            let result = capture
-                                .wait(&device)
-                                .map_err(crate::window_shot::ShotError::from)
-                                .and_then(|capture| crate::window_shot::save(&shot, &capture));
-                            let quit = shot.quit;
-                            deliver(&window_done, WindowEvent { quit, result }, |event| {
-                                format!("window screenshot: {:?}", event.result)
-                            });
-                        }
-                        Ok(Command::Write { path, text }) => {
-                            report(
-                                &done,
-                                write(&path, &text)
-                                    .map(|_| format!("Saved {}", path.display()))
-                                    .map_err(|e| e.to_string()),
-                            );
-                        }
-                        Ok(Command::OpenScene { id, path }) => {
-                            let result = std::fs::read_to_string(&path)
-                                .map_err(|error| error.to_string())
-                                .and_then(|text| decode_scene(&text))
-                                .map(|scene| Some(Box::new(scene)));
-                            deliver(&scene_done, SceneEvent { id, path, result }, describe_scene);
-                        }
-                        Ok(Command::SaveScene { id, path, document }) => {
-                            let result = serde_json::to_string_pretty(&document)
-                                .map_err(|error| error.to_string())
-                                .and_then(|text| {
-                                    write(&path, &text).map_err(|error| error.to_string())
-                                })
-                                .map(|_| None);
-                            deliver(&scene_done, SceneEvent { id, path, result }, describe_scene);
-                        }
-                        Ok(Command::OpenTake { path }) => {
-                            let result = std::fs::read_to_string(&path)
-                                .map_err(|error| format!("{}: {error}", path.display()))
-                                .and_then(|text| crate::takes::Take::from_clip(&text));
-                            deliver(&take_done, result, |result| match result {
-                                Ok(take) => format!("take {}", take.name),
-                                Err(error) => error.clone(),
-                            });
-                        }
-                        Ok(Command::RefreshTemplates { directory }) => {
-                            deliver(
-                                &template_done,
-                                crate::templates::catalog(&directory),
-                                |result| match result {
-                                    Ok(entries) => format!("{} templates", entries.len()),
-                                    Err(error) => error.clone(),
-                                },
-                            );
-                        }
-                        Ok(Command::Delete(path)) => {
-                            if let Err(e) = std::fs::remove_file(path) {
-                                report(&done, Err(e.to_string()));
-                            }
-                        }
+                        Ok(command) => run(command, &replies),
                         Err(mpsc::RecvTimeoutError::Disconnected) => {
-                            if let Some((path, text)) = pending.lock().unwrap().take()
-                                && let Err(error) = write(&path, &text)
-                            {
-                                log::error!(
-                                    "Final settings save {} failed: {error}",
-                                    path.display()
-                                );
-                            }
+                            // The app is closing: nobody reads `done` any more, so a failed
+                            // final save goes to the log.
+                            flush(&pending, |error| log::error!("{error}"));
                             break;
                         }
                         Err(mpsc::RecvTimeoutError::Timeout) => {}
                     }
-                    let next = pending.lock().unwrap().take();
-                    if let Some((path, text)) = next
-                        && let Err(e) = write(&path, &text)
-                    {
-                        report(&done, Err(format!("Settings save failed: {e}")));
-                    }
+                    flush(&pending, |error| report(&replies.done, Err(error)));
                 }
-            })
-            .expect("filesystem worker");
+            });
+        let worker = match worker {
+            Ok(worker) => Some(worker),
+            Err(error) => {
+                log::error!("File writer could not start: {error}");
+                None
+            }
+        };
         Self {
-            tx,
+            tx: Some(tx),
+            worker,
             settings,
             events,
             scene_events,
@@ -226,12 +338,16 @@ impl IoService {
         }
     }
     pub fn send(&self, cmd: Command) -> Result<(), String> {
-        self.tx
-            .try_send(cmd)
-            .map_err(|e| format!("File writer busy: {e}"))
+        let tx = self.tx.as_ref().ok_or("File writer stopped")?;
+        tx.try_send(cmd).map_err(|e| match e {
+            mpsc::TrySendError::Full(_) => "File writer busy: its queue is full".to_owned(),
+            mpsc::TrySendError::Disconnected(_) => {
+                "File writer stopped: its thread could not start".to_owned()
+            }
+        })
     }
     pub fn settings(&self, path: PathBuf, json: String) {
-        *self.settings.lock().unwrap() = Some((path, json));
+        *self.settings.lock().unwrap_or_else(PoisonError::into_inner) = Some((path, json));
     }
     pub fn poll_templates(&self) -> Option<Result<Vec<crate::templates::Entry>, String>> {
         self.template_events.try_recv().ok()
@@ -249,15 +365,28 @@ impl IoService {
         self.events.try_recv().ok()
     }
 }
+impl Drop for IoService {
+    /// Close the queue, then wait for the worker: it finishes the queued commands and writes the
+    /// last coalesced settings before it exits, so they reach the disk before the process does.
+    fn drop(&mut self) {
+        self.tx.take();
+        if let Some(worker) = self.worker.take()
+            && worker.join().is_err()
+        {
+            log::error!("File writer thread panicked outside a command");
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::{Bulb, Formula, MandelBox};
     #[test]
     fn scene_file_worker_roundtrips_authoring_keys_materials_and_metadata() {
         use crate::world::{WorldCommand, WorldDocument, WorldEditor, WorldKind};
         let mut editor = WorldEditor::new(WorldDocument::from_scene(&crate::scene::Scene::preset(
-            crate::params::FAMILY_BULB,
+            Formula::Mandelbulb(Bulb::PRESET),
         )));
         editor
             .execute(WorldCommand::SetTimeRange {
@@ -343,7 +472,7 @@ mod tests {
 
     #[test]
     fn scene_decoder_reads_a_world_document_and_rejects_anything_else() {
-        let scene = crate::scene::Scene::preset(crate::params::FAMILY_BOX);
+        let scene = crate::scene::Scene::preset(Formula::Mandelbox(MandelBox::PRESET));
         let world = crate::world::WorldDocument::from_scene(&scene);
         let decoded = decode_scene(&serde_json::to_string(&world).unwrap()).unwrap();
         let document = decoded.document.as_ref().unwrap();
@@ -353,6 +482,8 @@ mod tests {
         assert!(decode_scene(&serde_json::to_string(&scene).unwrap()).is_err());
     }
 
+    /// Dropping the service waits for the worker: the last coalesced settings are on disk when
+    /// `drop` returns. A failed explicit save is reported, leaves the old file, and leaves no temp.
     #[test]
     fn coalesced_settings_flush_on_shutdown_and_explicit_save_reports_failure() {
         let dir = std::env::temp_dir().join(format!("frac-io-{}", std::process::id()));
@@ -363,32 +494,42 @@ mod tests {
             io.settings(path.clone(), n.to_string());
         }
         drop(io);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "99");
+        assert!(!dir.join("settings.json.tmp").exists());
         let until = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while std::fs::read_to_string(&path).ok().as_deref() != Some("99") {
-            assert!(
-                std::time::Instant::now() < until,
-                "last settings must flush after drop"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
         let io = IoService::spawn();
         let blocker = dir.join("file");
         std::fs::write(&blocker, "original").unwrap();
-        io.send(Command::Write {
-            path: blocker.join("child.json"),
-            text: "{}".into(),
-        })
-        .unwrap();
-        loop {
-            if let Some(result) = io.poll() {
-                assert!(result.is_err());
-                break;
+        // The rename target is a directory that holds a file: the temp is written, the rename
+        // fails, and the temp is removed again.
+        let occupied = dir.join("occupied.json");
+        std::fs::create_dir_all(occupied.join("inside")).unwrap();
+        for target in [blocker.join("child.json"), occupied.clone()] {
+            io.send(Command::Write {
+                path: target,
+                text: "{}".into(),
+            })
+            .unwrap();
+            loop {
+                if let Some(result) = io.poll() {
+                    assert!(result.is_err());
+                    break;
+                }
+                assert!(std::time::Instant::now() < until);
+                std::thread::sleep(std::time::Duration::from_millis(10));
             }
-            assert!(std::time::Instant::now() < until);
-            std::thread::sleep(std::time::Duration::from_millis(10));
         }
         assert_eq!(std::fs::read_to_string(&blocker).unwrap(), "original");
+        assert!(!dir.join("occupied.json.tmp").exists());
         drop(io);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A panic in a command's work is that command's error, not the worker's end.
+    #[test]
+    fn a_panicking_command_is_its_own_error() {
+        let result: Result<(), String> = guarded(|| panic!("boom"), |e| e);
+        assert!(result.unwrap_err().contains("boom"));
+        assert_eq!(guarded(|| Ok::<_, String>(7), |e| e), Ok(7));
     }
 }

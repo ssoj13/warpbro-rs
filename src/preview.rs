@@ -54,6 +54,9 @@ pub struct PreviewRequest {
     pub white_nits: f32,
     pub cache_fraction: f64,
     pub reserve_gb: f64,
+    /// Batch budget of each cached frame's render (`render_service::BACKGROUND_BUDGET_MS`
+    /// from the app): scheduling only, so it never changes which pixels a cache holds.
+    pub budget_ms: f32,
 }
 impl PreviewRequest {
     /// Restarting transport is a scheduling change, not a pixel-content change.
@@ -126,7 +129,11 @@ impl PreviewRequest {
         {
             return Err("Invalid preview memory budget".into());
         }
-        crate::render_service::validate_size(self.width, self.height, self.spp)
+        if !self.budget_ms.is_finite() || self.budget_ms <= 0.0 {
+            return Err("Preview batch budget must be positive and finite".into());
+        }
+        crate::render::validate_size(self.width, self.height, self.spp)?;
+        Ok(())
     }
 }
 
@@ -223,8 +230,9 @@ impl PreviewController {
         if service.preview_stopped() {
             self.cancel();
             self.pending = None;
-            if self.error.as_deref() != Some("CUDA worker is unavailable") {
-                self.error = Some("CUDA worker is unavailable".into());
+            let stopped = crate::render_service::CommandError::Stopped.to_string();
+            if self.error.as_deref() != Some(stopped.as_str()) {
+                self.error = Some(stopped);
             }
             return None;
         }
@@ -373,16 +381,9 @@ impl PreviewController {
     }
     /// Return a retired/rejected presentation to the worker after upload staging releases it.
     pub fn recycle(&mut self, frame: Arc<Frame>) {
-        if self
-            .recycled
-            .iter()
-            .flatten()
-            .any(|old| Arc::ptr_eq(old, &frame))
-        {
-            return;
-        }
-        if let Some(slot) = self.recycled.iter_mut().find(|slot| slot.is_none()) {
-            *slot = Some(frame);
+        if let Err(frame) = crate::render_service::put_slot(&mut self.recycled, frame) {
+            // Every slot is taken: this presentation is freed instead of reused.
+            drop(frame);
         }
     }
     pub fn position(&self) -> Option<u32> {
@@ -433,6 +434,9 @@ const TIER: Tier = Tier::BEST;
 /// All native pixel ownership belongs to Playa's cache. Metadata cannot keep evicted pixels alive.
 pub(crate) struct PreviewCache {
     pub request: PreviewRequest,
+    /// Frames of the request's transport range (`PreviewRequest::frame_count`), validated
+    /// with the request by `new` / `restart`.
+    frames: u32,
     pub manager: Arc<CacheManager>,
     /// The owner of the frames, kept for `clear_all` (a `TierCache` view cannot drop a whole cache).
     cache: Arc<GlobalFrameCache>,
@@ -445,6 +449,7 @@ pub(crate) struct PreviewCache {
 impl PreviewCache {
     pub fn new(request: PreviewRequest, cache_all: bool) -> Result<Self, String> {
         request.validate()?;
+        let frames = request.frame_count()?;
         let (cache_first, cache_last) = request.cache_bounds();
         let count = (cache_last - cache_first + 1) as usize;
         let manager = Arc::new(CacheManager::new(
@@ -471,6 +476,7 @@ impl PreviewCache {
         ));
         Ok(Self {
             request,
+            frames,
             manager,
             view: cache.at(TIER),
             cache,
@@ -491,8 +497,13 @@ impl PreviewCache {
             return Err("Preview range exceeds cache budget; reduce preview resolution or increase the cache budget".into());
         }
         self.manager.increment_generation();
+        self.frames = request.frame_count()?;
         self.request = request;
         Ok(())
+    }
+    /// Frames of the transport range: the progress total and the fill bound.
+    pub fn frames(&self) -> u32 {
+        self.frames
     }
     pub fn index(&self, number: u32) -> Option<i32> {
         let (first, last) = self.request.cache_bounds();
@@ -637,10 +648,11 @@ impl Drop for PreviewCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scene::{Bulb, Formula};
     fn request() -> PreviewRequest {
         PreviewRequest {
             generation: 19,
-            scene: Arc::new(Scene::preset(crate::params::FAMILY_BULB)),
+            scene: Arc::new(Scene::preset(Formula::Mandelbulb(Bulb::PRESET))),
             render_profile: None,
             first: 10,
             last: 12,
@@ -653,6 +665,7 @@ mod tests {
             white_nits: 203.0,
             cache_fraction: 0.01,
             reserve_gb: 0.0,
+            budget_ms: crate::render_service::BACKGROUND_BUDGET_MS,
         }
     }
     fn frame() -> Frame {

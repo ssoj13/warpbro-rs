@@ -77,9 +77,8 @@ impl PropertyFilter {
 fn selection_bounds(nodes: &[WorldNodeInfo], e: &WorldEditor) -> (u32, u32) {
     let mut first = f64::INFINITY;
     let mut last = f64::NEG_INFINITY;
-    for node in nodes.iter().filter(|node| {
-        e.selected.contains(&node.id) || (e.selected.is_empty() && e.selection == Some(node.id))
-    }) {
+    let targets = e.targets(None);
+    for node in nodes.iter().filter(|node| targets.contains(&node.id)) {
         let start = node.start.ceil().max(f64::from(e.document.first));
         let end = (node.end.ceil() - 1.0).min(f64::from(e.document.last));
         if start <= end {
@@ -160,6 +159,9 @@ struct AttributeCache {
 struct OutlinerCache {
     document: Option<NodeId>,
     revision: u64,
+    /// The playhead the nodes' flags were evaluated at (`WorldDocument::nodes_at`): a keyed
+    /// eye shows its value there, as on the timeline.
+    frame: u32,
     nodes: Vec<WorldNodeInfo>,
     map: HashMap<u64, NodeId>,
     model: OutlinerModel,
@@ -427,6 +429,9 @@ pub struct WorldUi {
     keys: HashSet<KeyIdentity>,
     snap: bool,
     error: Option<String>,
+    /// The Attribute Editor's name field while it has focus: committed as one Rename (one undo
+    /// step) when it loses focus or on Enter, so it can be cleared to retype (`attribute_editor`).
+    name_edit: String,
     metadata: String,
     metadata_node: Option<NodeId>,
     metadata_document: Option<NodeId>,
@@ -477,6 +482,7 @@ impl Default for WorldUi {
             keys: HashSet::new(),
             snap: true,
             error: None,
+            name_edit: String::new(),
             metadata: String::new(),
             metadata_node: None,
             metadata_document: None,
@@ -586,11 +592,11 @@ fn category(path: &str) -> &'static str {
         "transform" => "Transform",
         "camera" => "Camera",
         "material" | "material_id" => "Material",
-        "fractal" | "formula" | "julia" | "julia_mix" | "orbit_offset" | "inversion_strength"
+        "formula" | "julia" | "julia_mix" | "orbit_offset" | "inversion_strength"
         | "inversion_center" | "inversion_radius" | "palette" | "coloring" | "trap_point"
         | "trap_axis" | "trap_scale" => "Fractal",
-        "light" | "lighting" => "Light",
-        "environment" => "Environment",
+        "sun" => "Light",
+        "environment" | "sky" => "Environment",
         "render" => "Render",
         "quality" => "Quality",
         "viewport" => "Viewport",
@@ -602,7 +608,6 @@ fn category(path: &str) -> &'static str {
                 "Mask"
             }
         }
-        "colour" | "color" => "Color",
         _ => "Custom",
     }
 }
@@ -627,15 +632,14 @@ fn reparent_order(
         .filter(|n| n.parent == parent)
         .collect::<Vec<_>>();
     let index = index.min(siblings.len());
-    let at = if let Some(next) = siblings.get(index) {
-        rest.iter().position(|n| n.id == next.id).unwrap()
-    } else if let Some(last) = siblings.last() {
-        rest.iter().position(|n| n.id == last.id).unwrap() + 1
-    } else {
-        parent
-            .and_then(|parent| rest.iter().position(|n| n.id == parent).map(|i| i + 1))
-            .unwrap_or(rest.len())
-    };
+    let slot = |id: NodeId| rest.iter().position(|n| n.id == id);
+    // Before the sibling now at `index`, else after the last sibling, else after the parent.
+    let at = match (siblings.get(index), siblings.last()) {
+        (Some(next), _) => slot(next.id),
+        (None, Some(last)) => slot(last.id).map(|i| i + 1),
+        (None, None) => parent.and_then(slot).map(|i| i + 1),
+    }
+    .unwrap_or(rest.len());
     let mut ids = rest.into_iter().map(|n| n.id).collect::<Vec<_>>();
     ids.splice(at..at, moved.iter().copied());
     ids
@@ -718,12 +722,7 @@ impl WorldUi {
             (Hotkey::Modified, PropertyFilter::MODIFIED),
         ] {
             if pressed(command) {
-                for id in e
-                    .selected
-                    .iter()
-                    .copied()
-                    .chain(e.selection.filter(|_| e.selected.is_empty()))
-                {
+                for id in e.targets(None) {
                     let filter = self.property_filters.entry(id).or_default();
                     filter.toggle(bit, modifiers.shift);
                     // Toggling the last filter off collapses the layer (After Effects U / P / R / S).
@@ -883,13 +882,20 @@ impl WorldUi {
             self.error = Some(err);
         }
     }
-    /// Delete `ids` as one undo step: the outliner's trash button, the layer menu and the
-    /// outliner's Delete key (`App`'s hotkeys) all end here.
-    pub(crate) fn delete(&mut self, e: &mut WorldEditor, ids: Vec<NodeId>) {
+    /// Delete `WorldEditor::targets(row)` as one undo step: the outliner's trash button and row
+    /// menu, the layer menu and the outliner's Delete key (`App`'s hotkeys) all end here.
+    pub(crate) fn delete(&mut self, e: &mut WorldEditor, row: Option<NodeId>) {
+        let ids = e.targets(row);
         self.command(
             e,
             WorldCommand::Batch(ids.into_iter().map(WorldCommand::Delete).collect()),
         );
+    }
+    /// Duplicate `WorldEditor::targets(row)` (`WorldEditor::duplicate`), reporting a failure.
+    fn duplicate(&mut self, e: &mut WorldEditor, row: Option<NodeId>) {
+        if let Err(error) = e.duplicate(row) {
+            self.error = Some(error);
+        }
     }
     /// One step of a panel drag (`key` names it): the edit joins the drag's open undo step.
     fn panel_command(&mut self, e: &mut WorldEditor, key: impl egui::AsId, c: WorldCommand) {
@@ -989,21 +995,20 @@ impl WorldUi {
             ui.menu_button(format!("{} Add", ph::ADD), |ui| {
                 self.add_menu_entries(ui, e, None);
             });
+            let any = !e.targets(None).is_empty();
             if ui
-                .add_enabled(e.selection.is_some(), egui::Button::new(ph::COPY))
-                .on_hover_text("Duplicate selected object")
+                .add_enabled(any, egui::Button::new(ph::COPY))
+                .on_hover_text("Duplicate selected objects")
                 .clicked()
-                && let Some(id) = e.selection
             {
-                self.command(e, WorldCommand::Duplicate(vec![id]));
+                self.duplicate(e, None);
             }
             if ui
-                .add_enabled(e.selection.is_some(), egui::Button::new(ph::TRASH))
+                .add_enabled(any, egui::Button::new(ph::TRASH))
                 .on_hover_text("Delete selected objects")
                 .clicked()
             {
-                let ids = e.selected.clone();
-                self.delete(e, ids);
+                self.delete(e, None);
             }
         });
         self.status(ui);
@@ -1081,8 +1086,8 @@ impl WorldUi {
                             self.create(e, kind, Some(id));
                         }
                         match action.as_str() {
-                            "duplicate" => self.command(e, WorldCommand::Duplicate(vec![id])),
-                            "delete" => self.command(e, WorldCommand::Delete(id)),
+                            "duplicate" => self.duplicate(e, Some(id)),
+                            "delete" => self.delete(e, Some(id)),
                             "unparent" => {
                                 self.command(e, WorldCommand::Reparent { id, parent: None })
                             }
@@ -1158,8 +1163,11 @@ impl WorldUi {
     fn take_outliner_cache(&mut self, e: &WorldEditor) -> OutlinerCache {
         let mut cache = std::mem::take(&mut self.outliner_cache);
         let document = Some(NodeId(e.document.graph.id));
-        if cache.document != document || cache.revision != e.revision() {
-            cache.nodes = e.document.nodes();
+        if cache.document != document
+            || cache.revision != e.revision()
+            || cache.frame != self.playhead
+        {
+            cache.nodes = e.document.nodes_at(f64::from(self.playhead));
             cache.map.clear();
             cache
                 .map
@@ -1183,6 +1191,7 @@ impl WorldUi {
             }
             cache.document = document;
             cache.revision = e.revision();
+            cache.frame = self.playhead;
         }
         cache.model.selection.clear();
         cache
@@ -1202,18 +1211,19 @@ impl WorldUi {
             cache.attributes.clear();
             cache.sections.clear();
         }
-        if schema_changed {
-            cache.nodes = e.document.nodes();
-        }
         if schema_changed || cache.frame != frame {
-            for node in &mut cache.nodes {
+            // The flags at the playhead (a keyed eye): the outliner reads the same (`nodes_at`).
+            cache.nodes = e.document.nodes_at(f64::from(self.playhead));
+            for node in &cache.nodes {
                 if schema_changed {
-                    cache.attributes.insert(
-                        node.id,
-                        e.document
-                            .attributes(node.id, self.playhead as f64)
-                            .unwrap_or_default(),
-                    );
+                    let attrs = match e.document.attributes(node.id, f64::from(self.playhead)) {
+                        Ok(attrs) => attrs,
+                        Err(error) => {
+                            self.error = Some(format!("{}: {error}", node.name));
+                            Vec::new()
+                        }
+                    };
+                    cache.attributes.insert(node.id, attrs);
                 } else if let Some(attrs) = cache.attributes.get_mut(&node.id) {
                     let mut changed_shape = false;
                     for attr in attrs.iter_mut() {
@@ -1231,26 +1241,16 @@ impl WorldUi {
                         }
                     }
                     if changed_shape {
-                        *attrs = e
-                            .document
-                            .attributes(node.id, self.playhead as f64)
-                            .unwrap_or_default();
+                        *attrs = match e.document.attributes(node.id, f64::from(self.playhead)) {
+                            Ok(attrs) => attrs,
+                            Err(error) => {
+                                self.error = Some(format!("{}: {error}", node.name));
+                                Vec::new()
+                            }
+                        };
                         for ((id, _), section) in &mut cache.sections {
                             if *id == node.id {
                                 section.fields.clear();
-                            }
-                        }
-                    }
-                }
-                if let Some(attrs) = cache.attributes.get(&node.id) {
-                    for attr in attrs {
-                        if let Some(value) = attr.value.as_bool() {
-                            match attr.path.as_str() {
-                                "/visible" => node.visible = value,
-                                "/locked" => node.locked = value,
-                                "/solo" => node.solo = value,
-                                "/shy" => node.shy = value,
-                                _ => {}
                             }
                         }
                     }
@@ -1435,16 +1435,17 @@ impl WorldUi {
                     attr: Some(a.clone()),
                 });
                 if self.components_open(id, &a.path, attrs) {
-                    for child in attrs.iter().filter(|child| {
-                        child.component.is_some()
-                            && (filter.0 != PropertyFilter::KEYED || !child.frames.is_empty())
+                    for (child, component) in attrs.iter().filter_map(|child| {
+                        let component = child.component?;
+                        ((filter.0 != PropertyFilter::KEYED || !child.frames.is_empty())
                             && child
                                 .path
                                 .rsplit_once('/')
-                                .is_some_and(|(parent, _)| parent == a.path)
+                                .is_some_and(|(parent, _)| parent == a.path))
+                        .then_some((child, component))
                     }) {
                         lanes.push(Lane {
-                            label: component_label(child.component.unwrap()).into(),
+                            label: component_label(component).into(),
                             path: Some(child.path.clone()),
                             value: child.value.clone(),
                             frames: child.frames.clone(),
@@ -1981,30 +1982,23 @@ impl WorldUi {
                     self.add_menu_entries(ui, e, Some(n.id));
                 });
                 ui.separator();
-                if ui
-                    .add_enabled(!n.locked, egui::Button::new("Duplicate"))
-                    .clicked()
-                {
-                    self.command(e, WorldCommand::Duplicate(vec![n.id]));
-                    ui.close();
-                }
+                // Both act on the selection when this layer is part of it, else on this layer.
                 let unlocked = e
-                    .selected
+                    .targets(Some(n.id))
                     .iter()
                     .all(|id| nodes.iter().any(|node| node.id == *id && !node.locked));
                 if ui
-                    .add_enabled(
-                        unlocked && !n.locked,
-                        egui::Button::new("Delete selected layers"),
-                    )
+                    .add_enabled(unlocked, egui::Button::new("Duplicate"))
                     .clicked()
                 {
-                    let ids = if e.selected.contains(&n.id) {
-                        e.selected.clone()
-                    } else {
-                        vec![n.id]
-                    };
-                    self.delete(e, ids);
+                    self.duplicate(e, Some(n.id));
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(unlocked, egui::Button::new("Delete selected layers"))
+                    .clicked()
+                {
+                    self.delete(e, Some(n.id));
                     ui.close();
                 }
             });
@@ -2364,23 +2358,23 @@ impl WorldUi {
                     return;
                 }
                 if let Some(n) = nodes.iter().find(|n| wid(n.id) == id) {
+                    let mut commands = vec![WorldCommand::SetSpan {
+                        id: n.id,
+                        start: new_start as f64,
+                        end: new_start as f64 + n.end - n.start,
+                    }];
+                    // A track change reorders the shown tracks among their own slots
+                    // (`WorldCommand::Reorder`): hidden shy nodes keep theirs.
                     let mut ids = nodes.iter().map(|n| n.id).collect::<Vec<_>>();
-                    if let Some(old) = ids.iter().position(|id| *id == n.id) {
+                    if let Some(old) = ids.iter().position(|id| *id == n.id)
+                        && old != new_track.min(ids.len().saturating_sub(1))
+                    {
                         let moved = ids.remove(old);
                         let to = new_track.min(ids.len());
                         ids.insert(to, moved);
+                        commands.push(WorldCommand::Reorder { ids });
                     }
-                    self.command(
-                        e,
-                        WorldCommand::Batch(vec![
-                            WorldCommand::SetSpan {
-                                id: n.id,
-                                start: new_start as f64,
-                                end: new_start as f64 + n.end - n.start,
-                            },
-                            WorldCommand::Reorder { ids },
-                        ]),
-                    );
+                    self.command(e, WorldCommand::Batch(commands));
                 }
             }
             TimelineAction::TrimStart { id, delta } => {
@@ -2540,7 +2534,12 @@ impl WorldUi {
             });
         });
         if (first, last, fps) != before {
-            self.command(e, WorldCommand::SetTimeRange { first, last, fps });
+            // One undo step per drag, the same gesture as the work-area drag on the ruler.
+            self.panel_command(
+                e,
+                "timeline_work_area",
+                WorldCommand::SetTimeRange { first, last, fps },
+            );
             self.playhead = self.playhead.clamp(e.document.first, e.document.last);
         }
     }
@@ -2780,11 +2779,22 @@ impl WorldUi {
                 ));
             }
         }
-        let mut name = node.name.clone();
-        if ui
-            .add(egui::TextEdit::singleline(&mut name).desired_width(f32::INFINITY))
-            .changed()
+        // The field edits a buffer and renames once, on focus loss or Enter (Escape cancels): one
+        // undo step, and the name can be cleared to retype it.
+        let field = ui.id().with(("node_name", id));
+        if !ui.memory(|m| m.has_focus(field)) && self.name_edit != node.name {
+            self.name_edit.clone_from(&node.name);
+        }
+        let edit = ui.add(
+            egui::TextEdit::singleline(&mut self.name_edit)
+                .id(field)
+                .desired_width(f32::INFINITY),
+        );
+        if edit.lost_focus()
+            && !ui.input(|i| i.key_pressed(egui::Key::Escape))
+            && self.name_edit != node.name
         {
+            let name = self.name_edit.clone();
             self.command(e, WorldCommand::Rename { id, name });
         }
         let actions = crate::render_profiles_ui::node_actions(ui, e, id, node.kind);
@@ -3256,11 +3266,11 @@ fn grid_json(value: GridValue, template: &Value) -> Value {
     match value {
         GridValue::Bool(v) => json!(v),
         GridValue::Str(v) => json!(v),
-        GridValue::Int8(v) => numeric_value(template, f64::from(v)),
-        GridValue::Int(v) => numeric_value(template, f64::from(v)),
+        GridValue::Int8(v) => crate::world::numeric_like(template, f64::from(v)),
+        GridValue::Int(v) => crate::world::numeric_like(template, f64::from(v)),
         GridValue::Int64(v) => json!(v),
-        GridValue::UInt(v) => numeric_value(template, f64::from(v)),
-        GridValue::Float(v) => numeric_value(template, clean_f64(v)),
+        GridValue::UInt(v) => crate::world::numeric_like(template, f64::from(v)),
+        GridValue::Float(v) => crate::world::numeric_like(template, clean_f64(v)),
         GridValue::Vec3(v) => json!(v.map(clean_f64)),
         GridValue::Vec4(v) => json!(v.map(clean_f64)),
         GridValue::List(v) => Value::Array(
@@ -3360,15 +3370,6 @@ fn anim_effect(
     })))
 }
 
-fn numeric_value(template: &Value, n: f64) -> Value {
-    if template.is_u64() {
-        json!(n.round().max(0.0) as u64)
-    } else if template.is_i64() {
-        json!(n.round() as i64)
-    } else {
-        json!(n)
-    }
-}
 fn choice_label(path: &str, value: &Value) -> String {
     if path == "/render/backend"
         && let Ok(backend) =
@@ -3432,11 +3433,8 @@ fn schema_editor(
                         && let Ok(formula) =
                             serde_json::from_value::<crate::scene::Formula>(choice.clone())
                     {
-                        resp = resp.on_hover_text(format!(
-                            "{}: {}",
-                            formula.display_name(),
-                            formula.hint()
-                        ));
+                        resp =
+                            resp.on_hover_text(format!("{}: {}", formula.name(), formula.hint()));
                     }
                     if resp.clicked() && !choice_selected(&attr.path, value, choice) {
                         apply_choice(&attr.path, value, choice);
@@ -3637,11 +3635,11 @@ fn record_control(_path: &str, _kind: &str, _response: Rect, _area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scene::Scene;
+    use crate::scene::{Bulb, Formula, MandelBox, Scene};
     use crate::world::WorldDocument;
     fn editor() -> WorldEditor {
         WorldEditor::new(WorldDocument::from_scene(&Scene::preset(
-            crate::params::FAMILY_BULB,
+            Formula::Mandelbulb(Bulb::PRESET),
         )))
     }
 
@@ -4622,9 +4620,10 @@ mod tests {
     }
     #[test]
     fn structural_choices_preserve_custom_parameters_and_integer_fields() {
-        let mut formula =
-            serde_json::to_value(crate::scene::Scene::preset(crate::params::FAMILY_BULB).formula)
-                .unwrap();
+        let mut formula = serde_json::to_value(
+            crate::scene::Scene::preset(Formula::Mandelbulb(Bulb::PRESET)).formula,
+        )
+        .unwrap();
         let default = formula.clone();
         let key = formula.as_object().unwrap().keys().next().unwrap().clone();
         formula[&key]["power"] = json!(9.5);
@@ -4633,19 +4632,32 @@ mod tests {
         assert!(choice_selected("/formula", &formula, &default));
         apply_choice("/formula", &mut formula, &default);
         assert_eq!(formula, customized);
-        let next =
-            serde_json::to_value(crate::scene::Scene::preset(crate::params::FAMILY_BOX).formula)
-                .unwrap();
+        let next = serde_json::to_value(
+            crate::scene::Scene::preset(Formula::Mandelbox(MandelBox::PRESET)).formula,
+        )
+        .unwrap();
         apply_choice("/formula", &mut formula, &next);
         assert_eq!(choice_label("/formula", &formula), "Mandelbox");
 
-        assert_eq!(numeric_value(&json!(12u32), 13.75), json!(14u32));
+        assert_eq!(
+            crate::world::numeric_like(&json!(12u32), 13.75),
+            json!(14u32)
+        );
     }
     #[test]
     fn numeric_edit_preserves_scene_integer_types() {
-        assert_eq!(numeric_value(&json!(12u32), 13.75), json!(14u32));
-        assert_eq!(numeric_value(&json!(-12i32), -13.75), json!(-14i32));
-        assert_eq!(numeric_value(&json!(12.5), 13.75), json!(13.75));
+        assert_eq!(
+            crate::world::numeric_like(&json!(12u32), 13.75),
+            json!(14u32)
+        );
+        assert_eq!(
+            crate::world::numeric_like(&json!(-12i32), -13.75),
+            json!(-14i32)
+        );
+        assert_eq!(
+            crate::world::numeric_like(&json!(12.5), 13.75),
+            json!(13.75)
+        );
     }
     #[test]
     fn layer_secondary_click_opens_menu_without_moving_name_or_starting_drag() {
@@ -5726,7 +5738,9 @@ mod tests {
             state.attribute_metrics.apply(ui);
             let font = ui.style().override_font_id.clone().unwrap();
             for family in 0..=crate::params::FAMILY_WORLD {
-                let e = WorldEditor::new(WorldDocument::from_scene(&Scene::preset(family)));
+                let e = WorldEditor::new(WorldDocument::from_scene(&Scene::preset(
+                    Formula::PRESETS[family as usize],
+                )));
                 for node in e.document.nodes() {
                     for attr in e.document.attributes(node.id, 0.0).unwrap() {
                         let label = crate::world::attribute_label(&attr.path);

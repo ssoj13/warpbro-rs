@@ -1,4 +1,7 @@
-//! Device-safe convergence policies; kernel integration follows paired benchmark capture.
+//! Device-safe convergence policies (luminance roulette from depth 3, indirect clamp). Not wired
+//! into any kernel yet: the CUDA and WGSL kernels still use `max3(throughput)` roulette from the
+//! first bounce. Whether to move these into fractal-core and A/B them with `--world-bench` is an
+//! open decision (plan1 Q4).
 //!
 //! PBRT 3ed uses luminance and delayed roulette; 4ed removes refractive radiance scaling
 //! through etaScale. Our Standard Surface BTDF uses adjoint flux weights and omits that

@@ -3,14 +3,23 @@
 
 use std::future::Future;
 use std::pin::pin;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::task::{Context, Poll, Waker};
 
+use crate::formulas::{
+    FAMILY_AMAZING_SURFACE, FAMILY_ASTROLABE, FAMILY_ATTRACTOR_TUBE, FAMILY_BRISTORBROT,
+    FAMILY_BURNING_SHIP, FAMILY_CRYSTAL_GEODE, FAMILY_DUPIN_CYCLIDE, FAMILY_GYROID_TPMS,
+    FAMILY_HARMONIC_BULB, FAMILY_HOPF_FIBRATION, FAMILY_KALEIDO_TWIST, FAMILY_LIDINOID_TPMS,
+    FAMILY_MANDELBAR, FAMILY_MOBIUS_IFS, FAMILY_NAUTILUS, FAMILY_PHYLLOTAXIS,
+    FAMILY_POLYHEDRAL_KIFS, FAMILY_SUPERFORMULA, FAMILY_TORUS_KNOT, FAMILY_VORONOI_FOAM,
+    ITERATING_MASK, SIGNED_MASK,
+};
 use crate::palette::build_lut;
 use crate::params::*;
+use crate::render::RenderError;
 use crate::render_prep::{
-    BLOCK, LightResidentKey, LutResidentKey, ObjectResidentKey, PreparedScene, Resident,
-    TALLY_THREADS, WorldMaterial, untile_into,
+    BLOCK, LightResidentKey, LutResidentKey, ObjectResidentKey, Plane, PreparedScene, Resident,
+    WorldMaterial, padded_len, untile_into,
 };
 use crate::scene::Scene;
 
@@ -224,7 +233,28 @@ pub fn shader_source() -> String {
         FAMILY_APOLLONIAN,
         FAMILY_HYBRID,
         FAMILY_WORLD,
-        WORLD_ABI_VERSION,
+        FAMILY_AMAZING_SURFACE,
+        FAMILY_BRISTORBROT,
+        FAMILY_BURNING_SHIP,
+        FAMILY_KALEIDO_TWIST,
+        FAMILY_POLYHEDRAL_KIFS,
+        FAMILY_HARMONIC_BULB,
+        FAMILY_MANDELBAR,
+        FAMILY_MOBIUS_IFS,
+        FAMILY_GYROID_TPMS,
+        FAMILY_LIDINOID_TPMS,
+        FAMILY_ATTRACTOR_TUBE,
+        FAMILY_TORUS_KNOT,
+        FAMILY_HOPF_FIBRATION,
+        FAMILY_DUPIN_CYCLIDE,
+        FAMILY_SUPERFORMULA,
+        FAMILY_PHYLLOTAXIS,
+        FAMILY_NAUTILUS,
+        FAMILY_VORONOI_FOAM,
+        FAMILY_CRYSTAL_GEODE,
+        FAMILY_ASTROLABE,
+        SIGNED_MASK,
+        ITERATING_MASK,
         PALETTE_SAMPLES,
     );
     let c0 = crate::color::to_709([1.0, 0.0, 0.0]);
@@ -277,26 +307,42 @@ fn poll_ready<F: Future>(fut: F) -> Option<F::Output> {
     }
 }
 
-/// Execute `op` inside `OutOfMemory` and `Validation` error scopes on `device`.
+/// Execute `op` inside `OutOfMemory` and `Validation` error scopes on `device`. An error outside
+/// any scope reaches wgpu's default handler, which panics and takes the render worker with it,
+/// so every resource creation, write, submission and lazy pipeline compile of this backend runs
+/// in here. wgpu-core validates on the CPU: a native scope holds its error when it is popped,
+/// without waiting for the device.
 pub fn with_error_scopes<T>(device: &wgpu::Device, op: impl FnOnce() -> T) -> Result<T, String> {
     let oom_scope = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
     let val_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let output = op();
-    let _ = device.poll(wgpu::PollType::wait_indefinitely());
-    if let Some(Some(err)) = poll_ready(val_scope.pop()) {
-        let _ = poll_ready(oom_scope.pop());
+    let validation = scope_error(val_scope.pop());
+    let oom = scope_error(oom_scope.pop());
+    if let Some(err) = validation {
         return Err(format!("WGPU validation error: {err}"));
     }
-    if let Some(Some(err)) = poll_ready(oom_scope.pop()) {
+    if let Some(err) = oom {
         return Err(format!("WGPU out-of-memory error: {err}"));
     }
     Ok(output)
+}
+
+/// The error a popped scope caught. A pop that has not resolved (never on native wgpu-core) is
+/// reported as an error instead of being taken for success.
+fn scope_error(pop: impl Future<Output = Option<wgpu::Error>>) -> Option<String> {
+    match poll_ready(pop) {
+        Some(error) => error.map(|e| e.to_string()),
+        None => Some("the error scope did not resolve".into()),
+    }
 }
 
 struct WgpuShared {
     device: wgpu::Device,
     queue: wgpu::Queue,
     adapter_name: String,
+    /// The device's limits, read once: dispatch sizes (`WgpuEngine::groups`) and film buffer
+    /// sizes (`WgpuEngine::create_target`) are checked against them.
+    limits: wgpu::Limits,
     module: wgpu::ShaderModule,
     trace_bgl: wgpu::BindGroupLayout,
     post_bgl: wgpu::BindGroupLayout,
@@ -324,12 +370,17 @@ struct WgpuShared {
 }
 
 impl WgpuShared {
+    /// The trace pipeline of `entry`, compiled on first use inside error scopes: a WGSL entry
+    /// that fails to compile is an `Err` of the launch, not a panic.
     fn trace_pipe<'a>(
         &self,
         cell: &'a OnceLock<wgpu::ComputePipeline>,
         entry: &str,
-    ) -> &'a wgpu::ComputePipeline {
-        cell.get_or_init(|| {
+    ) -> Result<&'a wgpu::ComputePipeline, RenderError> {
+        if let Some(pipe) = cell.get() {
+            return Ok(pipe);
+        }
+        let pipe = with_error_scopes(&self.device, || {
             self.device
                 .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some(entry),
@@ -340,6 +391,8 @@ impl WgpuShared {
                     cache: None,
                 })
         })
+        .map_err(|e| RenderError::Device(format!("{entry}: {e}")))?;
+        Ok(cell.get_or_init(|| pipe))
     }
 }
 
@@ -413,7 +466,6 @@ fn shared_wgpu() -> Result<Arc<WgpuShared>, String> {
                     label: Some("warpbro_post_bgl"),
                     entries: &[
                         uniform_entry,
-                        bgl_entry(2, true),
                         bgl_entry(5, false),
                         bgl_entry(8, false),
                         bgl_entry(9, false),
@@ -477,6 +529,7 @@ fn shared_wgpu() -> Result<Arc<WgpuShared>, String> {
                     pick: make_pipe(&pick_layout, "pick"),
                     module,
                     trace_layout,
+                    limits: device.limits(),
                     device,
                     queue,
                     adapter_name,
@@ -489,18 +542,35 @@ fn shared_wgpu() -> Result<Arc<WgpuShared>, String> {
         .clone()
 }
 
+/// One WGPU film: the tiled accumulation planes ([`padded_len`] samples), the display outputs
+/// (`width * height`), and one staging buffer that holds the largest readback.
 pub struct WgpuTarget {
-    pub padded: usize,
-    pub accum: wgpu::Buffer,
-    pub albedo: wgpu::Buffer,
-    pub normal: wgpu::Buffer,
-    pub stats: wgpu::Buffer,
-    pub active: wgpu::Buffer,
-    pub out: wgpu::Buffer,
-    pub sdr: wgpu::Buffer,
-    pub summary: wgpu::Buffer,
-    pub staging: wgpu::Buffer,
-    bind_groups: std::sync::Mutex<Option<(u64, wgpu::BindGroup, wgpu::BindGroup)>>,
+    padded: usize,
+    accum: wgpu::Buffer,
+    albedo: wgpu::Buffer,
+    normal: wgpu::Buffer,
+    stats: wgpu::Buffer,
+    active: wgpu::Buffer,
+    out: wgpu::Buffer,
+    sdr: wgpu::Buffer,
+    summary: wgpu::Buffer,
+    staging: wgpu::Buffer,
+    bind_groups: Mutex<Option<(u64, wgpu::BindGroup, wgpu::BindGroup)>>,
+}
+
+impl WgpuTarget {
+    /// Samples of the tiled film ([`padded_len`] of its size).
+    pub fn padded(&self) -> usize {
+        self.padded
+    }
+
+    fn plane(&self, plane: Plane) -> &wgpu::Buffer {
+        match plane {
+            Plane::Accum => &self.accum,
+            Plane::Albedo => &self.albedo,
+            Plane::Normal => &self.normal,
+        }
+    }
 }
 
 pub struct WgpuEngine {
@@ -519,6 +589,72 @@ pub struct WgpuEngine {
     object_resident: Resident<ObjectResidentKey>,
     light_resident: Resident<LightResidentKey>,
     lut_staging: Vec<[f32; 4]>,
+}
+
+/// The compute pass of one submission ([`WgpuEngine::run`]).
+fn compute<'e>(encoder: &'e mut wgpu::CommandEncoder, label: &str) -> wgpu::ComputePass<'e> {
+    encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+        label: Some(label),
+        timestamp_writes: None,
+    })
+}
+
+/// `len` bytes at `at` of a mapped readback; a short mapping is an error, never a panic.
+fn bytes_at(bytes: &[u8], at: usize, len: usize) -> Result<&[u8], RenderError> {
+    at.checked_add(len)
+        .and_then(|end| bytes.get(at..end))
+        .ok_or_else(|| RenderError::Device("WGPU readback is shorter than its copies".into()))
+}
+
+/// The `[unresolved, samples, active tiles, 0]` summary the `tally` entry writes, at the front of
+/// a readback.
+fn summary(bytes: &[u8]) -> Result<[f32; 4], RenderError> {
+    Ok(bytemuck::pod_read_unaligned(bytes_at(bytes, 0, 16)?))
+}
+
+/// The share of samples with an unresolved march ([`crate::render::Target::unresolved`]).
+fn unresolved_share(unresolved: f32, samples: f32) -> f32 {
+    if samples > 0.0 {
+        unresolved / samples
+    } else {
+        0.0
+    }
+}
+
+/// Grow `buf` (`len` elements of `T`, at least `min`) when `data` changes its size and write
+/// `data` into it: the one storage upload of the palette / environment LUT, the world objects and
+/// the world lights. A reallocation bumps `generation`, so cached bind groups are rebuilt; a
+/// failed one leaves `len` unchanged, so the next upload retries it.
+fn upload_storage<T: bytemuck::Pod>(
+    shared: &WgpuShared,
+    label: &'static str,
+    buf: &mut wgpu::Buffer,
+    len: &mut usize,
+    generation: &mut u64,
+    min: usize,
+    data: &[T],
+) -> Result<(), String> {
+    let needed = data.len().max(min);
+    if *len != needed {
+        *buf = with_error_scopes(&shared.device, || {
+            shared.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: (needed * std::mem::size_of::<T>()) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
+        })?;
+        *len = needed;
+        *generation = generation.wrapping_add(1);
+    }
+    if !data.is_empty() {
+        with_error_scopes(&shared.device, || {
+            shared
+                .queue
+                .write_buffer(buf, 0, bytemuck::cast_slice(data))
+        })?;
+    }
+    Ok(())
 }
 
 impl WgpuEngine {
@@ -593,90 +729,112 @@ impl WgpuEngine {
         &self.shared.adapter_name
     }
 
-    pub fn create_target(&self, width: usize, height: usize) -> WgpuTarget {
-        let padded = width.div_ceil(8) * height.div_ceil(4) * 32;
+    /// Allocate a zeroed film for `width` x `height`. Every buffer is checked against the
+    /// device's storage-binding and buffer-size limits first, so an oversized export fails with
+    /// a typed error instead of a wgpu panic.
+    pub fn create_target(&self, width: usize, height: usize) -> Result<WgpuTarget, RenderError> {
+        let padded = padded_len(width, height);
         let tiles = padded / 32;
-        let out_len = (width * height).max(TALLY_THREADS);
+        let pixels = (width * height).max(1);
         let vec4_bytes = std::mem::size_of::<[f32; 4]>() as u64;
+        let film_bytes = padded.max(1) as u64 * vec4_bytes;
+        let out_bytes = pixels as u64 * vec4_bytes;
+        let sdr_bytes = (pixels * std::mem::size_of::<u32>()) as u64;
+        // The largest readback: one tiled plane, or the fused summary + display light + codes.
+        let staging_bytes = film_bytes.max(16 + out_bytes + sdr_bytes);
+        let limits = &self.shared.limits;
+        let storage = limits
+            .max_storage_buffer_binding_size
+            .min(limits.max_buffer_size);
+        for (label, bytes, limit) in [
+            ("film plane", film_bytes, storage),
+            ("display light", out_bytes, storage),
+            ("display codes", sdr_bytes, storage),
+            ("readback staging", staging_bytes, limits.max_buffer_size),
+        ] {
+            if bytes > limit {
+                return Err(RenderError::Device(format!(
+                    "{width}x{height} needs a WGPU {label} buffer of {bytes} bytes; this device allows {limit}"
+                )));
+            }
+        }
         let device = &self.shared.device;
         let rw = wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_DST
             | wgpu::BufferUsages::COPY_SRC;
-        let make_vec4 = |label: &str, count: usize| {
+        let make = |label: &str, size: u64| {
             device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some(label),
-                size: (count.max(1) as u64) * vec4_bytes,
+                size,
                 usage: rw,
                 mapped_at_creation: false,
             })
         };
-        let active = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("warpbro_wgpu_active"),
-            size: (tiles.max(1) * std::mem::size_of::<u32>()) as u64,
-            usage: rw,
-            mapped_at_creation: false,
-        });
-        let ones = vec![1u32; tiles.max(1)];
-        self.shared
-            .queue
-            .write_buffer(&active, 0, bytemuck::cast_slice(&ones));
-        let sdr_bytes = (out_len.max(1) * std::mem::size_of::<u32>()) as u64;
-        let sdr = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("warpbro_wgpu_sdr"),
-            size: sdr_bytes,
-            usage: rw,
-            mapped_at_creation: false,
-        });
-        let summary = make_vec4("warpbro_wgpu_summary", 1);
-        let staging_bytes =
-            vec4_bytes + (padded.max(out_len).max(1) as u64) * vec4_bytes + sdr_bytes;
-        let staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("warpbro_wgpu_staging"),
-            size: staging_bytes,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        WgpuTarget {
-            padded,
-            accum: make_vec4("warpbro_wgpu_accum", padded),
-            albedo: make_vec4("warpbro_wgpu_albedo", padded),
-            normal: make_vec4("warpbro_wgpu_normal", padded),
-            stats: make_vec4("warpbro_wgpu_stats", padded),
-            active,
-            out: make_vec4("warpbro_wgpu_out", out_len),
-            sdr,
-            summary,
-            staging,
-            bind_groups: std::sync::Mutex::new(None),
-        }
-    }
-
-    pub fn clear_target(&self, wt: &WgpuTarget) {
-        let mut encoder =
+        with_error_scopes(device, || {
+            let active = make(
+                "warpbro_wgpu_active",
+                (tiles.max(1) * std::mem::size_of::<u32>()) as u64,
+            );
+            let ones = vec![1u32; tiles.max(1)];
             self.shared
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("warpbro_wgpu_clear"),
-                });
-        encoder.clear_buffer(&wt.accum, 0, None);
-        encoder.clear_buffer(&wt.albedo, 0, None);
-        encoder.clear_buffer(&wt.normal, 0, None);
-        encoder.clear_buffer(&wt.stats, 0, None);
-        self.shared.queue.submit(Some(encoder.finish()));
+                .queue
+                .write_buffer(&active, 0, bytemuck::cast_slice(&ones));
+            WgpuTarget {
+                padded,
+                accum: make("warpbro_wgpu_accum", film_bytes),
+                albedo: make("warpbro_wgpu_albedo", film_bytes),
+                normal: make("warpbro_wgpu_normal", film_bytes),
+                stats: make("warpbro_wgpu_stats", film_bytes),
+                active,
+                out: make("warpbro_wgpu_out", out_bytes),
+                sdr: make("warpbro_wgpu_sdr", sdr_bytes),
+                summary: make("warpbro_wgpu_summary", vec4_bytes),
+                staging: device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("warpbro_wgpu_staging"),
+                    size: staging_bytes,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                bind_groups: Mutex::new(None),
+            }
+        })
+        .map_err(|e| RenderError::Device(format!("{width}x{height} WGPU film: {e}")))
     }
 
-    pub fn upload_active(&self, wt: &WgpuTarget, active_host: &[u32]) {
-        self.shared
-            .queue
-            .write_buffer(&wt.active, 0, bytemuck::cast_slice(active_host));
+    /// Zero the accumulation planes for a new render.
+    pub fn clear_target(&self, wt: &WgpuTarget) -> Result<(), RenderError> {
+        self.run(
+            "warpbro_wgpu_clear",
+            |encoder| {
+                encoder.clear_buffer(&wt.accum, 0, None);
+                encoder.clear_buffer(&wt.albedo, 0, None);
+                encoder.clear_buffer(&wt.normal, 0, None);
+                encoder.clear_buffer(&wt.stats, 0, None);
+            },
+            &wt.staging,
+            &[],
+            |_| Ok(()),
+        )
     }
 
-    pub fn set_params(&self, params: &[f32; P_COUNT]) {
+    pub fn upload_active(&self, wt: &WgpuTarget, active_host: &[u32]) -> Result<(), RenderError> {
+        with_error_scopes(&self.shared.device, || {
+            self.shared
+                .queue
+                .write_buffer(&wt.active, 0, bytemuck::cast_slice(active_host))
+        })
+        .map_err(|e| RenderError::Device(format!("tile flags upload: {e}")))
+    }
+
+    pub fn set_params(&self, params: &[f32; P_COUNT]) -> Result<(), RenderError> {
         let mut padded = [0.0f32; UNIFORM_FLOATS];
         padded[..P_COUNT].copy_from_slice(params);
-        self.shared
-            .queue
-            .write_buffer(&self.params_buf, 0, bytemuck::cast_slice(&padded));
+        with_error_scopes(&self.shared.device, || {
+            self.shared
+                .queue
+                .write_buffer(&self.params_buf, 0, bytemuck::cast_slice(&padded))
+        })
+        .map_err(|e| RenderError::Device(format!("WGPU parameter upload: {e}")))
     }
 
     pub fn upload_prepared(
@@ -685,15 +843,14 @@ impl WgpuEngine {
         env: Option<&crate::environment::Map>,
         world: bool,
         stats: &mut crate::render_prep::PreparationStats,
-    ) -> Result<(), String> {
-        let device = &self.shared.device;
-        let queue = &self.shared.queue;
-        let storage_ro = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
-
+    ) -> Result<(), RenderError> {
+        let shared = &self.shared;
         let table = &mut self.lut_staging;
-        let lut_buf = &mut self.lut_buf;
-        let lut_len = &mut self.lut_len;
-        let buf_gen = &mut self.buf_generation;
+        let (buf, len, generation) = (
+            &mut self.lut_buf,
+            &mut self.lut_len,
+            &mut self.buf_generation,
+        );
         let changed = self
             .lut_resident
             .update(LutResidentKey(prepared.clone()), || {
@@ -704,83 +861,52 @@ impl WgpuEngine {
                 if let Some(env) = env {
                     table.extend(env.map.gpu_entries());
                 }
-                let needed = table.len().max(1);
-                if *lut_len != needed {
-                    *lut_buf = with_error_scopes(device, || {
-                        device.create_buffer(&wgpu::BufferDescriptor {
-                            label: Some("warpbro_wgpu_lut"),
-                            size: (needed * std::mem::size_of::<[f32; 4]>()) as u64,
-                            usage: storage_ro,
-                            mapped_at_creation: false,
-                        })
-                    })?;
-                    *lut_len = needed;
-                    *buf_gen = buf_gen.wrapping_add(1);
-                }
-                queue.write_buffer(lut_buf, 0, bytemuck::cast_slice(table));
-                Ok(())
-            })?;
+                upload_storage(shared, "warpbro_wgpu_lut", buf, len, generation, 1, table)
+            })
+            .map_err(|e| RenderError::Device(format!("palette / environment upload: {e}")))?;
         if changed {
             stats.lut_uploads += 1;
             stats.upload_bytes += (table.len() * std::mem::size_of::<[f32; 4]>()) as u64;
         }
 
         if world {
-            let objects_buf = &mut self.objects_buf;
-            let objects_len = &mut self.objects_len;
-            let buf_gen = &mut self.buf_generation;
+            let (buf, len, generation) = (
+                &mut self.objects_buf,
+                &mut self.objects_len,
+                &mut self.buf_generation,
+            );
             let data = &prepared.upload.objects;
-            let changed =
-                self.object_resident
-                    .update(ObjectResidentKey(prepared.clone()), || {
-                        let needed = data.len().max(4);
-                        if *objects_len != needed {
-                            *objects_buf = with_error_scopes(device, || {
-                                device.create_buffer(&wgpu::BufferDescriptor {
-                                    label: Some("warpbro_wgpu_objects"),
-                                    size: (needed * std::mem::size_of::<f32>()) as u64,
-                                    usage: storage_ro,
-                                    mapped_at_creation: false,
-                                })
-                            })?;
-                            *objects_len = needed;
-                            *buf_gen = buf_gen.wrapping_add(1);
-                        }
-                        if !data.is_empty() {
-                            queue.write_buffer(objects_buf, 0, bytemuck::cast_slice(data));
-                        }
-                        Ok(())
-                    })?;
+            let changed = self
+                .object_resident
+                .update(ObjectResidentKey(prepared.clone()), || {
+                    upload_storage(
+                        shared,
+                        "warpbro_wgpu_objects",
+                        buf,
+                        len,
+                        generation,
+                        4,
+                        data,
+                    )
+                })
+                .map_err(|e| RenderError::Device(format!("world objects upload: {e}")))?;
             if changed && !data.is_empty() {
                 stats.object_uploads += 1;
                 stats.upload_bytes += (data.len() * std::mem::size_of::<f32>()) as u64;
             }
 
-            let lights_buf = &mut self.lights_buf;
-            let lights_len = &mut self.lights_len;
-            let buf_gen = &mut self.buf_generation;
+            let (buf, len, generation) = (
+                &mut self.lights_buf,
+                &mut self.lights_len,
+                &mut self.buf_generation,
+            );
             let data = &prepared.upload.lights;
             let changed = self
                 .light_resident
                 .update(LightResidentKey(prepared.clone()), || {
-                    let needed = data.len().max(4);
-                    if *lights_len != needed {
-                        *lights_buf = with_error_scopes(device, || {
-                            device.create_buffer(&wgpu::BufferDescriptor {
-                                label: Some("warpbro_wgpu_lights"),
-                                size: (needed * std::mem::size_of::<f32>()) as u64,
-                                usage: storage_ro,
-                                mapped_at_creation: false,
-                            })
-                        })?;
-                        *lights_len = needed;
-                        *buf_gen = buf_gen.wrapping_add(1);
-                    }
-                    if !data.is_empty() {
-                        queue.write_buffer(lights_buf, 0, bytemuck::cast_slice(data));
-                    }
-                    Ok(())
-                })?;
+                    upload_storage(shared, "warpbro_wgpu_lights", buf, len, generation, 4, data)
+                })
+                .map_err(|e| RenderError::Device(format!("world lights upload: {e}")))?;
             if changed && !data.is_empty() {
                 stats.light_uploads += 1;
                 stats.upload_bytes += (data.len() * std::mem::size_of::<f32>()) as u64;
@@ -789,47 +915,111 @@ impl WgpuEngine {
         Ok(())
     }
 
-    fn readback_bytes(
+    /// One submission of this backend, the only place that encodes, submits and reads back:
+    /// `record` encodes the work, then each `(buffer, bytes)` of `reads` is copied into `staging`
+    /// back to back, mapped once and handed to `read` as one byte slice. All of it runs inside
+    /// error scopes, so a bad dispatch, binding or copy is an `Err`. Without `reads` nothing is
+    /// waited for: the GPU runs on while the host prepares the next launch.
+    fn run<R>(
         &self,
-        src: &wgpu::Buffer,
+        label: &str,
+        record: impl FnOnce(&mut wgpu::CommandEncoder),
         staging: &wgpu::Buffer,
-        byte_len: u64,
-        dst: &mut [u8],
-    ) -> Result<(), String> {
+        reads: &[(&wgpu::Buffer, u64)],
+        read: impl FnOnce(&[u8]) -> Result<R, RenderError>,
+    ) -> Result<R, RenderError> {
         let device = &self.shared.device;
-        let queue = &self.shared.queue;
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("warpbro_wgpu_readback"),
+        let mapped: u64 = reads.iter().map(|(_, bytes)| bytes).sum();
+        with_error_scopes(device, || {
+            let mut encoder = device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
+            record(&mut encoder);
+            let mut offset = 0;
+            for (src, bytes) in reads {
+                encoder.copy_buffer_to_buffer(src, 0, staging, offset, *bytes);
+                offset += bytes;
+            }
+            self.shared.queue.submit(Some(encoder.finish()));
+        })
+        .map_err(|e| RenderError::Device(format!("{label}: {e}")))?;
+        if reads.is_empty() {
+            return read(&[]);
+        }
+        let slice = staging.slice(..mapped);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            if sender.send(result).is_err() {
+                log::warn!("WGPU readback completed after its wait gave up");
+            }
         });
-        encoder.copy_buffer_to_buffer(src, 0, staging, 0, byte_len);
-        queue.submit(Some(encoder.finish()));
-
-        let slice = staging.slice(..byte_len);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        let _ = device.poll(wgpu::PollType::wait_indefinitely());
-        let mapped = slice
-            .get_mapped_range()
-            .map_err(|e| format!("WGPU staging map failed: {e:?}"))?;
-        dst.copy_from_slice(&mapped[..dst.len()]);
-        drop(mapped);
+        device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map_err(|e| RenderError::Device(format!("{label}: device poll: {e}")))?;
+        match receiver.try_recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => return Err(RenderError::Device(format!("{label}: readback map: {e}"))),
+            Err(_) => {
+                return Err(RenderError::Device(format!(
+                    "{label}: readback did not complete"
+                )));
+            }
+        }
+        let output = match slice.get_mapped_range() {
+            Ok(view) => read(&view),
+            Err(e) => Err(RenderError::Device(format!("{label}: mapped range: {e}"))),
+        };
         staging.unmap();
-        Ok(())
+        output
     }
 
+    /// Workgroups `(x, y)` of a 128-wide entry point over `threads` invocations. One dimension
+    /// is capped by the device (`max_compute_workgroups_per_dimension`, 65,535 on DX12 and
+    /// Vulkan), so a frame above ~8.4 MP (4096x2160) spills into `y`. The WGSL entries index
+    /// `gid.x + gid.y * nwg.x * 128` and drop the invocations past `threads`.
+    fn groups(&self, threads: usize) -> Result<(u32, u32), RenderError> {
+        let max = u64::from(
+            self.shared
+                .limits
+                .max_compute_workgroups_per_dimension
+                .max(1),
+        );
+        let total = (threads as u64).div_ceil(u64::from(BLOCK)).max(1);
+        let x = total.min(max);
+        let y = total.div_ceil(x);
+        if y > max {
+            return Err(RenderError::Device(format!(
+                "{threads} invocations exceed the device's {max} x {max} workgroups"
+            )));
+        }
+        Ok((x as u32, y as u32))
+    }
+
+    /// Read one tiled film plane back and untile it (normalized by the sample count in `w` when
+    /// `normalize`): radiance for exports and the denoiser, guides for the denoiser.
     pub fn read_tiled_into(
         &self,
         wt: &WgpuTarget,
-        src: &wgpu::Buffer,
+        plane: Plane,
         (width, height): (usize, usize),
         normalize: bool,
         tiled: &mut Vec<[f32; 4]>,
         output: &mut Vec<[f32; 4]>,
-    ) {
+    ) -> Result<(), RenderError> {
         tiled.resize(wt.padded, [0.0; 4]);
         let bytes = (wt.padded * std::mem::size_of::<[f32; 4]>()) as u64;
-        self.readback_bytes(src, &wt.staging, bytes, bytemuck::cast_slice_mut(tiled))
-            .expect("WGPU tiled readback");
+        self.run(
+            "warpbro_wgpu_readback",
+            |_| {},
+            &wt.staging,
+            &[(wt.plane(plane), bytes)],
+            |mapped| {
+                let dst = bytemuck::cast_slice_mut::<[f32; 4], u8>(tiled);
+                dst.copy_from_slice(bytes_at(mapped, 0, dst.len())?);
+                Ok(())
+            },
+        )?;
         untile_into(tiled, width, height, normalize, output);
+        Ok(())
     }
 
     fn create_trace_bind_group(&self, wt: &WgpuTarget) -> wgpu::BindGroup {
@@ -891,10 +1081,6 @@ impl WgpuEngine {
                         resource: self.params_buf.as_entire_binding(),
                     },
                     wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: self.objects_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
                         binding: 5,
                         resource: wt.accum.as_entire_binding(),
                     },
@@ -922,25 +1108,29 @@ impl WgpuEngine {
             })
     }
 
-    fn bind_groups(&self, wt: &WgpuTarget) -> (wgpu::BindGroup, wgpu::BindGroup) {
-        let mut guard = wt.bind_groups.lock().expect("bind_groups lock");
+    /// The film's (trace, post) bind groups, rebuilt when an engine buffer was reallocated.
+    fn bind_groups(
+        &self,
+        wt: &WgpuTarget,
+    ) -> Result<(wgpu::BindGroup, wgpu::BindGroup), RenderError> {
+        let mut guard = wt
+            .bind_groups
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         if let Some((cached_gen, trace_bg, post_bg)) = guard.as_ref()
             && *cached_gen == self.buf_generation
         {
-            return (trace_bg.clone(), post_bg.clone());
+            return Ok((trace_bg.clone(), post_bg.clone()));
         }
-        let trace_bg = self.create_trace_bind_group(wt);
-        let post_bg = self.create_post_bind_group(wt);
+        let (trace_bg, post_bg) = with_error_scopes(&self.shared.device, || {
+            (
+                self.create_trace_bind_group(wt),
+                self.create_post_bind_group(wt),
+            )
+        })
+        .map_err(|e| RenderError::Device(format!("WGPU bind groups: {e}")))?;
         *guard = Some((self.buf_generation, trace_bg.clone(), post_bg.clone()));
-        (trace_bg, post_bg)
-    }
-
-    fn trace_bind_group(&self, wt: &WgpuTarget) -> wgpu::BindGroup {
-        self.bind_groups(wt).0
-    }
-
-    fn post_bind_group(&self, wt: &WgpuTarget) -> wgpu::BindGroup {
-        self.bind_groups(wt).1
+        Ok((trace_bg, post_bg))
     }
 
     fn select_trace_pipeline(
@@ -949,7 +1139,7 @@ impl WgpuEngine {
         prepared: &PreparedScene,
         full_material: bool,
         force_mixed_world: bool,
-    ) -> &wgpu::ComputePipeline {
+    ) -> Result<&wgpu::ComputePipeline, RenderError> {
         const FAST_NAMES: [&str; 8] = [
             "fast_bulb",
             "fast_box",
@@ -985,23 +1175,22 @@ impl WgpuEngine {
             .then_some(prepared.homogeneous_family)
             .flatten()
             .filter(|&f| (f as usize) < crate::scene::Formula::COUNT as usize);
+        let shared = &self.shared;
         if scene.direct.is_some() {
             if scene.world_render {
                 if let Some(fam) = homo {
                     let f = fam as usize;
-                    let name = format!("world_direct_f{f}");
-                    self.shared
-                        .trace_pipe(&self.shared.world_direct_family[f], &name)
+                    shared.trace_pipe(
+                        &shared.world_direct_family[f],
+                        &format!("world_direct_f{f}"),
+                    )
                 } else {
-                    self.shared
-                        .trace_pipe(&self.shared.world_direct, "world_direct")
+                    shared.trace_pipe(&shared.world_direct, "world_direct")
                 }
             } else if code < 8 {
-                self.shared
-                    .trace_pipe(&self.shared.direct_family[code], DIRECT_NAMES[code])
+                shared.trace_pipe(&shared.direct_family[code], DIRECT_NAMES[code])
             } else {
-                self.shared
-                    .trace_pipe(&self.shared.single_direct, "single_direct")
+                shared.trace_pipe(&shared.single_direct, "single_direct")
             }
         } else if scene.world_render {
             let wm = if force_mixed_world {
@@ -1010,46 +1199,35 @@ impl WgpuEngine {
                 prepared.world_material
             };
             match (wm, homo) {
-                (WorldMaterial::Fast, _) if prepared.single_fast_bulb => self
-                    .shared
-                    .trace_pipe(&self.shared.world_fast_bulb, "world_fast_bulb"),
+                (WorldMaterial::Fast, _) if prepared.single_fast_bulb => {
+                    shared.trace_pipe(&shared.world_fast_bulb, "world_fast_bulb")
+                }
                 (WorldMaterial::Fast, Some(fam)) => {
                     let f = fam as usize;
-                    let name = format!("world_fast_f{f}");
-                    self.shared
-                        .trace_pipe(&self.shared.world_fast_family[f], &name)
+                    shared.trace_pipe(&shared.world_fast_family[f], &format!("world_fast_f{f}"))
                 }
-                (WorldMaterial::Fast, None) => self
-                    .shared
-                    .trace_pipe(&self.shared.world_fast, "world_fast"),
+                (WorldMaterial::Fast, None) => shared.trace_pipe(&shared.world_fast, "world_fast"),
                 (WorldMaterial::Full, Some(fam)) => {
                     let f = fam as usize;
-                    let name = format!("world_full_f{f}");
-                    self.shared
-                        .trace_pipe(&self.shared.world_full_family[f], &name)
+                    shared.trace_pipe(&shared.world_full_family[f], &format!("world_full_f{f}"))
                 }
-                (WorldMaterial::Full, None) => self
-                    .shared
-                    .trace_pipe(&self.shared.world_full, "world_full"),
-                (WorldMaterial::Mixed, _) => self.shared.trace_pipe(&self.shared.world, "world"),
+                (WorldMaterial::Full, None) => shared.trace_pipe(&shared.world_full, "world_full"),
+                (WorldMaterial::Mixed, _) => shared.trace_pipe(&shared.world, "world"),
             }
         } else if full_material {
             if code < 8 {
-                self.shared
-                    .trace_pipe(&self.shared.full_family[code], FULL_NAMES[code])
+                shared.trace_pipe(&shared.full_family[code], FULL_NAMES[code])
             } else {
-                self.shared
-                    .trace_pipe(&self.shared.single_full, "single_full")
+                shared.trace_pipe(&shared.single_full, "single_full")
             }
         } else if code < 8 {
-            self.shared
-                .trace_pipe(&self.shared.fast_family[code], FAST_NAMES[code])
+            shared.trace_pipe(&shared.fast_family[code], FAST_NAMES[code])
         } else {
-            self.shared
-                .trace_pipe(&self.shared.single_fast, "single_fast")
+            shared.trace_pipe(&shared.single_fast, "single_fast")
         }
     }
 
+    /// Trace one batch without a readback: the GPU runs on while the host returns.
     pub(crate) fn launch_trace(
         &self,
         wt: &WgpuTarget,
@@ -1057,29 +1235,27 @@ impl WgpuEngine {
         prepared: &PreparedScene,
         full_material: bool,
         force_mixed_world: bool,
-    ) {
-        let pipe = self.select_trace_pipeline(scene, prepared, full_material, force_mixed_world);
-        let bg = self.trace_bind_group(wt);
-        let mut encoder =
-            self.shared
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("warpbro_wgpu_trace"),
-                });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("warpbro_wgpu_trace_pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(pipe);
-            pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups((wt.padded as u32).div_ceil(BLOCK), 1, 1);
-        }
-        self.shared.queue.submit(Some(encoder.finish()));
+    ) -> Result<(), RenderError> {
+        let pipe = self.select_trace_pipeline(scene, prepared, full_material, force_mixed_world)?;
+        let (trace_bg, _) = self.bind_groups(wt)?;
+        let (x, y) = self.groups(wt.padded)?;
+        self.run(
+            "warpbro_wgpu_trace",
+            |encoder| {
+                let mut pass = compute(encoder, "warpbro_wgpu_trace_pass");
+                pass.set_pipeline(pipe);
+                pass.set_bind_group(0, &trace_bg, &[]);
+                pass.dispatch_workgroups(x, y, 1);
+            },
+            &wt.staging,
+            &[],
+            |_| Ok(()),
+        )
     }
 
     /// Fused single-encoder `trace` + optional `adapt` + 1-workgroup `tally` reduction,
-    /// reading back a single 16-byte `[unresolved, samples, active_tiles, 0]` summary.
+    /// reading back a single 16-byte `[unresolved, samples, active_tiles, 0]` summary:
+    /// `(unresolved share, active tiles, converged)`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn launch_trace_and_tally(
         &self,
@@ -1090,56 +1266,37 @@ impl WgpuEngine {
         force_mixed_world: bool,
         run_adapt: bool,
         total_tiles: usize,
-    ) -> (f32, usize, bool) {
-        let pipe = self.select_trace_pipeline(scene, prepared, full_material, force_mixed_world);
-        let (trace_bg, post_bg) = self.bind_groups(wt);
-        let mut encoder =
-            self.shared
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("warpbro_wgpu_trace_tally"),
-                });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("warpbro_wgpu_trace_tally_pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(pipe);
-            pass.set_bind_group(0, &trace_bg, &[]);
-            pass.dispatch_workgroups((wt.padded as u32).div_ceil(BLOCK), 1, 1);
-
-            pass.set_bind_group(0, &post_bg, &[]);
-            if run_adapt {
-                pass.set_pipeline(&self.shared.adapt);
-                pass.dispatch_workgroups((total_tiles as u32).div_ceil(BLOCK), 1, 1);
-            }
-            pass.set_pipeline(&self.shared.tally);
-            pass.dispatch_workgroups(1, 1, 1);
-        }
-        encoder.copy_buffer_to_buffer(&wt.summary, 0, &wt.staging, 0, 16);
-        self.shared.queue.submit(Some(encoder.finish()));
-
-        let device = &self.shared.device;
-        let slice = wt.staging.slice(..16);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        let _ = device.poll(wgpu::PollType::wait_indefinitely());
-        let mapped = slice.get_mapped_range().expect("WGPU summary map");
-        let summary: &[f32; 4] = bytemuck::from_bytes(&mapped[..16]);
-        let [unresolved, samples, active_f, _] = *summary;
-        drop(mapped);
-        wt.staging.unmap();
-
-        let unresolved_ratio = if samples > 0.0 {
-            unresolved / samples
-        } else {
-            0.0
-        };
-        let active = (active_f.round().max(0.0) as usize).min(total_tiles);
-        (unresolved_ratio, active, active == 0)
+    ) -> Result<(f32, usize, bool), RenderError> {
+        let pipe = self.select_trace_pipeline(scene, prepared, full_material, force_mixed_world)?;
+        let (trace_bg, post_bg) = self.bind_groups(wt)?;
+        let (tx, ty) = self.groups(wt.padded)?;
+        let (ax, ay) = self.groups(total_tiles)?;
+        let [unresolved, samples, active, _] = self.run(
+            "warpbro_wgpu_trace_tally",
+            |encoder| {
+                let mut pass = compute(encoder, "warpbro_wgpu_trace_tally_pass");
+                pass.set_pipeline(pipe);
+                pass.set_bind_group(0, &trace_bg, &[]);
+                pass.dispatch_workgroups(tx, ty, 1);
+                pass.set_bind_group(0, &post_bg, &[]);
+                if run_adapt {
+                    pass.set_pipeline(&self.shared.adapt);
+                    pass.dispatch_workgroups(ax, ay, 1);
+                }
+                pass.set_pipeline(&self.shared.tally);
+                pass.dispatch_workgroups(1, 1, 1);
+            },
+            &wt.staging,
+            &[(&wt.summary, 16)],
+            summary,
+        )?;
+        let active = (active.round().max(0.0) as usize).min(total_tiles);
+        Ok((unresolved_share(unresolved, samples), active, active == 0))
     }
 
     /// Fused single-encoder `trace` + `tally` + `tonemap_display` with a single `map_async`
-    /// readback of `summary` (16 B) + `light` (`vec4<f32>`) + `pixels` (`u32` sRGB).
+    /// readback of `summary` (16 B) + `light` (`vec4<f32>`) + `pixels` (`u32` sRGB); returns the
+    /// unresolved share.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn launch_fused_step_display(
         &self,
@@ -1152,157 +1309,124 @@ impl WgpuEngine {
         height: usize,
         light: &mut Vec<[f32; 4]>,
         pixels: &mut [u32],
-    ) -> f32 {
+    ) -> Result<f32, RenderError> {
         let n = width * height;
+        if pixels.len() != n {
+            return Err(RenderError::Device(format!(
+                "display codes hold {} pixels, the film {n}",
+                pixels.len()
+            )));
+        }
         light.resize(n, [0.0; 4]);
-        let pipe = self.select_trace_pipeline(scene, prepared, full_material, force_mixed_world);
-        let (trace_bg, post_bg) = self.bind_groups(wt);
-        let out_bytes = (n * std::mem::size_of::<[f32; 4]>()) as u64;
-        let sdr_bytes = (n * std::mem::size_of::<u32>()) as u64;
-        let total_bytes = 16 + out_bytes + sdr_bytes;
-
-        let mut encoder =
-            self.shared
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("warpbro_wgpu_fused_step"),
-                });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("warpbro_wgpu_fused_step_pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(pipe);
-            pass.set_bind_group(0, &trace_bg, &[]);
-            pass.dispatch_workgroups((wt.padded as u32).div_ceil(BLOCK), 1, 1);
-
-            pass.set_bind_group(0, &post_bg, &[]);
-            pass.set_pipeline(&self.shared.tally);
-            pass.dispatch_workgroups(1, 1, 1);
-
-            pass.set_pipeline(&self.shared.tonemap_display);
-            pass.dispatch_workgroups((n as u32).div_ceil(BLOCK), 1, 1);
-        }
-        encoder.copy_buffer_to_buffer(&wt.summary, 0, &wt.staging, 0, 16);
-        encoder.copy_buffer_to_buffer(&wt.out, 0, &wt.staging, 16, out_bytes);
-        encoder.copy_buffer_to_buffer(&wt.sdr, 0, &wt.staging, 16 + out_bytes, sdr_bytes);
-        self.shared.queue.submit(Some(encoder.finish()));
-
-        let device = &self.shared.device;
-        let slice = wt.staging.slice(..total_bytes);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        let _ = device.poll(wgpu::PollType::wait_indefinitely());
-        let mapped = slice.get_mapped_range().expect("WGPU fused step map");
-        let summary: &[f32; 4] = bytemuck::from_bytes(&mapped[..16]);
-        let [unresolved, samples, _, _] = *summary;
-        let out_end = 16 + out_bytes as usize;
-        bytemuck::cast_slice_mut::<[f32; 4], u8>(light).copy_from_slice(&mapped[16..out_end]);
-        bytemuck::cast_slice_mut::<u32, u8>(pixels)
-            .copy_from_slice(&mapped[out_end..out_end + sdr_bytes as usize]);
-        drop(mapped);
-        wt.staging.unmap();
-
-        if samples > 0.0 {
-            unresolved / samples
-        } else {
-            0.0
-        }
-    }
-
-    pub fn tally(&self, wt: &WgpuTarget) -> f32 {
-        let bg = self.post_bind_group(wt);
-        let mut encoder =
-            self.shared
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("warpbro_wgpu_tally"),
-                });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("warpbro_wgpu_tally_pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.shared.tally);
-            pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups(1, 1, 1);
-        }
-        self.shared.queue.submit(Some(encoder.finish()));
-
-        let mut summary = [[0.0f32; 4]];
-        self.readback_bytes(
-            &wt.summary,
+        let pipe = self.select_trace_pipeline(scene, prepared, full_material, force_mixed_world)?;
+        let (trace_bg, post_bg) = self.bind_groups(wt)?;
+        let (tx, ty) = self.groups(wt.padded)?;
+        let (dx, dy) = self.groups(n)?;
+        let out_bytes = std::mem::size_of_val(light.as_slice());
+        let sdr_bytes = std::mem::size_of_val(pixels);
+        self.run(
+            "warpbro_wgpu_fused_step",
+            |encoder| {
+                let mut pass = compute(encoder, "warpbro_wgpu_fused_step_pass");
+                pass.set_pipeline(pipe);
+                pass.set_bind_group(0, &trace_bg, &[]);
+                pass.dispatch_workgroups(tx, ty, 1);
+                pass.set_bind_group(0, &post_bg, &[]);
+                pass.set_pipeline(&self.shared.tally);
+                pass.dispatch_workgroups(1, 1, 1);
+                pass.set_pipeline(&self.shared.tonemap_display);
+                pass.dispatch_workgroups(dx, dy, 1);
+            },
             &wt.staging,
-            16,
-            bytemuck::cast_slice_mut(&mut summary),
+            &[
+                (&wt.summary, 16),
+                (&wt.out, out_bytes as u64),
+                (&wt.sdr, sdr_bytes as u64),
+            ],
+            |mapped| {
+                let [unresolved, samples, _, _] = summary(mapped)?;
+                bytemuck::cast_slice_mut::<[f32; 4], u8>(light)
+                    .copy_from_slice(bytes_at(mapped, 16, out_bytes)?);
+                bytemuck::cast_slice_mut::<u32, u8>(pixels).copy_from_slice(bytes_at(
+                    mapped,
+                    16 + out_bytes,
+                    sdr_bytes,
+                )?);
+                Ok(unresolved_share(unresolved, samples))
+            },
         )
-        .expect("WGPU tally readback");
-        let [unresolved, samples, _, _] = summary[0];
-        if samples > 0.0 {
-            unresolved / samples
-        } else {
-            0.0
-        }
     }
 
-    pub fn adapt(&self, wt: &WgpuTarget, active_host: &mut [u32]) -> (usize, bool) {
-        let tiles = active_host.len() as u32;
-        let bg = self.post_bind_group(wt);
-        let mut encoder =
-            self.shared
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("warpbro_wgpu_adapt"),
-                });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("warpbro_wgpu_adapt_pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.shared.adapt);
-            pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups(tiles.div_ceil(BLOCK), 1, 1);
-            pass.set_pipeline(&self.shared.tally);
-            pass.dispatch_workgroups(1, 1, 1);
-        }
-        self.shared.queue.submit(Some(encoder.finish()));
-
-        let mut summary = [[0.0f32; 4]];
-        self.readback_bytes(
-            &wt.summary,
+    /// The share of accumulated samples with an unresolved march.
+    pub fn tally(&self, wt: &WgpuTarget) -> Result<f32, RenderError> {
+        let (_, post_bg) = self.bind_groups(wt)?;
+        let [unresolved, samples, _, _] = self.run(
+            "warpbro_wgpu_tally",
+            |encoder| {
+                let mut pass = compute(encoder, "warpbro_wgpu_tally_pass");
+                pass.set_pipeline(&self.shared.tally);
+                pass.set_bind_group(0, &post_bg, &[]);
+                pass.dispatch_workgroups(1, 1, 1);
+            },
             &wt.staging,
-            16,
-            bytemuck::cast_slice_mut(&mut summary),
+            &[(&wt.summary, 16)],
+            summary,
+        )?;
+        Ok(unresolved_share(unresolved, samples))
+    }
+
+    /// The adaptive decision over `tiles` 8x4 tiles: `(tiles still sampling, all converged)`.
+    pub fn adapt(&self, wt: &WgpuTarget, tiles: usize) -> Result<(usize, bool), RenderError> {
+        let (_, post_bg) = self.bind_groups(wt)?;
+        let (x, y) = self.groups(tiles)?;
+        let [_, _, active, _] = self.run(
+            "warpbro_wgpu_adapt",
+            |encoder| {
+                let mut pass = compute(encoder, "warpbro_wgpu_adapt_pass");
+                pass.set_pipeline(&self.shared.adapt);
+                pass.set_bind_group(0, &post_bg, &[]);
+                pass.dispatch_workgroups(x, y, 1);
+                pass.set_pipeline(&self.shared.tally);
+                pass.dispatch_workgroups(1, 1, 1);
+            },
+            &wt.staging,
+            &[(&wt.summary, 16)],
+            summary,
+        )?;
+        let active = (active.round().max(0.0) as usize).min(tiles);
+        Ok((active, active == 0))
+    }
+
+    /// Exposed, saturated working-space radiance (`width * height`) into `raw` for OCIO.
+    pub fn tonemap(
+        &self,
+        wt: &WgpuTarget,
+        width: usize,
+        height: usize,
+        raw: &mut [[f32; 4]],
+    ) -> Result<(), RenderError> {
+        let (_, post_bg) = self.bind_groups(wt)?;
+        let (x, y) = self.groups(width * height)?;
+        let bytes = std::mem::size_of_val(raw);
+        self.run(
+            "warpbro_wgpu_tonemap",
+            |encoder| {
+                let mut pass = compute(encoder, "warpbro_wgpu_tonemap_pass");
+                pass.set_pipeline(&self.shared.tonemap);
+                pass.set_bind_group(0, &post_bg, &[]);
+                pass.dispatch_workgroups(x, y, 1);
+            },
+            &wt.staging,
+            &[(&wt.out, bytes as u64)],
+            |mapped| {
+                bytemuck::cast_slice_mut::<[f32; 4], u8>(raw)
+                    .copy_from_slice(bytes_at(mapped, 0, bytes)?);
+                Ok(())
+            },
         )
-        .expect("WGPU active tiles summary readback");
-        let active = (summary[0][2].round().max(0.0) as usize).min(active_host.len());
-        (active, active == 0)
     }
 
-    pub fn tonemap(&self, wt: &WgpuTarget, width: usize, height: usize, raw: &mut [[f32; 4]]) {
-        let n = (width * height) as u32;
-        let bg = self.post_bind_group(wt);
-        let mut encoder =
-            self.shared
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("warpbro_wgpu_tonemap"),
-                });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("warpbro_wgpu_tonemap_pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.shared.tonemap);
-            pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups(n.div_ceil(BLOCK), 1, 1);
-        }
-        self.shared.queue.submit(Some(encoder.finish()));
-
-        let bytes = std::mem::size_of_val(raw) as u64;
-        self.readback_bytes(&wt.out, &wt.staging, bytes, bytemuck::cast_slice_mut(raw))
-            .expect("WGPU tonemap readback");
-    }
-
+    /// The fast display (no OCIO, or Reinhard): linear display light and sRGB codes.
     pub fn tonemap_display(
         &self,
         wt: &WgpuTarget,
@@ -1310,97 +1434,79 @@ impl WgpuEngine {
         height: usize,
         light: &mut Vec<[f32; 4]>,
         pixels: &mut [u32],
-    ) {
+    ) -> Result<(), RenderError> {
         let n = width * height;
-        light.resize(n, [0.0; 4]);
-        let bg = self.post_bind_group(wt);
-        let out_bytes = (n * std::mem::size_of::<[f32; 4]>()) as u64;
-        let sdr_bytes = (n * std::mem::size_of::<u32>()) as u64;
-        let total_bytes = out_bytes + sdr_bytes;
-
-        let mut encoder =
-            self.shared
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("warpbro_wgpu_tonemap_display"),
-                });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("warpbro_wgpu_tonemap_display_pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.shared.tonemap_display);
-            pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups((n as u32).div_ceil(BLOCK), 1, 1);
+        if pixels.len() != n {
+            return Err(RenderError::Device(format!(
+                "display codes hold {} pixels, the film {n}",
+                pixels.len()
+            )));
         }
-        encoder.copy_buffer_to_buffer(&wt.out, 0, &wt.staging, 0, out_bytes);
-        encoder.copy_buffer_to_buffer(&wt.sdr, 0, &wt.staging, out_bytes, sdr_bytes);
-        self.shared.queue.submit(Some(encoder.finish()));
-
-        let device = &self.shared.device;
-        let slice = wt.staging.slice(..total_bytes);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        let _ = device.poll(wgpu::PollType::wait_indefinitely());
-        let mapped = slice.get_mapped_range().expect("WGPU tonemap_display map");
-        let out_end = out_bytes as usize;
-        bytemuck::cast_slice_mut::<[f32; 4], u8>(light).copy_from_slice(&mapped[..out_end]);
-        bytemuck::cast_slice_mut::<u32, u8>(pixels)
-            .copy_from_slice(&mapped[out_end..out_end + sdr_bytes as usize]);
-        drop(mapped);
-        wt.staging.unmap();
+        light.resize(n, [0.0; 4]);
+        let (_, post_bg) = self.bind_groups(wt)?;
+        let (x, y) = self.groups(n)?;
+        let out_bytes = std::mem::size_of_val(light.as_slice());
+        let sdr_bytes = std::mem::size_of_val(pixels);
+        self.run(
+            "warpbro_wgpu_tonemap_display",
+            |encoder| {
+                let mut pass = compute(encoder, "warpbro_wgpu_tonemap_display_pass");
+                pass.set_pipeline(&self.shared.tonemap_display);
+                pass.set_bind_group(0, &post_bg, &[]);
+                pass.dispatch_workgroups(x, y, 1);
+            },
+            &wt.staging,
+            &[(&wt.out, out_bytes as u64), (&wt.sdr, sdr_bytes as u64)],
+            |mapped| {
+                bytemuck::cast_slice_mut::<[f32; 4], u8>(light)
+                    .copy_from_slice(bytes_at(mapped, 0, out_bytes)?);
+                bytemuck::cast_slice_mut::<u32, u8>(pixels)
+                    .copy_from_slice(bytes_at(mapped, out_bytes, sdr_bytes)?);
+                Ok(())
+            },
+        )
     }
 
-    pub fn pick(&self, ndc: [f32; 2]) -> Result<Option<(usize, f32)>, String> {
+    pub fn pick(&self, ndc: [f32; 2]) -> Result<Option<(usize, f32)>, RenderError> {
         let query = [[ndc[0], ndc[1], 0.0f32, 0.0f32]];
-        self.shared
-            .queue
-            .write_buffer(&self.pick_aux, 0, bytemuck::cast_slice(&query));
-        let bg = self
-            .shared
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("warpbro_wgpu_pick_bg"),
-                layout: &self.shared.pick_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.params_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: self.objects_buf.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 10,
-                        resource: self.pick_aux.as_entire_binding(),
-                    },
-                ],
-            });
-        let mut encoder =
+        let bg = with_error_scopes(&self.shared.device, || {
             self.shared
                 .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("warpbro_wgpu_pick"),
-                });
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("warpbro_wgpu_pick_pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.shared.pick);
-            pass.set_bind_group(0, &bg, &[]);
-            pass.dispatch_workgroups(1, 1, 1);
-        }
-        self.shared.queue.submit(Some(encoder.finish()));
-
-        let mut hit = [[0.0f32; 4]];
-        self.readback_bytes(
-            &self.pick_aux,
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("warpbro_wgpu_pick_bg"),
+                    layout: &self.shared.pick_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.params_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.objects_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 10,
+                            resource: self.pick_aux.as_entire_binding(),
+                        },
+                    ],
+                })
+        })
+        .map_err(|e| RenderError::Device(format!("WGPU pick bind group: {e}")))?;
+        let [object, _, depth, _] = self.run(
+            "warpbro_wgpu_pick",
+            |encoder| {
+                self.shared
+                    .queue
+                    .write_buffer(&self.pick_aux, 0, bytemuck::cast_slice(&query));
+                let mut pass = compute(encoder, "warpbro_wgpu_pick_pass");
+                pass.set_pipeline(&self.shared.pick);
+                pass.set_bind_group(0, &bg, &[]);
+                pass.dispatch_workgroups(1, 1, 1);
+            },
             &self.pick_staging,
-            16,
-            bytemuck::cast_slice_mut(&mut hit),
+            &[(&self.pick_aux, 16)],
+            summary,
         )?;
-        let [object, _, depth, _] = hit[0];
         Ok((object >= 1.0).then(|| (object as usize - 1, depth)))
     }
 }
@@ -1432,5 +1538,20 @@ mod tests {
         let engine =
             WgpuEngine::new().expect("WGPU engine and shader pipelines must compile cleanly");
         assert!(!engine.name().is_empty());
+    }
+
+    /// A frame above the per-dimension workgroup limit spills into y instead of failing
+    /// validation (plan1 1.3); the grid covers every invocation with less than one row spare.
+    #[test]
+    fn gpu_wgpu_dispatch_grid_covers_dci_4k_within_the_limit() {
+        let _gpu_test = crate::test_gpu::lock();
+        let engine = WgpuEngine::new().expect("WGPU engine");
+        let max = engine.shared.limits.max_compute_workgroups_per_dimension;
+        let threads = padded_len(4096, 2160);
+        let (x, y) = engine.groups(threads).unwrap();
+        assert!(x <= max && y <= max);
+        let covered = u64::from(x) * u64::from(y) * u64::from(BLOCK);
+        assert!(covered >= threads as u64);
+        assert!(covered - (threads as u64) < u64::from(x) * u64::from(BLOCK));
     }
 }

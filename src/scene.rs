@@ -45,6 +45,10 @@ pub enum KifsKind {
     Octahedron,
     Menger,
 }
+impl KifsKind {
+    /// Every variant: the Attribute Editor's choices (`world::attribute_choices`).
+    pub const ALL: [Self; 3] = [Self::Tetrahedron, Self::Octahedron, Self::Menger];
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Kifs {
@@ -84,6 +88,16 @@ pub enum HybridStep {
     Mandelbox,
     KifsFold,
     Inversion,
+}
+impl HybridStep {
+    /// Every variant: the Attribute Editor's choices (`world::attribute_choices`).
+    pub const ALL: [Self; 5] = [
+        Self::Off,
+        Self::Mandelbulb,
+        Self::Mandelbox,
+        Self::KifsFold,
+        Self::Inversion,
+    ];
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -244,7 +258,8 @@ pub const DEFAULT_MAX_STEPS: u32 = 4096;
 mod glass_probe_tests {
     #[test]
     fn scenes_without_glass_probes_load_with_the_former_count() {
-        let mut json = serde_json::to_value(super::Scene::preset(0).render).unwrap();
+        let mut json =
+            serde_json::to_value(super::Scene::preset(super::Formula::PRESETS[0]).render).unwrap();
         json.as_object_mut().unwrap().remove("glass_probes");
         assert!(serde_json::from_value::<super::Render>(json).is_err());
         assert_eq!(super::DEFAULT_GLASS_PROBES, 256);
@@ -257,40 +272,53 @@ pub const DEFAULT_GLASS_PROBES: u32 = 256;
 /// fractal3d.rs HIT_EPSILON_PER_PIXEL: a footprint is hit_epsilon / this of a pixel.
 const HIT_EPSILON_PER_PIXEL: f32 = 0.008;
 
+// Every family code has its preset at its index: with 28 distinct codes over 28 variants this
+// also proves every `Formula::code()` is below `Formula::COUNT`, so indexing the registry
+// (`formulas::FORMULAS`) by it cannot go out of bounds.
+const _: () = {
+    let mut i = 0;
+    while i < Formula::PRESETS.len() {
+        assert!(Formula::PRESETS[i].code() as usize == i);
+        i += 1;
+    }
+};
+
 impl Formula {
     pub const COUNT: u32 = TOTAL_FORMULA_COUNT;
-    pub const NAMES: [&'static str; TOTAL_FORMULA_COUNT as usize] = [
-        "Mandelbulb",
-        "Mandelbox",
-        "Quaternion Julia",
-        "KIFS",
-        "Kleinian",
-        "Pseudo-Kleinian",
-        "Apollonian",
-        "Hybrid",
-        "Amazing Surface",
-        "Bristorbrot",
-        "Burning Ship 3D",
-        "Kaleido Twist IFS",
-        "Polyhedral KIFS",
-        "Harmonic Bulb",
-        "Mandelbar 3D",
-        "Möbius Sphere IFS",
-        "Gyroid / Schwarz TPMS",
-        "Lidinoid / Fischer-Koch TPMS",
-        "Strange Attractor Flow",
-        "Torus Knot Braid",
-        "Hopf Fibration Tori",
-        "Dupin Cyclide",
-        "3D Superformula",
-        "Fibonacci Phyllotaxis",
-        "Nautilus / Ammonite Shell",
-        "Voronoi Trabecular Foam",
-        "Quartz Crystal Cluster",
-        "Mechanical Astrolabe",
+
+    /// The default formula of each family, indexed by family code.
+    pub const PRESETS: [Formula; TOTAL_FORMULA_COUNT as usize] = [
+        Self::Mandelbulb(Bulb::PRESET),
+        Self::Mandelbox(MandelBox::PRESET),
+        Self::QuaternionJulia(Quat::PRESET),
+        Self::Kifs(Kifs::preset(KifsKind::Tetrahedron)),
+        Self::Kleinian(Kleinian::PRESET),
+        Self::PseudoKleinian(PseudoKleinian::PRESET),
+        Self::Apollonian(Apollonian::PRESET),
+        Self::Hybrid(Hybrid::PRESET),
+        Self::AmazingSurface(AmazingSurface::PRESET),
+        Self::Bristorbrot(Bristorbrot::PRESET),
+        Self::BurningShip(BurningShip::PRESET),
+        Self::KaleidoTwist(KaleidoTwist::PRESET),
+        Self::PolyhedralKifs(PolyhedralKifs::PRESET),
+        Self::HarmonicBulb(HarmonicBulb::PRESET),
+        Self::Mandelbar3D(Mandelbar3D::PRESET),
+        Self::MobiusIfs(MobiusIfs::PRESET),
+        Self::GyroidTpms(GyroidTpms::PRESET),
+        Self::LidinoidTpms(LidinoidTpms::PRESET),
+        Self::AttractorTube(AttractorTube::PRESET),
+        Self::TorusKnotBraid(TorusKnotBraid::PRESET),
+        Self::HopfFibration(HopfFibration::PRESET),
+        Self::DupinCyclide(DupinCyclide::PRESET),
+        Self::Superformula3D(Superformula3D::PRESET),
+        Self::PhyllotaxisShell(PhyllotaxisShell::PRESET),
+        Self::NautilusShell(NautilusShell::PRESET),
+        Self::VoronoiFoam(VoronoiFoam::PRESET),
+        Self::CrystalGeode(CrystalGeode::PRESET),
+        Self::AstrolabeGimbal(AstrolabeGimbal::PRESET),
     ];
 
-    pub fn code(&self) -> u32 {
+    pub const fn code(&self) -> u32 {
         match self {
             Self::Mandelbulb(_) => FAMILY_BULB,
             Self::Mandelbox(_) => FAMILY_BOX,
@@ -323,19 +351,21 @@ impl Formula {
         }
     }
 
-    pub fn name(&self) -> &'static str {
-        Self::NAMES[self.code() as usize]
+    /// The family's registry row (`formulas::FORMULAS`, the one source of names and flags).
+    pub fn meta(&self) -> &'static FormulaMeta {
+        // `&FORMULAS` is promoted to a static borrow; the index is in bounds by the const
+        // assertion over `PRESETS` above.
+        let table: &'static [FormulaMeta] = &FORMULAS;
+        &table[self.code() as usize]
     }
 
-    pub fn display_name(&self) -> &'static str {
-        let code = self.code();
-        let meta = &crate::formulas::FORMULAS[code as usize];
-        debug_assert_eq!(meta.code, code);
-        meta.display_name
+    /// The family's name in the Formula dropdown, the inspector header and preset scene names.
+    pub fn name(&self) -> &'static str {
+        self.meta().display_name
     }
 
     pub fn hint(&self) -> &'static str {
-        crate::formulas::FORMULAS[self.code() as usize].hint
+        self.meta().hint
     }
 
     /// Formula3d::framing_radius: the radius the camera distance is measured in.
@@ -400,51 +430,7 @@ impl Formula {
     /// Whether the formula iterates z <- f(z) + c with the shared orbit constant (fractal-kernels
     /// `orbit_constant`): only these read the Julia mix, the Julia constant and the orbit offset.
     pub fn has_orbit_constant(&self) -> bool {
-        matches!(
-            self,
-            Self::Mandelbulb(_)
-                | Self::Mandelbox(_)
-                | Self::AmazingSurface(_)
-                | Self::Bristorbrot(_)
-                | Self::BurningShip(_)
-                | Self::HarmonicBulb(_)
-                | Self::Mandelbar3D(_)
-        )
-    }
-
-    /// The default formula of each family (index = family code).
-    pub fn preset(code: u32) -> Self {
-        match code {
-            FAMILY_BULB => Self::Mandelbulb(Bulb::PRESET),
-            FAMILY_BOX => Self::Mandelbox(MandelBox::PRESET),
-            FAMILY_QUAT => Self::QuaternionJulia(Quat::PRESET),
-            FAMILY_KIFS => Self::Kifs(Kifs::preset(KifsKind::Tetrahedron)),
-            FAMILY_KLEINIAN => Self::Kleinian(Kleinian::PRESET),
-            FAMILY_PSEUDO_KLEINIAN => Self::PseudoKleinian(PseudoKleinian::PRESET),
-            FAMILY_APOLLONIAN => Self::Apollonian(Apollonian::PRESET),
-            FAMILY_HYBRID => Self::Hybrid(Hybrid::PRESET),
-            FAMILY_AMAZING_SURFACE => Self::AmazingSurface(AmazingSurface::PRESET),
-            FAMILY_BRISTORBROT => Self::Bristorbrot(Bristorbrot::PRESET),
-            FAMILY_BURNING_SHIP => Self::BurningShip(BurningShip::PRESET),
-            FAMILY_KALEIDO_TWIST => Self::KaleidoTwist(KaleidoTwist::PRESET),
-            FAMILY_POLYHEDRAL_KIFS => Self::PolyhedralKifs(PolyhedralKifs::PRESET),
-            FAMILY_HARMONIC_BULB => Self::HarmonicBulb(HarmonicBulb::PRESET),
-            FAMILY_MANDELBAR => Self::Mandelbar3D(Mandelbar3D::PRESET),
-            FAMILY_MOBIUS_IFS => Self::MobiusIfs(MobiusIfs::PRESET),
-            FAMILY_GYROID_TPMS => Self::GyroidTpms(GyroidTpms::PRESET),
-            FAMILY_LIDINOID_TPMS => Self::LidinoidTpms(LidinoidTpms::PRESET),
-            FAMILY_ATTRACTOR_TUBE => Self::AttractorTube(AttractorTube::PRESET),
-            FAMILY_TORUS_KNOT => Self::TorusKnotBraid(TorusKnotBraid::PRESET),
-            FAMILY_HOPF_FIBRATION => Self::HopfFibration(HopfFibration::PRESET),
-            FAMILY_DUPIN_CYCLIDE => Self::DupinCyclide(DupinCyclide::PRESET),
-            FAMILY_SUPERFORMULA => Self::Superformula3D(Superformula3D::PRESET),
-            FAMILY_PHYLLOTAXIS => Self::PhyllotaxisShell(PhyllotaxisShell::PRESET),
-            FAMILY_NAUTILUS => Self::NautilusShell(NautilusShell::PRESET),
-            FAMILY_VORONOI_FOAM => Self::VoronoiFoam(VoronoiFoam::PRESET),
-            FAMILY_CRYSTAL_GEODE => Self::CrystalGeode(CrystalGeode::PRESET),
-            FAMILY_ASTROLABE => Self::AstrolabeGimbal(AstrolabeGimbal::PRESET),
-            _ => Self::Hybrid(Hybrid::PRESET),
-        }
+        self.meta().has_orbit_constant
     }
 }
 
@@ -485,6 +471,10 @@ pub enum MaskShape {
     /// fractal thinned out in space. Not an array of copies.
     Cells,
 }
+impl MaskShape {
+    /// Every variant: the Attribute Editor's choices (`world::attribute_choices`).
+    pub const ALL: [Self; 3] = [Self::Sphere, Self::Box, Self::Cells];
+}
 
 /// How a sphere or box mask is repeated. Copies are a union; count 1 with a zero linear
 /// offset is the single shape. A radial sweep of 0 is a full circle (Blender Array Circle).
@@ -493,6 +483,10 @@ pub enum ArrayKind {
     #[default]
     Linear,
     Radial,
+}
+impl ArrayKind {
+    /// Every variant: the Attribute Editor's choices (`world::attribute_choices`).
+    pub const ALL: [Self; 2] = [Self::Linear, Self::Radial];
 }
 
 /// Ring axis of a radial array (Blender Central Axis).
@@ -504,6 +498,8 @@ pub enum ArrayAxis {
     Z,
 }
 impl ArrayAxis {
+    /// Every variant: the Attribute Editor's choices (`world::attribute_choices`).
+    pub const ALL: [Self; 3] = [Self::X, Self::Y, Self::Z];
     pub const fn code(self) -> u32 {
         match self {
             Self::X => 0,
@@ -658,20 +654,34 @@ pub struct ObjectTransform {
     pub scale: f32,
 }
 
+/// A directional light: what a Sun node (`WorldKind::DirectionalLight`) authors and what one
+/// world light packs (`Scene::lights`, the `P_LIGHT_DIR..P_SKY_INTENSITY` block per light).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Lighting {
-    pub sun_azimuth: f32,
-    pub sun_elevation: f32,
-    pub sun_color: [f32; 3],
-    pub sun_intensity: f32,
-    pub sun_angle: f32,
-    pub sky_intensity: f32,
-    pub sky_horizon: [f32; 3],
-    pub sky_zenith: [f32; 3],
+#[serde(deny_unknown_fields)]
+pub struct Sun {
+    /// Direction toward the sun around +Y, from +Z (degrees).
+    pub azimuth: f32,
+    /// Height above the horizon (degrees; negative is below).
+    pub elevation: f32,
+    pub color: [f32; 3],
+    pub intensity: f32,
+    /// Angular diameter of the disc (degrees); 0 is a point sun.
+    pub angle: f32,
+}
+
+/// The sky: what the Environment node (`WorldKind::Environment`) authors besides its HDRI. One
+/// per scene; its gradient lights and backs every object.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Sky {
+    pub intensity: f32,
+    pub horizon: [f32; 3],
+    pub zenith: [f32; 3],
     /// Show the sky behind the fractal (otherwise only its light).
     pub background: bool,
-    /// Show the sun disc in the background where camera rays miss (`P_CAMERA_SUN`); bounced
-    /// rays see the sun either way.
+    /// Show the suns' discs in the background where camera rays miss (`P_CAMERA_SUN`); bounced
+    /// rays see the suns either way. A sky property: the kernels gate every world sun's disc
+    /// with this one flag.
     pub sun_disc: bool,
 }
 
@@ -690,13 +700,10 @@ impl Camera {
     }
 }
 
-impl Lighting {
+impl Sun {
     /// Unit direction toward the sun from its azimuth (around +Y, from +Z) and elevation.
     pub fn direction(&self) -> glam::Vec3 {
-        let (az, el) = (
-            self.sun_azimuth.to_radians(),
-            self.sun_elevation.to_radians(),
-        );
+        let (az, el) = (self.azimuth.to_radians(), self.elevation.to_radians());
         glam::Vec3::new(az.sin() * el.cos(), el.sin(), az.cos() * el.cos())
     }
 }
@@ -706,6 +713,10 @@ pub enum MaterialModel {
     Fast,
     StandardSurface,
 }
+impl MaterialModel {
+    /// Every variant: the Attribute Editor's choices (`world::attribute_choices`).
+    pub const ALL: [Self; 2] = [Self::Fast, Self::StandardSurface];
+}
 
 /// Where the base colour comes from: the fractal's palette (escape / trap colouring) or a
 /// solid material colour (the material library).
@@ -714,6 +725,10 @@ pub enum ColorSource {
     #[default]
     Palette,
     Material,
+}
+impl ColorSource {
+    /// Every variant: the Attribute Editor's choices (`world::attribute_choices`).
+    pub const ALL: [Self; 2] = [Self::Palette, Self::Material];
 }
 
 /// usd-rs pt-material-ext facing mix: the look blends from the material (head-on) toward
@@ -777,6 +792,15 @@ pub enum Coloring {
     TrapOrigin,
     TrapPlane,
     TrapPoint,
+}
+impl Coloring {
+    /// Every variant: the Attribute Editor's choices (`world::attribute_choices`).
+    pub const ALL: [Self; 4] = [
+        Self::Radius,
+        Self::TrapOrigin,
+        Self::TrapPlane,
+        Self::TrapPoint,
+    ];
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -852,8 +876,9 @@ pub struct Scene {
     pub camera_reference: Option<f32>,
     #[serde(skip)]
     pub objects: Vec<Scene>,
+    /// The world's suns (`WorldDocument::snapshot`), each packed as one world light.
     #[serde(skip)]
-    pub lights: Vec<Lighting>,
+    pub lights: Vec<Sun>,
     #[serde(skip)]
     pub object_world: Option<[[f32; 4]; 4]>,
     /// The scene masks this object is intersected with (resolved by `WorldDocument::snapshot`).
@@ -904,7 +929,9 @@ pub struct Scene {
     pub inversion_radius: f32,
     pub object: ObjectTransform,
     pub camera: Camera,
-    pub lighting: Lighting,
+    /// The key light of a single-object scene; a world snapshot puts its first sun here.
+    pub sun: Sun,
+    pub sky: Sky,
     pub material: Material,
     pub palette: PaletteScheme,
     pub coloring: Coloring,
@@ -977,19 +1004,27 @@ impl Camera {
     }
 }
 
-impl Default for Lighting {
-    /// ofx-fractal Lighting3d::default.
+impl Default for Sun {
+    /// ofx-fractal Lighting3d::default (its sun).
     fn default() -> Self {
         let d = normalize([0.56, 0.76, 0.36]);
         Self {
-            sun_azimuth: d[0].atan2(d[2]).to_degrees(),
-            sun_elevation: d[1].asin().to_degrees(),
-            sun_color: [1.0; 3],
-            sun_intensity: 2.0,
-            sun_angle: 0.53,
-            sky_intensity: 8.0,
-            sky_horizon: [0.012, 0.02, 0.045],
-            sky_zenith: [0.047, 0.075, 0.14],
+            azimuth: d[0].atan2(d[2]).to_degrees(),
+            elevation: d[1].asin().to_degrees(),
+            color: [1.0; 3],
+            intensity: 2.0,
+            angle: 0.53,
+        }
+    }
+}
+
+impl Default for Sky {
+    /// ofx-fractal Lighting3d::default (its sky).
+    fn default() -> Self {
+        Self {
+            intensity: 8.0,
+            horizon: [0.012, 0.02, 0.045],
+            zenith: [0.047, 0.075, 0.14],
             background: true,
             sun_disc: true,
         }
@@ -1163,7 +1198,8 @@ impl Scene {
                 scale: 1.0,
             },
             camera: Camera::default_fov(fov),
-            lighting: Lighting::default(),
+            sun: Sun::default(),
+            sky: Sky::default(),
             material: Material::default(),
             palette,
             coloring: Coloring::Radius,
@@ -1187,10 +1223,11 @@ impl Scene {
         }
     }
 
-    /// The family preset (`0..Scene::COUNT`).
-    pub fn preset(code: u32) -> Self {
+    /// The preset scene of `f`'s family, framing and styling `f` (usually `Formula::PRESETS[i]`
+    /// or a family's `PRESET` value).
+    pub fn preset(f: Formula) -> Self {
         use PaletteScheme as P;
-        let f = Formula::preset(code);
+        let code = f.code();
         let name = f.name();
         let mut s = match code {
             FAMILY_BULB => Self::base(name, f, 38.0, 20.0, 0.001, P::Classic),
@@ -1264,9 +1301,12 @@ impl Scene {
     /// The 18 classic gallery presets (the 8 original families plus 10 variations).
     pub fn classic_gallery() -> Vec<Scene> {
         use PaletteScheme as P;
-        let mut v: Vec<Scene> = (0..8).map(Self::preset).collect();
+        let mut v: Vec<Scene> = Formula::PRESETS[..8]
+            .iter()
+            .map(|f| Self::preset(*f))
+            .collect();
 
-        let mut s = Self::preset(FAMILY_BULB);
+        let mut s = Self::preset(Formula::Mandelbulb(Bulb::PRESET));
         s.name = "Bulb · power 3".into();
         if let Formula::Mandelbulb(b) = &mut s.formula {
             b.power = 3.0;
@@ -1274,7 +1314,7 @@ impl Scene {
         s.palette = P::Sunset;
         v.push(s);
 
-        let mut s = Self::preset(FAMILY_BULB);
+        let mut s = Self::preset(Formula::Mandelbulb(Bulb::PRESET));
         s.name = "Bulb · power 12, gold".into();
         if let Formula::Mandelbulb(b) = &mut s.formula {
             b.power = 12.0;
@@ -1284,7 +1324,7 @@ impl Scene {
         s.material.specular_roughness = 0.25;
         v.push(s);
 
-        let mut s = Self::preset(FAMILY_BULB);
+        let mut s = Self::preset(Formula::Mandelbulb(Bulb::PRESET));
         s.name = "Bulb · Julia".into();
         s.julia = [0.35, 0.35, -0.4];
         s.julia_mix = 1.0;
@@ -1293,7 +1333,7 @@ impl Scene {
         s.coloring = Coloring::TrapOrigin;
         v.push(s);
 
-        let mut s = Self::preset(FAMILY_BULB);
+        let mut s = Self::preset(Formula::Mandelbulb(Bulb::PRESET));
         s.name = "Bulb · twisted".into();
         if let Formula::Mandelbulb(b) = &mut s.formula {
             b.angle_phase_degrees = [40.0, 0.0];
@@ -1302,7 +1342,7 @@ impl Scene {
         s.palette = P::Neon;
         v.push(s);
 
-        let mut s = Self::preset(FAMILY_BOX);
+        let mut s = Self::preset(Formula::Mandelbox(MandelBox::PRESET));
         s.name = "Mandelbox · scale −1.5".into();
         if let Formula::Mandelbox(b) = &mut s.formula {
             b.scale = -1.5;
@@ -1311,7 +1351,7 @@ impl Scene {
         s.palette = P::RoseGold;
         v.push(s);
 
-        let mut s = Self::preset(FAMILY_KIFS);
+        let mut s = Self::preset(Formula::Kifs(Kifs::preset(KifsKind::Tetrahedron)));
         s.name = "Menger sponge".into();
         s.formula = Formula::Kifs(Kifs::preset(KifsKind::Menger));
         s.palette = P::Mono;
@@ -1319,7 +1359,7 @@ impl Scene {
         s.material.coat = 1.0;
         v.push(s);
 
-        let mut s = Self::preset(FAMILY_KIFS);
+        let mut s = Self::preset(Formula::Kifs(Kifs::preset(KifsKind::Tetrahedron)));
         s.name = "Octahedron KIFS".into();
         s.formula = Formula::Kifs(Kifs {
             rotation_degrees: [12.0, 0.0, 8.0],
@@ -1328,7 +1368,7 @@ impl Scene {
         s.palette = P::Verdant;
         v.push(s);
 
-        let mut s = Self::preset(FAMILY_QUAT);
+        let mut s = Self::preset(Formula::QuaternionJulia(Quat::PRESET));
         s.name = "Quaternion · glass-coat".into();
         if let Formula::QuaternionJulia(q) = &mut s.formula {
             q.constant = [-0.291, -0.399, 0.339, 0.437];
@@ -1339,7 +1379,7 @@ impl Scene {
         s.palette = P::Ice;
         v.push(s);
 
-        let mut s = Self::preset(FAMILY_HYBRID);
+        let mut s = Self::preset(Formula::Hybrid(Hybrid::PRESET));
         s.name = "Hybrid · bulb + KIFS".into();
         if let Formula::Hybrid(h) = &mut s.formula {
             h.steps = [
@@ -1352,11 +1392,11 @@ impl Scene {
         s.palette = P::Fire;
         v.push(s);
 
-        let mut s = Self::preset(FAMILY_PSEUDO_KLEINIAN);
+        let mut s = Self::preset(Formula::PseudoKleinian(PseudoKleinian::PRESET));
         s.name = "Pseudo-Kleinian · cave".into();
         s.camera.distance = 0.6;
         s.camera.fov_y_degrees = 60.0;
-        s.lighting.sky_intensity = 12.0;
+        s.sky.intensity = 12.0;
         v.push(s);
 
         v
@@ -1365,7 +1405,7 @@ impl Scene {
     /// The built-in gallery: the 18 classic presets plus all 20 extended fractal & procedural families (38 total).
     pub fn gallery() -> Vec<Scene> {
         let mut v = Self::classic_gallery();
-        v.extend((8..Formula::COUNT).map(Self::preset));
+        v.extend(Formula::PRESETS[8..].iter().map(|f| Self::preset(*f)));
         v
     }
 
@@ -1667,20 +1707,20 @@ impl Scene {
         put3(&mut p, P_TRAP_NORMAL, axis);
         p[P_TRAP_SCALE] = self.trap_scale;
 
-        // --- light
-        let l = &self.lighting;
-        put3(&mut p, P_LIGHT_DIR, l.direction().to_array());
-        put_rgb(&mut p, P_LIGHT_COLOR, l.sun_color);
-        p[P_LIGHT_INTENSITY] = l.sun_intensity;
+        // --- light: the key sun, then the sky
+        let (sun, sky) = (&self.sun, &self.sky);
+        put3(&mut p, P_LIGHT_DIR, sun.direction().to_array());
+        put_rgb(&mut p, P_LIGHT_COLOR, sun.color);
+        p[P_LIGHT_INTENSITY] = sun.intensity;
         // A sun angle of 0 is a point sun (the kernels' delta light), as in OFX.
-        let (omc, pdf) = sun_cone((l.sun_angle * 0.5).to_radians().max(0.0));
+        let (omc, pdf) = sun_cone((sun.angle * 0.5).to_radians().max(0.0));
         p[P_SUN_ONE_MINUS_COS] = omc;
         p[P_SUN_CONE_PDF] = pdf;
-        p[P_SKY_INTENSITY] = l.sky_intensity;
-        put_rgb(&mut p, P_SKY_HORIZON, l.sky_horizon);
-        put_rgb(&mut p, P_SKY_ZENITH, l.sky_zenith);
-        p[P_BACKGROUND] = l.background as u32 as f32;
-        p[P_CAMERA_SUN] = l.sun_disc as u32 as f32;
+        p[P_SKY_INTENSITY] = sky.intensity;
+        put_rgb(&mut p, P_SKY_HORIZON, sky.horizon);
+        put_rgb(&mut p, P_SKY_ZENITH, sky.zenith);
+        p[P_BACKGROUND] = sky.background as u32 as f32;
+        p[P_CAMERA_SUN] = sky.sun_disc as u32 as f32;
         // Luminance weights of the working space (ACEScg).
         put3(&mut p, P_LUMA, fractal_core::luma::Luma::AcesCg.weights());
         // Direct shading (fractal-kernels `kernels/direct.rs`); left zero, nothing reads it.
@@ -1693,7 +1733,7 @@ impl Scene {
             p[P_AO_STEPS] = d.shading.ao_steps as f32;
             p[P_AO_RADIUS] = d.shading.ao_radius;
             // The single-object key light's radius; world lights carry their cones.
-            p[P_LIGHT_HALF_ANGLE] = (l.sun_angle * 0.5).to_radians().max(0.0);
+            p[P_LIGHT_HALF_ANGLE] = (sun.angle * 0.5).to_radians().max(0.0);
         }
 
         // --- material
@@ -1832,7 +1872,7 @@ mod lens_tests {
     use super::*;
     #[test]
     fn physical_gate_fov_and_f_number_pack_scene_unit_pupil_radius() {
-        let mut scene = Scene::preset(0);
+        let mut scene = Scene::preset(Formula::PRESETS[0]);
         scene.camera.fov_y_degrees = (2.0 * (0.024_f32 / (2.0 * 0.050)).atan()).to_degrees();
         scene.camera.f_number = 2.0;
         assert!((scene.camera.focal_length() - 0.050).abs() < 1e-7);

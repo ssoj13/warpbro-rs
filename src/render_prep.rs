@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::palette::PaletteScheme;
 use crate::params::*;
-use crate::scene::Scene;
+use crate::scene::{Bulb, Formula, Scene};
 
 pub const BLOCK: u32 = 128;
 /// Threads of the `tally` reduction (a multiple of `BLOCK`): the out-of-steps readback is this
@@ -18,6 +18,21 @@ pub const PER_LAUNCH: [usize; 3] = [P_SAMPLE_BEGIN, P_SPP, P_SEED];
 /// Adaptive-sampling slots: they choose which tiles keep sampling, never the accumulated values,
 /// so changing them must not restart the render (the `adapt` kernel re-decides every step).
 pub const SCHEDULE_ONLY: [usize; 2] = [P_ADAPT_THRESHOLD, P_ADAPT_MIN];
+
+/// Samples of a film in the kernels' 8x4 tile layout: every tile is whole, so partial tiles at
+/// the right and bottom edges are padded. Both backends size their films with it.
+pub(crate) fn padded_len(width: usize, height: usize) -> usize {
+    width.div_ceil(8) * height.div_ceil(4) * 32
+}
+
+/// A film plane both backends accumulate (`Gpu::read_film`): the radiance sums with the sample
+/// count in `w`, and the denoiser's albedo and normal guide sums.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Plane {
+    Accum,
+    Albedo,
+    Normal,
+}
 
 /// Worker-local counters; uploads count only completed host-to-device copies.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -46,7 +61,8 @@ pub(crate) struct PreparationInputs {
     inversion_radius: f32,
     object: crate::scene::ObjectTransform,
     camera: crate::scene::Camera,
-    lighting: crate::scene::Lighting,
+    sun: crate::scene::Sun,
+    sky: crate::scene::Sky,
     material: crate::scene::Material,
     palette: PaletteScheme,
     coloring: crate::scene::Coloring,
@@ -58,7 +74,7 @@ pub(crate) struct PreparationInputs {
     environment: crate::environment::Environment,
     objects: Vec<PreparationInputs>,
     masks: Vec<crate::scene::MaskInstance>,
-    lights: Vec<crate::scene::Lighting>,
+    lights: Vec<crate::scene::Sun>,
 }
 
 pub(crate) fn preparation_render(scene: &Scene, root: bool) -> crate::scene::Render {
@@ -138,7 +154,8 @@ impl PreparationInputs {
             inversion_radius,
             object,
             camera,
-            lighting,
+            sun,
+            sky,
             material,
             palette,
             coloring,
@@ -172,7 +189,8 @@ impl PreparationInputs {
             inversion_radius: *inversion_radius,
             object: *object,
             camera: *camera,
-            lighting: *lighting,
+            sun: *sun,
+            sky: *sky,
             material: material.clone(),
             palette: *palette,
             coloring: *coloring,
@@ -208,7 +226,8 @@ impl PreparationInputs {
             inversion_radius,
             object,
             camera,
-            lighting,
+            sun,
+            sky,
             material,
             palette,
             coloring,
@@ -238,7 +257,8 @@ impl PreparationInputs {
             && self.inversion_radius == *inversion_radius
             && self.object == *object
             && self.camera == *camera
-            && self.lighting == *lighting
+            && self.sun == *sun
+            && self.sky == *sky
             && same_material(&self.material, material)
             && self.palette == *palette
             && self.coloring == *coloring
@@ -339,19 +359,13 @@ impl PreparedScene {
         })
     }
 
-    pub(crate) fn params(&self, scene: &Scene, bounces_cap: Option<u32>) -> [f32; P_COUNT] {
-        let mut params: [f32; P_COUNT] = self
-            .upload
-            .params
-            .as_slice()
-            .try_into()
-            .expect("parameter block size");
+    /// The packed parameter block with `scene`'s tonemap-only slots: the cached upload ignores
+    /// exposure, saturation and Reinhard (`preparation_render`), so a look edit reuses it.
+    pub(crate) fn params(&self, scene: &Scene) -> [f32; P_COUNT] {
+        let mut params = self.upload.params;
         params[P_EXPOSURE] = 2f32.powf(scene.render.exposure_stops);
         params[P_SATURATION] = scene.render.saturation;
         params[P_TONEMAP] = scene.render.reinhard as u32 as f32;
-        if let Some(cap) = bounces_cap {
-            params[P_MAX_BOUNCES] = params[P_MAX_BOUNCES].min(cap as f32);
-        }
         params
     }
 }
@@ -559,9 +573,9 @@ pub(crate) fn scene_trace_data(scene: &Scene) -> Vec<f32> {
             values.extend(mask_row(m).unwrap_or([f32::NAN; MASK_STRIDE]));
         }
     }
-    let mut light_template = Scene::preset(FAMILY_BULB);
+    let mut light_template = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
     for light in &scene.lights {
-        light_template.lighting = *light;
+        light_template.sun = *light;
         let p = light_template.pack(1, 1);
         values.extend_from_slice(&p[P_LIGHT_DIR..P_SKY_INTENSITY]);
     }
@@ -569,7 +583,7 @@ pub(crate) fn scene_trace_data(scene: &Scene) -> Vec<f32> {
 }
 
 pub(crate) struct WorldUpload {
-    pub(crate) params: Vec<f32>,
+    pub(crate) params: [f32; P_COUNT],
     pub(crate) objects: Vec<f32>,
     pub(crate) lights: Vec<f32>,
 }
@@ -629,6 +643,19 @@ fn inverse_object(object: &Scene, index: usize) -> Result<glam::Mat4, String> {
     Ok(inverse)
 }
 
+/// The conservative distance scale of an affine map, from the columns `cols` of its inverse:
+/// `||A^-1||2 <= sqrt(||A^-1||1 ||A^-1||inf)`, so `1 / sqrt(norm1 * norm_inf)` is a lower bound
+/// of `sigma_min(A)`, parent shear included. World objects and masks scale their DE by it.
+fn stretch_scale(cols: &[[f32; 4]; 4]) -> f32 {
+    let norm1 = (0..3)
+        .map(|c| (0..3).map(|r| cols[c][r].abs()).sum::<f32>())
+        .fold(0.0f32, f32::max);
+    let norm_inf = (0..3)
+        .map(|r| (0..3).map(|c| cols[c][r].abs()).sum::<f32>())
+        .fold(0.0f32, f32::max);
+    1.0 / (norm1.sqrt() * norm_inf.sqrt())
+}
+
 /// A mask's kernel row (`fractal_core::params` `M_*`): its world-to-mask inverse affine, the
 /// conservative distance scale (as for objects), shape, invert, size, density and seed.
 pub(crate) fn mask_row(m: &crate::scene::MaskInstance) -> Result<[f32; MASK_STRIDE], String> {
@@ -651,14 +678,7 @@ pub(crate) fn mask_row(m: &crate::scene::MaskInstance) -> Result<[f32; MASK_STRI
             row[M_INVERSE + r * 4 + c] = column[r];
         }
     }
-    // ||A^-1||2 <= sqrt(||A^-1||1 ||A^-1||inf): a lower bound of the stretch, as for objects.
-    let norm1 = (0..3)
-        .map(|c| (0..3).map(|r| cols[c][r].abs()).sum::<f32>())
-        .fold(0.0f32, f32::max);
-    let norm_inf = (0..3)
-        .map(|r| (0..3).map(|c| cols[c][r].abs()).sum::<f32>())
-        .fold(0.0f32, f32::max);
-    row[M_SCALE] = 1.0 / (norm1.sqrt() * norm_inf.sqrt());
+    row[M_SCALE] = stretch_scale(&cols);
     row[M_SHAPE] = match mask.shape {
         MaskShape::Sphere => MASK_SPHERE,
         MaskShape::Box => MASK_BOX,
@@ -741,7 +761,10 @@ pub(crate) fn validate_world(scene: &Scene) -> Result<(), String> {
 impl WorldUpload {
     pub(crate) fn new(scene: &Scene, width: u32, height: u32) -> Result<Self, String> {
         scene.camera.validate_lens()?;
-        let mut params = scene.pack(width, height);
+        let mut params: [f32; P_COUNT] = scene
+            .pack(width, height)
+            .try_into()
+            .map_err(|_| "The scene's parameter block does not have P_COUNT slots".to_string())?;
         let mut objects = Vec::new();
         let mut lights = Vec::new();
         if scene.world_render {
@@ -765,15 +788,7 @@ impl WorldUpload {
                         objects.push(column[row]);
                     }
                 }
-                // ||A^-1||2 <= sqrt(||A^-1||1 ||A^-1||inf), so this is a
-                // conservative lower bound on sigma_min(A), including parent shear.
-                let norm1 = (0..3)
-                    .map(|c| (0..3).map(|r| cols[c][r].abs()).sum::<f32>())
-                    .fold(0.0f32, f32::max);
-                let norm_inf = (0..3)
-                    .map(|r| (0..3).map(|c| cols[c][r].abs()).sum::<f32>())
-                    .fold(0.0f32, f32::max);
-                let scale = 1.0 / (norm1.sqrt() * norm_inf.sqrt());
+                let scale = stretch_scale(&cols);
                 if !scale.is_finite() || scale <= 0.0 {
                     return Err(format!(
                         "World object {index} has an unusable distance scale"
@@ -818,12 +833,12 @@ impl WorldUpload {
             let camera = glam::Vec3::from_slice(&params[P_CAM_ORIGIN..P_CAM_ORIGIN + 3]);
             params[P_MAX_DISTANCE] = params[P_MAX_DISTANCE].max(camera.length() + 2.0 * extent);
             for light in &scene.lights {
-                let mut packed = Scene::preset(FAMILY_BULB);
-                packed.lighting = *light;
+                let mut packed = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
+                packed.sun = *light;
                 let mut p = packed.pack(1, 1);
                 // The world kernels have no delta light: a zero angle keeps a minimal cone.
                 let (omc, pdf) = crate::scene::sun_cone(
-                    (light.sun_angle * 0.5)
+                    (light.angle * 0.5)
                         .to_radians()
                         .clamp(1e-4, std::f32::consts::PI),
                 );
