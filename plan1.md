@@ -350,6 +350,16 @@ First build the safety net, then fix each divergence against the pinned fractal-
   SPIR-V per entry) and `create_compute_pipeline` time per entry; suspect constructs are the
   constant-trip refinement loops in `march` that inline the 28-family dynamic union. **Measure
   on an idle machine.**
+  **Root cause (measured 2026-10-23, RTX 3080 Ti, Vulkan, driver 616.64):** naga does not fold
+  the constant family argument, so every `*_f{code}` entry carried the whole 28-family
+  `family_distance` union (~30.9k inlined statements; reached from 169 call sites per trace
+  entry, 18 in pick); pick compile 17-20 s with 1 family, 55 s with 4, 137 s with 8, ~15 min
+  with 28. The NVIDIA driver's own disk cache already makes an unchanged SPIR-V recompile ~7 ms.
+  **Fix (done, uncommitted):** one shader module per family (`shader_source(family)`,
+  `family_distance_wgsl` generated from `FORMULAS[..].wgsl`), the dynamic module only for
+  mixed-family worlds; Mixed material x one family now specialized too; pick per module (lazy,
+  `homogeneous_family`); every pipeline via `gpu_info::create_compute_pipeline`; `--warmup` opens
+  the device + post pipelines only. Shader code paths, inlining and unrolling unchanged.
 
 ---
 
@@ -391,13 +401,12 @@ clippy `-D warnings` and fmt clean. **Wave 2's render changes are NOT verified o
 WGSL rewrite (CUDA ports, two-pass tally, glass absorption, generated entries) has not run, and
 `parity_tests::cuda_wgpu_primary_guides_agree_per_pixel` has never run (its tolerances are a
 guess). Blocked by 7.4: every WGPU test first compiles pipelines for 15+ min. Order: (1) CUDA-only
-`cuda_` tests (`--skip wgpu`) now; (2) fix 7.4 without touching the WGSL structure (the
-inlined 28-family union and unrolled loops are deliberate, for runtime speed - operator
-2026-10-23): every pipeline through `gpu_info::create_compute_pipeline` (persistent disk cache,
-Vulkan only in wgpu 30) and `--warmup` compiling all WGPU pipelines in bootstrap, like CUDA; (3) the WGPU and
-parity tests, tolerances tuned from measured numbers. Wave 2 does not merge to main before (3).
-Pending: warpbro window.rs -> `soluwell-window` migration (egui-widgets-rs), done by this branch
-after it lands, when colmap-rs pings the rev with present queue + gui_fps throttle.
+`cuda_` tests (`--skip wgpu`): done, 31/31; (2) 7.4 fixed by per-family shader modules (see 7.4;
+shader code paths, inlining and unrolling unchanged); (3) the WGPU and parity tests, tolerances
+tuned from measured numbers. Wave 2 does not merge to main before (3).
+window.rs migrated onto `soluwell-window` (egui-widgets-rs f5c71b3 added `App::presented`,
+Locked->Confined grab, surface clamp); CUDA has no per-family world kernels except
+`world_fast_bulb` (fractal-rs handoff, unmeasured).
 
 Approved by the operator ("unification, dedup, SSOT everywhere, fix everything systemically").
 Decisions taken by the lead: Q1 delete migrations after a one-time conversion (`#[ignore]` test

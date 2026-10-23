@@ -9,10 +9,12 @@
 //!                                                    render every gallery preset to DIR
 //!   WarpBro --bench [W H SPP]                        time every gallery preset
 //!   WarpBro --world-bench [DIR] [W H SPP] [--case NAME] [--seed N] [--batch 4|8] [--adaptive T]
+//!                         [--backend auto|cuda|wgpu]
 //!                                                    measure evaluated worlds (`render_bench`)
 //!   WarpBro --animated-fixtures [DIR] [W H SPP] [--all-frames]
 //!                                                    render the animated presets' frames
-//!   WarpBro --warmup-cuda                            initialize the embedded CUDA module
+//!   WarpBro --warmup                                 initialize the embedded CUDA module and
+//!                                                    the WGPU device, module and post pipelines
 
 mod animation;
 // The parameter ABI is shared with the CUDA kernels and with ofx-rs through fractal-rs; host code
@@ -225,13 +227,16 @@ fn main() -> anyhow::Result<()> {
     env_logger::init();
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
-        // Build-time warmup initializes the exact embedded module without opening
-        // a window or authoring scene state. The CUDA driver owns its JIT cache;
-        // this does not populate the Timeline frame cache or wait on the UI thread.
-        Some("--warmup-cuda") => {
+        // Build-time warmup, without a window or scene state: the CUDA driver JIT-caches the
+        // embedded module, and the WGPU device opens with its dynamic module and post pipelines
+        // (trace pipelines compile per family module on first use, then come from disk).
+        Some("--warmup") => {
             let started = std::time::Instant::now();
             let gpu = render::Gpu::new()?;
             println!("CUDA ready: {} ({:?})", gpu.name, started.elapsed());
+            let started = std::time::Instant::now();
+            let backend = render_wgpu::warmup().map_err(anyhow::Error::msg)?;
+            println!("WGPU ready on {backend:?} ({:?})", started.elapsed());
             Ok(())
         }
         Some("--world-bench") => render_bench::run(&args),

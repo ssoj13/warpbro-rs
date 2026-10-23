@@ -16,6 +16,12 @@ Two compute backends render the same packed scene ABI (`fractal_core::params`, `
   the cuda-oxide rustc backend and linked in with `#[cuda_module]`. Classic families 0..8 only.
 - **WGPU**: a WGSL port (`src/render_wgpu.wgsl` + `src/formulas.wgsl`) on the shared
   `gpu_info::shared_device()`. All 28 families. Extended families 8..27 exist only here.
+  One shader module per family plus a dynamic one (`render_wgpu::shader_source(family)`): a
+  family module's `family_distance` is that family's estimator alone, generated from
+  `formulas::FORMULAS[..].wgsl`; the dynamic module switches over all 28 (mixed-family worlds
+  only). Reason: naga does not fold a constant family argument, so the old one-module design
+  gave every "specialized" pipeline the whole union, inlined by the driver at ~170 call sites
+  (minutes per pipeline). Pipelines go through `gpu_info::create_compute_pipeline` (disk cache).
 
 Build only through cuda-oxide (`cargo oxide build`, `python bootstrap.py b`); type-check with
 `FRAC_ALLOW_PLAIN_CARGO=1 cargo check --all-targets` or `cargo clippy` (build.rs skips the backend
@@ -25,8 +31,8 @@ check for clippy / rust-analyzer).
 
 | Area | Files | Role |
 |---|---|---|
-| Entry | `main.rs` | CLI modes (`--gallery`, `--bench`, `--world-bench`, `--animated-fixtures`, `--warmup-cuda`), else `app::run` |
-| Window | `window.rs`, `window_shot.rs` | winit + wgpu surface, fixed-rate redraw at `gui_fps`, float canvas present, window screenshots |
+| Entry | `main.rs` | CLI modes (`--gallery`, `--bench`, `--world-bench`, `--animated-fixtures`, `--warmup`), else `app::run` |
+| Window | `window.rs`, `window_shot.rs` | adapter onto the shared `soluwell-window` host (egui-widgets-rs): private present queue, `max_fps` = `gui_fps`, HDR window shots via `App::presented` |
 | App shell | `app.rs` (7k), `dock.rs`, `hotkeys.rs`, `file_dialogs.rs` | `App` owns everything; per-frame `App::ui`; dock panels; scoped hotkeys |
 | Document | `world.rs` (6.5k), `world_ui.rs` (6k), `takes*.rs`, `camera_*.rs`, `animation.rs` | Playa-graph world document, commands, undo, evaluation; outliner / timeline / Attribute Editor; recorded takes |
 | Scene | `scene.rs`, `formulas.rs`, `presets.rs`, `templates.rs`, `materials.rs`, `palette.rs`, `environment.rs` | Evaluated `Scene` (typed), `Scene::pack` to the kernel ABI, formula registry, built-in presets/templates |
@@ -39,7 +45,7 @@ check for clippy / rust-analyzer).
 
 ```
 main.rs:main --> app::run --> window::run
-  Native::redraw (window.rs:124): surface -> ctx.run_ui -> App::ui (app.rs:4680) -> paint_canvas -> present
+  soluwell_window::run: ctx.run_ui -> Window::ui -> App::ui -> paint -> present -> Window::presented (window shots)
 
 App owns:
   world: WorldEditor (world.rs:356)   document + undo/redo     <- the ONLY authored state
@@ -92,7 +98,8 @@ run_worker (render_service.rs:1126) owns Gpu:
   Gpu::step_with_display (render.rs:779)
     resolve_backend_for_scene (295): Auto -> CUDA, WGPU for extended families / no CUDA
     PreparationCache::get (render_prep.rs:374) -> PreparedScene (WorldUpload: params, objects, masks, lights)
-    trace: CUDA kernels (world / world_fast / world_direct / per family) | WgpuEngine launch_* (render_wgpu.rs)
+    trace: CUDA kernels (world / world_fast / world_direct / per family) | WgpuEngine launch_* (render_wgpu.rs:
+           trace_entry -> TraceEntry {world, shade, family} -> the family's module, compiled on first use)
     adapt (active tiles) / tally (unresolved) / process_denoise (OIDN, denoise::State::due cadence)
     display: tonemap -> ColorPipeline::apply_into (OCIO) -> Target.light / Target.pixels
   Frame::snapshot (render_service.rs:144) -> publish_frame -> UI texture | ExportFrame -> writer

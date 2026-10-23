@@ -7,13 +7,16 @@
 // specializations (`render_wgpu::TraceEntry`), the private `normal_iterations` context instead
 // of CUDA's `Context` field, the two-pass `tally`, and the OFX tile frame CUDA has no twin of.
 //
-// Pre-prepended by `render_wgpu::shader_source()`:
+// Pre-prepended by `render_wgpu::shader_source(family)` (one module per family + a dynamic one):
 // 1. `standard_surface_bsdf::wgsl_source()`
 // 2. All `P_*`, `O_*`, `M_*`, `FAMILY_*`, `MASK_*`, `ARRAY_*`, `PALETTE_SAMPLES`,
 //    `TALLY_THREADS` constants and the `SIGNED_MASK` / `ITERATING_MASK` family bit sets of
 //    `formulas::FORMULAS`.
-// Appended by it: every trace entry point (`render_wgpu::TraceEntry::all`), one line each
-// calling `trace_pixel(linear_id(gid, nwg), is_world, family, mat_spec, is_direct)`.
+// Appended by it: `family_distance` (the module family's estimator, or a switch over every
+// family for the dynamic module: `render_wgpu::family_distance_wgsl`), the module's trace entry
+// points (`render_wgpu::TraceEntry::all`), one line each calling
+// `trace_pixel(linear_id(gid, nwg), is_world, family, mat_spec, is_direct)`, and its `pick`
+// (`pick_ray(gid, family)`).
 
 @group(0) @binding(0) var<uniform> params_u: array<vec4<f32>, 64>;
 @group(0) @binding(1) var<storage, read> lut: array<vec4<f32>>;
@@ -960,102 +963,6 @@ fn hybrid_distance(
         }
     }
     return fraction_blend(frac, 0.5 * length(z) / dr, trap);
-}
-
-fn family_distance(
-    is_world: bool,
-    obj: u32,
-    family_override: u32,
-    p: vec3<f32>,
-    trap_mode: u32,
-) -> vec2<f32> {
-    let family = resolved_family(is_world, obj, family_override);
-    switch family {
-        case FAMILY_BOX: {
-            return box_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_QUAT: {
-            return quat_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_KIFS: {
-            return kifs_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_KLEINIAN: {
-            return kleinian_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_PSEUDO_KLEINIAN: {
-            return pseudo_kleinian_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_APOLLONIAN: {
-            return apollonian_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_HYBRID: {
-            return hybrid_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_AMAZING_SURFACE: {
-            return amazing_surface_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_BRISTORBROT: {
-            return bristorbrot_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_BURNING_SHIP: {
-            return burning_ship_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_KALEIDO_TWIST: {
-            return kaleido_twist_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_POLYHEDRAL_KIFS: {
-            return polyhedral_kifs_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_HARMONIC_BULB: {
-            return harmonic_bulb_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_MANDELBAR: {
-            return mandelbar_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_MOBIUS_IFS: {
-            return mobius_ifs_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_GYROID_TPMS: {
-            return gyroid_tpms_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_LIDINOID_TPMS: {
-            return lidinoid_tpms_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_ATTRACTOR_TUBE: {
-            return attractor_tube_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_TORUS_KNOT: {
-            return torus_knot_braid_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_HOPF_FIBRATION: {
-            return hopf_fibration_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_DUPIN_CYCLIDE: {
-            return dupin_cyclide_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_SUPERFORMULA: {
-            return superformula_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_PHYLLOTAXIS: {
-            return phyllotaxis_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_NAUTILUS: {
-            return nautilus_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_VORONOI_FOAM: {
-            return voronoi_foam_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_CRYSTAL_GEODE: {
-            return crystal_geode_distance(is_world, obj, p, trap_mode);
-        }
-        case FAMILY_ASTROLABE: {
-            return astrolabe_distance(is_world, obj, p, trap_mode);
-        }
-        default: {
-            return bulb_distance(is_world, obj, p, trap_mode);
-        }
-    }
 }
 
 fn formula_bound(is_world: bool, obj: u32, p: vec3<f32>, d: f32) -> f32 {
@@ -3698,8 +3605,9 @@ fn tonemap_display(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_w
     sdr_out[i] = pack_srgb_rgba8(rgb);
 }
 
-@compute @workgroup_size(1, 1, 1)
-fn pick(@builtin(global_invocation_id) gid: vec3<u32>) {
+// The pick ray of the query in `aux_out[0]` (a generated `pick` entry per module calls it with
+// the module's family: `FAMILY_DYNAMIC` or one family code).
+fn pick_ray(gid: vec3<u32>, family_override: u32) {
     if gid.x != 0u {
         return;
     }
@@ -3711,8 +3619,8 @@ fn pick(@builtin(global_invocation_id) gid: vec3<u32>) {
     let hw = param(P_HALF_W);
     let hh = param(P_HALF_H);
     let dir = normalize(fwd + (right * (q.x * hw) + up * (q.y * hh)));
-    let start = cone_start(true, FAMILY_DYNAMIC, origin, dir);
-    let m = march(true, FAMILY_DYNAMIC, origin, dir, RAY_PRIMARY, 0.0, param(P_FOOTPRINT), start);
+    let start = cone_start(true, family_override, origin, dir);
+    let m = march(true, family_override, origin, dir, RAY_PRIMARY, 0.0, param(P_FOOTPRINT), start);
     if m.hit {
         let t = length(m.point - origin);
         let depth = t * dot(dir, fwd);

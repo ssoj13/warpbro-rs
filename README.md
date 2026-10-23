@@ -166,10 +166,12 @@ WarpBro is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX
 On Windows, `python bootstrap.py d --fix` sets up the Rust tools, then `python bootstrap.py b`
 builds the release binary `target/release/WarpBro.exe`. The bootstrap discovers the MSVC, Windows SDK and CUDA environment
 through `vcv-rs`, so a Developer Command Prompt is unnecessary. After linking, it initializes
-the exact executable's CUDA module and parameter block to warm the driver's JIT cache.
+the exact executable's CUDA module and parameter block to warm the driver's JIT cache, and
+opens the WGPU device with its shader module and post pipelines. WGPU trace pipelines compile
+per fractal family on first use (seconds) and are kept on disk by the driver and gpu-info.
 A module/ABI initialization failure now fails the build instead of appearing only in the UI.
-Use `--skip-cuda-warmup` for packaging/cross-builds without a GPU. For a direct
-`cargo oxide build`, run `target/release/WarpBro --warmup-cuda` afterward.
+Use `--skip-warmup` for packaging/cross-builds without a GPU. For a direct
+`cargo oxide build`, run `target/release/WarpBro --warmup` afterward.
 
 On Linux / WSL2:
 
@@ -475,8 +477,8 @@ material previews and Gallery wait for it. Release archives avoid it on most GPU
   other GPU, or a driver older than CUDA 13 that cannot read the fat binary, falls back to the
   PTX and its JIT compile; `CUDA_OXIDE_VERBOSE=1` reports the fallback.
 - `python bootstrap.py b` (PTX only) warms the cache for the executable it built, on this GPU,
-  before reporting success (`--skip-cuda-warmup` skips it).
-- On the PTX route, `WarpBro --warmup-cuda` warms the cache ahead of time: it creates the
+  before reporting success (`--skip-warmup` skips it).
+- On the PTX route, `WarpBro --warmup` warms the cache ahead of time: it creates the
   context, loads and validates the module, and exits. A driver update, another GPU, a cleared
   cache or `CUDA_CACHE_DISABLE` means warming again; `CUDA_CACHE_PATH` and
   `CUDA_CACHE_MAXSIZE` must match between warm-up and use.

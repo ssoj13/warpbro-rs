@@ -67,9 +67,11 @@ const TRACE_SLOTS: usize = 2 * Shade::ALL.len() * (FAMILIES + 1);
 /// One trace entry point: the one table [`shader_source`] generates the WGSL entries from and
 /// the pipeline cache ([`WgpuShared::trace_pipe`]) is keyed by, so a name or a slot cannot
 /// drift from its entry. `family: None` reads each object's `P_FAMILY` (the WGSL
-/// `FAMILY_DYNAMIC` sentinel); `Some(code)` inlines that family's estimate. Family codes and
-/// the dynamic case never share a value (plan1 2.8: fractal-core's `FAMILY_WORLD` equals the
-/// extended family code 8, so a sentinel inside the family range would misroute it).
+/// `FAMILY_DYNAMIC` sentinel) and lives in the dynamic module; `Some(code)` lives in that
+/// family's module, whose `family_distance` is the family's estimator alone
+/// ([`family_distance_wgsl`]). Family codes and the dynamic case never share a value (plan1 2.8:
+/// fractal-core's `FAMILY_WORLD` equals the extended family code 8, so a sentinel inside the
+/// family range would misroute it).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TraceEntry {
     pub(crate) world: bool,
@@ -78,18 +80,13 @@ pub(crate) struct TraceEntry {
 }
 
 impl TraceEntry {
-    /// Every entry [`shader_source`] emits. World scenes: each shade dynamic, and except Mixed
-    /// also specialized to each family (`PreparedScene::homogeneous_family`). Single scenes
-    /// know their one family, so they are only specialized.
+    /// Every entry of every module. World scenes: each shade dynamic and specialized to each
+    /// family (`PreparedScene::homogeneous_family`). Single scenes know their one family, so
+    /// they are only specialized.
     pub(crate) fn all() -> impl Iterator<Item = Self> {
         let world = Shade::ALL.into_iter().flat_map(|shade| {
-            let specialized = if shade == Shade::Mixed {
-                0
-            } else {
-                FAMILIES as u32
-            };
             std::iter::once(None)
-                .chain((0..specialized).map(Some))
+                .chain((0..FAMILIES as u32).map(Some))
                 .map(move |family| Self {
                     world: true,
                     shade,
@@ -127,9 +124,7 @@ impl TraceEntry {
     /// The WGSL source of the entry: 128 invocations per workgroup over the 2D dispatch of
     /// [`WgpuEngine::groups`], flattened by `linear_id`.
     fn wgsl(self) -> String {
-        let family = self
-            .family
-            .map_or_else(|| "FAMILY_DYNAMIC".to_string(), |code| format!("{code}u"));
+        let family = wgsl_family(self.family);
         format!(
             "@compute @workgroup_size(128, 1, 1) fn {}(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {{ trace_pixel(linear_id(gid, nwg), {}, {family}, {}); }}\n",
             self.name(),
@@ -140,9 +135,9 @@ impl TraceEntry {
 }
 
 /// The trace entry of one launch. Direct wins over the material; a world takes its objects'
-/// common material model (`force_mixed_world`: the per-object dispatcher, a test oracle) and,
-/// unless Mixed, the entry specialized to its objects' common family; a single scene always
-/// takes its family's entry.
+/// common material model and the entry specialized to its objects' common family
+/// (`force_mixed_world`: the per-object material and family dispatch, a test oracle); a single
+/// scene always takes its family's entry.
 fn trace_entry(
     scene: &Scene,
     prepared: &PreparedScene,
@@ -168,7 +163,7 @@ fn trace_entry(
     };
     let family = if !scene.world_render {
         Some(scene.formula.code())
-    } else if force_mixed_world || shade == Shade::Mixed {
+    } else if force_mixed_world {
         None
     } else {
         prepared.homogeneous_family
@@ -180,10 +175,17 @@ fn trace_entry(
     }
 }
 
-/// Assemble the complete WGSL source: `standard_surface_bsdf::wgsl_source()`, the `P_*` / `O_*` /
-/// `M_*` constants from `fractal_core::params`, the family registry's codes and masks,
-/// `render_wgpu.wgsl`, and the trace entry points of [`TraceEntry::all`].
-pub fn shader_source() -> String {
+/// The WGSL source of one shader module: `standard_surface_bsdf::wgsl_source()`, the `P_*` /
+/// `O_*` / `M_*` constants from `fractal_core::params`, the family registry's codes and masks,
+/// `render_wgpu.wgsl`, the module's `family_distance` ([`family_distance_wgsl`]) and its entry
+/// points: the trace entries of `family` ([`TraceEntry::all`]) and a `pick`.
+///
+/// **Why one module per family:** naga does not fold a constant family argument, so an entry
+/// specialized by argument alone still carried the whole 28-family union, which the driver
+/// inlines at every one of ~170 estimate call sites: minutes of driver compile per pipeline
+/// (measured 2026-10-23, RTX 3080 Ti, Vulkan: pick 17-20 s with one family, ~15 min with 28). A
+/// family module holds that family's estimator only - the code its specialized pipeline runs.
+pub fn shader_source(family: Option<u32>) -> String {
     use std::fmt::Write;
     let mut s = String::with_capacity(65536);
     s.push_str(standard_surface_bsdf::wgsl_source());
@@ -433,9 +435,59 @@ pub fn shader_source() -> String {
     );
     s.push_str(include_str!("formulas.wgsl"));
     s.push_str(include_str!("render_wgpu.wgsl"));
-    for entry in TraceEntry::all() {
+    s.push_str(&family_distance_wgsl(family));
+    for entry in TraceEntry::all().filter(|entry| entry.family == family) {
         s.push_str(&entry.wgsl());
     }
+    let _ = writeln!(
+        s,
+        "@compute @workgroup_size(1, 1, 1) fn pick(@builtin(global_invocation_id) gid: vec3<u32>) {{ pick_ray(gid, {}); }}",
+        wgsl_family(family)
+    );
+    s
+}
+
+/// The WGSL family argument of a module: `FAMILY_DYNAMIC` or the family code.
+fn wgsl_family(family: Option<u32>) -> String {
+    family.map_or_else(|| "FAMILY_DYNAMIC".to_string(), |code| format!("{code}u"))
+}
+
+/// `family_distance` (an object's raw estimate and trap) of a module, generated from the family
+/// registry (`formulas::FORMULAS`, each row's `wgsl` estimator): for `None` a switch over every
+/// family on the object's resolved family, for `Some(code)` that family's estimator alone.
+fn family_distance_wgsl(family: Option<u32>) -> String {
+    use std::fmt::Write;
+    let mut s = String::from(
+        "fn family_distance(is_world: bool, obj: u32, family_override: u32, p: vec3<f32>, trap_mode: u32) -> vec2<f32> {\n",
+    );
+    match family {
+        Some(code) => {
+            let _ = writeln!(
+                s,
+                "    return {}(is_world, obj, p, trap_mode);",
+                crate::formulas::FORMULAS[code as usize].wgsl
+            );
+        }
+        None => {
+            s.push_str("    switch resolved_family(is_world, obj, family_override) {\n");
+            for meta in &crate::formulas::FORMULAS {
+                // WGSL requires a default clause: the Mandelbulb row is it. Host-side codes are
+                // validated (`Formula::from_code`), so no other value reaches here.
+                let label = if meta.code == FAMILY_BULB {
+                    "default".to_string()
+                } else {
+                    format!("case {}u", meta.code)
+                };
+                let _ = writeln!(
+                    s,
+                    "        {label}: {{ return {}(is_world, obj, p, trap_mode); }}",
+                    meta.wgsl
+                );
+            }
+            s.push_str("    }\n");
+        }
+    }
+    s.push_str("}\n");
     s
 }
 
@@ -480,15 +532,20 @@ fn scope_error(pop: impl Future<Output = Option<wgpu::Error>>) -> Option<String>
 struct WgpuShared {
     device: wgpu::Device,
     queue: wgpu::Queue,
+    /// The adapter the device came from: the key of its persistent pipeline cache ([`compile`]).
+    info: wgpu::AdapterInfo,
     adapter_name: String,
     /// The device's limits, read once: dispatch sizes (`WgpuEngine::groups`) and film buffer
     /// sizes (`WgpuEngine::create_target`) are checked against them.
     limits: wgpu::Limits,
-    module: wgpu::ShaderModule,
+    /// The shader modules ([`shader_source`]): one per family, created on first use, and the
+    /// dynamic one (last cell, created with the device: the post pipelines come from it).
+    modules: Box<[OnceLock<wgpu::ShaderModule>]>,
     trace_bgl: wgpu::BindGroupLayout,
     post_bgl: wgpu::BindGroupLayout,
     pick_bgl: wgpu::BindGroupLayout,
     trace_layout: wgpu::PipelineLayout,
+    pick_layout: wgpu::PipelineLayout,
     /// The trace pipelines, compiled on first use: one cell per [`TraceEntry::slot`].
     trace: Box<[OnceLock<wgpu::ComputePipeline>]>,
     tally: wgpu::ComputePipeline,
@@ -496,33 +553,95 @@ struct WgpuShared {
     adapt: wgpu::ComputePipeline,
     tonemap: wgpu::ComputePipeline,
     tonemap_display: wgpu::ComputePipeline,
-    pick: wgpu::ComputePipeline,
+    /// The pick pipeline of each module ([`module_slot`]), compiled on the first pick of a world
+    /// of that family (or of mixed families): a session that never picks never compiles one.
+    picks: Box<[OnceLock<wgpu::ComputePipeline>]>,
+}
+
+/// The cell of `family`'s module (and pick pipeline): the family code, the dynamic module last.
+fn module_slot(family: Option<u32>) -> usize {
+    family.map_or(FAMILIES, |code| code as usize)
+}
+
+/// Compile entry `entry` of `module` through the device's persistent pipeline cache
+/// (`gpu_info::create_compute_pipeline`: compiled once per adapter and driver, loaded by every
+/// later process; Vulkan only in wgpu 30, elsewhere a plain compile). Caller holds error scopes.
+fn compile(
+    device: &wgpu::Device,
+    info: &wgpu::AdapterInfo,
+    module: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    entry: &str,
+) -> wgpu::ComputePipeline {
+    gpu_info::create_compute_pipeline(
+        device,
+        info,
+        &wgpu::ComputePipelineDescriptor {
+            label: Some(entry),
+            layout: Some(layout),
+            module,
+            entry_point: Some(entry),
+            compilation_options: Default::default(),
+            cache: None,
+        },
+    )
 }
 
 impl WgpuShared {
-    /// The trace pipeline of `entry`, compiled on first use inside error scopes: a WGSL entry
-    /// that fails to compile is an `Err` of the launch, not a panic.
+    /// `family`'s shader module ([`shader_source`]), created on first use inside error scopes.
+    fn module(&self, family: Option<u32>) -> Result<&wgpu::ShaderModule, RenderError> {
+        let cell = self.modules.get(module_slot(family)).ok_or_else(|| {
+            RenderError::Device(format!("family {family:?} has no shader module"))
+        })?;
+        if let Some(module) = cell.get() {
+            return Ok(module);
+        }
+        let module = with_error_scopes(&self.device, || {
+            self.device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("warpbro_render_wgpu"),
+                    source: wgpu::ShaderSource::Wgsl(shader_source(family).into()),
+                })
+        })
+        .map_err(|e| RenderError::Device(format!("WGSL module of family {family:?}: {e}")))?;
+        Ok(cell.get_or_init(|| module))
+    }
+
+    /// The pipeline in `cell` of entry `name` in `family`'s module, compiled on first use inside
+    /// error scopes: a WGSL entry that fails to compile is an `Err` of the launch, not a panic.
+    fn lazy<'a>(
+        &self,
+        cell: &'a OnceLock<wgpu::ComputePipeline>,
+        layout: &wgpu::PipelineLayout,
+        family: Option<u32>,
+        name: &str,
+    ) -> Result<&'a wgpu::ComputePipeline, RenderError> {
+        if let Some(pipe) = cell.get() {
+            return Ok(pipe);
+        }
+        let module = self.module(family)?;
+        let pipe = with_error_scopes(&self.device, || {
+            compile(&self.device, &self.info, module, layout, name)
+        })
+        .map_err(|e| RenderError::Device(format!("{name}: {e}")))?;
+        Ok(cell.get_or_init(|| pipe))
+    }
+
+    /// The trace pipeline of `entry` ([`Self::lazy`]).
     fn trace_pipe(&self, entry: TraceEntry) -> Result<&wgpu::ComputePipeline, RenderError> {
         let cell = self.trace.get(entry.slot()).ok_or_else(|| {
             RenderError::Device(format!("{} has no trace pipeline slot", entry.name()))
         })?;
-        if let Some(pipe) = cell.get() {
-            return Ok(pipe);
-        }
-        let name = entry.name();
-        let pipe = with_error_scopes(&self.device, || {
-            self.device
-                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some(&name),
-                    layout: Some(&self.trace_layout),
-                    module: &self.module,
-                    entry_point: Some(&name),
-                    compilation_options: Default::default(),
-                    cache: None,
-                })
-        })
-        .map_err(|e| RenderError::Device(format!("{name}: {e}")))?;
-        Ok(cell.get_or_init(|| pipe))
+        self.lazy(cell, &self.trace_layout, entry.family, &entry.name())
+    }
+
+    /// The pick pipeline of `family`'s module ([`Self::lazy`]).
+    fn pick_pipe(&self, family: Option<u32>) -> Result<&wgpu::ComputePipeline, RenderError> {
+        let cell = self
+            .picks
+            .get(module_slot(family))
+            .ok_or_else(|| RenderError::Device(format!("family {family:?} has no pick")))?;
+        self.lazy(cell, &self.pick_layout, family, "pick")
     }
 
     /// The two `tally` passes after a trace or `adapt` dispatch of `pass` (post bind group set):
@@ -534,6 +653,14 @@ impl WgpuShared {
         pass.set_pipeline(&self.tally_sum);
         pass.dispatch_workgroups(1, 1, 1);
     }
+}
+
+/// Open the WGPU device with its dynamic module and post pipelines (the build-time `--warmup`:
+/// a broken module fails the build, not the first launch). Trace and pick pipelines compile on
+/// first use - seconds per family module - and the driver and gpu-info keep them on disk.
+/// Returns the device's backend (only Vulkan keeps gpu-info's pipeline cache).
+pub fn warmup() -> Result<wgpu::Backend, String> {
+    Ok(shared_wgpu()?.info.backend)
 }
 
 static SHARED_WGPU: OnceLock<Result<Arc<WgpuShared>, String>> = OnceLock::new();
@@ -560,10 +687,9 @@ fn shared_wgpu() -> Result<Arc<WgpuShared>, String> {
             let queue = shared.queue.clone();
             let adapter_name = format!("{} (WGPU)", info.name);
             with_error_scopes(&shared.device, || {
-                let source = shader_source();
                 let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some("warpbro_render_wgpu"),
-                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                    source: wgpu::ShaderSource::Wgsl(shader_source(None).into()),
                 });
 
                 let bgl_entry = |binding: u32, read_only: bool| wgpu::BindGroupLayoutEntry {
@@ -638,14 +764,7 @@ fn shared_wgpu() -> Result<Arc<WgpuShared>, String> {
                 });
 
                 let make_pipe = |layout: &wgpu::PipelineLayout, entry: &str| {
-                    device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                        label: Some(entry),
-                        layout: Some(layout),
-                        module: &module,
-                        entry_point: Some(entry),
-                        compilation_options: Default::default(),
-                        cache: None,
-                    })
+                    compile(&device, &info, &module, layout, entry)
                 };
 
                 Arc::new(WgpuShared {
@@ -655,13 +774,23 @@ fn shared_wgpu() -> Result<Arc<WgpuShared>, String> {
                     adapt: make_pipe(&post_layout, "adapt"),
                     tonemap: make_pipe(&post_layout, "tonemap"),
                     tonemap_display: make_pipe(&post_layout, "tonemap_display"),
-                    pick: make_pipe(&pick_layout, "pick"),
-                    module,
+                    picks: (0..=FAMILIES).map(|_| OnceLock::new()).collect(),
+                    modules: (0..=FAMILIES)
+                        .map(|slot| {
+                            if slot == module_slot(None) {
+                                OnceLock::from(module.clone())
+                            } else {
+                                OnceLock::new()
+                            }
+                        })
+                        .collect(),
                     trace_layout,
+                    pick_layout,
                     limits: device.limits(),
                     device,
                     queue,
                     adapter_name,
+                    info,
                     trace_bgl,
                     post_bgl,
                     pick_bgl,
@@ -1523,7 +1652,14 @@ impl WgpuEngine {
         )
     }
 
-    pub fn pick(&self, ndc: [f32; 2]) -> Result<Option<(usize, f32)>, RenderError> {
+    /// The object under `ndc` (see `Gpu::pick`), marched in `family`'s module: the world's
+    /// common family (`PreparedScene::homogeneous_family`), `None` for mixed families.
+    pub fn pick(
+        &self,
+        ndc: [f32; 2],
+        family: Option<u32>,
+    ) -> Result<Option<(usize, f32)>, RenderError> {
+        let pipe = self.shared.pick_pipe(family)?;
         let query = [[ndc[0], ndc[1], 0.0f32, 0.0f32]];
         let bg = with_error_scopes(&self.shared.device, || {
             self.shared
@@ -1555,7 +1691,7 @@ impl WgpuEngine {
                     .queue
                     .write_buffer(&self.pick_aux, 0, bytemuck::cast_slice(&query));
                 let mut pass = compute(encoder, "warpbro_wgpu_pick_pass");
-                pass.set_pipeline(&self.shared.pick);
+                pass.set_pipeline(pipe);
                 pass.set_bind_group(0, &bg, &[]);
                 pass.dispatch_workgroups(1, 1, 1);
             },
@@ -1571,27 +1707,49 @@ impl WgpuEngine {
 mod tests {
     use super::*;
 
+    /// Each module carries the post entries, one `pick` and exactly its own trace entries; a
+    /// family module's `family_distance` is that family's estimator alone, the dynamic one a
+    /// switch over every family of the registry.
     #[test]
-    fn wgpu_shader_source_contains_all_compute_entry_points() {
-        let src = shader_source();
-        for entry in [
-            "fn tally(",
-            "fn tally_sum(",
-            "fn adapt(",
-            "fn tonemap(",
-            "fn tonemap_display(",
-            "fn pick(",
-        ] {
-            assert!(src.contains(entry), "missing entry point {entry}");
+    fn wgpu_shader_modules_contain_their_entry_points() {
+        let families = std::iter::once(None).chain((0..FAMILIES as u32).map(Some));
+        for family in families {
+            let src = shader_source(family);
+            for entry in [
+                "fn tally(",
+                "fn tally_sum(",
+                "fn adapt(",
+                "fn tonemap(",
+                "fn tonemap_display(",
+            ] {
+                assert!(
+                    src.contains(entry),
+                    "{family:?}: missing entry point {entry}"
+                );
+            }
+            assert_eq!(src.matches(" fn pick(").count(), 1, "{family:?}: one pick");
+            for entry in TraceEntry::all() {
+                let name = format!("fn {}(", entry.name());
+                let want = usize::from(entry.family == family);
+                assert_eq!(src.matches(&name).count(), want, "{family:?}: {name}");
+            }
+            let estimate = family_distance_wgsl(family);
+            match family {
+                Some(code) => {
+                    assert!(!estimate.contains("switch"), "{code}: {estimate}");
+                    assert!(estimate.contains(crate::formulas::FORMULAS[code as usize].wgsl));
+                }
+                None => {
+                    for meta in &crate::formulas::FORMULAS {
+                        assert!(estimate.contains(meta.wgsl), "dynamic misses {}", meta.wgsl);
+                    }
+                }
+            }
+            assert!(
+                !src.contains("FAMILY_WORLD"),
+                "the dynamic family is FAMILY_DYNAMIC, never fractal-core's FAMILY_WORLD (= family 8)"
+            );
         }
-        for entry in TraceEntry::all() {
-            let name = format!("fn {}(", entry.name());
-            assert_eq!(src.matches(&name).count(), 1, "{name} must be emitted once");
-        }
-        assert!(
-            !src.contains("FAMILY_WORLD"),
-            "the dynamic family is FAMILY_DYNAMIC, never fractal-core's FAMILY_WORLD (= family 8)"
-        );
     }
 
     /// One generated entry per (scope, shade, family), each with its own pipeline slot: a
@@ -1599,7 +1757,7 @@ mod tests {
     #[test]
     fn trace_entries_have_unique_names_and_slots() {
         let entries: Vec<TraceEntry> = TraceEntry::all().collect();
-        assert_eq!(entries.len(), 1 + 3 * (FAMILIES + 1) + 3 * FAMILIES);
+        assert_eq!(entries.len(), 4 * (FAMILIES + 1) + 3 * FAMILIES);
         let mut names: Vec<String> = entries.iter().map(|e| e.name()).collect();
         let mut slots: Vec<usize> = entries.iter().map(|e| e.slot()).collect();
         names.sort();
@@ -1616,8 +1774,8 @@ mod tests {
 
     /// The launch routing (GPU-free): single scenes take their family's entry in every shade
     /// (an extended family included), a homogeneous Fast world (also one Fast Mandelbulb, the
-    /// old `world_fast_bulb`) takes `world_fast_f{family}`, a Mixed or forced-mixed world the
-    /// dynamic `world_mixed`.
+    /// old `world_fast_bulb`) takes `world_fast_f{family}`, mixed materials of one family
+    /// `world_mixed_f{family}`, a forced-mixed world the dynamic `world_mixed`.
     #[test]
     fn trace_entry_routes_each_scene_to_its_specialization() {
         use crate::scene::{Bulb, Formula};
@@ -1647,7 +1805,7 @@ mod tests {
         world.objects = vec![amazing.clone(), amazing.clone()];
         assert_eq!(name(&world, false, false), "world_full_f8");
         world.objects[1].material.model = crate::scene::MaterialModel::Fast;
-        assert_eq!(name(&world, false, false), "world_mixed");
+        assert_eq!(name(&world, false, false), "world_mixed_f8");
         world.objects[1] = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
         world.objects[1].material.model = crate::scene::MaterialModel::StandardSurface;
         assert_eq!(name(&world, false, false), "world_full");

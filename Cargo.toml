@@ -37,11 +37,11 @@ cuda-host = { git = "ssh://git@github.com/ssoj13/cuda-rust-windows.git", branch 
 cuda-core = { git = "ssh://git@github.com/ssoj13/cuda-rust-windows.git", branch = "main" }
 egui = "0.36"
 soluwell-viewport = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
+# The native window host (winit + wgpu + egui-winit, HDR present), shared with av-graph-gui and colmap-ui.
+soluwell-window = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
 # Viewport transform manipulator (Q / W / E / R tools, as in Playa).
 egui-wgpu = "0.36"
-egui-winit = "0.36"
 wgpu = "30"
-winit = "0.30"
 bytemuck = "1"
 anyhow = "1"
 vfx-ocio = { git = "ssh://git@github.com/ssoj13/oiio-rs.git", branch = "main", features = ["gpu", "parallel"] }

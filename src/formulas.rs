@@ -98,6 +98,9 @@ pub struct ParamMeta {
 pub struct FormulaMeta {
     /// The family code (`P_FAMILY`), equal to the row's index in [`FORMULAS`].
     pub code: u32,
+    /// The family's WGSL distance estimator (`render_wgpu.wgsl`), called by the generated
+    /// `family_distance` (`render_wgpu::family_distance_wgsl`).
+    pub wgsl: &'static str,
     /// Enum variant key in `Formula` (e.g. `"AmazingSurface"`).
     pub variant: &'static str,
     /// The family's name in the Formula dropdown, the inspector and new scene names
@@ -727,6 +730,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     // 0..8: Classic 8 families
     FormulaMeta {
         code: FAMILY_BULB,
+        wgsl: "bulb_distance",
         variant: "Mandelbulb",
         display_name: "Mandelbulb",
         hint: "Spherical triplex power fractal (White & Nylander)",
@@ -783,6 +787,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_BOX,
+        wgsl: "box_distance",
         variant: "Mandelbox",
         display_name: "Mandelbox",
         hint: "Box-fold and sphere-fold conformal fractal (Tglad)",
@@ -839,6 +844,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_QUAT,
+        wgsl: "quat_distance",
         variant: "QuaternionJulia",
         display_name: "Quaternion Julia",
         hint: "3D slice of a 4D quaternion quadratic Julia set",
@@ -886,6 +892,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_KIFS,
+        wgsl: "kifs_distance",
         variant: "Kifs",
         display_name: "KIFS",
         hint: "Kaleidoscopic Iterated Function System (Tetrahedron, Octahedron, Menger)",
@@ -933,6 +940,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_KLEINIAN,
+        wgsl: "kleinian_distance",
         variant: "Kleinian",
         display_name: "Kleinian",
         hint: "Maskit slice Kleinian limit set via box wrap and sphere inversion",
@@ -971,6 +979,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_PSEUDO_KLEINIAN,
+        wgsl: "pseudo_kleinian_distance",
         variant: "PseudoKleinian",
         display_name: "Pseudo-Kleinian",
         hint: "Knighty Mandelbox-Kleinian limit set with cylindrical Thingy estimator",
@@ -1036,6 +1045,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_APOLLONIAN,
+        wgsl: "apollonian_distance",
         variant: "Apollonian",
         display_name: "Apollonian",
         hint: "3D Apollonian gasket foam via periodic lattice fold and sphere inversion",
@@ -1065,6 +1075,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_HYBRID,
+        wgsl: "hybrid_distance",
         variant: "Hybrid",
         display_name: "Hybrid",
         hint: "4-slot alternating hybrid of Mandelbulb, Mandelbox, KIFS, and Apollonian steps",
@@ -1104,6 +1115,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     // 8..28: 20 Extended Fractals & Procedural Shapes
     FormulaMeta {
         code: FAMILY_AMAZING_SURFACE,
+        wgsl: "amazing_surface_distance",
         variant: "AmazingSurface",
         display_name: "Amazing Surface (KaliBox)",
         hint: "Kali's Amazing Surface: independent 3-axis box fold, pre-sphere shift, and sphere inversion for architectural arches and gothic ruins",
@@ -1178,6 +1190,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_BRISTORBROT,
+        wgsl: "bristorbrot_distance",
         variant: "Bristorbrot",
         display_name: "Bristorbrot",
         hint: "Bristor's quadratic 3D hypercomplex fractal with coral-like dendritic filaments",
@@ -1243,6 +1256,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_BURNING_SHIP,
+        wgsl: "burning_ship_distance",
         variant: "BurningShip",
         display_name: "Burning Ship 3D",
         hint: "3D Burning Ship / Mandelbulb-Abs with per-axis absolute-value folding before spherical exponentiation",
@@ -1299,6 +1313,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_KALEIDO_TWIST,
+        wgsl: "kaleido_twist_distance",
         variant: "KaleidoTwist",
         display_name: "Kaleido Twist IFS",
         hint: "Marble Marcher / Menger-Twist IFS: pre-rotation, abs fold, Menger sorting fold, scale, shift, and post-rotation",
@@ -1364,6 +1379,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_POLYHEDRAL_KIFS,
+        wgsl: "polyhedral_kifs_distance",
         variant: "PolyhedralKifs",
         display_name: "Polyhedral KIFS (Icosa/Dodeca)",
         hint: "Knighty's golden-ratio icosahedral & dodecahedral reflection group fractal",
@@ -1429,6 +1445,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_HARMONIC_BULB,
+        wgsl: "harmonic_bulb_distance",
         variant: "HarmonicBulb",
         display_name: "Harmonic Bulb",
         hint: "Spherical-harmonics modulated Mandelbulb with organic botanical and marine symmetry",
@@ -1494,6 +1511,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_MANDELBAR,
+        wgsl: "mandelbar_distance",
         variant: "Mandelbar3D",
         display_name: "Mandelbar 3D (Tricorn)",
         hint: "3D Tricorn / Mandelbar fractal using complex conjugation across azimuthal and polar angles",
@@ -1559,6 +1577,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_MOBIUS_IFS,
+        wgsl: "mobius_ifs_distance",
         variant: "MobiusIfs",
         display_name: "Möbius Sphere IFS",
         hint: "Conformal Möbius group IFS combining periodic lattice wrap, spiral twist, and sphere inversion",
@@ -1633,6 +1652,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_GYROID_TPMS,
+        wgsl: "gyroid_tpms_distance",
         variant: "GyroidTpms",
         display_name: "Gyroid / Schwarz TPMS",
         hint: "Triply Periodic Minimal Surface (Gyroid, Schwarz P, Schwarz D, Neovius) with multi-octave FBM fractal detailing",
@@ -1725,6 +1745,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_LIDINOID_TPMS,
+        wgsl: "lidinoid_tpms_distance",
         variant: "LidinoidTpms",
         display_name: "Lidinoid / Fischer-Koch TPMS",
         hint: "Higher-order chiral minimal surfaces (Lidinoid, Fischer-Koch S, Split-P) with double-gyroid channels",
@@ -1799,6 +1820,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_ATTRACTOR_TUBE,
+        wgsl: "attractor_tube_distance",
         variant: "AttractorTube",
         display_name: "Strange Attractor Flow",
         hint: "3D chaotic strange-attractor stream-surface (Aizawa, Halvorsen, Thomas) advected along RK2 trajectories",
@@ -1873,6 +1895,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_TORUS_KNOT,
+        wgsl: "torus_knot_braid_distance",
         variant: "TorusKnotBraid",
         display_name: "Torus Knot Braid",
         hint: "Exact (p, q) torus knot with recursive N-strand twisted cable braiding",
@@ -1956,6 +1979,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_HOPF_FIBRATION,
+        wgsl: "hopf_fibration_distance",
         variant: "HopfFibration",
         display_name: "Hopf Fibration Tori",
         hint: "Stereographic projection of S^3 -> S^2 Hopf fibers forming Villarceau circles and linked Clifford tori",
@@ -2030,6 +2054,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_DUPIN_CYCLIDE,
+        wgsl: "dupin_cyclide_distance",
         variant: "DupinCyclide",
         display_name: "Dupin Cyclide",
         hint: "Quartic Dupin cyclide (inversion of a torus) with Crescent/Horned/Spindle topology and carved ribs",
@@ -2113,6 +2138,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_SUPERFORMULA,
+        wgsl: "superformula_distance",
         variant: "Superformula3D",
         display_name: "3D Superformula (Radiolaria)",
         hint: "3D Gielis superformula spherical product with Haeckel radiolaria skeletal pores",
@@ -2223,6 +2249,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_PHYLLOTAXIS,
+        wgsl: "phyllotaxis_distance",
         variant: "PhyllotaxisShell",
         display_name: "Fibonacci Phyllotaxis (Romanesco)",
         hint: "Closed-form O(1) inverse spherical Fibonacci spiral lattice with recursive Romanesco conical florets",
@@ -2297,6 +2324,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_NAUTILUS,
+        wgsl: "nautilus_distance",
         variant: "NautilusShell",
         display_name: "Nautilus / Ammonite Shell",
         hint: "Raup logarithmic helicospiral shell with internal chamber septa and ammonite growth ribs",
@@ -2380,6 +2408,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_VORONOI_FOAM,
+        wgsl: "voronoi_foam_distance",
         variant: "VoronoiFoam",
         display_name: "Voronoi Trabecular Foam",
         hint: "Multi-scale 3D Voronoi F2-F1 cellular skeleton and radiolaria/bone trabecular struts",
@@ -2454,6 +2483,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_CRYSTAL_GEODE,
+        wgsl: "crystal_geode_distance",
         variant: "CrystalGeode",
         display_name: "Quartz Crystal Cluster",
         hint: "Procedural mineral crystal cluster with hexagonal prisms and 6-sided rhombohedral terminations",
@@ -2528,6 +2558,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     },
     FormulaMeta {
         code: FAMILY_ASTROLABE,
+        wgsl: "astrolabe_distance",
         variant: "AstrolabeGimbal",
         display_name: "Mechanical Astrolabe",
         hint: "Concentric tilted gyroscopic gimbal rings with precision gear teeth and axial pivots",

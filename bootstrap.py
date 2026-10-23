@@ -7,7 +7,8 @@ bootstrap.
 
 WarpBro builds through cuda-oxide: its GPU kernels (fractal-rs `fractal-kernels`) are Rust compiled to PTX by the
 rustc_codegen_cuda backend, which `cargo oxide` enables. Builds warm the CUDA driver's JIT
-cache before reporting success, so the next workspace launch does not wait for a cold compile.
+cache and open the WGPU device with its shader module and post pipelines before reporting
+success, so the next workspace launch does not wait for a cold compile.
 Plain `cargo build` cannot link them (build.rs stops it with an explanation). This script checks the toolchain first, then drives
 `cargo oxide`.
 
@@ -387,15 +388,15 @@ def build(args: argparse.Namespace) -> int:
     if code != 0 or not RELEASE_BIN.is_file():
         err("Build failed")
         return code or 1
-    if not (no_gpu or getattr(args, "skip_cuda_warmup", False)):
-        # Prime the driver's cache for this exact executable, on the same GPU the
-        # workspace uses. Fail here if its module/parameter ABI cannot initialize.
-        step("Preparing CUDA kernels for the next application launch ...")
-        code, _, warmup_ms = run([str(RELEASE_BIN), "--warmup-cuda"])
+    if not (no_gpu or getattr(args, "skip_warmup", False)):
+        # Prime the CUDA JIT cache and open the WGPU device for this exact executable, on
+        # the same GPU the workspace uses. Fail here if a module or pipeline cannot initialize.
+        step("Preparing CUDA kernels and WGPU pipelines for the next application launch ...")
+        code, _, warmup_ms = run([str(RELEASE_BIN), "--warmup"])
         if code != 0:
-            err("CUDA warmup failed; see the module/parameter error above")
+            err("GPU warmup failed; see the module/pipeline error above")
             return code
-        step(f"CUDA warmup: {fmt_time(warmup_ms)}")
+        step(f"GPU warmup: {fmt_time(warmup_ms)}")
     ok(f"Build successful ({fmt_time(elapsed)})")
     step(f"Binary: {RELEASE_BIN}")
     print()
@@ -750,7 +751,7 @@ COMMANDS
 
 OPTIONS
   --arch sm_86     target architecture for b / r / ci (default: default-arch in .cargo/cuda-oxide.toml)
-  --no-gpu         b: build without a GPU (no device check, no CUDA warmup)
+  --no-gpu         b: build without a GPU (no device check, no GPU warmup)
   --cubins         b / ci: also embed cubins for sm_75/86/89/120 (release archives; +1-2 min)
   --fix            doctor: install what can be installed without sudo
   -f, --force      install: rebuild first
@@ -793,8 +794,8 @@ def main() -> int:
     parser.add_argument("command", nargs="?", choices=COMMANDS, default="h", help=", ".join(COMMANDS))
     parser.add_argument("rest", nargs="*", help="positional arguments for g / bench")
     parser.add_argument("--arch", help="CUDA architecture, e.g. sm_86")
-    parser.add_argument("--skip-cuda-warmup", action="store_true",
-                        help="Build without initializing CUDA (for packaging/cross-builds)")
+    parser.add_argument("--skip-warmup", action="store_true",
+                        help="Build without warming CUDA and WGPU (for packaging/cross-builds)")
     parser.add_argument("--no-gpu", action="store_true", help="build without a GPU (no device check, no warmup)")
     parser.add_argument("--cubins", action="store_true",
                         help=f"b / ci: also embed cubins for {CUBIN_ARCHS} (release archives)")

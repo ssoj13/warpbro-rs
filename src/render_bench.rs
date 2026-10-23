@@ -60,6 +60,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     // `--adaptive THRESHOLD`: measure adaptive sampling (stops converged tiles; `samples` is the
     // budget). Off by default so estimator comparisons get exactly `samples` per pixel.
     let mut adaptive_threshold: Option<f32> = None;
+    // `--backend cuda|wgpu`: which tracer the cases run on (default: the profile's Auto choice).
+    let mut backend = crate::render_profiles::Backend::Auto;
     while position < args.len() {
         let flag = &args[position];
         let value = args
@@ -69,6 +71,14 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             "--case" => case = Some(value.as_str()),
             "--seed" => seed = value.parse().context("Invalid benchmark seed")?,
             "--batch" => batch = value.parse().context("Invalid benchmark batch")?,
+            "--backend" => {
+                backend = match value.as_str() {
+                    "auto" => crate::render_profiles::Backend::Auto,
+                    "cuda" => crate::render_profiles::Backend::Cuda,
+                    "wgpu" => crate::render_profiles::Backend::Wgpu,
+                    _ => anyhow::bail!("Benchmark backend must be auto, cuda or wgpu"),
+                }
+            }
             "--adaptive" => {
                 adaptive_threshold = Some(value.parse().context("Invalid adaptive threshold")?)
             }
@@ -114,6 +124,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             "Benchmark must use evaluated world objects"
         );
         scene.render.denoise.enabled = false;
+        scene.render.backend = backend;
         // Estimator comparisons need exactly `samples` per pixel; adaptive sampling would stop
         // converged tiles early and change both the error and the time of every run.
         scene.render.adaptive.enabled = adaptive_threshold.is_some();

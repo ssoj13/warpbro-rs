@@ -877,7 +877,7 @@ impl Gpu {
             };
             wgpu.upload_prepared(&prepared, env.as_deref(), true, &mut self.stats)?;
             wgpu.set_params(&p)?;
-            return wgpu.pick(ndc);
+            return wgpu.pick(ndc, prepared.homogeneous_family);
         }
         let cuda = self
             .cuda
@@ -4149,36 +4149,47 @@ mod tests {
 
     #[test]
     fn wgsl_compute_shader_validates_all_entry_points() {
-        let src = crate::render_wgpu::shader_source();
-        let module = naga::front::wgsl::parse_str(&src)
-            .unwrap_or_else(|e| panic!("WGSL parse error:\n{}", e.emit_to_string(&src)));
-        let mut validator = naga::valid::Validator::new(
-            naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::empty(),
-        );
-        validator
-            .validate(&module)
-            .unwrap_or_else(|e| panic!("WGSL validation error:\n{}", e.emit_to_string(&src)));
-
-        let expected = [
-            "tally",
-            "tally_sum",
-            "adapt",
-            "tonemap",
-            "tonemap_display",
-            "pick",
-        ]
-        .map(String::from)
-        .into_iter()
-        .chain(crate::render_wgpu::TraceEntry::all().map(|entry| entry.name()));
-        for name in expected {
-            assert!(
-                module
-                    .entry_points
-                    .iter()
-                    .any(|ep| ep.name == name && ep.stage == naga::ShaderStage::Compute),
-                "missing compute entry point {name}"
+        // Every module: the dynamic one and each family's.
+        let families = std::iter::once(None).chain((0..crate::scene::Formula::COUNT).map(Some));
+        for family in families {
+            let src = crate::render_wgpu::shader_source(family);
+            let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| {
+                panic!("{family:?}: WGSL parse error:\n{}", e.emit_to_string(&src))
+            });
+            let mut validator = naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::empty(),
             );
+            validator.validate(&module).unwrap_or_else(|e| {
+                panic!(
+                    "{family:?}: WGSL validation error:\n{}",
+                    e.emit_to_string(&src)
+                )
+            });
+            let expected = [
+                "tally",
+                "tally_sum",
+                "adapt",
+                "tonemap",
+                "tonemap_display",
+                "pick",
+            ]
+            .map(String::from)
+            .into_iter()
+            .chain(
+                crate::render_wgpu::TraceEntry::all()
+                    .filter(|entry| entry.family == family)
+                    .map(|entry| entry.name()),
+            );
+            for name in expected {
+                assert!(
+                    module
+                        .entry_points
+                        .iter()
+                        .any(|ep| ep.name == name && ep.stage == naga::ShaderStage::Compute),
+                    "{family:?}: missing compute entry point {name}"
+                );
+            }
         }
 
         // Verify all 28 formula families round-trip through WorldDocument, metadata, and Scene::pack
