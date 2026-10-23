@@ -15,6 +15,12 @@
   worlds only. naga did not fold the constant family argument, so every "specialized" pipeline
   used to carry all 28 families (driver compile: ~15 min for pick, longer for trace). Mixed
   material x one family is specialized too; pick compiles per module on first use.
+- **WGPU trace code size:** the driver inlines the estimator at every call site, so each loop
+  now has one: `march` (stepping and both bisections share one sample through a phase state),
+  `march_sample` and `fractional_march_distance` (nearest object first, then the rest),
+  `march_leaving` / `visibility_leaving` (two passes), the six-probe normal stencil and the
+  two endpoint normals of a fractional count. Same points, order and results. Inlined estimator
+  copies: trace entry 169 -> 22, pick 18 -> 3.
 - **Pipeline disk cache and warmup:** every WGPU pipeline goes through
   `gpu_info::create_compute_pipeline` (persistent cache, Vulkan). `WarpBro --warmup` replaces
   `--warmup-cuda` (`bootstrap.py --skip-warmup`): CUDA module plus WGPU device, module and post
@@ -27,7 +33,9 @@
 - **Export and colour:** `OutputSettings` is the video-io `Preset` plus extras, one OCIO config
   load per source (`ocio::shared`), SDR preview view from the config, 16-bit codes from the OCIO
   encoder, file IO joined on drop and written through `.tmp`; EDR displays stay relative to
-  SDR white.
+  SDR white. A stale output choice (a display / view / input / look the config lacks) fails
+  the export instead of rendering through the config's first fitting view (video-io
+  `ca041bd`: candidates are every view, only an existing non-fitting view is replaced).
 - **Document:** strict decode (missing required fields, including `active_camera`,
   `active_environment`, `Take.source`, `Scene.mask` and `RenderSettings.backend`, are errors);
   migrations removed after converting the shipped templates once; Sun/Sky split, reorder,

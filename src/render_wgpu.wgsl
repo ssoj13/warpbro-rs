@@ -1448,7 +1448,8 @@ fn fractional_object_distance(
 
 // The march step distance at `x` when an object is a fractional Mandelbulb: the minimum of the
 // objects' [`fractional_object_distance`], nearest-sphere first with the same skip as
-// [`march_sample`]. `nearest` / `weighted_distance` are the sample's object and estimate.
+// [`march_sample`] and, like it, one estimate call site. `nearest` / `weighted_distance` are
+// the sample's object and estimate.
 fn fractional_march_distance(
     is_world: bool,
     family_override: u32,
@@ -1464,25 +1465,26 @@ fn fractional_march_distance(
         return F32_MAX;
     }
     let first = min(nearest, count - 1u);
-    var best = fractional_object_distance(
-        is_world, first, family_override, x, eps, epsilon_slope, ray_speed, nearest, weighted_distance,
-    );
-    if count == 1u {
-        return best;
-    }
-    for (var i = 0u; i < count; i = i + 1u) {
-        if i == first {
-            continue;
+    var best = F32_MAX;
+    for (var k = 0u; k < count; k = k + 1u) {
+        // The nearest object first, then the others in index order (k > 0 only in a world).
+        var i = first;
+        if k > 0u {
+            i = k - 1u;
+            if i >= first {
+                i = i + 1u;
+            }
+            let row = i * OBJECT_STRIDE;
+            let reach = (length(object_point(true, i, x)) - objects[row + O_CLIP_RADIUS])
+                * objects[row + O_DISTANCE_SCALE];
+            if reach >= best {
+                continue;
+            }
         }
-        let row = i * OBJECT_STRIDE;
-        let reach = (length(object_point(true, i, x)) - objects[row + O_CLIP_RADIUS])
-            * objects[row + O_DISTANCE_SCALE];
-        if reach >= best {
-            continue;
-        }
-        best = min(best, fractional_object_distance(
-            true, i, family_override, x, eps, epsilon_slope, ray_speed, nearest, weighted_distance,
-        ));
+        let d = fractional_object_distance(
+            is_world, i, family_override, x, eps, epsilon_slope, ray_speed, nearest, weighted_distance,
+        );
+        best = select(min(best, d), d, k == 0u);
     }
     return best;
 }
@@ -1651,12 +1653,23 @@ fn visibility_leaving(
     base: f32,
     slope: f32,
 ) -> MarchResult {
-    let m = march_visibility(is_world, family_override, origin, dir, base, slope);
-    if any(retreat != origin) && m.hit && m.first {
-        return march_visibility(is_world, family_override, retreat, dir, base, slope);
+    // Two passes through one call site (the estimator is inlined per call site).
+    var at = origin;
+    var m: MarchResult;
+    for (var n = 0u; n < 2u; n = n + 1u) {
+        m = march_visibility(is_world, family_override, at, dir, base, slope);
+        if !(any(retreat != origin) && m.hit && m.first) {
+            break;
+        }
+        at = retreat;
     }
     return m;
 }
+
+// The phases of [`march`]'s one loop.
+const MARCH_STEP: u32 = 0u;
+const MARCH_FIRST_HIT: u32 = 1u;
+const MARCH_SURFACE: u32 = 2u;
 
 // Sphere-trace from `origin` along `dir` (fractal-kernels `march`). `kind`: a primary (camera or
 // Direct) ray hits at `d <= eps` with `P_MAX_STEPS`, a secondary one at `d < eps` with
@@ -1665,6 +1678,9 @@ fn visibility_leaving(
 // restarts at `t_enter`; a hit after stepping inside bisects the bracket from the last outside
 // sample; a hit after a fractional step longer than the plain one bisects for the first hit.
 // The step budget running out inside the interval reports the closest sample as unresolved.
+//
+// One loop, one `march_sample` call site: the driver inlines the estimator at every call site,
+// so stepping and both bisections share the sample (`phase`) instead of each carrying a copy.
 fn march(
     is_world: bool,
     family_override: u32,
@@ -1699,64 +1715,72 @@ fn march(
     var closest = march_miss(origin);
     var has_closest = false;
     var accelerated = false;
-    for (var i = 0u; i < max_steps; i = i + 1u) {
-        if t > max_distance {
-            break;
+    // MARCH_STEP: sphere tracing (step `i`); MARCH_FIRST_HIT: bisection for the first hit after
+    // an accelerated step; MARCH_SURFACE: bisection of a bracket that stepped inside. A
+    // bisection runs `k` up to `HIT_REFINEMENTS` over [`lo`, `hi`] and returns `best`.
+    var phase = MARCH_STEP;
+    var i = 0u;
+    var k = 0u;
+    var lo = 0.0;
+    var hi = 0.0;
+    var best = march_miss(origin);
+    loop {
+        var st = t;
+        if phase == MARCH_STEP {
+            if i >= max_steps || t > max_distance {
+                break;
+            }
+        } else {
+            if k >= HIT_REFINEMENTS || hi - lo <= 0.5 * best.eps {
+                return best;
+            }
+            st = 0.5 * (lo + hi);
+            k = k + 1u;
         }
-        let point = origin + dir * t;
+        let point = origin + dir * st;
         let s = march_sample(is_world, family_override, point, true);
+        if phase == MARCH_FIRST_HIT {
+            let mid_eps = footprint(base, slope, st, point);
+            if select(s.d < mid_eps, s.d <= mid_eps, primary) {
+                hi = st;
+                best = march_hit(point, s, mid_eps);
+            } else {
+                lo = st;
+            }
+            continue;
+        }
+        if phase == MARCH_SURFACE {
+            if s.d > 0.0 {
+                lo = st;
+                best = march_hit(point, s, footprint(base, slope, st, point));
+            } else {
+                hi = st;
+            }
+            continue;
+        }
         let d = s.d;
         if d <= 0.0 && !has_outside && t > t_enter {
             t = t_enter;
+            i = i + 1u;
             continue;
         }
         let eps = footprint(base, slope, t, point);
         if select(d < eps, d <= eps, primary) {
             if accelerated && has_outside {
-                var lo = outside_t;
-                var hi = t;
-                var best = march_hit(point, s, eps);
-                for (var k = 0u; k < HIT_REFINEMENTS; k = k + 1u) {
-                    if hi - lo <= 0.5 * best.eps {
-                        break;
-                    }
-                    let mid = 0.5 * (lo + hi);
-                    let mid_point = origin + dir * mid;
-                    let ms = march_sample(is_world, family_override, mid_point, true);
-                    let mid_eps = footprint(base, slope, mid, mid_point);
-                    if select(ms.d < mid_eps, ms.d <= mid_eps, primary) {
-                        hi = mid;
-                        best = march_hit(mid_point, ms, mid_eps);
-                    } else {
-                        lo = mid;
-                    }
-                }
-                return best;
-            }
-            if !(has_outside && d <= 0.0) {
+                phase = MARCH_FIRST_HIT;
+                best = march_hit(point, s, eps);
+            } else if !(has_outside && d <= 0.0) {
                 var m = march_hit(point, s, eps);
                 m.first = i == 0u;
                 return m;
+            } else {
+                // Stepped inside: bisect the bracket from the last outside sample.
+                phase = MARCH_SURFACE;
+                best = outside;
             }
-            // Stepped inside: bisect the bracket from the last outside sample.
-            var best = outside;
-            var lo = outside_t;
-            var hi = t;
-            for (var k = 0u; k < HIT_REFINEMENTS; k = k + 1u) {
-                if hi - lo <= 0.5 * best.eps {
-                    break;
-                }
-                let mid = 0.5 * (lo + hi);
-                let inner = origin + dir * mid;
-                let ms = march_sample(is_world, family_override, inner, true);
-                if ms.d > 0.0 {
-                    lo = mid;
-                    best = march_hit(inner, ms, footprint(base, slope, mid, inner));
-                } else {
-                    hi = mid;
-                }
-            }
-            return best;
+            lo = outside_t;
+            hi = t;
+            continue;
         }
         let here = march_hit(point, s, eps);
         if !has_closest || here.ratio < closest.ratio {
@@ -1777,6 +1801,7 @@ fn march(
         } else {
             t = t + min(max(step_factor * d, eps * 0.5), step_cap);
         }
+        i = i + 1u;
     }
     if has_closest && t <= max_distance {
         closest.hit = false;
@@ -1799,9 +1824,15 @@ fn march_leaving(
     slope: f32,
     start: f32,
 ) -> MarchResult {
-    let m = march(is_world, family_override, origin, dir, kind, base, slope, start);
-    if any(retreat != origin) && m.hit && m.first {
-        return march(is_world, family_override, retreat, dir, kind, base, slope, start);
+    // Two passes through one call site (the estimator is inlined per call site).
+    var at = origin;
+    var m: MarchResult;
+    for (var n = 0u; n < 2u; n = n + 1u) {
+        m = march(is_world, family_override, at, dir, kind, base, slope, start);
+        if !(any(retreat != origin) && m.hit && m.first) {
+            break;
+        }
+        at = retreat;
     }
     return m;
 }
@@ -1910,14 +1941,18 @@ fn stencil_normal(
     let signed = family_signed(resolved_family(is_world, obj, family_override));
     var h = h_in;
     for (var k = 0u; k <= NORMAL_STEP_HALVINGS; k = k + 1u) {
-        let xp = clipped_distance_and_trap(is_world, obj, family_override, center + vec3<f32>(h, 0.0, 0.0), 0u).x;
-        let xm = clipped_distance_and_trap(is_world, obj, family_override, center - vec3<f32>(h, 0.0, 0.0), 0u).x;
-        let yp = clipped_distance_and_trap(is_world, obj, family_override, center + vec3<f32>(0.0, h, 0.0), 0u).x;
-        let ym = clipped_distance_and_trap(is_world, obj, family_override, center - vec3<f32>(0.0, h, 0.0), 0u).x;
-        let zp = clipped_distance_and_trap(is_world, obj, family_override, center + vec3<f32>(0.0, 0.0, h), 0u).x;
-        let zm = clipped_distance_and_trap(is_world, obj, family_override, center - vec3<f32>(0.0, 0.0, h), 0u).x;
-        if signed || (xp > 0.0 && xm > 0.0 && yp > 0.0 && ym > 0.0 && zp > 0.0 && zm > 0.0) {
-            let g = vec3<f32>(xp - xm, yp - ym, zp - zm);
+        // The six probes (+x, -x, +y, -y, +z, -z) through one estimate call site.
+        var probes: array<f32, 6>;
+        for (var j = 0u; j < 6u; j = j + 1u) {
+            var off = vec3<f32>(0.0);
+            off[j / 2u] = h;
+            let p = select(center + off, center - off, (j & 1u) == 1u);
+            probes[j] = clipped_distance_and_trap(is_world, obj, family_override, p, 0u).x;
+        }
+        let plus = vec3<f32>(probes[0], probes[2], probes[4]);
+        let minus = vec3<f32>(probes[1], probes[3], probes[5]);
+        if signed || (all(plus > vec3<f32>(0.0)) && all(minus > vec3<f32>(0.0))) {
+            let g = plus - minus;
             if direct {
                 if length(g) >= 1.0e-7 {
                     return normalize(g);
@@ -2038,8 +2073,13 @@ fn surface_normal(
     if weight == 0.0 || !family_iterates(resolved_family(is_world, obj, family_override)) {
         return endpoint_normal(is_world, obj, family_override, x, dir, eps);
     }
-    let lower = endpoint_ray_normal(is_world, obj, family_override, ray, whole);
-    let upper = endpoint_ray_normal(is_world, obj, family_override, ray, whole + 1u);
+    // Both endpoints through one call site: each inlines a re-march and a stencil.
+    var ends: array<vec3<f32>, 2>;
+    for (var k = 0u; k < 2u; k = k + 1u) {
+        ends[k] = endpoint_ray_normal(is_world, obj, family_override, ray, whole + k);
+    }
+    let lower = ends[0];
+    let upper = ends[1];
     let cosine = clamp(dot(lower, upper), -1.0, 1.0);
     var tangent = upper - lower * cosine;
     let sine = length(tangent);

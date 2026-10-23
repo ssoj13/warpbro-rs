@@ -314,25 +314,26 @@ impl Ocio {
     /// Display and view an output of `kind` renders through. The scene's own choice (`current`)
     /// wins when it already fits; otherwise the config's first fitting display, with its view
     /// whose measured peak ([`Ocio::view_peak`]) is closest to `peak_nits` for HDR, its first
-    /// view for SDR.
+    /// view for SDR. A `current` naming a colour space, display, view or look this config lacks
+    /// is an error, never a silent substitute: a stale choice would export through another
+    /// transform. `current` is resolved against every view and the candidates are every view of
+    /// the config (video-io's contract): an existing view that does not fit `kind` (an HDR view
+    /// for an SDR file) is still replaced.
     pub fn output_transform(
         &self,
         current: &Sel,
         kind: OutputKind,
         peak_nits: f32,
     ) -> Result<(String, String)> {
-        let hdr = kind != OutputKind::Sdr;
-        let names = self.resolve(current, hdr).ok();
+        let names = self.resolve(current, true)?;
         let mut candidates = Vec::new();
-        for display in self.displays(hdr) {
-            for view in self.views(display, hdr) {
+        for display in self.displays(true) {
+            for view in self.views(display, true) {
                 candidates.push(self.output_view(display, view));
             }
         }
         let selected = resolve_output_view(
-            names
-                .as_ref()
-                .map(|n| (n.display.as_str(), n.view.as_str())),
+            Some((names.display.as_str(), names.view.as_str())),
             kind,
             peak_nits,
             &candidates,
@@ -1360,6 +1361,31 @@ mod tests {
 
     fn cg() -> Ocio {
         Ocio::load("ocio://default").expect("the default built-in config")
+    }
+
+    /// A stale choice (a view the loaded config lacks) fails the output transform instead of
+    /// exporting through the config's first fitting view; an existing HDR view on an SDR output
+    /// is replaced by an SDR one.
+    #[test]
+    fn output_transform_refuses_a_view_the_config_lacks() {
+        let o = Ocio::load("ocio://studio-config-latest").unwrap();
+        let sdr = crate::color::default_selection();
+        let stale = Sel {
+            view: "No such view".into(),
+            ..sdr.clone()
+        };
+        let err = o
+            .output_transform(&stale, OutputKind::Sdr, 100.0)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("No such view"), "{err}");
+        let hdr = Sel {
+            display: "Rec.2100-PQ - Display".into(),
+            view: "ACES 2.0 - HDR 1000 nits (P3 D65)".into(),
+            ..sdr
+        };
+        let (display, view) = o.output_transform(&hdr, OutputKind::Sdr, 100.0).unwrap();
+        assert!(o.view_is(&display, &view, OutputKind::Sdr), "{display} / {view}");
     }
 
     /// An HDR output picks the view whose MEASURED peak is nearest the requested one (no name

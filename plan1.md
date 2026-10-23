@@ -387,12 +387,17 @@ First build the safety net, then fix each divergence against the pinned fractal-
         signed zeros included), values into `array<f32,6>`, then the old checks.
      e. Re-run callsites.py (record), naga validate via the GPU-free test, clippy; GPU tests
         only with the operator's go (see step 4).
-  2. [ ] For the largest callers, restructure so each loop has ONE estimator call site, with
+     **Done 2026-10-23:** a-d plus `fractional_march_distance` (2 sites -> 1, same order as
+     `march_sample`). Copies of `family_distance`: trace_pixel 169 -> 22, pick_ray 18 -> 3.
+     Remaining multipliers (small, left as is): march_exit 3 sites, trace_direct stencil x2,
+     direct_shade -> direct_shadow x2, surface_normal's own endpoint_normal next to the two
+     re-marched ones.
+  2. [x] For the largest callers, restructure so each loop has ONE estimator call site, with
      bit-identical math (same points, same order, same results): the normal stencil (6 taps x
      halvings -> a loop over the 6 offsets), `march` (step + two bisection loops -> one loop
      with a phase state), shadow / AO / light visibility marches likewise. No unrolling or
      inlining is forbidden; no algorithm changes. Mirror nothing in CUDA (fractal-rs unchanged).
-  3. [ ] Re-count (step 1) and record before/after call sites.
+  3. [x] Re-count (step 1) and record before/after call sites (above).
   4. [ ] End: GPU-free suite + clippy; then, with the operator's go and an idle machine: the
      WGPU world test (compile time), `parity_tests::cuda_wgpu_primary_guides_agree_per_pixel`,
      and one A/B `--world-bench --backend wgpu --case <one case>` before/after (the "before"
