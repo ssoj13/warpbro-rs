@@ -149,7 +149,7 @@ jobs:
           test -n "$rev"
           echo "rev=${rev:0:12}" >> "$GITHUB_OUTPUT"
 
-      - uses: Swatinem/rust-cache@v2.9.2
+      - uses: Swatinem/rust-cache@v2.9.3
         with:
           prefix-key: v0-rust-oxide-${{ steps.oxide.outputs.rev }}
           key: ${{ matrix.platform }}
