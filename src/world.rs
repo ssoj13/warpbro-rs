@@ -1716,10 +1716,12 @@ impl WorldEditor {
 /// The values attribute `path` may take, in menu order; empty for a free value. Every enum lists
 /// its own variants (`T::ALL`), so the choices follow the types: a new variant cannot be
 /// missing from its menu.
-fn attribute_choices(path: &str) -> Vec<Value> {
-    fn variants<T: Serialize>(all: impl IntoIterator<Item = T>) -> Vec<Value> {
+fn attribute_choices(path: &str) -> Result<Vec<Value>, String> {
+    // A variant that failed to serialize would silently vanish from its menu and become
+    // unsettable (`set_attribute` rejects values outside the choices): an error instead.
+    fn variants<T: Serialize>(all: impl IntoIterator<Item = T>) -> Result<Vec<Value>, String> {
         all.into_iter()
-            .filter_map(|v| serde_json::to_value(v).ok())
+            .map(|v| serde_json::to_value(v).map_err(|e| e.to_string()))
             .collect()
     }
     use crate::scene::{
@@ -1729,7 +1731,7 @@ fn attribute_choices(path: &str) -> Vec<Value> {
         return variants(crate::scene::Formula::PRESETS);
     }
     if let Some(choices) = crate::formulas::formula_param_choices(path) {
-        return choices;
+        return Ok(choices);
     }
     match path {
         "/render/backend" => variants(crate::render_profiles::Backend::ALL),
@@ -1750,7 +1752,7 @@ fn attribute_choices(path: &str) -> Vec<Value> {
         // `/formula/Hybrid/steps` array keeps no choices: it edits slot by slot
         // (`set_attribute` rejects a whole value outside choices).
         p if p.starts_with("/formula/Hybrid/steps/") => variants(HybridStep::ALL),
-        _ => Vec::new(),
+        _ => Ok(Vec::new()),
     }
 }
 pub(crate) fn attribute_range(path: &str) -> Option<(f64, f64)> {
@@ -2954,23 +2956,29 @@ impl WorldDocument {
     pub fn render_profiles(
         &self,
         role: Option<crate::render_profiles::CatalogRole>,
-    ) -> Vec<WorldNodeInfo> {
+    ) -> Result<Vec<WorldNodeInfo>, String> {
         self.settings_nodes(WorldKind::RenderSettings, role)
     }
-    /// The catalog of one settings kind, optionally only Profiles or only Templates.
+    /// The catalog of one settings kind, optionally only Profiles or only Templates. A node with
+    /// an invalid catalog role is an error, not silently left out of the catalog.
     pub fn settings_nodes(
         &self,
         kind: WorldKind,
         role: Option<crate::render_profiles::CatalogRole>,
-    ) -> Vec<WorldNodeInfo> {
-        self.nodes()
-            .into_iter()
-            .filter(|node| {
-                node.kind == kind
-                    && role
-                        .is_none_or(|role| self.catalog_role(node.id).ok().flatten() == Some(role))
-            })
-            .collect()
+    ) -> Result<Vec<WorldNodeInfo>, String> {
+        let mut out = Vec::new();
+        for node in self.nodes() {
+            if node.kind != kind {
+                continue;
+            }
+            if let Some(role) = role
+                && self.catalog_role(node.id)? != Some(role)
+            {
+                continue;
+            }
+            out.push(node);
+        }
+        Ok(out)
     }
     fn settings_bus_id(&self, key: &str, kind: WorldKind) -> Result<NodeId, String> {
         let id = self
@@ -3021,22 +3029,23 @@ impl WorldDocument {
             .and_then(NodeId::parse)
             .ok_or_else(|| format!("Settings reference {path} must be a UUID"))
     }
-    fn settings_choices(&self, consumer: NodeId, path: &str) -> Option<Vec<Value>> {
-        let kind = crate::render_profiles::reference_kind(path)?;
-        let template = self.catalog_role(consumer).ok().flatten()
-            == Some(crate::render_profiles::CatalogRole::Template);
-        Some(
-            self.nodes()
-                .into_iter()
-                .filter(|node| {
-                    node.kind == kind
-                        && (template
-                            || self.catalog_role(node.id).ok().flatten()
-                                == Some(crate::render_profiles::CatalogRole::Profile))
-                })
-                .map(|node| json!(node.id))
-                .collect(),
-        )
+    /// The settings nodes a reference attribute `path` of `consumer` may point at (a template
+    /// may reference templates too); None when `path` is not a settings reference.
+    fn settings_choices(&self, consumer: NodeId, path: &str) -> Result<Option<Vec<Value>>, String> {
+        use crate::render_profiles::CatalogRole;
+        let Some(kind) = crate::render_profiles::reference_kind(path) else {
+            return Ok(None);
+        };
+        let template = self.catalog_role(consumer)? == Some(CatalogRole::Template);
+        let mut choices = Vec::new();
+        for node in self.nodes() {
+            if node.kind == kind
+                && (template || self.catalog_role(node.id)? == Some(CatalogRole::Profile))
+            {
+                choices.push(json!(node.id));
+            }
+        }
+        Ok(Some(choices))
     }
     fn settings_template(&self, kind: WorldKind, scene: &Scene) -> Result<Value, String> {
         use crate::render_profiles::{look_values, quality_values, render_values, viewport_values};
@@ -3048,7 +3057,7 @@ impl WorldDocument {
             })),
             WorldKind::ViewportSettings => {
                 let profiles =
-                    self.render_profiles(Some(crate::render_profiles::CatalogRole::Profile));
+                    self.render_profiles(Some(crate::render_profiles::CatalogRole::Profile))?;
                 let still = profiles
                     .first()
                     .ok_or("Create a RenderSettings profile before ViewportSettings")?
@@ -4288,9 +4297,10 @@ impl WorldDocument {
                 frames: attrs.key_frames(path),
                 keyable,
                 component: None,
-                choices: self
-                    .settings_choices(id, path)
-                    .unwrap_or_else(|| attribute_choices(path)),
+                choices: match self.settings_choices(id, path)? {
+                    Some(choices) => choices,
+                    None => attribute_choices(path)?,
+                },
                 choice_labels: vec![],
                 range: attribute_range(path),
                 slider: attribute_slider(path),
@@ -4400,7 +4410,7 @@ impl WorldDocument {
                     frames: vec![],
                     keyable: false,
                     component: Some(slot),
-                    choices: attribute_choices(&path),
+                    choices: attribute_choices(&path)?,
                     choice_labels: vec![],
                     range: None,
                     slider: None,
@@ -4729,7 +4739,7 @@ impl WorldDocument {
             // Enum slots (Hybrid steps) only take their listed values; the grid
             // offers exactly these, this guards direct API writes. Numeric
             // components have no choices and skip the check.
-            let slot_choices = attribute_choices(path);
+            let slot_choices = attribute_choices(path)?;
             if !slot_choices.is_empty() && !slot_choices.contains(&value) {
                 return Err(format!("Invalid enum value: {path}"));
             }
@@ -4771,7 +4781,7 @@ impl WorldDocument {
                     .map_err(|e| format!("Invalid formula: {e}"))?;
             }
             _ => {
-                let choices = attribute_choices(path);
+                let choices = attribute_choices(path)?;
                 if !choices.is_empty() && !choices.contains(&value) {
                     return Err(format!("Invalid enum value: {path}"));
                 }

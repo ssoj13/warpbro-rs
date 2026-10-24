@@ -463,6 +463,17 @@ Most unchecked boxes above are stale: the waves fixed them. Verified state:
   7.2 `validate_render_profiles` on every edit.
 - **Needs the operator:** Q2 (`conn`: finish a connect-attribute UI or delete it); Q4
   (`path_convergence.rs`, A/B on GPU); 7.3 (GPU->CPU->GPU display, design change, GPU).
+- **Done after the audit (2026-10-23):** 4.16 (recorded takes return `Result` and the app
+  reports a dropped one; metadata / take-pick errors go to the panel error; `attribute_choices`,
+  `settings_nodes`, `render_profiles`, `settings_choices` return `Result` instead of
+  `.ok()`-filtering an invalid catalog role or variant); 4.10 (material card Duplicate through
+  `WorldEditor::duplicate`); section 6 `_service` removed from `ExportController::cancel`.
+  1.11 left as is: a single export at a time makes a stale cancel unreachable.
+- [ ] **New: `.ok()` sweep.** 38 non-test `.ok()` remain; most are legitimate (`try_recv`,
+  `try_lock`, probing whether text is a fragment), but some are silent fallbacks to review:
+  `main.rs` `arg()` (a malformed CLI number silently becomes the default), `app.rs` env-var
+  parses (`FRAC_SNAP` size, ~1923), `world.rs` `info(..).ok()` / `node(..).ok()` /
+  `info_at(..).ok()` in listings, `preview.rs` `frame_count().ok()`, `exr_io.rs` header read.
 
 ## Execution state (2026-10-23)
 

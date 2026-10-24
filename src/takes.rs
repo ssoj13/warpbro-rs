@@ -914,8 +914,9 @@ pub struct Tick {
 pub struct Update {
     /// A gesture began this frame.
     pub started: bool,
-    /// A gesture ended and produced this take (a camera take, its source unset).
-    pub finished: Option<Take>,
+    /// A gesture ended and produced this take (a camera take, its source unset); `Err` when its
+    /// samples did not make a valid take (`Take::new`), for the host to report.
+    pub finished: Option<Result<Take, String>>,
 }
 
 struct Live {
@@ -1005,13 +1006,11 @@ impl Recorder {
     }
 
     /// End the gesture now, dropping the still tail. None when it was too short to keep.
-    fn finish(&mut self) -> Option<Take> {
+    fn finish(&mut self) -> Option<Result<Take, String>> {
         let mut live = self.live.take()?;
         live.samples.truncate(live.moved + 1);
         let min_secs = self.min_secs.max(MIN_SECS);
-        (duration(&live.samples) >= min_secs)
-            .then(|| Take::new(live.start, None, live.samples).ok())
-            .flatten()
+        (duration(&live.samples) >= min_secs).then(|| Take::new(live.start, None, live.samples))
     }
 }
 
@@ -1076,8 +1075,9 @@ impl DragRecorder {
 
     /// The drag ended: one take per node that moved for at least the minimum gesture time,
     /// its still head and tail dropped. Like a trim (`Take::trimmed`), the take starts on the
-    /// frame its kept motion began, so it plays on the frames it played on.
-    pub fn finish(&mut self) -> Vec<Take> {
+    /// frame its kept motion began, so it plays on the frames it played on. An `Err` is a take
+    /// whose samples were invalid (`Take::new`), for the host to report.
+    pub fn finish(&mut self) -> Vec<Result<Take, String>> {
         let min_secs = self.min_secs.max(MIN_SECS);
         std::mem::take(&mut self.live)
             .into_iter()
@@ -1097,9 +1097,7 @@ impl DragRecorder {
                         pose: s.pose,
                     })
                     .collect();
-                (duration(&kept) >= min_secs)
-                    .then(|| Take::new(start, Some(node), kept).ok())
-                    .flatten()
+                (duration(&kept) >= min_secs).then(|| Take::new(start, Some(node), kept))
             })
             .collect()
     }

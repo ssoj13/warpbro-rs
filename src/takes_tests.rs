@@ -212,7 +212,7 @@ fn a_navigation_gesture_runs_through_the_coast_and_trims_the_still_tail() {
             break;
         }
     }
-    let take = finished.expect("take finished");
+    let take = finished.expect("take finished").expect("a valid take");
     assert_eq!(
         (take.start, take.len(), take.kind()),
         (7.0, 31, TakeKind::Camera)
@@ -238,7 +238,7 @@ fn a_drag_records_one_transform_take_per_moved_node() {
         let x = if i < 5 { 0.0 } else { (i - 5) as f32 };
         d.sample(1.0 / 60.0, 12.0, &[(a, trs(0.0, x)), (b, trs(0.0, 0.0))]);
     }
-    let takes = d.finish();
+    let takes: Vec<_> = d.finish().into_iter().collect::<Result<_, _>>().unwrap();
     assert_eq!(takes.len(), 1, "a still node makes no take");
     let t = &takes[0];
     assert_eq!(
@@ -262,7 +262,7 @@ fn a_drag_during_playback_starts_its_take_on_the_frame_its_motion_began() {
         let x = if i < 10 { 0.0 } else { (i - 9) as f32 };
         d.sample(1.0 / 24.0, 100.0 + f64::from(i), &[(a, trs(0.0, x))]);
     }
-    let takes = d.finish();
+    let takes: Vec<_> = d.finish().into_iter().collect::<Result<_, _>>().unwrap();
     assert_eq!(takes.len(), 1);
     assert_eq!(
         takes[0].start, 109.0,

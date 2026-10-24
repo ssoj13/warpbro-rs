@@ -2327,7 +2327,7 @@ fn render_profiles_route_auto_locked_and_output_without_mutating_document() {
     use crate::render_profiles::{ProfileTarget, RenderMethod, ViewportMode};
     let mut e = editor();
     let saved = e.document.clone();
-    assert_eq!(e.document.render_profiles(None).len(), 2);
+    assert_eq!(e.document.render_profiles(None).unwrap().len(), 2);
     let output = e.document.output_render_profile().unwrap();
     let policy = e.document.viewport_policy(0.0).unwrap();
     let moving = e.document.viewport_render(0.0, true).unwrap();

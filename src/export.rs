@@ -664,7 +664,9 @@ impl ExportController {
         });
         Ok(())
     }
-    pub fn cancel(&mut self, _service: &RenderService) {
+    /// Ask the running export to stop: the coordinator sees the flag between frames and ends the
+    /// worker's export itself (`Command::CancelExport`), an encode in progress is cancelled.
+    pub fn cancel(&mut self) {
         if let Some(run) = &self.run {
             run.cancel.store(true, Ordering::Release);
             if let Some(encoding) = &run.encoding {
@@ -878,7 +880,7 @@ impl ExportController {
                     .text(format!("{} / {total} frames written", self.completed)),
             );
             if ui.button("Cancel").clicked() {
-                self.cancel(service);
+                self.cancel();
             }
         }
         ui.label(&self.status);
@@ -2799,7 +2801,7 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         let started = std::time::Instant::now();
-        controller.cancel(&service);
+        controller.cancel();
         assert!(started.elapsed() < Duration::from_millis(100));
         while controller.is_running() {
             controller.update();

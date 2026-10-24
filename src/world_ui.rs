@@ -1121,12 +1121,17 @@ impl WorldUi {
         let changed = self.metadata_document != document || self.metadata_node != Some(id);
         if changed || self.metadata_revision != e.revision() {
             if changed || !self.metadata_dirty {
-                self.metadata = e
-                    .document
-                    .metadata(id)
-                    .ok()
-                    .and_then(|value| serde_json::to_string_pretty(&value).ok())
-                    .unwrap_or_else(|| "{}".into());
+                let text = e.document.metadata(id).and_then(|value| {
+                    serde_json::to_string_pretty(&value).map_err(|err| err.to_string())
+                });
+                match text {
+                    Ok(text) => self.metadata = text,
+                    // An empty editor, not a made-up `{}` that "Apply" would write back.
+                    Err(err) => {
+                        self.metadata.clear();
+                        self.error = Some(format!("Metadata: {err}"));
+                    }
+                }
                 self.metadata_dirty = false;
             }
             self.metadata_node = Some(id);
@@ -2197,7 +2202,13 @@ impl WorldUi {
                 } else if let Some(n) = nodes.iter().find(|n| take_wid(n.id) == id) {
                     // A take's bar picks its node and the take (Takes panel).
                     self.select(e, n.id, additive, range, nodes);
-                    self.picked_take = e.document.take_clip(n.id).ok().flatten();
+                    match e.document.take_clip(n.id) {
+                        Ok(take) => self.picked_take = take,
+                        Err(err) => {
+                            self.picked_take = None;
+                            self.error = Some(err);
+                        }
+                    }
                 }
             }
             TimelineAction::ClearSelection => {

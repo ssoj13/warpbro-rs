@@ -1794,7 +1794,12 @@ impl App {
         if self.gizmo_gesture.take().is_some() {
             self.drag_recorder.min_secs = self.min_take_secs;
             for take in self.drag_recorder.finish() {
-                self.world.add_take(take);
+                match take {
+                    Ok(take) => {
+                        self.world.add_take(take);
+                    }
+                    Err(error) => self.status = format!("Recorded take dropped: {error}"),
+                }
             }
         }
     }
@@ -1839,11 +1844,15 @@ impl App {
             }
             self.evaluated_world = None;
         }
-        if let Some(take) = update.finished {
-            self.world.add_take(crate::takes::Take {
-                source: camera,
-                ..take
-            });
+        match update.finished {
+            Some(Ok(take)) => {
+                self.world.add_take(crate::takes::Take {
+                    source: camera,
+                    ..take
+                });
+            }
+            Some(Err(error)) => self.status = format!("Recorded take dropped: {error}"),
+            None => {}
         }
         // The settle time runs on frames: keep them coming until the gesture is cut.
         if self.takes_recorder.recording() {
@@ -2512,6 +2521,7 @@ impl App {
         let mut assign = None;
         let mut refresh = None;
         let mut apply_preset = None;
+        let mut duplicate = None;
         let mut command = None;
         egui::ScrollArea::vertical()
             .id_salt("material_nodes")
@@ -2593,7 +2603,7 @@ impl App {
                                     }
                                 });
                                 if ui.button("Duplicate").clicked() {
-                                    command = Some(WorldCommand::Duplicate(vec![entry.id]));
+                                    duplicate = Some(entry.id);
                                     ui.close();
                                 }
                                 if ui.button("Delete").clicked() {
@@ -2629,6 +2639,15 @@ impl App {
             && let Err(error) = self.world.execute(command)
         {
             self.status = error;
+        }
+        // The one Duplicate path of the UI (`WorldEditor::duplicate`): the card's material, or
+        // the whole selection when the card is part of it, as the outliner does.
+        if let Some(id) = duplicate {
+            self.world.finish_edit();
+            self.status = match self.world.duplicate(Some(id)) {
+                Ok(count) => format!("Duplicated {count} node(s)"),
+                Err(error) => error,
+            };
         }
         if create_default || create.is_some() {
             let mut material = Material::default();

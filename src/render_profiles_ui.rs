@@ -25,6 +25,14 @@ impl Actions {
         self.edit = other.edit.or(self.edit);
         self.error = other.error.or(self.error.take());
     }
+    /// A catalog listing for drawing: on error the list is empty and the error is reported, so
+    /// the panel still draws and says why it is empty.
+    fn or_report<T>(&mut self, listing: Result<Vec<T>, String>) -> Vec<T> {
+        listing.unwrap_or_else(|error| {
+            self.error = Some(error);
+            Vec::new()
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -233,9 +241,11 @@ fn catalog_selector(
     ops: &CatalogOps,
 ) -> Actions {
     let mut actions = Actions::default();
-    let nodes = world
-        .document
-        .settings_nodes(kind, Some(CatalogRole::Profile));
+    let nodes = actions.or_report(
+        world
+            .document
+            .settings_nodes(kind, Some(CatalogRole::Profile)),
+    );
     ui.label(label);
     ui.horizontal(|ui| {
         let mut candidate = selected;
@@ -276,9 +286,11 @@ fn catalog_selector(
                 );
                 ui.close();
             }
-            let templates = world
-                .document
-                .settings_nodes(kind, Some(CatalogRole::Template));
+            let templates = actions.or_report(
+                world
+                    .document
+                    .settings_nodes(kind, Some(CatalogRole::Template)),
+            );
             if !templates.is_empty() {
                 ui.separator();
                 ui.label("Apply template as independent copy");
@@ -468,7 +480,8 @@ pub(crate) fn toolbar(
             const ROUTING: &str = "Auto uses Moving and Still profiles; Locked always uses Manual. Fast uses path tracing with approximate opaque materials and the selected quality.";
             let (label, hover) = match active {
                 Some(active) => {
-                    let nodes = world.document.render_profiles(Some(CatalogRole::Profile));
+                    let nodes = actions
+                        .or_report(world.document.render_profiles(Some(CatalogRole::Profile)));
                     (
                         target_name(active.target),
                         format!("{}\n\n{ROUTING}", active_summary(&nodes, active)),
@@ -638,7 +651,7 @@ fn catalog_buttons(
     recall: &mut dyn FnMut(&egui::Ui, &mut WorldEditor, &WorldNodeInfo, &mut Actions),
 ) -> Actions {
     let mut actions = Actions::default();
-    let mut nodes = world.document.settings_nodes(kind, None);
+    let mut nodes = actions.or_report(world.document.settings_nodes(kind, None));
     // A UUID orders as its text does: no strings to build per comparison.
     nodes.sort_by(|a, b| a.name.cmp(&b.name).then_with(|| a.id.cmp(&b.id)));
     ui.horizontal_wrapped(|ui| {
