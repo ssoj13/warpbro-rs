@@ -22,6 +22,8 @@ Two compute backends render the same packed scene ABI (`fractal_core::params`, `
   only). Reason: naga does not fold a constant family argument, so the old one-module design
   gave every "specialized" pipeline the whole union, inlined by the driver at ~170 call sites
   (minutes per pipeline). Pipelines go through `gpu_info::create_compute_pipeline` (disk cache).
+  Trace/pick readiness uses deduplicated compile tickets and a separate shader-compiler thread;
+  the sole render worker polls readiness instead of compiling those pipelines inline.
 
 Build only through cuda-oxide (`cargo oxide build`, `python bootstrap.py b`); type-check with
 `FRAC_ALLOW_PLAIN_CARGO=1 cargo check --all-targets` or `cargo clippy` (build.rs skips the backend
@@ -44,10 +46,11 @@ operator's go.
 | Entry | `main.rs` | CLI modes (`--gallery`, `--bench`, `--world-bench`, `--animated-fixtures`, `--warmup`), else `app::run` |
 | Window | `window.rs`, `window_shot.rs` | adapter onto the shared `soluwell-window` host (egui-widgets-rs): private present queue, `max_fps` = `gui_fps`, HDR window shots via `App::presented` |
 | App shell | `app.rs` (7k), `dock.rs`, `hotkeys.rs`, `file_dialogs.rs` | `App` owns everything; per-frame `App::ui`; dock panels; scoped hotkeys |
+| Local control | `crates/app-control/src/lib.rs`, `app_control.rs` | Reusable loopback REST transport and bounded command bus; WarpBro dispatch on the UI thread through normal document/navigation commands |
 | Document | `world.rs` (6.5k), `world_ui.rs` (6k), `takes*.rs`, `camera_*.rs`, `animation.rs` | Playa-graph world document, commands, undo, evaluation; outliner / timeline / Attribute Editor; recorded takes |
 | Scene | `scene.rs`, `formulas.rs`, `presets.rs`, `templates.rs`, `materials.rs`, `palette.rs`, `environment.rs` | Evaluated `Scene` (typed), `Scene::pack` to the kernel ABI, formula registry, built-in presets/templates |
 | Render | `render.rs` (4.9k), `render_prep.rs`, `render_wgpu.rs`, `render_service.rs`, `render_profiles*.rs`, `denoise.rs` | `Gpu` (both backends), preparation cache, worker thread, profiles -> `EffectiveRender`, OIDN |
-| Preview | `preview.rs`, `overlay.rs`, `material_gallery.rs` | Cached timeline playback, viewport wires/bounds, material thumbnails |
+| Preview | `preview.rs`, `overlay.rs`, `material_gallery.rs`, `thumbnail_cache.rs` | Cached timeline playback, viewport wires/bounds, shared gallery/bookmark/material thumbnail disk cache |
 | Colour / IO | `color.rs`, `ocio.rs`, `transfer.rs`, `export.rs` (3.2k), `exr_io.rs`, `io_service.rs`, `fs_name.rs` | OCIO display pipeline, export coordinator + writers, file worker |
 | Unused draft | `path_convergence.rs` | Roulette / clamp policies, not wired (belongs in fractal-rs) |
 
@@ -66,6 +69,7 @@ App owns:
 
 App::ui per frame:
   sync_preview -> world_ui.advance (playhead) -> refresh_scene (snapshot if (graph id, revision, frame) changed)
+  poll_control -> app_control::Call -> control_command -> WorldEditor / navigation / queued worker work
   hotkeys::consume (GLOBAL table first, then the panel scope)
   before = snapshot_before.take()                                   -- edit transaction opens
   poll_events <- renderer (Frame | Picked | Thumbnail | Error) ; io polls
@@ -76,8 +80,10 @@ App::ui per frame:
   save_settings -> io
 ```
 
-Rule: `self.scene` is scratch. Only the end-of-frame diff turns its mutations into document edits.
-Anything that edits `self.scene` outside that window, or keeps a parallel copy of document state, desyncs.
+Rule: `self.scene` is scratch. The end-of-frame diff turns ordinary UI mutations into document edits.
+REST control runs before that edit window and authors directly through `WorldEditor` (camera navigation
+through `navigate_camera`), then refreshes the evaluated scene. Mutating scratch outside either path,
+or keeping a parallel copy of document state, desyncs.
 
 ## World document and edits
 
@@ -104,7 +110,10 @@ WorldDocument --snapshot_with_render_profile--> Scene --Scene::pack--> [f32; P_C
   viewport: app.rs step_viewport -> ViewportRequest -> RenderService::request_viewport (single-slot mailbox)
   export:   export.rs coordinate_export -> Command::RenderExport{reply}     thumbnails: Command::Thumbnail
   preview:  preview.rs -> BeginPreview / CacheViewport / Seek
-run_worker (render_service.rs:1126) owns Gpu:
+run_worker (render_service.rs; line anchors above predate the compiler/cache additions) owns Gpu:
+  pipeline_ready -> WgpuShared::ready -> CompileTicket -> warpbro-shader-compiler
+    pending: keep the render job; compile once, retain errors, wake app when finished
+    ready: continue on the sole render worker (no second render worker)
   Gpu::step_with_display (render.rs:779)
     resolve_backend_for_scene (295): Auto -> CUDA, WGPU for extended families / no CUDA
     PreparationCache::get (render_prep.rs:374) -> PreparedScene (WorldUpload: params, objects, masks, lights)
@@ -119,6 +128,22 @@ run_worker (render_service.rs:1126) owns Gpu:
              the submit time made thousands-of-samples batches and multi-second stalls)
   Frame::snapshot (render_service.rs:144) -> publish_frame -> UI texture | ExportFrame -> writer
 ```
+
+The status bar shows `Preparing shader · <seconds>s · <entry>` during WGPU pipeline preparation;
+Auto scenes using extended families are labelled WGPU. This separates compilation waits from sample
+progress; it does not promise a navigation frame rate. `render_diagnostics` exposes active/recent
+compiles and thumbnail-cache counters through the [local REST API](docs/reference/rest-api.md).
+
+All gallery, bookmark and material thumbnails use `thumbnail_cache::ThumbnailCache` with `DiskCache`
+at `<profile>/cache/thumbnails` (`~/.warpbro` or `WARPBRO_HOME`), bounded to 256 MiB by oldest-write
+eviction. Entries contain CPU display pixels, with a versioned binary header, extent and SHA-256
+validation; writes publish through a temporary file and rename. Invalid entries regenerate.
+Content-addressed keys include the exact packed scene ABI, transforms/masks/lights, palettes, quality,
+backend, SPP/seed, the actual resident environment-map fingerprint, OCIO processor cache IDs and the
+renderer/source fingerprint (including Cargo.lock). Labels, document UUIDs and GPU handles are not
+pixel identities. These are thumbnail entries, separate from the RAM-only timeline preview cache.
+Completed thumbnail jobs retain completion under event-queue backpressure; cached-hit and failure
+terminal events have a pending slot rather than disappearing when the event queue is full.
 
 ## Colour and export
 
@@ -139,6 +164,13 @@ IoService thread: settings / scenes / bookmarks (tmp + rename), frame and window
   in both.
 - `denoise::State::due` mutates the cadence: call it exactly once per step.
 - Render errors on the worker must reach the requester as a typed event; never leave a job waiting.
+- Diagnostic wake clones the shared wake handle before calling it; never wake the UI while holding
+  the diagnostics wake mutex.
+- A pending shader ticket must not consume the render worker with an inline driver compile; failures
+  remain terminal for that ticket. The compiler is separate from the sole owner of render targets.
+- Pipeline-cache persistence is driver-specific. The gpu-info dependency is pinned to the guard fix
+  `f845ac889738e159191eb9f71cfabc8831ce134f`, which corrects cache persistence after pipeline creation.
+  Verify accepted cache contents and reuse across restart; a large old disk file alone proves neither.
 - Undo granularity is one open edit per gesture id; text fields and drag values need a gesture.
 - egui: nested `ui.input` inside `hotkeys::active` deadlocks; read `active` first.
 - Many sources are CRLF; scripted replacements must match `\r\n`.

@@ -109,7 +109,7 @@ impl ViewportMode {
     /// Every variant: the Attribute Editor's choices (`world::attribute_choices`).
     pub const ALL: [Self; 2] = [Self::Auto, Self::Locked];
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProfileTarget {
     Moving,
     Still,

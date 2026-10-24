@@ -37,8 +37,26 @@ impl Environment {
 /// A decoded environment: the shared map built from working-space texels.
 pub struct Map {
     pub map: fractal_env::EnvMap,
+    fingerprint: std::sync::OnceLock<[u8; 32]>,
 }
 impl Map {
+    /// Identity of the decoded map actually resident in the renderer, including reloads.
+    /// Reading the source file here could label an old resident map with new file content.
+    pub fn fingerprint(&self) -> [u8; 32] {
+        *self.fingerprint.get_or_init(|| {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(self.map.width().to_le_bytes());
+            h.update(self.map.height().to_le_bytes());
+            for texel in self.map.equirect().texels() {
+                for channel in texel {
+                    h.update(channel.to_bits().to_le_bytes());
+                }
+            }
+            h.finalize().into()
+        })
+    }
+
     /// The map `source` names: a built-in one (`builtin:<name>`, `fractal_env::BUILTINS`) or a
     /// lat-long `.hdr` / `.exr` file.
     pub fn load(source: &str) -> Result<Self, String> {
@@ -107,7 +125,10 @@ impl Map {
             })
             .collect();
         fractal_env::EnvMap::new(width, height, pixels, fractal_env::Luma::AcesCg)
-            .map(|map| Self { map })
+            .map(|map| Self {
+                map,
+                fingerprint: Default::default(),
+            })
             .map_err(|e| e.to_string())
     }
 }

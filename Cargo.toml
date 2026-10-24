@@ -11,8 +11,10 @@ path = "src/main.rs"
 default = []
 
 [workspace]
+members = ["crates/app-control"]
 
 [dependencies]
+app-control = { path = "crates/app-control" }
 # The fractal path tracer shared with ofx-rs: parameter ABI and sampling, the CUDA kernels
 # (built into this binary through #[cuda_module]) and the material presets.
 fractal-core = { git = "ssh://git@github.com/ssoj13/fractal-rs.git", branch = "main" }
@@ -58,6 +60,7 @@ av-util-core = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "ma
 standard-surface-bsdf = { git = "ssh://git@github.com/ssoj13/render-rs.git", branch = "main", features = ["cuda-math"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+sha2 = "0.10.9"
 png = "0.18.1"
 dirs = "7.0.0"
 cam-controls = { git = "ssh://git@github.com/ssoj13/gitnexus-rs.git", branch = "main" }

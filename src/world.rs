@@ -200,7 +200,7 @@ pub struct WorldAttribute {
 }
 
 pub use crate::formulas::Slider;
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WorldCommand {
     Create {
         kind: WorldKind,

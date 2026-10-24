@@ -860,6 +860,37 @@ impl Gpu {
         Ok(true)
     }
 
+    pub(crate) fn thumbnail_environment(
+        &mut self,
+        scene: &Scene,
+    ) -> Result<Option<[u8; 32]>, RenderError> {
+        Ok(self.environment_for(scene.environment.key().as_ref())?.map(|m| m.fingerprint()))
+    }
+
+    /// Nonblocking shader admission for the interactive worker. CLI callers keep the normal
+    /// blocking launch contract; the GUI leaves a pending job intact and services other work.
+    pub(crate) fn pipeline_ready(
+        &mut self,
+        scene: &Scene,
+        width: usize,
+        height: usize,
+        pick: bool,
+    ) -> Result<bool, RenderError> {
+        if pick && (!scene.world_render || scene.objects.is_empty()) {
+            return Ok(true);
+        }
+        if self.resolve_backend(scene)? != Backend::Wgpu {
+            return Ok(true);
+        }
+        let prepared = self.preparation.get(scene, width as u32, height as u32)
+            .map_err(RenderError::Scene)?;
+        #[cfg(test)]
+        let force_mixed = self.force_mixed_world;
+        #[cfg(not(test))]
+        let force_mixed = false;
+        self.wgpu()?.pipeline_ready(scene, &prepared, pick, force_mixed)
+    }
+
     /// Admission of a job before it is queued: the backend resolves (an unavailable explicit
     /// backend, or CUDA for an extended family, fails here, not on every step), the scene packs
     /// at the exact requested dimensions and its environment map loads. The steps reuse the

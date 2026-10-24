@@ -529,7 +529,24 @@ fn scope_error(pop: impl Future<Output = Option<wgpu::Error>>) -> Option<String>
     }
 }
 
+#[derive(Clone, Copy)]
+enum PipelineKey {
+    Trace(TraceEntry),
+    Pick(Option<u32>),
+}
+#[derive(Default)]
+struct CompileTicket {
+    queued: std::sync::atomic::AtomicBool,
+    result: OnceLock<Result<(), String>>,
+}
+struct CompileRequest {
+    shared: Arc<WgpuShared>,
+    key: PipelineKey,
+}
 struct WgpuShared {
+    compiler: OnceLock<Result<std::sync::mpsc::Sender<CompileRequest>, String>>,
+    trace_tickets: Box<[CompileTicket]>,
+    pick_tickets: Box<[CompileTicket]>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     /// The adapter the device came from: the key of its persistent pipeline cache ([`compile`]).
@@ -588,6 +605,79 @@ fn compile(
 }
 
 impl WgpuShared {
+    // One compiler thread, independent of the rendering worker. Tickets deduplicate requests
+    // and retain failures; a failed pipeline is never retried silently on every UI frame.
+    fn ready(self: &Arc<Self>, key: PipelineKey) -> Result<bool, RenderError> {
+        let (ready, ticket) = match key {
+            PipelineKey::Trace(entry) => (
+                self.trace[entry.slot()].get().is_some(),
+                &self.trace_tickets[entry.slot()],
+            ),
+            PipelineKey::Pick(family) => (
+                self.picks[module_slot(family)].get().is_some(),
+                &self.pick_tickets[module_slot(family)],
+            ),
+        };
+        if ready {
+            return Ok(true);
+        }
+        if let Some(result) = ticket.result.get() {
+            return result.clone().map(|()| true).map_err(RenderError::Device);
+        }
+        let sender = self
+            .compiler
+            .get_or_init(|| {
+                let (tx, rx) = std::sync::mpsc::channel::<CompileRequest>();
+                std::thread::Builder::new()
+                    .name("warpbro-shader-compiler".into())
+                    .spawn(move || {
+                        while let Ok(request) = rx.recv() {
+                            let shared = &request.shared;
+                            let result =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    match request.key {
+                                        PipelineKey::Trace(entry) => {
+                                            shared.trace_pipe(entry).map(|_| ())
+                                        }
+                                        PipelineKey::Pick(family) => {
+                                            shared.pick_pipe(family).map(|_| ())
+                                        }
+                                    }
+                                }))
+                                .map_err(|_| "Shader compiler panicked".to_string())
+                                .and_then(|r| r.map_err(|e| e.to_string()));
+                            let ticket = match request.key {
+                                PipelineKey::Trace(entry) => &shared.trace_tickets[entry.slot()],
+                                PipelineKey::Pick(family) => {
+                                    &shared.pick_tickets[module_slot(family)]
+                                }
+                            };
+                            if let Err(error) = &result {
+                                log::error!("{error}");
+                            }
+                            let _ = ticket.result.set(result);
+                            crate::render_diagnostics::wake();
+                        }
+                    })
+                    .map_err(|e| e.to_string())?;
+                Ok(tx)
+            })
+            .as_ref()
+            .map_err(|e| RenderError::Device(e.clone()))?;
+        if !ticket
+            .queued
+            .swap(true, std::sync::atomic::Ordering::AcqRel)
+        {
+            sender
+                .send(CompileRequest {
+                    shared: self.clone(),
+                    key,
+                })
+                .map_err(|_| RenderError::Device("Shader compiler stopped".into()))?;
+        }
+        Ok(false)
+    }
+
     /// `family`'s shader module ([`shader_source`]), created on first use inside error scopes.
     fn module(&self, family: Option<u32>) -> Result<&wgpu::ShaderModule, RenderError> {
         let cell = self.modules.get(module_slot(family)).ok_or_else(|| {
@@ -619,6 +709,7 @@ impl WgpuShared {
         if let Some(pipe) = cell.get() {
             return Ok(pipe);
         }
+        let _timing = crate::render_diagnostics::PipelineTimer::start(name, family);
         let module = self.module(family)?;
         let pipe = with_error_scopes(&self.device, || {
             compile(&self.device, &self.info, module, layout, name)
@@ -768,6 +859,9 @@ fn shared_wgpu() -> Result<Arc<WgpuShared>, String> {
                 };
 
                 Arc::new(WgpuShared {
+                    compiler: OnceLock::new(),
+                    trace_tickets: (0..TRACE_SLOTS).map(|_| CompileTicket::default()).collect(),
+                    pick_tickets: (0..=FAMILIES).map(|_| CompileTicket::default()).collect(),
                     trace: (0..TRACE_SLOTS).map(|_| OnceLock::new()).collect(),
                     tally: make_pipe(&post_layout, "tally"),
                     tally_sum: make_pipe(&post_layout, "tally_sum"),
@@ -1411,6 +1505,26 @@ impl WgpuEngine {
         Ok((trace_bg, post_bg))
     }
 
+    pub(crate) fn pipeline_ready(
+        &self,
+        scene: &Scene,
+        prepared: &PreparedScene,
+        pick: bool,
+        force_mixed: bool,
+    ) -> Result<bool, RenderError> {
+        let key = if pick {
+            PipelineKey::Pick(prepared.homogeneous_family)
+        } else {
+            PipelineKey::Trace(trace_entry(
+                scene,
+                prepared,
+                prepared.params(scene)[P_MATERIAL_MODEL] != 0.0,
+                force_mixed,
+            ))
+        };
+        self.shared.ready(key)
+    }
+
     fn select_trace_pipeline(
         &self,
         scene: &Scene,
@@ -1757,8 +1871,11 @@ mod tests {
             }
             // Code only: comments may name it to explain why it is not used.
             assert!(
-                src.lines()
-                    .all(|line| !line.split("//").next().unwrap_or("").contains("FAMILY_WORLD")),
+                src.lines().all(|line| !line
+                    .split("//")
+                    .next()
+                    .unwrap_or("")
+                    .contains("FAMILY_WORLD")),
                 "the dynamic family is FAMILY_DYNAMIC, never fractal-core's FAMILY_WORLD (= family 8)"
             );
         }

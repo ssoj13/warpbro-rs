@@ -9,7 +9,7 @@ The project repository is [WarpBro](https://github.com/ssoj13/WarpBro), with SSH
 
 ![WarpBro browsing the Menger sponge](docs/ui-menger.jpg)
 
-Documentation: [fractals and procedural shapes](docs/formulas.md), [render and quality profiles](docs/render-profiles.md), [workspace, materials and cached playback](docs/workspace.md), [colour](docs/color.md), [transparent and absorbing glass](docs/glass.md), [changelog](CHANGELOG.md). Open work: [PLAN.md](PLAN.md).
+Documentation: [fractals and procedural shapes](docs/formulas.md), [render and quality profiles](docs/render-profiles.md), [workspace, materials and cached playback](docs/workspace.md), [colour](docs/color.md), [transparent and absorbing glass](docs/glass.md), [local REST API](docs/reference/rest-api.md), [changelog](CHANGELOG.md). Open work: [PLAN.md](PLAN.md).
 
 ## What it does
 

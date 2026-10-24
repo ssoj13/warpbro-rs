@@ -8,6 +8,9 @@
 //! `App::scene`, and the end-of-frame diff against `snapshot_before` authors them into the
 //! document as undoable edits. The window (`window.rs`) redraws only while `App::animating`.
 
+#[path = "app_control.rs"]
+mod control;
+
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -270,6 +273,8 @@ pub(crate) struct App {
     exposure_hold: f32,
     show_ui: bool,
     status: String,
+    control: Option<app_control::Server>,
+    control_started: bool,
     frame_ms: f32,
     seed: u32,
     /// `FRAC_SNAP=out.png [FRAC_SNAP_PRESET=i] [FRAC_SNAP_SPP=n]`: screenshot the window once the
@@ -544,19 +549,6 @@ fn march_limit_label(ui: &mut egui::Ui, unresolved: f32) {
             "Samples with a march out of steps: camera rays show the background, bounce and shadow rays bring no light. Raise Render > March steps.",
         );
     }
-}
-
-fn to_image(t: &Frame) -> ColorImage {
-    ColorImage::new(
-        [t.width, t.height],
-        t.pixels
-            .iter()
-            .map(|&p| {
-                let [r, g, b, _] = p.to_le_bytes();
-                Color32::from_rgb(r, g, b)
-            })
-            .collect(),
-    )
 }
 
 /// Settings panel pages in tab order: the one name of a page wherever it is opened (menu,
@@ -1022,6 +1014,8 @@ impl App {
             raw_view: false,
             exposure_hold: 0.0,
             show_ui: true,
+            control: None,
+            control_started: false,
             status,
             frame_ms: 16.0,
             seed: 0,
@@ -3259,7 +3253,7 @@ impl App {
                     }
                     self.fail_thumbnail(id, error);
                 }
-                RenderEvent::Thumbnail { id, frame } => {
+                RenderEvent::Thumbnail { id, image } => {
                     use crate::material_gallery::ThumbId;
                     let pending = if self
                         .thumb_pending
@@ -3283,15 +3277,13 @@ impl App {
                         if !self.material_gallery.is_pending(id) {
                             continue;
                         }
-                        if let Some(error) = &frame.colour_error {
-                            self.material_gallery.fail_thumbnail(id, error.clone());
-                            self.status = error.clone();
-                            continue;
-                        }
                     }
                     let texture = ctx.load_texture(
                         format!("thumb-{id}"),
-                        to_image(&frame),
+                        ColorImage::from_rgba_unmultiplied(
+                            [image.width, image.height],
+                            bytemuck::cast_slice(&image.pixels),
+                        ),
                         TextureOptions::LINEAR,
                     );
                     let entries = match card {
@@ -4255,6 +4247,14 @@ impl App {
             .as_ref()
             .map(|s| s.effective.render.backend)
             .unwrap_or(self.scene.render.backend);
+        let backend = if backend == crate::render_profiles::Backend::Auto
+            && (self.request.as_ref().map_or(&self.scene, |r| &r.scene).uses_extended_formula()
+                || self.gpu_name.ends_with("(WGPU)"))
+        {
+            crate::render_profiles::Backend::Wgpu
+        } else {
+            backend
+        };
         match backend {
             crate::render_profiles::Backend::Wgpu => format!("WGPU · {}", self.gpu_name),
             crate::render_profiles::Backend::Cuda | crate::render_profiles::Backend::Auto => {
@@ -4279,7 +4279,9 @@ impl App {
                 frame.is_some_and(|f| f.denoise_error.is_some() || f.denoised_samples > 0)
             }
             StatusItem::March => frame.is_some_and(|f| f.unresolved > 0.0),
-            StatusItem::Message => !self.status.is_empty(),
+            StatusItem::Message => {
+                !self.status.is_empty() || crate::render_diagnostics::compiling().is_some()
+            }
         };
         if !shown {
             return false;
@@ -4328,8 +4330,15 @@ impl App {
             }
             (StatusItem::March, Some(frame)) => march_limit_label(ui, frame.unresolved),
             (StatusItem::Message, _) => {
-                ui.label(RichText::new(&self.status).weak())
-                    .on_hover_text(&self.status);
+                if let Some((entry, seconds)) = crate::render_diagnostics::compiling() {
+                    let message = format!("Preparing shader · {seconds:.0}s · {entry}");
+                    ui.colored_label(WARNING, &message).on_hover_text(&message);
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(250));
+                } else {
+                    ui.label(RichText::new(&self.status).weak())
+                        .on_hover_text(&self.status);
+                }
             }
             // A frame section without a frame is not shown (`shown`).
             (_, None) => {}
@@ -5082,6 +5091,7 @@ impl App {
             self.world_ui.playing = false;
             self.status = error;
         }
+        self.poll_control(&ctx);
         let edit_frame = f64::from(self.world_ui.playhead);
         let edit_origin = self.load_revision;
         use crate::hotkeys::{self, Command as Hotkey, Scope};

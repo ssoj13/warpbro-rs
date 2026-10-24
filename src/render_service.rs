@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use crate::render::{Batch, Gpu, RenderError, Target, validate_size};
 use crate::scene::Scene;
+use crate::thumbnail_cache::{ThumbnailCache, ThumbnailImage};
 
 pub use video_io::export::{HdrLevels, PngEncoding, hdr_scale, write_png};
 #[cfg(test)]
@@ -385,7 +386,7 @@ pub enum RenderEvent {
     Error(String),
     Thumbnail {
         id: u64,
-        frame: Arc<Frame>,
+        image: Arc<ThumbnailImage>,
     },
     /// [`Command::Thumbnail`]'s failure: admission or a render step failed.
     ThumbnailFailed {
@@ -839,7 +840,9 @@ fn queue_event(state: &mut Mailbox, event: RenderEvent) {
             event @ RenderEvent::ExportFrame { .. } => state.pending_export = Some(event),
             event @ RenderEvent::ExportFailed { .. } => state.pending_failure = Some(event),
             event @ RenderEvent::Picked { .. } => state.pending_pick = Some(event),
-            event @ RenderEvent::ThumbnailFailed { .. } => state.pending_thumbnail = Some(event),
+            event @ (RenderEvent::Thumbnail { .. } | RenderEvent::ThumbnailFailed { .. }) => {
+                state.pending_thumbnail = Some(event);
+            }
             RenderEvent::Error(error) => state.last_error = Some(error),
             _ => {}
         }
@@ -1160,6 +1163,14 @@ fn step_preview(
     ) {
         return worked;
     }
+    match gpu.pipeline_ready(&job.scene, job.target.width, job.target.height, false) {
+        Ok(false) => return worked,
+        Err(error) => {
+            fail_preview(session, shared, error.to_string());
+            return true;
+        }
+        Ok(true) => {}
+    }
     let advanced = gpu.advance(
         &mut job.target,
         &job.scene,
@@ -1259,6 +1270,9 @@ struct Worker {
     /// Both caches retain Playa's byte budget and eviction policy.
     parked_preview: Option<crate::preview::PreviewCache>,
     presentations: PresentationPool,
+    pick: Option<Command>,
+    thumbnails: crate::thumbnail_cache::DiskCache,
+    thumbnail_key: Option<String>,
 }
 
 impl Worker {
@@ -1484,11 +1498,21 @@ impl Worker {
                 height,
                 ndc,
             } => {
-                let hit = validate_size(width, height, 1)
-                    .and_then(|()| self.gpu.pick(&scene, width, height, ndc))
-                    .map_err(|error| error.to_string());
-                // Its parameters replaced the viewport's: the next viewport launch sets its own.
-                push_event(shared, RenderEvent::Picked { id, hit });
+                if let Some(Command::Pick { id: old, .. }) = self.pick.replace(Command::Pick {
+                    id,
+                    scene,
+                    width,
+                    height,
+                    ndc,
+                }) {
+                    push_event(
+                        shared,
+                        RenderEvent::Picked {
+                            id: old,
+                            hit: Err("Pick superseded".into()),
+                        },
+                    );
+                }
             }
             Command::ReloadColour => {
                 if let Some(v) = &mut self.viewport {
@@ -1549,6 +1573,47 @@ impl Worker {
                 });
                 match admitted {
                     Ok(scene) => {
+                        self.thumbnail_key = match self
+                            .gpu
+                            .resolve_backend(&scene)
+                            .map_err(|e| e.to_string())
+                            .and_then(|backend| {
+                                crate::thumbnail_cache::key(
+                                    &scene,
+                                    width,
+                                    height,
+                                    spp,
+                                    seed,
+                                    backend,
+                                    self.gpu
+                                        .thumbnail_environment(&scene)
+                                        .map_err(|e| e.to_string())?,
+                                )
+                            }) {
+                            Ok(key) => Some(key),
+                            Err(error) => {
+                                log::warn!("Thumbnail cache key: {error}");
+                                None
+                            }
+                        };
+                        if let Some(key) = &self.thumbnail_key {
+                            match self.thumbnails.get(key, width, height) {
+                                Ok(Some(image)) => {
+                                    crate::render_diagnostics::thumbnail(true, false);
+                                    push_event(
+                                        shared,
+                                        RenderEvent::Thumbnail {
+                                            id,
+                                            image: Arc::new(image),
+                                        },
+                                    );
+                                    return;
+                                }
+                                Ok(None) => {}
+                                Err(error) => log::warn!("{error}; regenerating"),
+                            }
+                        }
+                        crate::render_diagnostics::thumbnail(false, false);
                         self.thumbnail = Some(RenderJob {
                             id,
                             scene,
@@ -1577,7 +1642,7 @@ impl Worker {
     /// One step of every job that has work. Returns whether any GPU work ran.
     fn work(&mut self, shared: &Shared) -> bool {
         let interactive = self.viewport.as_ref().is_some_and(viewport_interactive);
-        let mut worked = false;
+        let mut worked = self.step_pick(shared);
         if let Some(viewport) = self.viewport.as_mut() {
             match step_viewport(&mut self.gpu, viewport, shared) {
                 Ok(stepped) => worked |= stepped,
@@ -1604,6 +1669,36 @@ impl Worker {
         worked
     }
 
+    fn step_pick(&mut self, shared: &Shared) -> bool {
+        let Some(Command::Pick {
+            id,
+            scene,
+            width,
+            height,
+            ndc,
+        }) = self.pick.take()
+        else {
+            return false;
+        };
+        let ready = validate_size(width, height, 1)
+            .and_then(|()| self.gpu.pipeline_ready(&scene, width, height, true));
+        if matches!(ready, Ok(false)) {
+            self.pick = Some(Command::Pick {
+                id,
+                scene,
+                width,
+                height,
+                ndc,
+            });
+            return false;
+        }
+        let hit = ready
+            .and_then(|_| self.gpu.pick(&scene, width, height, ndc))
+            .map_err(|e| e.to_string());
+        push_event(shared, RenderEvent::Picked { id, hit });
+        true
+    }
+
     fn step_export(&mut self, shared: &Shared, interactive: bool) -> bool {
         let Some(job) = self.export.as_mut() else {
             return false;
@@ -1618,13 +1713,21 @@ impl Worker {
         }
         let outcome = self
             .gpu
-            .advance(
-                &mut job.target,
-                &job.scene,
-                job.spp,
-                job.seed,
-                Batch::Budget(job.budget_ms),
-            )
+            .pipeline_ready(&job.scene, job.target.width, job.target.height, false)
+            .and_then(|ready| if ready { Ok(Some(())) } else { Ok(None) });
+        if matches!(outcome, Ok(None)) {
+            return false;
+        }
+        let outcome = outcome
+            .and_then(|_| {
+                self.gpu.advance(
+                    &mut job.target,
+                    &job.scene,
+                    job.spp,
+                    job.seed,
+                    Batch::Budget(job.budget_ms),
+                )
+            })
             .and_then(|complete| {
                 if !complete {
                     return Ok(None);
@@ -1681,6 +1784,25 @@ impl Worker {
         let mut worked = false;
         if !interactive && !job.target.complete(job.spp) {
             worked = true;
+            match self
+                .gpu
+                .pipeline_ready(&job.scene, job.target.width, job.target.height, false)
+            {
+                Ok(false) => return false,
+                Err(error) => {
+                    let id = job.id;
+                    self.thumbnail = None;
+                    push_event(
+                        shared,
+                        RenderEvent::ThumbnailFailed {
+                            id,
+                            error: error.to_string(),
+                        },
+                    );
+                    return true;
+                }
+                Ok(true) => {}
+            }
             if let Err(error) = self.gpu.advance(
                 &mut job.target,
                 &job.scene,
@@ -1701,8 +1823,29 @@ impl Worker {
             }
         }
         if job.target.complete(job.spp) && lock(shared).events.len() < QUEUE_LIMIT {
-            let frame = Arc::new(Frame::snapshot(&job.target, job.id, false, false, 100.0));
-            push_event(shared, RenderEvent::Thumbnail { id: job.id, frame });
+            if let Some(error) = &job.target.colour_error {
+                push_event(
+                    shared,
+                    RenderEvent::ThumbnailFailed {
+                        id: job.id,
+                        error: error.clone(),
+                    },
+                );
+                self.thumbnail = None;
+                return true;
+            }
+            let image = Arc::new(ThumbnailImage {
+                width: job.target.width,
+                height: job.target.height,
+                pixels: job.target.pixels.clone(),
+            });
+            if let Some(key) = self.thumbnail_key.take() {
+                match self.thumbnails.put(&key, &image) {
+                    Ok(()) => crate::render_diagnostics::thumbnail(false, true),
+                    Err(error) => log::warn!("Thumbnail cache write: {error}"),
+                }
+            }
+            push_event(shared, RenderEvent::Thumbnail { id: job.id, image });
             self.thumbnail = None;
         }
         worked
@@ -1735,6 +1878,11 @@ fn run_worker(shared: &Shared) {
         preview: None,
         parked_preview: None,
         presentations: PresentationPool::default(),
+        pick: None,
+        thumbnails: crate::thumbnail_cache::DiskCache::new(
+            crate::warpbro_dir().join("cache/thumbnails"),
+        ),
+        thumbnail_key: None,
     };
     while let Some(mail) = worker.take(shared) {
         worker.receive(shared, mail);
@@ -1792,6 +1940,9 @@ fn step_viewport(
 ) -> Result<bool, RenderError> {
     let request = &active.request;
     if !request.active {
+        return Ok(false);
+    }
+    if !gpu.pipeline_ready(&request.scene, request.width, request.height, false)? {
         return Ok(false);
     }
     let preview = request.preview;
@@ -2847,6 +2998,29 @@ mod tests {
         assert!(validate_size(0, 1, 1).is_err());
         assert!(validate_size(16384, 16384, 1).is_err());
         assert!(validate_size(32, 24, 0).is_err());
+    }
+
+    #[test]
+    fn cached_thumbnail_completion_survives_backpressure() {
+        let mut state = Mailbox::default();
+        for _ in 0..QUEUE_LIMIT {
+            queue_event(&mut state, RenderEvent::Error("busy".into()));
+        }
+        queue_event(
+            &mut state,
+            RenderEvent::Thumbnail {
+                id: 42,
+                image: Arc::new(ThumbnailImage {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![0xffabcdef],
+                }),
+            },
+        );
+        assert!(matches!(
+            state.pending_thumbnail,
+            Some(RenderEvent::Thumbnail { id: 42, .. })
+        ));
     }
 
     /// A thumbnail failure is a typed terminal event that survives a full event queue (plan1

@@ -2,6 +2,25 @@
 
 ## Unreleased - 2026-10-24
 
+- **Local REST control:** separate `app-control` transport crate and UI-thread WarpBro adapter,
+  bound to loopback with a bounded command bus and application acknowledgements. Supports
+  document/node/attribute queries and edits, undo/redo, timeline, materials, settings, exports,
+  viewport orbit/pan/zoom/fly and camera patches, screenshots and diagnostics. Browser-origin
+  requests are refused. See [the REST reference](docs/reference/rest-api.md).
+- **WGPU shader preparation:** trace/pick preflight uses deduplicated compile tickets on a
+  separate compiler thread while one render worker retains render-target ownership. Pending
+  jobs yield until their pipeline is ready; compile failures reach the requester. The status
+  bar shows `Preparing shader` elapsed time and entry, and extended-family Auto scenes show
+  the WGPU backend label.
+- **Persistent thumbnails:** gallery, bookmarks and material previews share a content-addressed
+  `ThumbnailCache` disk implementation under `<profile>/cache/thumbnails` (256 MiB budget),
+  with binary extent/checksum validation, temporary-file publication and regeneration on invalid
+  entries. Keys track packed scene/quality/backend/SPP/seed inputs, the resident environment,
+  OCIO processors and renderer source. Thumbnail completion survives event-queue backpressure.
+- **Pipeline-cache persistence:** pin gpu-info to
+  `f845ac889738e159191eb9f71cfabc8831ce134f`, fixing cache publication after pipeline creation.
+  The regression passes upstream, and the rebuilt app reuses trace pipelines across restart.
+
 - **Viewport stalls fixed:** a render step now waits for its own GPU work before recording the
   batch's time (`Gpu::stamp`). Launches are asynchronous, so a step that published no frame used
   to record only its submit time (~0 ms); the 8 ms batch budget then sized the next batch to
