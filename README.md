@@ -278,10 +278,10 @@ PQ/HDR render targets remain selectable in Color on SDR screens, including for H
 only the actual window-output modes in Display depend on the connected display.
 
 **Settings → Display → GUI FPS** sets the interface refresh rate independently of rendering
-(15–240 FPS, default 60). A dedicated CUDA worker owns all progressive targets, thumbnails
-and final renders. Commands and completion events use bounded queues; viewport requests and
-frames use replaceable slots, so the GUI takes the newest ready frame without waiting for
-CUDA. Scene changes invalidate older generations. Settings writes, screenshot output and
+(15–240 FPS, default 60). A dedicated render worker (CUDA or WGPU) owns all progressive
+targets, thumbnails and final renders. Commands and completion events use bounded queues;
+viewport requests and frames use replaceable slots, so the GUI takes the newest ready frame
+without waiting for the GPU. Scene changes invalidate older generations. Settings writes, screenshot output and
 OCIO config loading also run in background workers. Window presentation uses a separate wgpu
 device from offscreen OCIO processing, so surface reconfiguration does not wait for that
 worker's queue. The GUI still performs drawing and GPU presentation; the configured FPS is a
@@ -548,10 +548,10 @@ src/render_profiles_ui.rs   named profile/template catalog and shared viewport b
 src/world_ui.rs   Outliner, object Attribute Editor and layered component Timeline
 src/presets.rs    five authored 250-frame animated World presets
 src/camera_orbit.rs   deterministic timeline integration of camera orbit speed
-src/render.rs     CUDA context, progressive targets, kernel dispatch, PNG output
+src/render.rs     CUDA / WGPU backends, progressive targets, kernel dispatch, PNG output
 src/app.rs        the egui browser, shared Settings panel and viewport toolbar
 src/dock.rs       dockable panels, named layout manager and viewport toolbar
-src/render_service.rs   CUDA worker, bounded command/event bus and latest-frame mailbox
+src/render_service.rs   render worker, bounded command/event bus and latest-frame mailbox
 src/io_service.rs       asynchronous full-scene open/save, settings, bookmarks and screenshots
 src/export.rs     autonomous render coordinator, EXR sink and ffmpeg-rs HEVC writer
 src/inspector.rs  scene controls from egui-widgets-rs attribute editors

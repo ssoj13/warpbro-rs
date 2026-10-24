@@ -3,7 +3,7 @@
 //! Naming contract: a test that needs a CUDA device is named `cuda_*`; one that needs another
 //! GPU API (a wgpu adapter, Vulkan Video) is named `gpu_*`. Hosted CI has no GPU and runs the
 //! ordinary suite with `--skip cuda_ --skip gpu_` (`bootstrap.py` GPU_TEST_PREFIXES); a device
-//! test under another name fails there ("CUDA worker is unavailable", "Vulkan Video
+//! test under another name fails there ("Render worker is unavailable", "Vulkan Video
 //! unavailable", a wgpu validation error).
 use std::sync::{Mutex, MutexGuard};
 

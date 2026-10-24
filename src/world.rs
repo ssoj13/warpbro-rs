@@ -5788,8 +5788,9 @@ impl WorldDocument {
     /// Decode a persisted `WorldDocument` from JSON text, strictly: an unknown or missing field
     /// is an error (`deny_unknown_fields`, `node_shape`), the graph is of this build's format
     /// (`check_format`) and the document passes `validate`. Nothing is upgraded or filled in, so
-    /// a decoded document re-encodes to its text: older layouts were converted once (plan1 Q1)
-    /// and are not read. The one reader of saved documents (`io_service::decode_scene`).
+    /// a decoded document re-encodes to the same JSON value (not necessarily the same bytes):
+    /// older layouts were converted once (plan1 Q1) and are not read. The one reader of saved
+    /// documents (`io_service::decode_scene`).
     pub fn decode_json(text: &str) -> Result<Self, String> {
         let document: Self = serde_json::from_str(text).map_err(|e| e.to_string())?;
         document.check_format()?;

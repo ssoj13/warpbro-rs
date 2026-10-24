@@ -412,7 +412,11 @@ First build the safety net, then fix each divergence against the pinned fractal-
 
 ## 8. Docs and comments
 
-- [ ] `main.rs:2-8` ("eight families", 3 of 8 CLI modes), `main.rs:34` false "Integrated into CUDA";
+**Done 2026-10-23:** most items were already fixed by the waves; left: main.rs top doc (families
+from `formulas::FORMULAS`, stale `mod export` comment), `decode_json` doc (same JSON value, not
+bytes), README / `test_gpu.rs` "CUDA worker" -> render worker. Not found (no longer present):
+`bounces_cap`, the `render.rs` false comment, the `world.rs` doc on the wrong fn.
+- [x] `main.rs:2-8` ("eight families", 3 of 8 CLI modes), `main.rs:34` false "Integrated into CUDA";
   render worker named "CUDA worker" / thread `frac-cuda` though it drives both backends
   (`render_service.rs:1-2`, `401`, `410`, `601`, `export.rs:1330`, `render.rs:1-2`, `preview.rs`);
   `render.rs:762` `bounces_cap` doc; `render.rs:1330` false comment;
@@ -438,8 +442,8 @@ First build the safety net, then fix each divergence against the pinned fractal-
 ## Not done in this pass
 
 - `cargo clippy --all-targets -- --force-warn dead_code --force-warn unused` (overrides the
-  `#[allow]`s, lists what the compiler sees as dead) was started but blocked for 20 min on the
-  target-dir lock held by another build; stopped. Run it as step 1 of execution.
+  `#[allow]`s, lists what the compiler sees as dead): **run 2026-10-23**, the only dead code is
+  `path_convergence.rs` (5 items), the open Q4 draft; nothing else.
 
 ## Execution state (2026-10-23)
 
