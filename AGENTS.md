@@ -46,7 +46,7 @@ operator's go.
 | Entry | `main.rs` | CLI modes (`--gallery`, `--bench`, `--world-bench`, `--animated-fixtures`, `--warmup`), else `app::run` |
 | Window | `window.rs`, `window_shot.rs` | adapter onto the shared `soluwell-window` host (egui-widgets-rs): private present queue, `max_fps` = `gui_fps`, HDR window shots via `App::presented` |
 | App shell | `app.rs` (7k), `dock.rs`, `hotkeys.rs`, `file_dialogs.rs` | `App` owns everything; per-frame `App::ui`; dock panels; scoped hotkeys |
-| Local control | `crates/app-control/src/lib.rs`, `app_control.rs` | Reusable loopback REST transport and bounded command bus; WarpBro dispatch on the UI thread through normal document/navigation commands |
+| Actions / local control | `events.rs`, `app_events.rs`, `app_actions.rs`, `world_events.rs`, `app_control.rs`, `crates/app-control/src/lib.rs` | App-owned Playa EventBus; shared typed UI/REST actions, deferred central dispatch, World/take adapters and loopback HTTP decoding |
 | Document | `world.rs` (6.5k), `world_ui.rs` (6k), `takes*.rs`, `camera_*.rs`, `animation.rs` | Playa-graph world document, commands, undo, evaluation; outliner / timeline / Attribute Editor; recorded takes |
 | Scene | `scene.rs`, `formulas.rs`, `presets.rs`, `templates.rs`, `materials.rs`, `palette.rs`, `environment.rs` | Evaluated `Scene` (typed), `Scene::pack` to the kernel ABI, formula registry, built-in presets/templates |
 | Render | `render.rs` (4.9k), `render_prep.rs`, `render_wgpu.rs`, `render_service.rs`, `render_profiles*.rs`, `denoise.rs` | `Gpu` (both backends), preparation cache, worker thread, profiles -> `EffectiveRender`, OIDN |
@@ -66,24 +66,35 @@ App owns:
   renderer: RenderService (render_service.rs:393, worker thread owns Gpu)
   io: IoService (io_service.rs:102, file worker)   preview: PreviewController   export: ExportController
   colour: ocio::State (UI; the document owns the selection, refresh_scene mirrors it with set_sel)
+  event_bus: playa_events::EventBus; UI and REST publish app_control::Event<UiCommand>
 
 App::ui per frame:
   sync_preview -> world_ui.advance (playhead) -> refresh_scene (snapshot if (graph id, revision, frame) changed)
-  poll_control -> app_control::Call -> control_command -> WorldEditor / navigation / queued worker work
-  hotkeys::consume (GLOBAL table first, then the panel scope)
-  before = snapshot_before.take()                                   -- edit transaction opens
+  poll_control starts HTTP transport -> handle_events drains the App-owned Playa EventBus
+  hotkeys::consume (GLOBAL table first, then panel scope) -> emit_app -> handle_events
   poll_events <- renderer (Frame | Picked | Thumbnail | Error) ; io polls
-  panels: viewport (fly/orbit mutate self.scene.camera; step_viewport -> ViewportRequest;
-          manipulate -> world.execute_edit(gesture); viewport_click -> Pick) | AE | timeline | export_ui ...
-  diff self.scene vs before: camera -> world.navigate_camera ; render/colour -> world.edit_snapshot
-  world.finish_edit_unless(held gesture)                            -- edit transaction closes
+  panels read evaluated state and edit transient widget drafts -> typed UiCommand intents
+  handle_events at explicit frame boundaries -> dispatch_command:
+    Action::App -> handle_app_action; Action::World -> world_events::apply;
+    Action::Take -> handle_take_action; Action::Query -> control_query
+  accepted actions -> WorldEditor / navigate_camera / worker requests -> refresh_scene
+  record_take / preview intents -> bus; WorldAction::FinishEdit {held} -> bus -> handle_events
   save_settings -> io
 ```
 
-Rule: `self.scene` is scratch. The end-of-frame diff turns ordinary UI mutations into document edits.
-REST control runs before that edit window and authors directly through `WorldEditor` (camera navigation
-through `navigate_camera`), then refreshes the evaluated scene. Mutating scratch outside either path,
-or keeping a parallel copy of document state, desyncs.
+Rule: `self.scene` is evaluated scratch; widget drafts are transient. Widgets, hotkeys and REST
+publish the same `app_control::Event<UiCommand>` to App's Playa EventBus. `UiCommand` carries
+`Action::{App, World, Take, Query}` plus captured document/frame and, for camera intents, active-camera
+identity. Deferred dispatch validates that context before applying state; delayed actions for a closed
+document or replaced camera fail instead of editing a different target. Concrete node/take/material
+targets are captured with the intent. HTTP commands default to current dispatch-time context.
+
+`app_control` supplies HTTP parsing, typed decoding and one-shot acknowledgements, not another
+application-command queue. Its parser `mpsc` carries HTTP sockets only; reply `mpsc` carries results
+only. Both UI and HTTP use Playa `try_emit`: a full EventBus rejects admission without evicting an
+older accepted action. Apply mutations in the central handlers, never in a widget or an immediate
+EventBus subscriber. Draft deltas merge onto current accepted state rather than replacing unrelated
+intervening edits.
 
 ## World document and edits
 
@@ -171,6 +182,8 @@ IoService thread: settings / scenes / bookmarks (tmp + rename), frame and window
 - Pipeline-cache persistence is driver-specific. The gpu-info dependency is pinned to the guard fix
   `f845ac889738e159191eb9f71cfabc8831ce134f`, which corrects cache persistence after pipeline creation.
   Verify accepted cache contents and reuse across restart; a large old disk file alone proves neither.
+- UI/REST admission must use reliable Playa EventBus `try_emit` (upstream `72ed08b`); do not add a
+  parallel application queue or fall back to an emitter that evicts accepted actions on overflow.
 - Undo granularity is one open edit per gesture id; text fields and drag values need a gesture.
 - egui: nested `ui.input` inside `hotkeys::active` deadlocks; read `active` first.
 - Many sources are CRLF; scripted replacements must match `\r\n`.

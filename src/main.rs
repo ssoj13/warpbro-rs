@@ -42,6 +42,7 @@ mod palette;
 #[cfg(test)]
 mod parity_tests;
 // Unwired roulette / clamp policies awaiting a decision (plan1 Q4): no kernel uses them yet.
+mod events;
 #[allow(dead_code)]
 mod path_convergence;
 mod presets;
@@ -49,7 +50,6 @@ mod preview;
 mod render;
 mod render_bench;
 mod render_diagnostics;
-mod thumbnail_cache;
 mod render_prep;
 mod render_profiles;
 mod render_profiles_ui;
@@ -60,9 +60,11 @@ mod takes;
 mod templates;
 #[cfg(test)]
 mod test_gpu;
+mod thumbnail_cache;
 mod window;
 mod window_shot;
 mod world;
+mod world_events;
 mod world_ui;
 
 use std::time::Instant;

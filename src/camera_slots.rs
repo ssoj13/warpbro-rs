@@ -48,7 +48,7 @@ impl CameraSlots {
 
     /// The strip of slot buttons: one click stores `camera`, the other restores into it
     /// (`hotkeys::slot_click`; `swap` exchanges the buttons).
-    pub fn ui(&mut self, ui: &mut egui::Ui, camera: &mut Camera, swap: bool) -> Option<SlotAction> {
+    pub fn ui(&self, ui: &mut egui::Ui, swap: bool) -> Option<SlotAction> {
         use crate::hotkeys::{SlotClick, slot_click, slot_hint};
         let mut action = None;
         let right_to_left = ui.layout().prefer_right_to_left();
@@ -88,11 +88,10 @@ impl CameraSlots {
                 .on_hover_text(hint);
             match slot_click(&response, swap) {
                 Some(SlotClick::Store) => {
-                    self.store(index, camera);
                     action = Some(SlotAction::Stored(index));
                 }
                 Some(SlotClick::Recall) => {
-                    action = Some(if self.restore(index, camera) {
+                    action = Some(if self.slots[index].is_some() {
                         SlotAction::Restored(index)
                     } else {
                         SlotAction::Empty(index)
@@ -125,25 +124,26 @@ mod tests {
             let ctx = egui::Context::default();
             let mut slots = CameraSlots::default();
             let mut camera = crate::scene::Scene::preset(Formula::Mandelbulb(Bulb::PRESET)).camera;
-            let frame = |slots: &mut CameraSlots, camera: &mut Camera, events: Vec<egui::Event>| {
-                let mut action = None;
-                let output = ctx.run_ui(
-                    egui::RawInput {
-                        screen_rect: Some(egui::Rect::from_min_size(
-                            egui::Pos2::ZERO,
-                            egui::vec2(400.0, 100.0),
-                        )),
-                        events,
-                        ..Default::default()
-                    },
-                    |root| {
-                        egui::CentralPanel::default().show(root, |ui| {
-                            ui.horizontal(|ui| action = slots.ui(ui, camera, swap));
-                        });
-                    },
-                );
-                (action, output)
-            };
+            let frame =
+                |slots: &mut CameraSlots, _camera: &mut Camera, events: Vec<egui::Event>| {
+                    let mut action = None;
+                    let output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(400.0, 100.0),
+                            )),
+                            events,
+                            ..Default::default()
+                        },
+                        |root| {
+                            egui::CentralPanel::default().show(root, |ui| {
+                                ui.horizontal(|ui| action = slots.ui(ui, swap));
+                            });
+                        },
+                    );
+                    (action, output)
+                };
             let click = |pos: egui::Pos2, button| {
                 vec![
                     egui::Event::PointerMoved(pos),
@@ -180,10 +180,14 @@ mod tests {
             assert_eq!(camera, before);
             let (action, _) = frame(&mut slots, &mut camera, click(pos, store));
             assert_eq!(action, Some(SlotAction::Stored(1)), "swap={swap}");
+            assert!(slots.slots[1].is_none(), "a widget only proposes the store");
+            slots.store(1, &camera);
             let stored = camera;
             camera.yaw_degrees += 30.0;
             let (action, _) = frame(&mut slots, &mut camera, click(pos, recall));
             assert_eq!(action, Some(SlotAction::Restored(1)), "swap={swap}");
+            assert_ne!(camera, stored, "a widget only proposes the recall");
+            assert!(slots.restore(1, &mut camera));
             assert_eq!(camera, stored);
         }
     }

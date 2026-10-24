@@ -3,6 +3,7 @@ use crate::render_profiles::{
     CatalogRole, ProfileTarget, RenderMethod, ViewportMode, ViewportRender,
 };
 use crate::world::{NodeId, WorldCommand, WorldEditor, WorldKind, WorldNodeInfo};
+use playa_events::EventEmitter;
 use serde_json::json;
 use soluwell_config::icons as ph;
 
@@ -12,8 +13,13 @@ pub(crate) struct Actions {
     pub error: Option<String>,
 }
 impl Actions {
-    fn execute(&mut self, world: &mut WorldEditor, command: WorldCommand) -> bool {
-        match world.execute(command) {
+    fn execute(
+        &mut self,
+        world: &WorldEditor,
+        emitter: &EventEmitter,
+        command: WorldCommand,
+    ) -> bool {
+        match crate::world_events::emit_edit(emitter, world, 0.0, command, None) {
             Ok(()) => true,
             Err(error) => {
                 self.error = Some(error);
@@ -122,8 +128,8 @@ fn name_command(dialog: &NameDialog) -> Result<WorldCommand, String> {
         },
     })
 }
-fn dialogs(ui: &egui::Ui, world: &mut WorldEditor) -> Actions {
-    let mut actions = Actions::default();
+fn dialogs(ui: &egui::Ui, world: &WorldEditor, emitter: &EventEmitter) -> Actions {
+    let actions = Actions::default();
     let id = dialog_id(world);
     let frame = ui.ctx().cumulative_frame_nr();
     let drawn = id.with("drawn");
@@ -169,9 +175,10 @@ fn dialogs(ui: &egui::Ui, world: &mut WorldEditor) -> Actions {
         });
     });
     if accepted {
-        match name_command(&dialog).and_then(|command| world.execute(command)) {
+        match name_command(&dialog)
+            .and_then(|command| crate::world_events::emit_edit(emitter, world, 0.0, command, None))
+        {
             Ok(()) => {
-                actions.edit = world.active();
                 cancelled = true;
             }
             Err(error) => dialog.error = Some(error),
@@ -233,7 +240,8 @@ struct CatalogOps<'a> {
 /// edit and new / copy / template buttons, so every binding's menu lines up.
 fn catalog_selector(
     ui: &mut egui::Ui,
-    world: &mut WorldEditor,
+    world: &WorldEditor,
+    emitter: &EventEmitter,
     label: &str,
     kind: WorldKind,
     selected: NodeId,
@@ -258,7 +266,7 @@ fn catalog_selector(
                 }
             });
         if candidate != selected {
-            actions.execute(world, bind(candidate));
+            actions.execute(world, emitter, bind(candidate));
         }
         if ui
             .button(ph::GEAR)
@@ -309,7 +317,8 @@ fn catalog_selector(
 /// A render-profile binding (Moving / Still / Manual / Output); copies made here are bound.
 fn profile_selector(
     ui: &mut egui::Ui,
-    world: &mut WorldEditor,
+    world: &WorldEditor,
+    emitter: &EventEmitter,
     viewport: NodeId,
     target: ProfileTarget,
     selected: NodeId,
@@ -318,6 +327,7 @@ fn profile_selector(
     catalog_selector(
         ui,
         world,
+        emitter,
         target_name(target),
         WorldKind::RenderSettings,
         selected,
@@ -337,16 +347,22 @@ fn profile_selector(
 /// request it.
 pub(crate) fn output_binding_rows(
     ui: &mut egui::Ui,
-    world: &mut WorldEditor,
+    world: &WorldEditor,
+    emitter: &EventEmitter,
     frame: f64,
 ) -> Actions {
-    let mut actions = output_rows(ui, world, frame);
-    actions.merge(dialogs(ui, world));
+    let mut actions = output_rows(ui, world, emitter, frame);
+    actions.merge(dialogs(ui, world, emitter));
     actions
 }
 /// The Output render profile and the OutputSettings recipe rows (grid rows), shared by the
 /// Render / Encode panel and Settings → Render & Viewport.
-fn output_rows(ui: &mut egui::Ui, world: &mut WorldEditor, frame: f64) -> Actions {
+fn output_rows(
+    ui: &mut egui::Ui,
+    world: &WorldEditor,
+    emitter: &EventEmitter,
+    frame: f64,
+) -> Actions {
     let mut actions = Actions::default();
     match (
         world.document.viewport_settings_id(),
@@ -355,6 +371,7 @@ fn output_rows(ui: &mut egui::Ui, world: &mut WorldEditor, frame: f64) -> Action
         (Ok(viewport), Ok(output)) => actions.merge(profile_selector(
             ui,
             world,
+            emitter,
             viewport,
             ProfileTarget::Output,
             output,
@@ -366,6 +383,7 @@ fn output_rows(ui: &mut egui::Ui, world: &mut WorldEditor, frame: f64) -> Action
         Ok(recipe) => actions.merge(catalog_selector(
             ui,
             world,
+            emitter,
             "Output file",
             WorldKind::OutputSettings,
             recipe,
@@ -385,7 +403,8 @@ fn output_rows(ui: &mut egui::Ui, world: &mut WorldEditor, frame: f64) -> Action
 }
 fn binding_controls(
     ui: &mut egui::Ui,
-    world: &mut WorldEditor,
+    world: &WorldEditor,
+    emitter: &EventEmitter,
     include_output: bool,
     frame: f64,
 ) -> Actions {
@@ -414,11 +433,11 @@ fn binding_controls(
                 (ProfileTarget::Manual, policy.manual_id),
             ] {
                 actions.merge(profile_selector(
-                    ui, world, viewport, target, selected, frame,
+                    ui, world, emitter, viewport, target, selected, frame,
                 ));
             }
             if include_output {
-                actions.merge(output_rows(ui, world, frame));
+                actions.merge(output_rows(ui, world, emitter, frame));
             }
         });
     actions
@@ -445,7 +464,8 @@ fn active_summary(nodes: &[WorldNodeInfo], active: &ViewportRender) -> String {
 /// profile menu is labelled with the binding the viewport rendered last (`active`).
 pub(crate) fn toolbar(
     ui: &mut egui::Ui,
-    world: &mut WorldEditor,
+    world: &WorldEditor,
+    emitter: &EventEmitter,
     frame: f64,
     active: Option<&ViewportRender>,
 ) -> Actions {
@@ -469,6 +489,7 @@ pub(crate) fn toolbar(
             if mode != policy.mode {
                 actions.execute(
                     world,
+                    emitter,
                     WorldCommand::SetAttribute {
                         id: viewport,
                         path: "/viewport/mode".into(),
@@ -490,7 +511,7 @@ pub(crate) fn toolbar(
                 None => ("Profiles", ROUTING.to_owned()),
             };
             ui.menu_button(label, |ui| {
-                actions.merge(binding_controls(ui, world, false, frame))
+                actions.merge(binding_controls(ui, world, emitter, false, frame))
             })
             .response
             .on_hover_text(hover);
@@ -515,6 +536,7 @@ pub(crate) fn toolbar(
                 {
                     actions.execute(
                         world,
+                        emitter,
                         WorldCommand::SetAttribute {
                             id: viewport,
                             path: path.into(),
@@ -527,7 +549,7 @@ pub(crate) fn toolbar(
         }
         (Err(error), _) | (_, Err(error)) => actions.error = Some(error),
     }
-    actions.merge(dialogs(ui, world));
+    actions.merge(dialogs(ui, world, emitter));
     actions
 }
 
@@ -552,7 +574,8 @@ fn render_catalog_target(ui: &mut egui::Ui, world: &WorldEditor) -> ProfileTarge
 }
 fn recall_render(
     ui: &egui::Ui,
-    world: &mut WorldEditor,
+    world: &WorldEditor,
+    emitter: &EventEmitter,
     node: &WorldNodeInfo,
     target: ProfileTarget,
     frame: f64,
@@ -570,7 +593,11 @@ fn recall_render(
         ),
         Ok(_) => match world.document.viewport_settings_id() {
             Ok(viewport) => {
-                actions.execute(world, binding_command(viewport, target, node.id, frame));
+                actions.execute(
+                    world,
+                    emitter,
+                    binding_command(viewport, target, node.id, frame),
+                );
             }
             Err(error) => actions.error = Some(error),
         },
@@ -580,7 +607,8 @@ fn recall_render(
 
 fn recall_output(
     ui: &egui::Ui,
-    world: &mut WorldEditor,
+    world: &WorldEditor,
+    emitter: &EventEmitter,
     node: &WorldNodeInfo,
     actions: &mut Actions,
 ) {
@@ -595,7 +623,7 @@ fn recall_output(
             node.name.clone(),
         ),
         Ok(_) => {
-            actions.execute(world, WorldCommand::SetOutputSettings(node.id));
+            actions.execute(world, emitter, WorldCommand::SetOutputSettings(node.id));
         }
         Err(error) => actions.error = Some(error),
     }
@@ -645,10 +673,11 @@ fn catalog_new_buttons(
 /// A template carries the file icon.
 fn catalog_buttons(
     ui: &mut egui::Ui,
-    world: &mut WorldEditor,
+    world: &WorldEditor,
+    emitter: &EventEmitter,
     kind: WorldKind,
     hover: &str,
-    recall: &mut dyn FnMut(&egui::Ui, &mut WorldEditor, &WorldNodeInfo, &mut Actions),
+    recall: &mut dyn FnMut(&egui::Ui, &WorldEditor, &WorldNodeInfo, &mut Actions),
 ) -> Actions {
     let mut actions = Actions::default();
     let mut nodes = actions.or_report(world.document.settings_nodes(kind, None));
@@ -673,7 +702,7 @@ fn catalog_buttons(
                 recall(ui, world, &node, &mut actions);
             }
             response.context_menu(|ui| {
-                actions.merge(settings_menu(ui, world, node.id, kind, &node.name))
+                actions.merge(settings_menu(ui, world, emitter, node.id, kind, &node.name))
             });
         }
     });
@@ -683,11 +712,12 @@ fn catalog_buttons(
 /// Viewport policy and profile parameters use the existing node Attribute Editor.
 pub(crate) fn settings(
     ui: &mut egui::Ui,
-    world: &mut WorldEditor,
+    world: &WorldEditor,
+    emitter: &EventEmitter,
     world_ui: &mut crate::world_ui::WorldUi,
 ) -> Actions {
     let frame = f64::from(world_ui.playhead);
-    let mut actions = binding_controls(ui, world, true, frame);
+    let mut actions = binding_controls(ui, world, emitter, true, frame);
     ui.separator();
     ui.label("Render profiles and templates");
     ui.weak("Profiles are shared live. Applying a template creates an independent render profile.");
@@ -696,10 +726,11 @@ pub(crate) fn settings(
     actions.merge(catalog_buttons(
         ui,
         world,
+        emitter,
         WorldKind::RenderSettings,
         "Recall to the selected target; right-click to edit or save settings",
         &mut |ui, world, node, actions| {
-            recall_render(ui, world, node, render_target, frame, actions)
+            recall_render(ui, world, emitter, node, render_target, frame, actions)
         },
     ));
     ui.separator();
@@ -715,23 +746,25 @@ pub(crate) fn settings(
     actions.merge(catalog_buttons(
         ui,
         world,
+        emitter,
         WorldKind::OutputSettings,
         "Use as the export recipe; right-click to edit or save settings",
-        &mut recall_output,
+        &mut |ui, world, node, actions| recall_output(ui, world, emitter, node, actions),
     ));
     ui.separator();
     match world.document.viewport_settings_id() {
         Ok(viewport) => world_ui.attribute_editor(ui, world, viewport),
         Err(error) => actions.error = Some(error),
     }
-    actions.merge(dialogs(ui, world));
+    actions.merge(dialogs(ui, world, emitter));
     actions
 }
 /// The right-click menu of a catalog settings node: edit, rename, save as profile / template
 /// and, for a template, the independent copies its catalog can apply.
 fn settings_menu(
     ui: &mut egui::Ui,
-    world: &mut WorldEditor,
+    world: &WorldEditor,
+    _emitter: &EventEmitter,
     id: NodeId,
     kind: WorldKind,
     name: &str,
@@ -804,7 +837,8 @@ fn settings_menu(
 /// Catalog role is metadata on the canonical settings node, independent of its schema.
 pub(crate) fn node_actions(
     ui: &mut egui::Ui,
-    world: &mut WorldEditor,
+    world: &WorldEditor,
+    emitter: &EventEmitter,
     id: NodeId,
     kind: WorldKind,
 ) -> Actions {
@@ -840,16 +874,16 @@ pub(crate) fn node_actions(
                 .map(|node| node.name)
                 .unwrap_or_default();
             ui.menu_button("Catalog actions", |ui| {
-                actions.merge(settings_menu(ui, world, id, kind, &name))
+                actions.merge(settings_menu(ui, world, emitter, id, kind, &name))
             });
         }
     });
     if role != before
         && let Some(role) = role
     {
-        actions.execute(world, WorldCommand::SetCatalogRole { id, role });
+        actions.execute(world, emitter, WorldCommand::SetCatalogRole { id, role });
     }
-    actions.merge(dialogs(ui, world));
+    actions.merge(dialogs(ui, world, emitter));
     actions
 }
 
@@ -917,10 +951,17 @@ mod tests {
         let ctx = egui::Context::default();
         // The profile menu is labelled with the binding the viewport rendered last.
         let moving = world.document.viewport_render(at, true).unwrap();
-        let draw = |ui: &mut egui::Ui, world: &mut WorldEditor| {
+        let mut state = crate::world_ui::WorldUi::default();
+        let emitter = state.emitter().clone();
+        let mut draw = |ui: &mut egui::Ui, world: &mut WorldEditor| {
             ui.horizontal(|ui| {
-                assert!(toolbar(ui, world, 0.0, Some(&moving)).error.is_none());
+                assert!(
+                    toolbar(ui, world, &emitter, 0.0, Some(&moving))
+                        .error
+                        .is_none()
+                );
             });
+            state.dispatch_events(world);
         };
         let painted = frame(&ctx, vec![], |ui| draw(ui, &mut world));
         text_center(&painted, "Moving");
@@ -940,10 +981,13 @@ mod tests {
         let original = world.document.clone();
         let ctx = egui::Context::default();
         let mut world_ui = crate::world_ui::WorldUi::default();
+        let emitter = world_ui.emitter().clone();
         let mut draw = |events, world: &mut WorldEditor| {
-            frame(&ctx, events, |ui| {
-                assert!(settings(ui, world, &mut world_ui).error.is_none());
-            })
+            let output = frame(&ctx, events, |ui| {
+                assert!(settings(ui, world, &emitter, &mut world_ui).error.is_none());
+            });
+            world_ui.dispatch_events(world);
+            output
         };
         let painted = draw(vec![], &mut world);
         let create = text_center(&painted, "New profile…");
@@ -976,10 +1020,13 @@ mod tests {
         let viewport_before = world.document.viewport_policy(0.0).unwrap();
         let ctx = egui::Context::default();
         let mut world_ui = crate::world_ui::WorldUi::default();
+        let emitter = world_ui.emitter().clone();
         let mut draw = |events, world: &mut WorldEditor| {
-            frame(&ctx, events, |ui| {
-                assert!(settings(ui, world, &mut world_ui).error.is_none());
-            })
+            let output = frame(&ctx, events, |ui| {
+                assert!(settings(ui, world, &emitter, &mut world_ui).error.is_none());
+            });
+            world_ui.dispatch_events(world);
+            output
         };
         let painted = draw(vec![], &mut world);
         let recall = text_center(&painted, "Recall custom render");
@@ -1010,10 +1057,13 @@ mod tests {
         let original = world.document.clone();
         let ctx = egui::Context::default();
         let mut world_ui = crate::world_ui::WorldUi::default();
+        let emitter = world_ui.emitter().clone();
         let mut draw = |events, world: &mut WorldEditor| {
-            frame(&ctx, events, |ui| {
-                assert!(settings(ui, world, &mut world_ui).error.is_none());
-            })
+            let output = frame(&ctx, events, |ui| {
+                assert!(settings(ui, world, &emitter, &mut world_ui).error.is_none());
+            });
+            world_ui.dispatch_events(world);
+            output
         };
         let painted = draw(vec![], &mut world);
         let recall = text_center(

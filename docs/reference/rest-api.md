@@ -2,7 +2,7 @@
 
 WarpBro exposes the running desktop app at `http://127.0.0.1:9877/api`. Use it to inspect the document, edit nodes, navigate the viewport, control playback, and start exports.
 
-Updated: 2026-10-24. The command definitions live in [the app adapter](../../src/app_control.rs), [the HTTP transport](../../crates/app-control/src/lib.rs), and [WorldCommand](../../src/world.rs).
+Updated: 2026-10-24. The command definitions live in [the REST decoder](../../src/app_control.rs), [shared typed events](../../src/events.rs), [the dispatcher](../../src/app_events.rs), [action handlers](../../src/app_actions.rs), [the HTTP transport](../../crates/app-control/src/lib.rs), and [WorldCommand](../../src/world.rs).
 
 ## Contents
 
@@ -46,6 +46,8 @@ Health returns `pid` and `protocol` (currently `1`) without waiting for the UI. 
 
 GET routes read state. POST routes execute commands with JSON payloads. Slashes map to dots in command names: `POST /api/viewport/orbit` executes `viewport.orbit`.
 
+HTTP decodes requests into the same typed `app_control::Event<UiCommand>` that widgets and hotkeys publish to App's Playa EventBus. The central dispatcher applies App, World, Take, and Query actions on the app thread. HTTP parser channels carry sockets, and reply channels carry acknowledgements; there is no separate REST application-command queue. `GET /api/commands` lists the exposed HTTP commands; UI-only transient intents do not automatically have HTTP endpoints.
+
 Use this helper for the examples below:
 
 ```powershell
@@ -67,27 +69,28 @@ Invoke-RestMethod -Method Post -Uri "$api/viewport/orbit" -ContentType 'applicat
 
 Direct POST routes accept an empty body as `{}`. Use `{}` for commands with no payload. Request bodies are limited to 1 MiB. Send document JSON as an object, rather than a JSON string containing another document.
 
-A normal successful command returns HTTP 200 after the app handles it. Camera commands return `success`, the resulting `camera`, and document `revision`. Other result fields depend on the command. Read queries return their objects or arrays directly, without a result wrapper.
+A normal successful command returns HTTP 200 after the shared dispatcher handles it. Camera commands return `success`, the resulting `camera`, and document `revision`. Other result fields depend on the command. Read queries return their objects or arrays directly, without a result wrapper.
 
-An acknowledgement does not mean a new image has finished rendering. Picking and export explicitly return `{"queued":true}` because their GPU/file work continues asynchronously. `app.exit` acknowledges the close request before the process exits. A command waiting for the app times out after 10 seconds; a request that has expired before dispatch is skipped. If a timeout overlaps execution, inspect current state before retrying a mutation.
+An acknowledgement does not mean a new image has finished rendering or a requested file operation has completed. `scene.open` and `scene.save` dispatch background I/O; inspect application status for its result. Picking and export explicitly return `{"queued":true}` because their GPU/file work continues asynchronously. `app.exit` acknowledges the close request before the process exits. A command waiting for the app times out after 10 seconds; a request that has expired before dispatch is skipped. If a timeout overlaps execution, inspect current state before retrying a mutation.
 
 ## Queries
 
 | GET route under `/api` | Reply                                                                                                               |
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | `/health`              | Transport identity: process ID and protocol version.                                                                |
-| `/commands`            | Supported command names, query names, and WorldCommand format.                                                      |
+| `/commands`            | Supported command/query names, `event_bus` identity, and WorldCommand format.                                       |
 | `/status`              | Scene name, document UUID, revision, selection, camera, timeline, render, thumbnail, diagnostic, and status fields. |
 | `/scene`               | Persistent World document, suitable for strict document loading.                                                    |
 | `/nodes`               | Node array: `id`, `kind`, `name`, `parent`, `visible`, `locked`, `solo`, `start`, `end`.                            |
 | `/attributes/<uuid>`   | Node attributes evaluated at the playhead: `path`, `label`, `value`, `keyable`, `frames`, `choices`, `range`.       |
 | `/gallery`             | Gallery entries: zero-based `index`, `name`, `formula`, and thumbnail-ready flag `thumbnail`.                       |
 | `/materials`           | Material-library entries: zero-based `index` and preset name `preset`.                                              |
+| `/takes`               | Recorded-take list from the current document.                                                                       |
 | `/camera`              | Camera evaluated from the document at the current playhead, including during cached preview.                        |
 | `/settings`            | Current application preferences, including controls, Auto Key, and export settings.                                 |
 | `/render`              | The render portion of status.                                                                                       |
 | `/diagnostics`         | Active pipeline compilation, recent pipeline timings, and thumbnail-cache counters.                                 |
-| `/screenshot.png`      | Current viewport image as `image/png`; fails if no frame exists.                                                    |
+| `/screenshot.png`      | Current viewport image as `image/png`; fails if no frame exists or its colour output failed.                        |
 
 For the running binary's command list:
 
@@ -99,18 +102,22 @@ Invoke-RestMethod "$api/commands" | ConvertTo-Json -Depth 10
 
 Each camera navigation call stops timeline/cache playback, evaluates the document at the current playhead, applies one camera change, stops active flight/inertia, authors it through the active Camera node, and closes its Undo step. Auto Key follows the current application setting. These calls do not simulate held mouse buttons or a timed flight.
 
-| POST command      | Required payload                                                | Effect                                                                                                                                                        |
-| ----------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `viewport.orbit`  | `yaw_degrees`, `pitch_degrees`: numbers                         | Orbit deltas in degrees using the shared Houdini orbit rig; pitch is limited by the rig to ±89°.                                                              |
-| `viewport.pan`    | `dx_px`, `dy_px`: numbers                                       | Pan deltas in viewport pixels; scale follows vertical FOV, viewport height, distance, and camera roll.                                                        |
-| `viewport.zoom`   | `factor`: positive finite number                                | Apply a multiplicative orbit-distance change.                                                                                                                 |
-| `viewport.fly`    | `translation`: three numbers; `rotation_degrees`: three numbers | Translate in the camera's local axes, then add yaw, pitch, and roll deltas. Translation is right, up, forward in scene units.                                 |
-| `viewport.camera` | Object containing camera fields to replace                      | Patch the evaluated camera; omitted fields retain their current values.                                                                                       |
-| `viewport.frame`  | `{}`                                                            | Frame the scene bounds.                                                                                                                                       |
-| `viewport.home`   | `{}`                                                            | Restore the camera of the loaded origin scene.                                                                                                                |
-| `viewport.pick`   | `ndc`: two numbers in `[-1,1]`                                  | Stop timeline/cache playback, evaluate the current playhead, and queue a GPU pick; returns `queued` and `pick_id`. Selection changes when the result arrives. |
-| `viewport.raw`    | `enabled`: boolean                                              | Toggle raw viewport display.                                                                                                                                  |
-| `viewport.tool`   | `tool`: string                                                  | Choose `select`, `move`, `rotate`, or `scale`.                                                                                                                |
+| POST command             | Required payload                                                                  | Effect                                                                                                                                                        |
+| ------------------------ | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `viewport.orbit`         | `yaw_degrees`, `pitch_degrees`: numbers                                           | Orbit deltas in degrees using the shared Houdini orbit rig; pitch is limited by the rig to ±89°.                                                              |
+| `viewport.pan`           | `dx_px`, `dy_px`: numbers                                                         | Pan deltas in viewport pixels; scale follows vertical FOV, viewport height, distance, and camera roll.                                                        |
+| `viewport.zoom`          | `factor`: positive finite number                                                  | Apply a multiplicative orbit-distance change.                                                                                                                 |
+| `viewport.fly`           | `translation`: three numbers; `rotation_degrees`: three numbers                   | Translate in the camera's local axes, then add yaw, pitch, and roll deltas. Translation is right, up, forward in scene units.                                 |
+| `viewport.camera`        | Object containing camera fields to replace                                        | Patch the evaluated camera; omitted fields retain their current values.                                                                                       |
+| `viewport.frame`         | `{}`                                                                              | Frame the scene bounds.                                                                                                                                       |
+| `viewport.home`          | `{}`                                                                              | Restore the camera of the loaded origin scene.                                                                                                                |
+| `viewport.pick`          | `ndc`: two numbers in `[-1,1]`; optional `add`, `focus`: booleans (default false) | Stop timeline/cache playback, evaluate the current playhead, and queue a GPU pick; returns `queued` and `pick_id`. Selection changes when the result arrives. |
+| `viewport.raw`           | `enabled`: boolean                                                                | Toggle raw viewport display.                                                                                                                                  |
+| `viewport.pause`         | `enabled`: boolean                                                                | Author the viewport pause flag.                                                                                                                               |
+| `viewport.flight.toggle` | `{}`                                                                              | Toggle saved free-flight/horizon-lock mode.                                                                                                                   |
+| `viewport.slot.store`    | `index`: integer                                                                  | Store the current camera in a zero-based CamClip slot (0–4).                                                                                                  |
+| `viewport.slot.restore`  | `index`: integer                                                                  | Restore a nonempty CamClip slot (0–4).                                                                                                                        |
+| `viewport.tool`          | `tool`: string                                                                    | Choose `select`, `move`, `rotate`, or `scale`.                                                                                                                |
 
 Navigation examples:
 
@@ -159,11 +166,14 @@ Send-WarpBro 'viewport.pick' @{ ndc = @(0, 0) }
 | ------------------------------ | -------------------------------------------------------------------------------- |
 | `scene.new`                    | `{}`; load a new default scene.                                                  |
 | `scene.load`                   | Full World document object; validate and load it through the scene-loading path. |
-| `scene.document`               | Full World document object; validate and reset the World editor document.        |
+| `scene.document`               | Alias of `scene.load`; full World document object.                               |
+| `scene.open`                   | `path`: string; submit a scene-file open request to background I/O.              |
+| `scene.save`                   | `path`: string; submit saving the current document to background I/O.            |
 | `gallery.load`                 | `{"index":19}`; load the gallery entry at a zero-based index.                    |
 | `world.command`                | One externally tagged WorldCommand object; see below.                            |
 | `selection.set`                | `{"ids":[...uuid strings...]}`; validate each node and replace selection.        |
 | `history.undo`, `history.redo` | `{}`; use document history.                                                      |
+| `history.reset`                | `{}`; restore the loaded origin document as one undoable step.                   |
 
 Gallery entries can change; query their names before choosing one:
 
@@ -175,7 +185,7 @@ $document = Invoke-RestMethod "$api/scene"
 Send-WarpBro 'scene.load' $document
 ```
 
-Document loads use the same strict schema validation as opening a scene file. They do not accept an evaluated Scene snapshot or a filename.
+`scene.load` and `scene.document` use the same strict schema validation as opening a scene file. They accept the document object, rather than an evaluated Scene snapshot or a filename. Use `scene.open` or `scene.save` for filesystem paths.
 
 ## World commands and attributes
 
@@ -260,18 +270,22 @@ Send-WarpBro 'selection.set' @{ ids = @($node.id) }
 
 ## Playback, materials, settings, and exports
 
-| POST command      | Payload and behavior                                                                          |
-| ----------------- | --------------------------------------------------------------------------------------------- |
-| `timeline.seek`   | `{"frame":0}`; unsigned integer playhead frame; cancels cache-preview playback.               |
-| `timeline.play`   | `{}`; start timeline playback.                                                                |
-| `timeline.pause`  | `{}`; pause playback and cancel cache preview.                                                |
-| `material.create` | `{"index":0}`; create/select a standalone material from a library preset.                     |
-| `material.apply`  | `{"index":0}`; apply a library preset to selected eligible objects.                           |
-| `settings.set`    | Recursive preferences patch; omitted fields retain their current values, unknown fields fail. |
-| `export.start`    | `{}`; freeze the current World scene and queue export with current export settings.           |
-| `export.cancel`   | `{}`; request cancellation.                                                                   |
-| `app.ui`          | `{"enabled":false}`; hide/show panels.                                                        |
-| `app.exit`        | `{}`; request window close.                                                                   |
+| POST command      | Payload and behavior                                                                                                 |
+| ----------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `timeline.seek`   | `{"frame":0}`; unsigned integer playhead frame; cancels cache-preview playback.                                      |
+| `timeline.play`   | `{}`; start timeline playback.                                                                                       |
+| `timeline.pause`  | `{}`; pause playback and cancel cache preview.                                                                       |
+| `timeline.loop`   | `enabled`: boolean; set timeline looping.                                                                            |
+| `material.create` | `{"index":0}`; create/select a standalone material from a library preset.                                            |
+| `material.apply`  | `{"index":0}`; apply a library preset to selected eligible objects.                                                  |
+| `settings.set`    | Recursive preferences patch; omitted fields retain their current values, unknown fields fail.                        |
+| `colour.set`      | Full serialized colour-selection object (`ocio::Sel`); author the scene selection through the shared action handler. |
+| `colour.preset`   | `index`: integer; restore a saved colour preset.                                                                     |
+| `colour.reload`   | `{}`; reload the selected OCIO configuration.                                                                        |
+| `export.start`    | `{}`; freeze the current World scene and queue export with current export settings.                                  |
+| `export.cancel`   | `{}`; request cancellation.                                                                                          |
+| `app.ui`          | `{"enabled":false}`; hide/show panels.                                                                               |
+| `app.exit`        | `{}`; request window close.                                                                                          |
 
 ```powershell
 Send-WarpBro 'timeline.pause'
@@ -317,13 +331,13 @@ Errors return JSON such as:
 { "success": false, "error": "Zoom factor must be finite and positive" }
 ```
 
-| HTTP status | Meaning                                                                                        |
-| ----------- | ---------------------------------------------------------------------------------------------- |
-| 200         | Query or command handled; inspect the body for asynchronous `queued` results.                  |
-| 400         | Invalid JSON/payload, unknown command/field, validation failure, or application command error. |
-| 403         | The request contains an `Origin` header; browser-origin requests are refused.                  |
-| 404         | Unsupported HTTP method or route outside `/api/`. Unknown commands under `/api/` return 400.   |
-| 503         | HTTP request queue or command bus full, or application shutting down/stopped.                  |
-| 504         | The app did not acknowledge the command within 10 seconds.                                     |
+| HTTP status | Meaning                                                                                                                                                                     |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 200         | Query or command handled; inspect the body for asynchronous `queued` results.                                                                                               |
+| 400         | Invalid JSON/payload, unknown command/field, validation failure, or application command error.                                                                              |
+| 403         | The request contains an `Origin` header; browser-origin requests are refused.                                                                                               |
+| 404         | Unsupported HTTP method or route outside `/api/`. Unknown commands under `/api/` return 400.                                                                                |
+| 503         | HTTP parser queue full/stopped, application shutting down, or EventBus admission refused. A full bus leaves older accepted actions intact and does not publish this action. |
+| 504         | The app did not acknowledge the command within 10 seconds.                                                                                                                  |
 
-Commands run on the app thread through a bounded bus. Prefer sequential mutations so later requests observe earlier results. A disconnected listener is a connection error, rather than a JSON response. Check the startup log for disabled API, an invalid port, or an occupied port.
+Commands run on the app thread through Playa's shared EventBus. Reliable `try_emit` refuses overflow without evicting an accepted action. Prefer sequential mutations so later requests observe earlier results. A disconnected listener is a connection error, rather than a JSON response. Check the startup log for disabled API, an invalid port, or an occupied port.

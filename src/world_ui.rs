@@ -1,7 +1,9 @@
 //! Object panels. Widgets report intents; WorldEditor owns all document changes.
 use crate::world::{NodeId, WorldAttribute, WorldCommand, WorldEditor, WorldKind, WorldNodeInfo};
+use crate::world_events::WorldAction;
 use curves::Tan;
 use egui::{Color32, Pos2, Rect, Sense, Vec2};
+use playa_events::{EventBus, EventEmitter};
 use serde_json::{Value, json};
 use soluwell_config::AttrMetrics;
 use soluwell_config::attr_layout::{ValueEditorLayout, cell_ui, square_icon};
@@ -383,6 +385,8 @@ pub(crate) fn grid_config(
 }
 
 pub struct WorldUi {
+    emitter: EventEmitter,
+    event_document: Option<NodeId>,
     pub playhead: u32,
     pub playing: bool,
     pub auto_key: bool,
@@ -395,6 +399,7 @@ pub struct WorldUi {
     pub(crate) effects: EffectParams,
     /// The Add menus' state: the Tab menu, History, favorites and usage (`add_items`).
     add_menu: soluwell_chrome::tab_menu::TabMenu<WorldKind>,
+    add_memory: AddMenuMemory,
     pub attribute_label_width: f32,
     /// Authored outline/canvas split; narrow panels only clamp its drawn width.
     pub timeline_outline_width: f32,
@@ -450,6 +455,8 @@ pub struct WorldUi {
 impl Default for WorldUi {
     fn default() -> Self {
         Self {
+            emitter: EventBus::new().emitter(),
+            event_document: None,
             playhead: 0,
             playing: false,
             auto_key: false,
@@ -458,6 +465,7 @@ impl Default for WorldUi {
             hide_shy: true,
             effects: EffectParams::default(),
             add_menu: soluwell_chrome::tab_menu::TabMenu::new("world_add_menu"),
+            add_memory: AddMenuMemory::default(),
             attribute_label_width: 180.0,
             timeline_outline_width: 340.0,
             timeline_width: 0.0,
@@ -661,6 +669,252 @@ fn tree(nodes: &[WorldNodeInfo], parent: Option<NodeId>, depth: usize) -> Vec<Tr
         .collect()
 }
 impl WorldUi {
+    pub(crate) fn set_emitter(&mut self, emitter: EventEmitter) {
+        self.emitter = emitter;
+    }
+    pub(crate) fn emitter(&self) -> &EventEmitter {
+        &self.emitter
+    }
+    pub(crate) fn report_error(&mut self, error: String) {
+        self.error = Some(error);
+    }
+    fn emit_action(&mut self, world: &WorldEditor, action: WorldAction) -> bool {
+        self.event_document = Some(NodeId(world.document.graph.id));
+        self.emit_current(action)
+    }
+    fn emit_current(&mut self, action: WorldAction) -> bool {
+        match crate::events::emit(
+            &self.emitter,
+            crate::events::UiCommand {
+                document: self.event_document,
+                frame: Some(f64::from(self.playhead)),
+                camera: None,
+                action: crate::events::Action::World(action),
+            },
+        ) {
+            Ok(()) => true,
+            Err(error) => {
+                self.error = Some(error);
+                false
+            }
+        }
+    }
+    fn request_seek(&mut self, world: &WorldEditor, frame: u32) {
+        self.emit_action(world, WorldAction::Seek(frame));
+    }
+    pub(crate) fn apply_world_action(
+        &mut self,
+        world: &mut WorldEditor,
+        action: WorldAction,
+        _frame: f64,
+    ) -> Result<Value, String> {
+        match action {
+            WorldAction::Edit { command, gesture } => {
+                let range = (world.document.first, world.document.last);
+                world.execute_edit(command, gesture)?;
+                if range != (world.document.first, world.document.last) {
+                    self.playhead = self
+                        .playhead
+                        .clamp(world.document.first, world.document.last);
+                }
+            }
+            WorldAction::Metadata { id, value } => {
+                world.execute(WorldCommand::SetMetadata {
+                    id,
+                    path: String::new(),
+                    value: value.clone(),
+                })?;
+                if serde_json::from_str::<Value>(&self.metadata).ok().as_ref() == Some(&value) {
+                    self.metadata_dirty = false;
+                }
+                self.metadata_document = Some(NodeId(world.document.graph.id));
+                self.metadata_node = Some(id);
+                self.metadata_revision = world.revision();
+            }
+            WorldAction::EditKeys { command, keys } => {
+                world.execute(command)?;
+                self.keys = keys
+                    .into_iter()
+                    .map(|(node, path, frame)| KeyIdentity { node, path, frame })
+                    .collect();
+            }
+            WorldAction::Selection { ids, lead } => {
+                for id in &ids {
+                    world.document.info(*id)?;
+                }
+                world.set_selection(ids);
+                if let Some(id) = lead {
+                    world.set_lead(id);
+                }
+            }
+            WorldAction::ClickSelection { id, add } => {
+                if let Some(id) = id {
+                    world.document.info(id)?;
+                }
+                world.click_select(id, add);
+            }
+            WorldAction::SelectKeys {
+                keys,
+                add,
+                order,
+                lead,
+            } => {
+                if !add {
+                    self.keys.clear();
+                }
+                self.keys
+                    .extend(keys.into_iter().map(|(node, path, frame)| KeyIdentity {
+                        node,
+                        path,
+                        frame,
+                    }));
+                world.set_selection(
+                    order
+                        .into_iter()
+                        .filter(|id| self.keys.iter().any(|key| key.node == *id))
+                        .collect(),
+                );
+                if let Some(id) = lead {
+                    world.set_lead(id);
+                }
+            }
+            WorldAction::ClearKeys => self.keys.clear(),
+            WorldAction::Channels { id, expansion } => {
+                self.channels.insert(id, expansion);
+            }
+            WorldAction::PickTake(take) => self.picked_take = take,
+            WorldAction::Seek(frame) => self.seek(frame),
+            WorldAction::Playing(playing) => self.playing = playing,
+            WorldAction::Looping(looping) => self.looping = looping,
+            WorldAction::Preview(action) => {
+                self.seek(action.first);
+                self.playing = false;
+                self.preview_action = Some(action);
+            }
+            WorldAction::PlaybackRange(range) => self.playback_range = range,
+            WorldAction::TimelineOptions {
+                auto_key,
+                new_key,
+                snap,
+                hide_shy,
+            } => {
+                if let Some(value) = auto_key {
+                    self.auto_key = value;
+                }
+                if let Some(value) = new_key {
+                    self.new_key = value;
+                    world.new_key = value;
+                }
+                if let Some(value) = snap {
+                    self.snap = value;
+                }
+                if let Some(value) = hide_shy {
+                    self.hide_shy = value;
+                }
+            }
+            WorldAction::TimelineWidths { attribute, outline } => {
+                if let Some(width) = attribute {
+                    if !width.is_finite() || width <= 0.0 {
+                        return Err("Invalid attribute label width".into());
+                    }
+                    self.attribute_label_width = width;
+                }
+                if let Some(width) = outline {
+                    if !width.is_finite() || width <= 0.0 {
+                        return Err("Invalid timeline outline width".into());
+                    }
+                    self.timeline_outline_width = width;
+                }
+            }
+            WorldAction::Effects(params) => self.effects = params,
+            WorldAction::AddMenuMemory(memory) => self.set_add_menu_memory(memory),
+            WorldAction::FileDialogs {
+                directories,
+                filters,
+            } => {
+                self.file_dialogs = crate::file_dialogs::History {
+                    directories,
+                    filters,
+                };
+            }
+            WorldAction::PropertyFilter { ids, bit, additive } => {
+                for id in ids {
+                    let filter = self.property_filters.entry(id).or_default();
+                    filter.toggle(bit, additive);
+                    if filter.0 == 0 {
+                        self.property_filters.remove(&id);
+                        self.expanded.remove(&id);
+                    } else {
+                        self.expanded.insert(id);
+                    }
+                }
+            }
+            WorldAction::Expanded { id, open } => {
+                if open {
+                    self.property_filters.remove(&id);
+                    self.expanded.insert(id);
+                    self.groups.insert((id, "@Transform".into()));
+                } else {
+                    self.expanded.remove(&id);
+                }
+            }
+            WorldAction::Group { id, path, open } => {
+                if open {
+                    self.groups.insert((id, path));
+                } else {
+                    self.groups.remove(&(id, path));
+                }
+            }
+            WorldAction::Channel { id, path, open } => {
+                self.channels.entry(id).or_default().set(&path, open);
+            }
+            WorldAction::Section { id, group, open } => {
+                if let Some(group) = ATTRIBUTE_GROUPS
+                    .iter()
+                    .copied()
+                    .find(|value| *value == group)
+                {
+                    let closed = self.section_closed.entry(id).or_default();
+                    if open {
+                        closed.remove(group);
+                    } else {
+                        closed.insert(group);
+                    }
+                }
+            }
+            WorldAction::Reveal { id, attribute } => self.reveal_in_timeline(id, &attribute),
+            WorldAction::FitTimeline { width } => self.fit_timeline(width, world),
+            WorldAction::OpenMaterialLibrary => self.material_library_requested = true,
+            WorldAction::FinishEdit { held } => {
+                world.finish_edit_unless(held);
+            }
+        }
+        Ok(
+            json!({"success":true,"revision":world.revision(),"selection":world.selected(),"frame":self.playhead}),
+        )
+    }
+    #[cfg(test)]
+    pub(crate) fn dispatch_events(&mut self, world: &mut WorldEditor) {
+        for event in self.emitter.poll() {
+            if let Some(event) = playa_events::downcast_event::<crate::events::UiEvent>(&event) {
+                if let crate::events::Action::World(action) = &event.command.action {
+                    assert!(
+                        !event
+                            .command
+                            .document
+                            .is_some_and(|id| id != NodeId(world.document.graph.id))
+                    );
+                    crate::world_events::apply(
+                        world,
+                        self,
+                        action.clone(),
+                        event.command.frame.unwrap_or_default(),
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
     pub fn take_preview_action(&mut self) -> Option<PreviewAction> {
         self.preview_action.take()
     }
@@ -678,7 +932,8 @@ impl WorldUi {
     /// Global `0-9` (jump to time mark) and `Shift + 0-9` (set time mark at playhead).
     /// Consumed in `Scope::Global` so marks work across all panels while `hotkeys::consume`
     /// protects focused text and numeric (`DragValue`) editors in Attribute Editor and elsewhere.
-    pub fn mark_shortcuts(&mut self, ctx: &egui::Context, e: &mut WorldEditor) {
+    pub fn mark_shortcuts(&mut self, ctx: &egui::Context, e: &WorldEditor) {
+        self.event_document = Some(NodeId(e.document.graph.id));
         use crate::hotkeys::{self, Command as Hotkey, Scope};
         if ctx.input(|input| input.pointer.secondary_down()) {
             return;
@@ -697,11 +952,11 @@ impl WorldUi {
             if hotkeys::consume(ctx, Scope::Global, Hotkey::Mark(slot))
                 && let Some(&frame) = e.document.marks.get(&slot)
             {
-                self.seek(frame);
+                self.request_seek(e, frame);
             }
         }
     }
-    fn timeline_shortcuts(&mut self, ui: &egui::Ui, e: &mut WorldEditor, nodes: &[WorldNodeInfo]) {
+    fn timeline_shortcuts(&mut self, ui: &egui::Ui, e: &WorldEditor, nodes: &[WorldNodeInfo]) {
         use crate::hotkeys::{self, Command as Hotkey, Scope};
         hotkeys::register(ui, Scope::Timeline, ui.max_rect());
         self.mark_shortcuts(ui.ctx(), e);
@@ -711,7 +966,12 @@ impl WorldUi {
         let modifiers = ui.input(|input| input.modifiers);
         let pressed = |command| hotkeys::consume(ui.ctx(), Scope::Timeline, command);
         if pressed(Hotkey::Fit) {
-            self.fit_timeline(self.timeline_width, e);
+            self.emit_action(
+                e,
+                WorldAction::FitTimeline {
+                    width: self.timeline_width,
+                },
+            );
         }
         // U: the animated properties; U U (a double tap): the modified ones (After Effects).
         for (command, bit) in [
@@ -722,17 +982,14 @@ impl WorldUi {
             (Hotkey::Modified, PropertyFilter::MODIFIED),
         ] {
             if pressed(command) {
-                for id in e.targets(None) {
-                    let filter = self.property_filters.entry(id).or_default();
-                    filter.toggle(bit, modifiers.shift);
-                    // Toggling the last filter off collapses the layer (After Effects U / P / R / S).
-                    if filter.0 == 0 {
-                        self.property_filters.remove(&id);
-                        self.expanded.remove(&id);
-                    } else {
-                        self.expanded.insert(id);
-                    }
-                }
+                self.emit_action(
+                    e,
+                    WorldAction::PropertyFilter {
+                        ids: e.targets(None),
+                        bit,
+                        additive: modifiers.shift,
+                    },
+                );
             }
         }
         let jump_in = pressed(Hotkey::In);
@@ -750,30 +1007,34 @@ impl WorldUi {
         if jump_in || jump_out || preview {
             let bounds = selection_bounds(nodes, e);
             if jump_in {
-                self.seek(bounds.0);
+                self.request_seek(e, bounds.0);
             }
             if jump_out {
-                self.seek(bounds.1);
+                self.request_seek(e, bounds.1);
             }
             if preview {
-                self.seek(bounds.0);
-                self.playing = false;
-                self.preview_action = mode.map(|mode| PreviewAction {
-                    first: bounds.0,
-                    last: bounds.1,
-                    mode,
-                });
+                self.request_seek(e, bounds.0);
+                if let Some(mode) = mode {
+                    self.emit_action(
+                        e,
+                        WorldAction::Preview(PreviewAction {
+                            first: bounds.0,
+                            last: bounds.1,
+                            mode,
+                        }),
+                    );
+                }
             }
         }
         if pressed(Hotkey::Play) {
-            self.playing = !self.playing;
+            self.emit_action(e, WorldAction::Playing(!self.playing));
         }
         let (first, last, fps) = (e.document.first, e.document.last, e.document.fps);
         if pressed(Hotkey::Start) {
-            self.seek(first);
+            self.request_seek(e, first);
         }
         if pressed(Hotkey::End) {
-            self.seek(last);
+            self.request_seek(e, last);
         }
         // B / N move one end of the work area to the time cursor, pushing the other along.
         let cursor = self.playhead;
@@ -815,6 +1076,9 @@ impl WorldUi {
     }
     /// Snapshot the Add menu's history, favorites and usage counts for `settings.json`.
     pub fn add_menu_memory(&self) -> AddMenuMemory {
+        self.add_memory.clone()
+    }
+    fn draft_add_menu_memory(&self) -> AddMenuMemory {
         let mut usage = self.add_menu.usage().to_vec();
         usage.sort();
         AddMenuMemory {
@@ -825,11 +1089,14 @@ impl WorldUi {
     }
     /// Restore the Add menu's history, favorites and usage counts from `settings.json`.
     pub fn set_add_menu_memory(&mut self, memory: AddMenuMemory) {
+        self.add_memory = memory.clone();
         self.add_menu.set_history(memory.history);
         self.add_menu.set_favorites(memory.favorites);
         self.add_menu.set_usage(memory.usage);
     }
     pub fn reset(&mut self) {
+        let emitter = self.emitter.clone();
+        let event_document = self.event_document;
         let attribute_metrics = self.attribute_metrics;
         let attribute_label_width = self.attribute_label_width;
         let timeline_outline_width = self.timeline_outline_width;
@@ -838,6 +1105,8 @@ impl WorldUi {
         let file_dialogs = std::mem::take(&mut self.file_dialogs);
         let add_menu = self.add_menu_memory();
         *self = Self::default();
+        self.emitter = emitter;
+        self.event_document = event_document;
         self.file_dialogs = file_dialogs;
         self.set_add_menu_memory(add_menu);
         self.attribute_metrics = attribute_metrics;
@@ -877,14 +1146,18 @@ impl WorldUi {
         }
         old != self.playhead
     }
-    fn command(&mut self, e: &mut WorldEditor, c: WorldCommand) {
-        if let Err(err) = e.execute(c) {
-            self.error = Some(err);
-        }
+    fn command(&mut self, e: &WorldEditor, c: WorldCommand) {
+        self.emit_action(
+            e,
+            WorldAction::Edit {
+                command: c,
+                gesture: None,
+            },
+        );
     }
     /// Delete `WorldEditor::targets(row)` as one undo step: the outliner's trash button and row
     /// menu, the layer menu and the outliner's Delete key (`App`'s hotkeys) all end here.
-    pub(crate) fn delete(&mut self, e: &mut WorldEditor, row: Option<NodeId>) {
+    pub(crate) fn delete(&mut self, e: &WorldEditor, row: Option<NodeId>) {
         let ids = e.targets(row);
         self.command(
             e,
@@ -892,18 +1165,20 @@ impl WorldUi {
         );
     }
     /// Duplicate `WorldEditor::targets(row)` (`WorldEditor::duplicate`), reporting a failure.
-    fn duplicate(&mut self, e: &mut WorldEditor, row: Option<NodeId>) {
-        if let Err(error) = e.duplicate(row) {
-            self.error = Some(error);
-        }
+    fn duplicate(&mut self, e: &WorldEditor, row: Option<NodeId>) {
+        self.command(e, WorldCommand::Duplicate(e.targets(row)));
     }
     /// One step of a panel drag (`key` names it): the edit joins the drag's open undo step.
-    fn panel_command(&mut self, e: &mut WorldEditor, key: impl egui::AsId, c: WorldCommand) {
+    fn panel_command(&mut self, e: &WorldEditor, key: impl egui::AsId, c: WorldCommand) {
         let gesture = egui::Id::new(key).value();
         self.panel_gesture = Some(gesture);
-        if let Err(err) = e.execute_edit(c, Some(gesture)) {
-            self.error = Some(err);
-        }
+        self.emit_action(
+            e,
+            WorldAction::Edit {
+                command: c,
+                gesture: Some(gesture),
+            },
+        );
     }
     /// The edit gesture this UI keeps open: an Attribute Editor drag, or a panel drag while a
     /// pointer button is held. Whatever else is pending closes (`WorldEditor::finish_edit_unless`).
@@ -913,7 +1188,7 @@ impl WorldUi {
         }
         soluwell_panels::attr_grid::edit_gesture(ctx).or(self.panel_gesture)
     }
-    fn value_command(&mut self, ui: &egui::Ui, e: &mut WorldEditor, c: WorldCommand) {
+    fn value_command(&mut self, ui: &egui::Ui, e: &WorldEditor, c: WorldCommand) {
         let gesture = soluwell_panels::attr_grid::edit_gesture(ui.ctx()).or_else(|| {
             if ui.input(|input| input.pointer.primary_released()) {
                 e.active_edit()
@@ -921,9 +1196,13 @@ impl WorldUi {
                 None
             }
         });
-        if let Err(err) = e.execute_edit(c, gesture) {
-            self.error = Some(err);
-        }
+        self.emit_action(
+            e,
+            WorldAction::Edit {
+                command: c,
+                gesture,
+            },
+        );
     }
     fn status(&mut self, ui: &mut egui::Ui) {
         if let Some(err) = self.error.clone() {
@@ -937,7 +1216,7 @@ impl WorldUi {
     }
     fn select(
         &mut self,
-        e: &mut WorldEditor,
+        e: &WorldEditor,
         id: NodeId,
         add: bool,
         range: bool,
@@ -950,16 +1229,21 @@ impl WorldUi {
                     nodes.iter().position(|n| n.id == id),
                 )
             {
-                e.set_selection(nodes[a.min(b)..=a.max(b)].iter().map(|n| n.id).collect());
+                self.emit_action(
+                    e,
+                    WorldAction::Selection {
+                        ids: nodes[a.min(b)..=a.max(b)].iter().map(|n| n.id).collect(),
+                        lead: Some(id),
+                    },
+                );
             }
-            e.set_lead(id);
         } else {
-            e.click_select(Some(id), add);
+            self.emit_action(e, WorldAction::ClickSelection { id: Some(id), add });
         }
     }
     /// Create a `kind` node named after its kind under `parent` (None: the root); it becomes
     /// the selection. Every Add menu ends here.
-    fn create(&mut self, e: &mut WorldEditor, kind: WorldKind, parent: Option<NodeId>) {
+    fn create(&mut self, e: &WorldEditor, kind: WorldKind, parent: Option<NodeId>) {
         self.command(
             e,
             WorldCommand::Create {
@@ -974,19 +1258,30 @@ impl WorldUi {
         self.add_menu.open(at);
     }
     /// The Tab menu while open: an entry taken creates its node at the root.
-    pub(crate) fn add_menu_ui(&mut self, ctx: &egui::Context, e: &mut WorldEditor) {
-        if let Some(kind) = self.add_menu.show(ctx, &add_items()) {
+    pub(crate) fn add_menu_ui(&mut self, ctx: &egui::Context, e: &WorldEditor) {
+        let kind = self.add_menu.show(ctx, &add_items());
+        let memory = self.draft_add_menu_memory();
+        if memory != self.add_memory {
+            self.emit_action(e, WorldAction::AddMenuMemory(memory));
+        }
+        if let Some(kind) = kind {
             self.create(e, kind, None);
         }
     }
     /// The Add menu's nested entries inside an open menu: what was taken, created under
     /// `parent` (None: the root).
-    fn add_menu_entries(&mut self, ui: &mut egui::Ui, e: &mut WorldEditor, parent: Option<NodeId>) {
-        if let Some(kind) = self.add_menu.menu_ui(ui, &add_items()) {
+    fn add_menu_entries(&mut self, ui: &mut egui::Ui, e: &WorldEditor, parent: Option<NodeId>) {
+        let kind = self.add_menu.menu_ui(ui, &add_items());
+        let memory = self.draft_add_menu_memory();
+        if memory != self.add_memory {
+            self.emit_action(e, WorldAction::AddMenuMemory(memory));
+        }
+        if let Some(kind) = kind {
             self.create(e, kind, parent);
         }
     }
-    pub fn outliner(&mut self, ui: &mut egui::Ui, e: &mut WorldEditor) {
+    pub fn outliner(&mut self, ui: &mut egui::Ui, e: &WorldEditor) {
+        self.event_document = Some(NodeId(e.document.graph.id));
         ui.horizontal(|ui| {
             ui.menu_button(format!("{} Add", ph::ADD), |ui| {
                 self.add_menu_entries(ui, e, None);
@@ -1023,10 +1318,13 @@ impl WorldUi {
                 // The widget resolved the gesture: `ids` is the new selection. The Attribute
                 // Editor follows the row it landed on, else the last selected.
                 OutlinerAction::Select { ids, lead } => {
-                    e.set_selection(ids.iter().filter_map(|id| map.get(id).copied()).collect());
-                    if let Some(lead) = lead.and_then(|id| map.get(&id).copied()) {
-                        e.set_lead(lead);
-                    }
+                    self.emit_action(
+                        e,
+                        WorldAction::Selection {
+                            ids: ids.iter().filter_map(|id| map.get(id).copied()).collect(),
+                            lead: lead.and_then(|id| map.get(&id).copied()),
+                        },
+                    );
                 }
                 // Every toggle of one press-and-sweep shares `gesture`: one undo step.
                 OutlinerAction::ToggleVisible {
@@ -1134,7 +1432,7 @@ impl WorldUi {
             self.metadata_revision = e.revision();
         }
     }
-    fn apply_metadata(&mut self, e: &mut WorldEditor, id: NodeId) -> bool {
+    fn apply_metadata(&mut self, e: &WorldEditor, id: NodeId) -> bool {
         let value = match serde_json::from_str(&self.metadata) {
             Ok(value) => value,
             Err(err) => {
@@ -1142,24 +1440,9 @@ impl WorldUi {
                 return false;
             }
         };
-        match e.execute(WorldCommand::SetMetadata {
-            id,
-            path: "".into(),
-            value,
-        }) {
-            Ok(()) => {
-                self.metadata_dirty = false;
-                self.metadata_document = Some(NodeId(e.document.graph.id));
-                self.metadata_node = Some(id);
-                self.metadata_revision = e.revision();
-                true
-            }
-            Err(err) => {
-                self.error = Some(err);
-                false
-            }
-        }
+        self.emit_action(e, WorldAction::Metadata { id, value })
     }
+
     fn take_outliner_cache(&mut self, e: &WorldEditor) -> OutlinerCache {
         let mut cache = std::mem::take(&mut self.outliner_cache);
         let document = Some(NodeId(e.document.graph.id));
@@ -1459,7 +1742,8 @@ impl WorldUi {
         }
         lanes
     }
-    pub fn timeline(&mut self, ui: &mut egui::Ui, e: &mut WorldEditor) {
+    pub fn timeline(&mut self, ui: &mut egui::Ui, e: &WorldEditor) {
+        self.event_document = Some(NodeId(e.document.graph.id));
         self.timeline_width = ui.max_rect().width();
         self.transport(ui, e);
         self.status(ui);
@@ -1629,7 +1913,9 @@ impl WorldUi {
         model.fps = e.document.fps as f32;
         model.playhead = self.playhead as i64;
         model.selection.clear();
-        model.selection.extend(e.selected().iter().map(|id| wid(*id)));
+        model
+            .selection
+            .extend(e.selected().iter().map(|id| wid(*id)));
         model.work_area = Some(WorkArea {
             start: e.document.first as i64,
             end: e.document.last as i64 + 1,
@@ -1788,9 +2074,11 @@ impl WorldUi {
                 let splitter = ui.interact(handle, splitter_id, Sense::click_and_drag())
                     .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
                 if splitter.dragged() {
-                    self.timeline_outline_width = (left_w + splitter.drag_delta().x).clamp(min_outline, max_outline);
+                    self.emit_action(e, WorldAction::TimelineWidths {
+                        attribute: None, outline: Some((left_w + splitter.drag_delta().x).clamp(min_outline, max_outline)),
+                    });
                 } else if splitter.double_clicked() {
-                    self.timeline_outline_width = 340.0;
+                    self.emit_action(e, WorldAction::TimelineWidths { attribute: None, outline: Some(340.0) });
                 }
                 ui.painter().vline(
                     origin.x + left_w,
@@ -1834,7 +2122,7 @@ impl WorldUi {
     fn layer_row(
         &mut self,
         ui: &mut egui::Ui,
-        e: &mut WorldEditor,
+        e: &WorldEditor,
         n: &WorldNodeInfo,
         nodes: &[WorldNodeInfo],
         r: Rect,
@@ -1883,14 +2171,13 @@ impl WorldUi {
             .on_hover_text("Expand layer properties")
             .clicked()
             {
-                if expanded {
-                    self.expanded.remove(&n.id);
-                } else {
-                    // Expanding shows the properties: a filter matching none of them goes.
-                    self.property_filters.remove(&n.id);
-                    self.expanded.insert(n.id);
-                    self.groups.insert((n.id, "@Transform".into()));
-                }
+                self.emit_action(
+                    e,
+                    WorldAction::Expanded {
+                        id: n.id,
+                        open: !expanded,
+                    },
+                );
             }
             for (path, state, on, off, tip) in [
                 ("/visible", n.visible, ph::VISIBLE, ph::HIDDEN, "Visibility"),
@@ -2038,7 +2325,7 @@ impl WorldUi {
     fn lane_row(
         &mut self,
         ui: &mut egui::Ui,
-        e: &mut WorldEditor,
+        e: &WorldEditor,
         lane: &mut Lane,
         r: Rect,
         data: LaneData<'_>,
@@ -2066,9 +2353,15 @@ impl WorldUi {
                     true,
                 )
                 .clicked()
-                    && !self.groups.remove(&(id, path.clone()))
                 {
-                    self.groups.insert((id, path.clone()));
+                    self.emit_action(
+                        e,
+                        WorldAction::Group {
+                            id,
+                            path: path.clone(),
+                            open: !open,
+                        },
+                    );
                 }
                 cell_ui(ui, cells.label, "group", |ui| {
                     ui.strong(&lane.label);
@@ -2089,7 +2382,7 @@ impl WorldUi {
             }) {
                 match anim_effect(id, attr, frame, intent) {
                     Some(AnimEffect::Command(command)) => self.command(e, *command),
-                    Some(AnimEffect::Seek(to)) => self.seek(to),
+                    Some(AnimEffect::Seek(to)) => self.request_seek(e, to),
                     None => {}
                 }
             }
@@ -2155,7 +2448,14 @@ impl WorldUi {
             if attr.component.is_none() && lane.value.is_array() {
                 let open = self.components_open(id, path, attrs);
                 if soluwell_panels::attr_grid::channel_caret(ui, &config, cells.actions, open) {
-                    self.channels.entry(id).or_default().set(path, !open);
+                    self.emit_action(
+                        e,
+                        WorldAction::Channel {
+                            id,
+                            path: path.clone(),
+                            open: !open,
+                        },
+                    );
                 }
             }
         });
@@ -2178,15 +2478,16 @@ impl WorldUi {
     }
     fn timeline_action(
         &mut self,
-        e: &mut WorldEditor,
+        e: &WorldEditor,
         nodes: &[WorldNodeInfo],
         lanes: &[Vec<Lane>],
         a: TimelineAction,
     ) {
         match a {
-            TimelineAction::Seek { frame } => {
-                self.seek(frame.clamp(e.document.first as i64, e.document.last as i64) as u32)
-            }
+            TimelineAction::Seek { frame } => self.request_seek(
+                e,
+                frame.clamp(e.document.first as i64, e.document.last as i64) as u32,
+            ),
             TimelineAction::Select {
                 id,
                 additive,
@@ -2198,7 +2499,9 @@ impl WorldUi {
                     // A take's bar picks its node and the take (Takes panel).
                     self.select(e, n.id, additive, range, nodes);
                     match e.document.take_clip(n.id) {
-                        Ok(take) => self.picked_take = take,
+                        Ok(take) => {
+                            self.emit_action(e, WorldAction::PickTake(take));
+                        }
                         Err(err) => {
                             self.picked_take = None;
                             self.error = Some(err);
@@ -2207,7 +2510,13 @@ impl WorldUi {
                 }
             }
             TimelineAction::ClearSelection => {
-                e.clear_selection();
+                self.emit_action(
+                    e,
+                    WorldAction::Selection {
+                        ids: Vec::new(),
+                        lead: None,
+                    },
+                );
             }
             // Live drag frames and the closing Done (a cancel restores the start range) join one
             // undo step; a cancelled drag leaves the document as it was, so it records none.
@@ -2221,31 +2530,29 @@ impl WorldUi {
                         fps: e.document.fps,
                     },
                 );
-                self.playhead = self.playhead.clamp(e.document.first, e.document.last);
+                // The reducer clamps the playhead after accepting the work-area edit.
             }
             TimelineAction::SelectKeys { keys, add } => {
-                if !add {
-                    self.keys.clear();
-                }
-                let mut lead = None;
-                for k in keys {
-                    if let Some(key) = Self::key_identity(nodes, lanes, k) {
-                        lead = Some(key.node);
-                        self.keys.insert(key);
-                    }
-                }
-                e.set_selection(
-                    nodes
-                        .iter()
-                        .filter(|n| self.keys.iter().any(|k| k.node == n.id))
-                        .map(|n| n.id)
-                        .collect(),
+                let keys: Vec<_> = keys
+                    .into_iter()
+                    .filter_map(|key| Self::key_identity(nodes, lanes, key))
+                    .map(|key| (key.node, key.path, key.frame))
+                    .collect();
+                let lead = keys.last().map(|key| key.0);
+                self.emit_action(
+                    e,
+                    WorldAction::SelectKeys {
+                        keys,
+                        add,
+                        order: nodes.iter().map(|node| node.id).collect(),
+                        lead,
+                    },
                 );
-                if let Some(lead) = lead {
-                    e.set_lead(lead);
-                }
             }
-            TimelineAction::ClearKeySelection => self.keys.clear(),
+            TimelineAction::ClearKeySelection => {
+                self.emit_action(e, WorldAction::ClearKeys);
+            }
+
             // Markers are the document's ten time-mark slots (0-9); a marker's id is its slot.
             TimelineAction::AddMarker { frame } => {
                 match (0..10).find(|slot| !e.document.marks.contains_key(slot)) {
@@ -2317,10 +2624,16 @@ impl WorldUi {
                         })
                         .collect(),
                 );
-                match e.execute(command) {
-                    Ok(()) => self.keys = moved,
-                    Err(err) => self.error = Some(err),
-                }
+                self.emit_action(
+                    e,
+                    WorldAction::EditKeys {
+                        command,
+                        keys: moved
+                            .into_iter()
+                            .map(|key| (key.node, key.path, key.frame))
+                            .collect(),
+                    },
+                );
             }
             TimelineAction::DeleteKeys { keys } => {
                 let cmds = keys
@@ -2332,10 +2645,13 @@ impl WorldUi {
                         frame: f64::from_bits(k.frame),
                     })
                     .collect();
-                match e.execute(WorldCommand::Batch(cmds)) {
-                    Ok(()) => self.keys.clear(),
-                    Err(err) => self.error = Some(err),
-                }
+                self.emit_action(
+                    e,
+                    WorldAction::EditKeys {
+                        command: WorldCommand::Batch(cmds),
+                        keys: Vec::new(),
+                    },
+                );
             }
             TimelineAction::MoveClip {
                 id,
@@ -2415,10 +2731,12 @@ impl WorldUi {
             _ => {}
         }
     }
-    fn transport(&mut self, ui: &mut egui::Ui, e: &mut WorldEditor) {
+    fn transport(&mut self, ui: &mut egui::Ui, e: &WorldEditor) {
         self.attribute_metrics.apply(ui);
         let (mut first, mut last, mut fps) = (e.document.first, e.document.last, e.document.fps);
         let before = (first, last, fps);
+        let mut playhead = self.playhead;
+        let (mut auto_key, mut snap, mut hide_shy) = (self.auto_key, self.snap, self.hide_shy);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing = Vec2::new(2.0, 0.0);
             ui.spacing_mut().interact_size.y = self.attribute_metrics.field_height;
@@ -2426,10 +2744,10 @@ impl WorldUi {
                 .on_hover_text("First frame")
                 .clicked()
             {
-                self.seek(e.document.first);
+                self.request_seek(e, e.document.first);
             }
             if transport_icon(ui, ph::CARET_LEFT, false, self.attribute_metrics).clicked() {
-                self.seek(self.playhead.saturating_sub(1).max(e.document.first));
+                self.request_seek(e, self.playhead.saturating_sub(1).max(e.document.first));
             }
             if transport_icon(
                 ui,
@@ -2440,13 +2758,13 @@ impl WorldUi {
             .on_hover_text("Play / pause")
             .clicked()
             {
-                self.playing = !self.playing;
+                self.emit_action(e, WorldAction::Playing(!self.playing));
             }
             if transport_icon(ui, ph::CARET_RIGHT, false, self.attribute_metrics).clicked() {
-                self.seek(self.playhead.saturating_add(1).min(e.document.last));
+                self.request_seek(e, self.playhead.saturating_add(1).min(e.document.last));
             }
             if transport_icon(ui, ph::SKIP_FORWARD, false, self.attribute_metrics).clicked() {
-                self.seek(e.document.last);
+                self.request_seek(e, e.document.last);
             }
             if transport_icon(
                 ui,
@@ -2457,7 +2775,7 @@ impl WorldUi {
             .on_hover_text("Loop work area")
             .clicked()
             {
-                self.looping = !self.looping;
+                self.emit_action(e, WorldAction::Looping(!self.looping));
             }
             ui.label("Frame");
             ui.add_sized(
@@ -2465,8 +2783,9 @@ impl WorldUi {
                     self.attribute_metrics.numeric_width,
                     self.attribute_metrics.field_height,
                 ],
-                egui::DragValue::new(&mut self.playhead).range(e.document.first..=e.document.last),
+                egui::DragValue::new(&mut playhead).range(e.document.first..=e.document.last),
             );
+            if playhead != self.playhead { self.request_seek(e, playhead); }
             ui.separator();
             ui.label("FPS");
             ui.add_sized(
@@ -2492,13 +2811,13 @@ impl WorldUi {
                 ],
                 egui::DragValue::new(&mut last).range(first..=100000),
             );
-            ui.checkbox(&mut self.auto_key, "Auto Key")
+            ui.checkbox(&mut auto_key, "Auto Key")
                 .on_hover_text("Key camera navigation only when Auto Key is enabled; otherwise preserve existing animation keys.");
-            ui.checkbox(&mut self.snap, "Snap");
-            ui.toggle_value(&mut self.hide_shy, format!("{} Shy", soluwell_config::phosphor::regular::GHOST))
+            ui.checkbox(&mut snap, "Snap");
+            ui.toggle_value(&mut hide_shy, format!("{} Shy", soluwell_config::phosphor::regular::GHOST))
                 .on_hover_text("Hide shy nodes (render settings and profiles start shy); the Outliner shows every node");
             if ui.small_button("Fit").on_hover_text("Fit working range · F").clicked() {
-                self.fit_timeline(self.timeline_width, e);
+                self.emit_action(e, WorldAction::FitTimeline { width: self.timeline_width });
             }
             ui.scope(|ui| {
                 ui.spacing_mut().slider_width *= 2.0;
@@ -2544,6 +2863,17 @@ impl WorldUi {
                 }
             });
         });
+        if (auto_key, snap, hide_shy) != (self.auto_key, self.snap, self.hide_shy) {
+            self.emit_action(
+                e,
+                WorldAction::TimelineOptions {
+                    auto_key: Some(auto_key),
+                    new_key: None,
+                    snap: Some(snap),
+                    hide_shy: Some(hide_shy),
+                },
+            );
+        }
         if (first, last, fps) != before {
             // One undo step per drag, the same gesture as the work-area drag on the ruler.
             self.panel_command(
@@ -2551,12 +2881,12 @@ impl WorldUi {
                 "timeline_work_area",
                 WorldCommand::SetTimeRange { first, last, fps },
             );
-            self.playhead = self.playhead.clamp(e.document.first, e.document.last);
+            // The reducer clamps the playhead after accepting the work-area edit.
         }
     }
     /// The Effects menu: Simplify, Smooth and Euler filter (`curves::Effect`) with their
     /// parameters, applied as one `WorldCommand::CurveEffect` to the curves of the selected keys.
-    fn effects_menu(&mut self, ui: &mut egui::Ui, e: &mut WorldEditor) {
+    fn effects_menu(&mut self, ui: &mut egui::Ui, e: &WorldEditor) {
         let mut targets: Vec<(NodeId, String)> = Vec::new();
         for k in &self.keys {
             if !targets
@@ -2571,9 +2901,13 @@ impl WorldUi {
             ui.weak("Select keys: an effect edits their curves.");
         }
         let mut chosen = None;
+        let mut params = self.effects;
         egui::Grid::new("curve_effects")
             .num_columns(3)
-            .show(ui, |ui| chosen = effect_rows(ui, &mut self.effects, any));
+            .show(ui, |ui| chosen = effect_rows(ui, &mut params, any));
+        if params != self.effects {
+            self.emit_action(e, WorldAction::Effects(params));
+        }
         if let Some(effect) = chosen {
             self.command(e, WorldCommand::CurveEffect { targets, effect });
             ui.close();
@@ -2652,7 +2986,7 @@ impl WorldUi {
                 .on_hover_text("Open material library")
                 .clicked()
             {
-                self.material_library_requested = true;
+                self.emit_current(WorldAction::OpenMaterialLibrary);
             }
             changed
         } else if a.path == "/environment/path" {
@@ -2693,7 +3027,7 @@ impl WorldUi {
             schema_editor(ui, value, a, self.attribute_metrics.value_layout())
         }
     }
-    pub fn inspector(&mut self, ui: &mut egui::Ui, e: &mut WorldEditor) {
+    pub fn inspector(&mut self, ui: &mut egui::Ui, e: &WorldEditor) {
         let Some(id) = e.active() else {
             ui.label("Select an object to edit its properties.");
             return;
@@ -2702,7 +3036,8 @@ impl WorldUi {
     }
 
     /// The same editor can display a referenced node without changing selection.
-    pub fn attribute_editor(&mut self, ui: &mut egui::Ui, e: &mut WorldEditor, id: NodeId) {
+    pub fn attribute_editor(&mut self, ui: &mut egui::Ui, e: &WorldEditor, id: NodeId) {
+        self.event_document = Some(NodeId(e.document.graph.id));
         self.attribute_metrics.apply(ui);
         let mut cache = self.take_cache(e);
         let Some(node) = cache.nodes.iter().find(|n| n.id == id).cloned() else {
@@ -2728,10 +3063,10 @@ impl WorldUi {
         } else {
             targets
         };
+        let mut file_history = self.file_dialogs.clone();
         if let Some((picked_id, picker)) = &mut self.picker {
             picker.update(ui.ctx());
-            self.file_dialogs
-                .observe(crate::file_dialogs::ENVIRONMENT, picker);
+            file_history.observe(crate::file_dialogs::ENVIRONMENT, picker);
             if let Some(path) = picker.take_picked() {
                 let picked_id = *picked_id;
                 let picked_targets = if picked_id == id {
@@ -2767,6 +3102,15 @@ impl WorldUi {
                 );
                 self.picker = None;
             }
+        }
+        if file_history != self.file_dialogs {
+            self.emit_action(
+                e,
+                WorldAction::FileDialogs {
+                    directories: file_history.directories,
+                    filters: file_history.filters,
+                },
+            );
         }
         self.status(ui);
         ui.horizontal(|ui| {
@@ -2808,12 +3152,18 @@ impl WorldUi {
             let name = self.name_edit.clone();
             self.command(e, WorldCommand::Rename { id, name });
         }
-        let actions = crate::render_profiles_ui::node_actions(ui, e, id, node.kind);
+        let actions = crate::render_profiles_ui::node_actions(ui, e, &self.emitter, id, node.kind);
         if let Some(error) = actions.error {
             self.error = Some(error);
         }
         if let Some(edit) = actions.edit {
-            e.select_only(edit);
+            self.emit_action(
+                e,
+                WorldAction::Selection {
+                    ids: vec![edit],
+                    lead: Some(edit),
+                },
+            );
         }
         if node.kind == WorldKind::Camera && ui.button("Use as active camera").clicked() {
             self.command(e, WorldCommand::SetActiveCamera(id));
@@ -2920,6 +3270,7 @@ impl WorldUi {
                                 let mut commands = Vec::new();
                                 let mut value_commands = Vec::new();
                                 let mut hooks = WorldGridHooks {
+                                    expansion: self.channels.get(&id).cloned().unwrap_or_default(),
                                     ui_state: self,
                                     id,
                                     targets: &targets,
@@ -2940,6 +3291,12 @@ impl WorldUi {
                                     &config,
                                     &mut hooks,
                                 );
+                                let expansion = hooks.expansion.clone();
+                                drop(hooks);
+                                if expansion != self.channels.get(&id).cloned().unwrap_or_default()
+                                {
+                                    self.emit_action(e, WorldAction::Channels { id, expansion });
+                                }
                                 // Store each edit's value across all same-kind targets. For vector edits,
                                 // write only the touched components (`edit.parts`) on additional targets so
                                 // untouched axes keep each layer's own values.
@@ -2988,7 +3345,15 @@ impl WorldUi {
                                     }
                                 }
                                 if let Some(width) = section.state.table.widths.first() {
-                                    self.attribute_label_width = *width;
+                                    if *width != self.attribute_label_width {
+                                        self.emit_action(
+                                            e,
+                                            WorldAction::TimelineWidths {
+                                                attribute: Some(*width),
+                                                outline: None,
+                                            },
+                                        );
+                                    }
                                 }
                                 if !value_commands.is_empty() {
                                     self.value_command(ui, e, WorldCommand::Batch(value_commands));
@@ -2998,12 +3363,14 @@ impl WorldUi {
                                 }
                             });
                     if response.header.open != open {
-                        let closed = self.section_closed.entry(id).or_default();
-                        if response.header.open {
-                            closed.remove(group);
-                        } else {
-                            closed.insert(group);
-                        }
+                        self.emit_action(
+                            e,
+                            WorldAction::Section {
+                                id,
+                                group: group.into(),
+                                open: response.header.open,
+                            },
+                        );
                     }
                 }
                 egui::CollapsingHeader::new("Custom numeric attribute").show(ui, |ui| {
@@ -3063,6 +3430,7 @@ impl WorldUi {
     }
 }
 struct WorldGridHooks<'a> {
+    expansion: ChannelExpansion,
     ui_state: &'a mut WorldUi,
     id: NodeId,
     targets: &'a [NodeId],
@@ -3099,7 +3467,7 @@ impl AttrGridHooks for WorldGridHooks<'_> {
                     if let Some(AnimEffect::Seek(to)) =
                         anim_effect(self.id, attr, self.frame, intent)
                     {
-                        self.ui_state.seek(to);
+                        self.ui_state.emit_current(WorldAction::Seek(to));
                     }
                 }
                 _ => {
@@ -3116,7 +3484,7 @@ impl AttrGridHooks for WorldGridHooks<'_> {
     }
     /// One expansion per node, shared with the timeline's lanes.
     fn expansion(&mut self) -> Option<&mut ChannelExpansion> {
-        Some(self.ui_state.channels.entry(self.id).or_default())
+        Some(&mut self.expansion)
     }
     fn disabled(&self, field: &AttrField) -> Option<String> {
         let attr = &self.attrs[self.indices[self.index(field)?]];
@@ -3135,7 +3503,10 @@ impl AttrGridHooks for WorldGridHooks<'_> {
             .clicked()
         {
             for &target in self.targets {
-                self.ui_state.reveal_in_timeline(target, attr);
+                self.ui_state.emit_current(WorldAction::Reveal {
+                    id: target,
+                    attribute: attr.clone(),
+                });
             }
             ui.close();
         }
@@ -3690,6 +4061,7 @@ mod tests {
             |root| {
                 egui::CentralPanel::default().show(root, |ui| {
                     state.timeline_shortcuts(ui, e, &nodes);
+                    state.dispatch_events(e);
                 });
             },
         );
@@ -3743,7 +4115,10 @@ mod tests {
                     events,
                     ..Default::default()
                 },
-                |root| state.timeline(root, &mut e),
+                |root| {
+                    state.timeline(root, &mut e);
+                    state.dispatch_events(&mut e);
+                },
             )
         };
         let mut output = draw(&mut state, 900.0, vec![]);
@@ -4325,6 +4700,7 @@ mod tests {
                         ui.add(egui::TextEdit::singleline(text).id(focus))
                             .request_focus();
                         state.timeline_shortcuts(ui, &mut e, &nodes);
+                        state.dispatch_events(&mut e);
                     });
                 },
             );
@@ -4391,7 +4767,10 @@ mod tests {
                         ..Default::default()
                     },
                     |root| {
-                        egui::CentralPanel::default().show(root, |ui| state.timeline(ui, &mut e));
+                        egui::CentralPanel::default().show(root, |ui| {
+                            state.timeline(ui, &mut e);
+                            state.dispatch_events(&mut e);
+                        });
                     },
                 );
             };
@@ -4407,7 +4786,10 @@ mod tests {
                     ..Default::default()
                 },
                 |root| {
-                    egui::CentralPanel::default().show(root, |ui| state.timeline(ui, &mut e));
+                    egui::CentralPanel::default().show(root, |ui| {
+                        state.timeline(ui, &mut e);
+                        state.dispatch_events(&mut e);
+                    });
                 },
             );
             assert_eq!(state.timeline_cache.lanes.as_ptr(), lanes);
@@ -4609,6 +4991,7 @@ mod tests {
                 new_track: 1,
             },
         );
+        state.dispatch_events(&mut e);
         let ordered = e
             .document
             .nodes()
@@ -4708,6 +5091,7 @@ mod tests {
                             Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::new(400.0, 24.0)),
                             false,
                         );
+                        state.dispatch_events(&mut e);
                     });
                 },
             )
@@ -4783,6 +5167,7 @@ mod tests {
                                 ),
                                 false,
                             );
+                            state.dispatch_events(&mut e);
                         }
                     });
                 },
@@ -4832,8 +5217,10 @@ mod tests {
         let ctx = egui::Context::default();
         let mut state = WorldUi::default();
         let _ = ctx.run_ui(Default::default(), |root| {
-            egui::CentralPanel::default()
-                .show(root, |ui| state.attribute_editor(ui, &mut e, material));
+            egui::CentralPanel::default().show(root, |ui| {
+                state.attribute_editor(ui, &mut e, material);
+                state.dispatch_events(&mut e);
+            });
         });
         assert_eq!(e.active(), selected);
         assert_eq!(e.document, original);
@@ -4877,6 +5264,8 @@ mod tests {
         state.metadata = json!({"label":"Applied"}).to_string();
         state.metadata_dirty = true;
         assert!(state.apply_metadata(&mut e, id));
+        assert!(state.metadata_dirty, "enqueueing is not an acknowledgement");
+        state.dispatch_events(&mut e);
         assert!(!state.metadata_dirty);
         assert!(e.undo());
         state.refresh_metadata(&e, id);
@@ -4971,6 +5360,7 @@ mod tests {
         let _ = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
                 state.timeline(ui, &mut e);
+                state.dispatch_events(&mut e);
             });
         });
         let tracks = state.timeline_cache.model.tracks.as_ptr();
@@ -4978,6 +5368,7 @@ mod tests {
         let _ = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
                 state.timeline(ui, &mut e);
+                state.dispatch_events(&mut e);
             });
         });
         assert_eq!(state.timeline_cache.model.tracks.as_ptr(), tracks);
@@ -5217,6 +5608,7 @@ mod tests {
                                 nodes: &nodes,
                             },
                         );
+                        state.dispatch_events(&mut e);
                     }
                 });
             });
@@ -5288,8 +5680,11 @@ mod tests {
             output.textures_delta.clear();
             if let Some(c) = edit {
                 state.panel_command(e, "timeline_work_area", c);
+                state.dispatch_events(e);
             }
-            e.finish_edit_unless(state.held_gesture(&ctx));
+            let held = state.held_gesture(&ctx);
+            state.emit_action(e, WorldAction::FinishEdit { held });
+            state.dispatch_events(e);
         };
         frame(
             &mut state,
@@ -5336,11 +5731,14 @@ mod tests {
                 |ui| {
                     egui::CentralPanel::default().show(ui, |ui| {
                         state.inspector(ui, e);
+                        state.dispatch_events(e);
                     });
                 },
             );
             output.textures_delta.clear();
-            e.finish_edit_unless(state.held_gesture(&ctx));
+            let held = state.held_gesture(&ctx);
+            state.emit_action(e, WorldAction::FinishEdit { held });
+            state.dispatch_events(e);
             GRID_RECT_TRACES.with(|trace| trace.borrow()["/transform/position"])
         };
         let cell = render(&mut state, &mut e, vec![], 0.0);
@@ -5426,6 +5824,7 @@ mod tests {
                 |ui| {
                     egui::CentralPanel::default().show(ui, |ui| {
                         state.inspector(ui, e);
+                        state.dispatch_events(e);
                     });
                 },
             );
@@ -5508,6 +5907,7 @@ mod tests {
                             nodes: &[],
                         },
                     );
+                    state.dispatch_events(&mut e);
                 });
             },
         );
@@ -5564,6 +5964,7 @@ mod tests {
                     let mut value_commands = Vec::new();
                     let targets = [id];
                     let mut hooks = WorldGridHooks {
+                        expansion: Default::default(),
                         ui_state: &mut state,
                         id,
                         targets: &targets,
@@ -5619,6 +6020,7 @@ mod tests {
                                 nodes: &nodes,
                             },
                         );
+                        state.dispatch_events(&mut e);
                     }
                 });
             });
@@ -5716,16 +6118,19 @@ mod tests {
         let _ = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
                 state.timeline(ui, &mut e);
+                state.dispatch_events(&mut e);
             });
         });
         let _ = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
                 state.outliner(ui, &mut e);
+                state.dispatch_events(&mut e);
             });
         });
         let _ = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
                 state.inspector(ui, &mut e);
+                state.dispatch_events(&mut e);
             });
         });
     }
@@ -5806,6 +6211,7 @@ mod tests {
                 |root| {
                     egui::CentralPanel::default().show(root, |ui| {
                         WorldGridHooks {
+                            expansion: Default::default(),
                             ui_state: &mut state,
                             id,
                             targets: &targets,
@@ -5906,11 +6312,14 @@ mod tests {
                 |ui| {
                     egui::CentralPanel::default().show(ui, |ui| {
                         state.inspector(ui, e);
+                        state.dispatch_events(e);
                     });
                 },
             );
             output.textures_delta.clear();
-            e.finish_edit_unless(state.held_gesture(&ctx));
+            let held = state.held_gesture(&ctx);
+            state.emit_action(e, WorldAction::FinishEdit { held });
+            state.dispatch_events(e);
             GRID_RECT_TRACES.with(|trace| trace.borrow()["/transform/position"])
         };
         let cell = render(&mut state, &mut e, vec![], 0.0);
@@ -6075,8 +6484,10 @@ mod tests {
         let ctx = egui::Context::default();
         let mut state = WorldUi::default();
         let _ = ctx.run_ui(Default::default(), |root| {
-            egui::CentralPanel::default()
-                .show(root, |ui| state.attribute_editor(ui, &mut e, render_id));
+            egui::CentralPanel::default().show(root, |ui| {
+                state.attribute_editor(ui, &mut e, render_id);
+                state.dispatch_events(&mut e);
+            });
         });
         assert!(
             state.cache.sections.contains_key(&(render_id, "Quality")),

@@ -358,6 +358,17 @@ impl ExportSettings {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct UiActions {
+    pub job: Option<ExportJob>,
+    pub output: Option<OutputSettings>,
+    pub start: bool,
+    pub cancel: bool,
+    pub preset_file: Option<(bool, PathBuf)>,
+    pub preset_dialog: Option<video_io_egui::PresetPickRequest>,
+    pub preset_requests: Vec<video_io_egui::PresetRequest>,
+}
+
 pub struct ExportController {
     /// The preferences part of the next export (stem, range, cadence, overwrite).
     pub job: ExportJob,
@@ -443,6 +454,7 @@ impl Default for ExportController {
     fn default() -> Self {
         let mut dialog =
             video_io_egui::ExportDialog::new("render_encode", video_io_egui::Export::default());
+        dialog.set_deferred_presets(true);
         dialog.set_presets_dir(video_io_egui::default_presets_dir("video-io"));
         Self {
             job: ExportJob::default(),
@@ -675,7 +687,7 @@ impl ExportController {
             self.status = "Cancelling export…".into();
         }
     }
-    fn open_preset_dialog(&mut self, req: video_io_egui::PresetPickRequest) {
+    pub(crate) fn open_preset_dialog(&mut self, req: video_io_egui::PresetPickRequest) {
         let save = req.kind == video_io_egui::PresetPickKind::Save;
         let mut dialog = egui_file_dialog::FileDialog::new()
             .id(egui::Id::new(if save {
@@ -696,46 +708,68 @@ impl ExportController {
     }
     /// The preset file dialog: a picked file is saved from, or loaded into, the dialog's preset
     /// (video-io-egui's preset files); a load becomes the recipe the host authors.
-    fn update_preset_picker(&mut self, ctx: &egui::Context) {
+    fn update_preset_picker(&mut self, ctx: &egui::Context) -> Option<(bool, PathBuf)> {
         let Some((save, picker)) = &mut self.preset_picker else {
-            return;
+            return None;
         };
         picker.update(ctx);
-        let Some(path) = picker.take_picked() else {
-            if matches!(
+        let picked = picker.take_picked().map(|path| (*save, path));
+        if picked.is_some()
+            || matches!(
                 picker.state(),
                 egui_file_dialog::DialogState::Closed | egui_file_dialog::DialogState::Cancelled
-            ) {
-                self.preset_picker = None;
-            }
-            return;
-        };
-        let save = *save;
-        self.preset_picker = None;
-        // The document's recipe, in case it changed (undo) since the panel last showed.
+            )
+        {
+            self.preset_picker = None;
+        }
+        picked
+    }
+
+    pub(crate) fn preset_file(
+        &mut self,
+        save: bool,
+        path: &Path,
+    ) -> Result<Option<Preset>, String> {
         self.dialog.export_mut().preset = self.output.preset.clone();
         if save {
-            match self.dialog.save_preset_file(&path) {
-                Ok(stem) => self.status = format!("Saved preset {stem}"),
-                Err(error) => self.status = format!("Preset save failed: {error}"),
-            }
+            let stem = self.dialog.save_preset_file(path)?;
+            self.status = format!("Saved preset {stem}");
+            Ok(None)
         } else {
-            match self.dialog.load_preset_file(&path, None) {
-                Ok(stem) => {
-                    self.output.preset = self.dialog.export().preset.clone();
-                    self.status = format!("Loaded preset {stem}");
-                }
-                Err(error) => self.status = format!("Preset load failed: {error}"),
-            }
+            let stem = self.dialog.load_preset_file(path, None)?;
+            self.status = format!("Loaded preset {stem}");
+            Ok(Some(self.dialog.export().preset.clone()))
         }
     }
+
+    pub(crate) fn handle_preset_request(
+        &mut self,
+        request: video_io_egui::PresetRequest,
+    ) -> Result<(), String> {
+        let result = request.apply()?;
+        self.status = match &result {
+            video_io_egui::PresetResult::Saved(named) => format!("Saved preset {}", named.name),
+            video_io_egui::PresetResult::Deleted(name) => format!("Deleted preset {name}"),
+            video_io_egui::PresetResult::Reloaded(_) => self.status.clone(),
+        };
+        self.dialog.accept_preset_result(result);
+        Ok(())
+    }
+
     /// The video-io-egui panel over [`Self::output`]'s preset, then the host extras (the output
     /// transform). The dialog edits the document's preset as it is: it gets a copy, and only an
     /// edit (a preset that differs afterwards) is written back, so showing the panel never
     /// changes the recipe. `ocio` / `current`: the loaded config and the scene's selection.
-    fn panel(&mut self, ui: &mut egui::Ui, ocio: Result<&Ocio, &str>, current: &Sel) {
-        let kind_before = self.output.output_kind();
-        self.dialog.export_mut().preset = self.output.preset.clone();
+    fn panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        ocio: Result<&Ocio, &str>,
+        current: &Sel,
+        output: &mut OutputSettings,
+        actions: &mut UiActions,
+    ) {
+        let kind_before = output.output_kind();
+        self.dialog.export_mut().preset = (*output).preset.clone();
         let config = video_io_egui::ShowConfig {
             show_range: false,
             show_size: true,
@@ -746,33 +780,20 @@ impl ExportController {
             show_backend: false,
             ..video_io_egui::ShowConfig::default()
         };
-        let output = &mut self.output;
         self.dialog.show_panel_with(ui, &config, &mut |ui| {
             if let (Some(kind), Ok(ocio)) = (kind_before, ocio) {
                 output.output_transform_ui(ui, ocio, current, kind);
             }
         });
-        if self.dialog.export().preset != self.output.preset {
-            self.output.preset = self.dialog.export().preset.clone();
+        if self.dialog.export().preset != (*output).preset {
+            (*output).preset = self.dialog.export().preset.clone();
         }
         if let Some(req) = self.dialog.take_preset_pick_request() {
-            self.open_preset_dialog(req);
+            actions.preset_dialog = Some(req);
         }
-        for event in self.dialog.take_preset_events() {
-            match event {
-                video_io_egui::PresetEvent::Saved(stem) => {
-                    self.status = format!("Saved preset {stem}");
-                }
-                video_io_egui::PresetEvent::Applied(stem) => {
-                    self.status = format!("Loaded preset {stem}");
-                }
-                video_io_egui::PresetEvent::Deleted(stem) => {
-                    self.status = format!("Deleted preset {stem}");
-                }
-            }
-        }
+        actions.preset_requests = self.dialog.take_preset_requests();
         // An override names a display of one kind (SDR / PQ / HLG): a new kind starts automatic.
-        self.output.normalize_override(kind_before);
+        (*output).normalize_override(kind_before);
     }
     /// `timeline` is (first, last, fps, playhead) of the world document. The host fills
     /// [`Self::output`] from the document's OutputSettings node before this call and authors
@@ -781,26 +802,26 @@ impl ExportController {
     /// own rows (its bindings) at the top of the form's grid, `freeze` the scene a start
     /// renders; both get the host's `host` (its document editor).
     #[allow(clippy::too_many_arguments)]
-    pub fn ui<H>(
+    pub(crate) fn ui(
         &mut self,
         ui: &mut egui::Ui,
-        host: &mut H,
         timeline: (u32, u32, f64, u32),
-        service: &RenderService,
         ocio: Result<&Ocio, String>,
         current: &Sel,
-        rows: impl FnOnce(&mut egui::Ui, &mut H),
-        freeze: impl FnOnce(&mut H) -> Scene,
-    ) {
+        rows: impl FnOnce(&mut egui::Ui),
+    ) -> UiActions {
         let running = self.is_running();
-        self.update_preset_picker(ui.ctx());
+        let mut actions = UiActions::default();
+        actions.preset_file = self.update_preset_picker(ui.ctx());
+        let mut job = self.job.clone();
+        let mut output = self.output.clone();
         ui.add_enabled_ui(!running, |ui| {
             egui::Grid::new("render_encode").num_columns(2).show(ui, |ui| {
-                rows(ui, host);
+                rows(ui);
                 ui.label("Name");
                 ui.horizontal(|ui| {
-                    ui.text_edit_singleline(&mut self.job.name);
-                    ui.label(format!(".{}", self.output.preset.suffix()));
+                    ui.text_edit_singleline(&mut job.name);
+                    ui.label(format!(".{}", output.preset.suffix()));
                 });
                 ui.end_row();
                 ui.label("Samples / frame");
@@ -812,47 +833,47 @@ impl ExportController {
                 });
                 ui.end_row();
                 ui.label("Denoise");
-                ui.checkbox(&mut self.output.denoise_at_completion, "Once at completion")
+                ui.checkbox(&mut output.denoise_at_completion, "Once at completion")
                     .on_hover_text(
                         "Run OIDN once after all samples of each exported frame; override Output profile denoise cadence.",
                     );
                 ui.end_row();
                 ui.label("Frame range");
                 ui.horizontal(|ui| {
-                    ui.add(egui::DragValue::new(&mut self.job.first).range(0..=u32::MAX));
+                    ui.add(egui::DragValue::new(&mut job.first).range(0..=u32::MAX));
                     ui.label("…");
-                    ui.add(egui::DragValue::new(&mut self.job.last).range(0..=u32::MAX));
+                    ui.add(egui::DragValue::new(&mut job.last).range(0..=u32::MAX));
                     if ui
                         .button("Current frame")
                         .on_hover_text("Render only the frame under the playhead.")
                         .clicked()
                     {
-                        self.job.first = timeline.3;
-                        self.job.last = timeline.3;
+                        job.first = timeline.3;
+                        job.last = timeline.3;
                     }
                     if ui
                         .button("Timeline")
                         .on_hover_text("The timeline's range, and its FPS for video.")
                         .clicked()
                     {
-                        self.job.first = timeline.0;
-                        self.job.last = timeline.1;
-                        self.job.set_fps(timeline.2);
+                        job.first = timeline.0;
+                        job.last = timeline.1;
+                        job.set_fps(timeline.2);
                     }
                 });
                 ui.end_row();
                 // Every video: the Video format, a PNG sequence's video.
-                if self.output.preset.video().is_some() {
-                    self.fps_row(ui);
+                if output.preset.video().is_some() {
+                    self.fps_row(ui, &mut job);
                 }
             });
-            self.panel(ui, ocio.as_deref().map_err(String::as_str), current);
-            ui.small(self.output.hint());
+            self.panel(ui, ocio.as_deref().map_err(String::as_str), current, &mut output, &mut actions);
+            ui.small(output.hint());
             ui.weak(format!("Written to {}", self.out_root.join("<date_time>").display()));
             ui.weak("Animation is sampled at each frame. The scene and keys are frozen when export starts.");
             // The same quality, scaling and checks a start applies (`start`).
             let validation = self.quality.clone().and_then(|(samples, scale)| {
-                let mut preview = ExportSettings::new(self.job.clone(), &self.output, samples, scale);
+                let mut preview = ExportSettings::new(job.clone(), &output, samples, scale);
                 preview.io.resolve(&self.out_root);
                 preview.validate()
             });
@@ -863,10 +884,7 @@ impl ExportController {
                 .add_enabled(validation.is_ok(), egui::Button::new("Start render"))
                 .clicked()
             {
-                let scene = freeze(host);
-                if let Err(error) = self.start(&scene, service, ocio.clone()) {
-                    self.status = error;
-                }
+                actions.start = true;
             }
         });
         if running {
@@ -880,16 +898,23 @@ impl ExportController {
                     .text(format!("{} / {total} frames written", self.completed)),
             );
             if ui.button("Cancel").clicked() {
-                self.cancel();
+                actions.cancel = true;
             }
         }
         ui.label(&self.status);
+        if job != self.job {
+            actions.job = Some(job);
+        }
+        if output != self.output {
+            actions.output = Some(output);
+        }
+        actions
     }
     /// The "FPS" grid row of every video (the Video format, a PNG export's video).
-    fn fps_row(&mut self, ui: &mut egui::Ui) {
+    fn fps_row(&mut self, ui: &mut egui::Ui, job: &mut ExportJob) {
         ui.label("FPS");
         ui.horizontal(|ui| {
-            let mut fps = self.job.fps();
+            let mut fps = job.fps();
             if ui
                 .add(
                     egui::DragValue::new(&mut fps)
@@ -899,20 +924,17 @@ impl ExportController {
                 )
                 .changed()
             {
-                self.job.set_fps(fps);
+                job.set_fps(fps);
             }
             egui::ComboBox::from_id_salt("export_fps_presets")
                 .selected_text("Presets")
                 .show_ui(ui, |ui| {
                     for rate in [23.976, 24.0, 25.0, 29.97, 30.0, 50.0, 59.94, 60.0, 120.0] {
                         if ui
-                            .selectable_label(
-                                (self.job.fps() - rate).abs() < 0.001,
-                                rate.to_string(),
-                            )
+                            .selectable_label((job.fps() - rate).abs() < 0.001, rate.to_string())
                             .clicked()
                         {
-                            self.job.set_fps(rate);
+                            job.set_fps(rate);
                             ui.close();
                         }
                     }
@@ -1744,7 +1766,16 @@ mod tests {
             },
             |root| {
                 egui::CentralPanel::default().show(root, |ui| {
-                    controller.panel(ui, Err("no colour config in this test"), current)
+                    let mut output = controller.output.clone();
+                    let mut actions = UiActions::default();
+                    controller.panel(
+                        ui,
+                        Err("no colour config in this test"),
+                        current,
+                        &mut output,
+                        &mut actions,
+                    );
+                    controller.output = output;
                 });
             },
         )
@@ -2861,7 +2892,10 @@ mod tests {
             ocio.display_is(&pq.display, OutputKind::Pq) && pq.view.contains("1000 nits"),
             "{pq:?}"
         );
-        assert!(pq.note.is_some(), "the SDR scene view was replaced for PQ: {pq:?}");
+        assert!(
+            pq.note.is_some(),
+            "the SDR scene view was replaced for PQ: {pq:?}"
+        );
         output.preset.png_peak_nits = 500.0;
         assert!(
             output
@@ -2872,7 +2906,11 @@ mod tests {
                 .contains("500 nits")
         );
         output.preset.png = PngEncoding::Hlg;
-        let display = output.resolve_transform(&ocio, &scene).unwrap().unwrap().display;
+        let display = output
+            .resolve_transform(&ocio, &scene)
+            .unwrap()
+            .unwrap()
+            .display;
         assert!(display.contains("HLG"), "{display}");
         // An SDR-only format renders for SDR whatever the signal field says.
         output.preset.format = ExportFormat::Jpeg;

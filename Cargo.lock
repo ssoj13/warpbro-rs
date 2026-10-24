@@ -286,6 +286,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 name = "app-control"
 version = "0.1.0"
 dependencies = [
+ "playa-events",
  "serde",
  "serde_json",
  "tiny_http",
@@ -7153,7 +7154,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 [[package]]
 name = "playa-coord"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#5bbc38ad8d269560a88ca410fbde76de7d318415"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#72ed08b3565901df51135fdcee3ec3ec4f0d8fa6"
 dependencies = [
  "glam",
 ]
@@ -7161,7 +7162,7 @@ dependencies = [
 [[package]]
 name = "playa-engine"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#5bbc38ad8d269560a88ca410fbde76de7d318415"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#72ed08b3565901df51135fdcee3ec3ec4f0d8fa6"
 dependencies = [
  "alembic-rs",
  "anyhow",
@@ -7211,7 +7212,7 @@ dependencies = [
 [[package]]
 name = "playa-events"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#5bbc38ad8d269560a88ca410fbde76de7d318415"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#72ed08b3565901df51135fdcee3ec3ec4f0d8fa6"
 dependencies = [
  "log",
  "serde",
@@ -7222,7 +7223,7 @@ dependencies = [
 [[package]]
 name = "playa-graph"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#5bbc38ad8d269560a88ca410fbde76de7d318415"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#72ed08b3565901df51135fdcee3ec3ec4f0d8fa6"
 dependencies = [
  "box-rs",
  "flex-geom",
@@ -7239,7 +7240,7 @@ dependencies = [
 [[package]]
 name = "playa-io"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#5bbc38ad8d269560a88ca410fbde76de7d318415"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#72ed08b3565901df51135fdcee3ec3ec4f0d8fa6"
 dependencies = [
  "audio-decode",
  "av-format-core",
@@ -7265,7 +7266,7 @@ dependencies = [
 [[package]]
 name = "playa-player"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#5bbc38ad8d269560a88ca410fbde76de7d318415"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#72ed08b3565901df51135fdcee3ec3ec4f0d8fa6"
 dependencies = [
  "log",
  "lru",
@@ -7276,7 +7277,7 @@ dependencies = [
 [[package]]
 name = "playa-templates"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#5bbc38ad8d269560a88ca410fbde76de7d318415"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#72ed08b3565901df51135fdcee3ec3ec4f0d8fa6"
 dependencies = [
  "serde",
  "serde_json",
@@ -7285,7 +7286,7 @@ dependencies = [
 [[package]]
 name = "playa-time"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#5bbc38ad8d269560a88ca410fbde76de7d318415"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#72ed08b3565901df51135fdcee3ec3ec4f0d8fa6"
 dependencies = [
  "glam",
  "serde",
@@ -10321,7 +10322,7 @@ dependencies = [
 [[package]]
 name = "video-io"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/video-io-rs.git?branch=main#a8c77c8bec1e9c7a312b0fa69325f49fbc65a257"
+source = "git+ssh://git@github.com/ssoj13/video-io-rs.git?branch=main#90477c3689ab97a9f1b419c8ae9b5b7f79ab75b5"
 dependencies = [
  "av-codec",
  "av-codec-core",
@@ -10350,7 +10351,7 @@ dependencies = [
 [[package]]
 name = "video-io-egui"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/video-io-rs.git?branch=main#a8c77c8bec1e9c7a312b0fa69325f49fbc65a257"
+source = "git+ssh://git@github.com/ssoj13/video-io-rs.git?branch=main#90477c3689ab97a9f1b419c8ae9b5b7f79ab75b5"
 dependencies = [
  "egui",
  "serde",

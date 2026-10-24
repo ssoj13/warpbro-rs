@@ -550,6 +550,12 @@ src/presets.rs    five authored 250-frame animated World presets
 src/camera_orbit.rs   deterministic timeline integration of camera orbit speed
 src/render.rs     CUDA / WGPU backends, progressive targets, kernel dispatch, PNG output
 src/app.rs        the egui browser, shared Settings panel and viewport toolbar
+src/events.rs     typed UiCommand / Action protocol for the App-owned Playa EventBus
+src/app_events.rs   shared deferred dispatcher for widget, hotkey and REST intents
+src/app_actions.rs   application action handlers; captured drafts/targets applied centrally
+src/world_events.rs   typed World-panel intents and the WorldEditor application boundary
+src/app_control.rs   REST decoding and queries through the same typed EventBus
+crates/app-control   loopback HTTP transport and one-shot action acknowledgements
 src/dock.rs       dockable panels, named layout manager and viewport toolbar
 src/render_service.rs   render worker, bounded command/event bus and latest-frame mailbox
 src/io_service.rs       asynchronous full-scene open/save, settings, bookmarks and screenshots

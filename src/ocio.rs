@@ -726,6 +726,12 @@ pub struct State {
     pending: bool,
 }
 
+pub(crate) struct ColourUi {
+    pub selection: Option<Sel>,
+    pub reload: bool,
+    pub presets: Option<ColourPresets>,
+}
+
 impl State {
     /// The colour state of `sel`, its config loading on a worker that wakes `ui` when ready.
     pub fn new(sel: Sel, ui: crate::render_service::Wake) -> Self {
@@ -825,14 +831,15 @@ impl State {
         self.rebuild();
     }
 
-    /// Compact direct View control; lists use the already-loaded metadata only.
-    pub fn quick_view_ui(&mut self, ui: &mut egui::Ui) -> bool {
+    /// Compact direct View control; returns a proposed selection for the app event bus.
+    pub fn quick_view_ui(&mut self, ui: &mut egui::Ui) -> Option<Sel> {
         self.poll();
+        let mut selection = self.sel.clone();
         let (display, current, views) = self
             .config()
             .ok()
             .and_then(|ocio| {
-                let names = ocio.resolve(&self.sel, true).ok()?;
+                let names = ocio.resolve(&selection, true).ok()?;
                 let views = ocio
                     .views(&names.display, true)
                     .into_iter()
@@ -840,7 +847,13 @@ impl State {
                     .collect::<Vec<_>>();
                 Some((names.display, names.view, views))
             })
-            .unwrap_or_else(|| (self.sel.display.clone(), self.sel.view.clone(), Vec::new()));
+            .unwrap_or_else(|| {
+                (
+                    selection.display.clone(),
+                    selection.view.clone(),
+                    Vec::new(),
+                )
+            });
         ui.label("View:");
         let mut selected = current.clone();
         egui::ComboBox::from_id_salt("viewport_ocio_view")
@@ -856,33 +869,33 @@ impl State {
                 }
             });
         if selected != current {
-            self.sel.on = true;
+            selection.on = true;
             // The view belongs to the display it was listed from: store both, so the choice
             // never depends on which display an empty field defaults to elsewhere.
-            self.sel.display = display;
-            self.sel.view = selected;
-            self.rebuild();
-            true
+            selection.display = display;
+            selection.view = selected;
+            Some(selection)
         } else {
-            false
+            None
         }
     }
 
     /// The Colour panel. Returns whether the choice changed; `browse` is set when the
     /// user asks for a config file (the app runs the file dialog).
     /// `swap` exchanges the preset buttons' store / recall clicks (`hotkeys::slot_click`).
-    pub fn ui(&mut self, ui: &mut egui::Ui, browse: &mut bool, swap: bool) -> bool {
+    pub(crate) fn ui(&mut self, ui: &mut egui::Ui, browse: &mut bool, swap: bool) -> ColourUi {
         self.poll();
         let before = self.sel.clone();
+        let mut selection = before.clone();
+        let mut presets = self.presets.clone();
         let mut reload = false;
-        self.presets
-            .ui(ui, &mut self.sel, &mut self.preset_edit, swap);
+        presets.ui(ui, &mut selection, &mut self.preset_edit, swap);
         ui.add_space(4.0);
-        ui.checkbox(&mut self.sel.on, "OCIO display transform")
+        ui.checkbox(&mut selection.on, "OCIO display transform")
             .on_hover_text("Show the colour image through the OCIO display / view (isolated channels stay raw).\nOff: the built-in sRGB display with the tone operator.");
         ui.add_space(4.0);
 
-        let mut config = self.sel.config.clone();
+        let mut config = selection.config.clone();
         egui::Grid::new("ocio.grid").num_columns(2).spacing([8.0, 4.0]).show(ui, |ui| {
             ui.label("Config");
             ui.horizontal(|ui| {
@@ -893,19 +906,19 @@ impl State {
                 reload = ui.button("Reload").on_hover_text("Read the config again (after it changed on disk).").clicked();
             });
             ui.end_row();
-            if config != self.sel.config {
+            if config != selection.config {
                 // The names of the old config mean nothing in the new one.
-                self.sel = Sel { on: self.sel.on, config, ..Sel::default() };
+                selection = Sel { on: selection.on, config, ..Sel::default() };
             }
-            if self.sel.config != before.config || reload {
-                self.cfg = None;
+            if selection.config != before.config || reload {
+                return;
             }
             let Some(ocio) = self.cfg.as_ref().and_then(|(_, config)| config.as_ref().ok()).cloned() else {
                 return;
             };
             let owned = |v: Vec<&str>| v.into_iter().map(str::to_owned).collect::<Vec<_>>();
             let displays = owned(ocio.displays(true));
-            let resolved = ocio.resolve(&self.sel, true).ok();
+            let resolved = ocio.resolve(&selection, true).ok();
             let views = resolved.as_ref().map(|n| owned(ocio.views(&n.display, true))).unwrap_or_default();
             let (inputs, looks) = (owned(ocio.inputs()), owned(ocio.looks()));
             let auto_input = ocio.working_space().map_or_else(|| "none found".to_owned(), |n| format!("auto: {n}"));
@@ -918,7 +931,7 @@ impl State {
                 "This config's linear AP1 (ACEScg) colour space: the tracer renders in ACEScg. Default: found by its transform to the aces_interchange role (else by the ACES names).",
             );
             ui.horizontal(|ui| {
-                combo(ui, "ocio.working_input", &mut self.sel.working_input, &inputs, &auto_input);
+                combo(ui, "ocio.working_input", &mut selection.working_input, &inputs, &auto_input);
                 if let Some(name) = &input_warning {
                     ui.colored_label(soluwell_config::semantic(ui).warn, soluwell_config::icons::WARNING)
                         .on_hover_text(format!("\"{name}\" is not linear AP1: colours will be wrong."));
@@ -928,30 +941,24 @@ impl State {
             ui.label("Display").on_hover_text(
                 "The target display for rendering and export. HDR targets remain selectable on SDR screens; WarpBro presents an SDR preview there. Settings > Display selects the actual window output.",
             );
-            let d_before = self.sel.display.clone();
-            combo(ui, "ocio.display", &mut self.sel.display, &displays, &dflt(|n| &n.display));
-            if self.sel.display != d_before {
+            let d_before = selection.display.clone();
+            combo(ui, "ocio.display", &mut selection.display, &displays, &dflt(|n| &n.display));
+            if selection.display != d_before {
                 // The view list belongs to the display.
-                self.sel.view.clear();
+                selection.view.clear();
             }
             ui.end_row();
             ui.label("View").on_hover_text("The rendering of the scene for the display.");
-            combo(ui, "ocio.view", &mut self.sel.view, &views, &dflt(|n| &n.view));
+            combo(ui, "ocio.view", &mut selection.view, &views, &dflt(|n| &n.view));
             ui.end_row();
             ui.label("Look").on_hover_text("A look applied instead of the view's own looks.");
-            combo(ui, "ocio.look", &mut self.sel.look, &looks, "(the view's looks)");
+            combo(ui, "ocio.look", &mut selection.look, &looks, "(the view's looks)");
             ui.end_row();
         });
 
         // One rebuild for whatever changed this frame.
-        let changed = self.sel != before || reload;
-        if changed {
-            if reload {
-                self.reload();
-            } else {
-                self.rebuild();
-            }
-        }
+        let changed = selection != before || reload;
+
         // The worker wakes the UI when the load is done (`State::new`).
         if self.pending {
             ui.label("Preparing colour configuration…");
@@ -962,7 +969,11 @@ impl State {
             ui.add_space(4.0);
             ui.colored_label(ui.visuals().error_fg_color, e);
         }
-        changed
+        ColourUi {
+            selection: changed.then_some(selection),
+            reload,
+            presets: (presets != self.presets).then_some(presets),
+        }
     }
 }
 
@@ -1412,9 +1423,15 @@ mod tests {
             ..sdr.clone()
         };
         let out = o.output_transform(&hdr, OutputKind::Sdr, 100.0).unwrap();
-        assert!(o.view_is(&out.display, &out.view, OutputKind::Sdr), "{out:?}");
+        assert!(
+            o.view_is(&out.display, &out.view, OutputKind::Sdr),
+            "{out:?}"
+        );
         let note = out.note.expect("a replaced choice is reported");
-        assert!(note.contains(&hdr.view) && note.contains(&out.view), "{note}");
+        assert!(
+            note.contains(&hdr.view) && note.contains(&out.view),
+            "{note}"
+        );
         // A fitting choice is kept, silently.
         let kept = o.output_transform(&sdr, OutputKind::Sdr, 100.0).unwrap();
         assert_eq!((kept.view.as_str(), kept.note), (sdr.view.as_str(), None));
@@ -1436,9 +1453,16 @@ mod tests {
             "the test needs an EDR view"
         );
         let out = o.output_transform(&edr, OutputKind::Sdr, 100.0).unwrap();
-        assert_eq!(o.view_encoding(&out.display, &out.view), Some(Encoding::Sdr), "{out:?}");
+        assert_eq!(
+            o.view_encoding(&out.display, &out.view),
+            Some(Encoding::Sdr),
+            "{out:?}"
+        );
         let note = out.note.expect("the EDR choice was replaced");
-        assert!(note.contains(&edr.view) && note.contains(&out.view), "{note}");
+        assert!(
+            note.contains(&edr.view) && note.contains(&out.view),
+            "{note}"
+        );
     }
 
     /// An HDR output picks the view whose MEASURED peak is nearest the requested one (no name
@@ -1770,7 +1794,10 @@ mod tests {
         let mut browse = false;
         let _ = ctx.run_ui(Default::default(), |root| {
             egui::CentralPanel::default().show(root, |ui| {
-                assert!(!state.ui(ui, &mut browse, false));
+                let proposed = state.ui(ui, &mut browse, false);
+                assert!(
+                    proposed.selection.is_none() && !proposed.reload && proposed.presets.is_none()
+                );
                 ui.label("The rest of the UI still draws");
             });
         });

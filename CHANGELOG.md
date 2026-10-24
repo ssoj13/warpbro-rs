@@ -2,8 +2,13 @@
 
 ## Unreleased - 2026-10-24
 
+- **Shared UI/REST EventBus:** widgets, hotkeys and HTTP publish the same typed
+  `app_control::Event<UiCommand>` to App's Playa EventBus. Central deferred dispatch applies
+  App, World, Take and Query actions with captured document/frame/camera/target context;
+  widget drafts remain transient. Reliable `try_emit` refuses overflow without evicting an
+  accepted action. HTTP parser channels carry sockets; reply channels carry acknowledgements.
 - **Local REST control:** separate `app-control` transport crate and UI-thread WarpBro adapter,
-  bound to loopback with a bounded command bus and application acknowledgements. Supports
+  bound to loopback with typed EventBus actions and application acknowledgements. Supports
   document/node/attribute queries and edits, undo/redo, timeline, materials, settings, exports,
   viewport orbit/pan/zoom/fly and camera patches, screenshots and diagnostics. Browser-origin
   requests are refused. See [the REST reference](docs/reference/rest-api.md).

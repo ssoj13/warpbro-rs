@@ -10,7 +10,10 @@ use crate::takes::{Take, TakeFilters, TakeKind};
 use crate::world::NodeId;
 use soluwell_config::icons;
 use soluwell_config::phosphor::regular as ph;
-use std::collections::BTreeSet;
+use std::{
+    collections::{BTreeSet, VecDeque},
+    path::PathBuf,
+};
 
 /// Panel state, not saved with the scene.
 pub(super) struct View {
@@ -26,10 +29,10 @@ pub(super) struct View {
     speed: f64,
     /// The take `trim` was initialised for: a new selection resets it to the whole take.
     trim_of: Option<u64>,
-    /// Export (Some take) or import (None) file dialog.
-    picker: Option<(Option<u64>, egui_file_dialog::FileDialog)>,
-    /// Copied takes text, handed to the system clipboard by the next caller holding a context.
-    clipboard: Option<String>,
+    /// Export (Some take) or import (None) dialog, bound to the document that opened it.
+    picker: Option<(Option<u64>, NodeId, egui_file_dialog::FileDialog)>,
+    /// Origin documents for the I/O worker's FIFO take-import completions.
+    pending_imports: VecDeque<NodeId>,
 }
 impl Default for View {
     fn default() -> Self {
@@ -43,13 +46,14 @@ impl Default for View {
             speed: 1.0,
             trim_of: None,
             picker: None,
-            clipboard: None,
+            pending_imports: VecDeque::new(),
         }
     }
 }
 
-/// What a row or toolbar asked for; applied after drawing (drawing borrows the document).
-pub(super) enum Action {
+/// Concrete take intents, published by the UI and applied only by the application event handler.
+#[derive(Clone)]
+pub(crate) enum Action {
     Select {
         id: u64,
         ctrl: bool,
@@ -73,8 +77,43 @@ pub(super) enum Action {
     SetTiming(u64, Timing),
     SetFilters(u64, TakeFilters),
     Bake(u64),
+    /// Resolved before publishing; the handler never reads a later UI selection.
+    Selection {
+        ids: BTreeSet<u64>,
+        anchor: Option<u64>,
+    },
+    BindTargets {
+        id: u64,
+        targets: Result<Vec<NodeId>, String>,
+        bind: bool,
+    },
+    PlayTargets(u64, Result<Vec<NodeId>, String>),
+    BakeTargets(u64, Result<Vec<NodeId>, String>),
+    Create {
+        animation: bool,
+        objects: Vec<NodeId>,
+        camera: Option<NodeId>,
+        camera_pose: crate::scene::Camera,
+    },
+    Imported(Result<Take, String>),
+    Paste(String),
+    Recording(bool),
+    MinSeconds(f64),
+    RecorderOptions(crate::camera_recorder::Options),
+    Filter(String),
+    PinnedOnly(bool),
+    PickerComplete {
+        export: Option<u64>,
+        path: PathBuf,
+    },
+    PickerHistory {
+        export: bool,
+        directory: Option<PathBuf>,
+        filter: Option<String>,
+    },
 }
-pub(super) enum Derive {
+#[derive(Clone)]
+pub(crate) enum Derive {
     Trim(f64, f64),
     Speed(f64),
     Split,
@@ -89,10 +128,7 @@ impl App {
         ui.separator();
         self.takes_editor(ui, &mut actions);
         for action in actions {
-            self.take_action(action);
-        }
-        if let Some(text) = self.takes_view.clipboard.take() {
-            ui.ctx().copy_text(text);
+            self.emit_take(action);
         }
     }
 
@@ -133,14 +169,20 @@ impl App {
     fn takes_toolbar(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let selected = self.selected_takes();
         let any = !selected.is_empty();
+        let mut filter = self.takes_view.filter.clone();
+        let mut pinned_only = self.takes_view.pinned_only;
         ui.horizontal_wrapped(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.takes_view.filter)
+            if ui.add(
+                egui::TextEdit::singleline(&mut filter)
                     .hint_text(format!("{} Filter", icons::SEARCH))
                     .desired_width(110.0),
-            );
-            ui.toggle_value(&mut self.takes_view.pinned_only, ph::PUSH_PIN)
-                .on_hover_text("Pinned takes only");
+            ).changed() {
+                actions.push(Action::Filter(filter));
+            }
+            if ui.toggle_value(&mut pinned_only, ph::PUSH_PIN)
+                .on_hover_text("Pinned takes only").changed() {
+                actions.push(Action::PinnedOnly(pinned_only));
+            }
             ui.separator();
             // Record / pause: whether navigation and manipulator drags make takes.
             let recording = self.record_takes;
@@ -153,15 +195,12 @@ impl App {
                 })
                 .clicked()
             {
-                self.record_takes = !recording;
-                if recording {
-                    self.takes_recorder.cancel();
-                    self.drag_recorder.cancel();
-                }
+                actions.push(Action::Recording(!recording));
             }
+            let mut min_take_secs = self.min_take_secs;
             if ui
                 .add(
-                    egui::DragValue::new(&mut self.min_take_secs)
+                    egui::DragValue::new(&mut min_take_secs)
                         .range(crate::takes::MIN_SECS..=600.0)
                         .speed(0.05)
                         .max_decimals(2)
@@ -171,8 +210,7 @@ impl App {
                 .on_hover_text("Keep only takes longer than this duration (seconds)")
                 .changed()
             {
-                self.takes_recorder.min_secs = self.min_take_secs;
-                self.drag_recorder.min_secs = self.min_take_secs;
+                actions.push(Action::MinSeconds(min_take_secs));
             }
             ui.separator();
             if ui
@@ -526,7 +564,7 @@ impl App {
         } else {
             ui.weak("Select one take to edit it.");
         }
-        let options = &mut self.recorder_options;
+        let mut options = self.recorder_options;
         ui.horizontal_wrapped(|ui| {
             ui.label("Bake");
             ui.checkbox(&mut options.transform, "Transform");
@@ -542,6 +580,9 @@ impl App {
                 "Reduction error: maximum absolute error at the samples, in each channel's units",
             );
         });
+        if options != self.recorder_options {
+            actions.push(Action::RecorderOptions(options));
+        }
         if ui
             .add_enabled(
                 take.is_some(),
@@ -557,18 +598,58 @@ impl App {
         }
     }
 
-    pub(super) fn take_action(&mut self, action: Action) {
+    /// Resolve selection-sensitive intents at publication, before another event can change it.
+    pub(super) fn capture_take_action(&self, action: Action) -> Action {
+        match action {
+            Action::Select { id, ctrl, shift } => self.take_selection_action(id, ctrl, shift),
+            Action::Bind(id) => Action::BindTargets {
+                id,
+                targets: self.take_targets(id),
+                bind: self.world.document.take_users(id).is_empty(),
+            },
+            Action::Play(id) => Action::PlayTargets(id, self.take_targets(id)),
+            Action::Bake(id) => Action::BakeTargets(id, self.take_targets(id)),
+            Action::FromAnimation | Action::FromPose => Action::Create {
+                animation: matches!(action, Action::FromAnimation),
+                objects: self.selected_objects(),
+                camera: self.world.document.active_camera,
+                camera_pose: self.scene.camera,
+            },
+            action => action,
+        }
+    }
+
+    pub(super) fn handle_take_action(
+        &mut self,
+        action: Action,
+        frame: f64,
+        ctx: &egui::Context,
+    ) -> Result<serde_json::Value, String> {
         let fps = self.world.document.fps;
         let result: Result<(), String> = match action {
-            Action::Select { id, ctrl, shift } => {
-                self.select_take(id, ctrl, shift);
+            Action::Select { .. }
+            | Action::Bind(_)
+            | Action::Play(_)
+            | Action::Bake(_)
+            | Action::FromAnimation
+            | Action::FromPose => Err("Take intent was not captured before publishing".into()),
+            Action::Selection { ids, anchor } => {
+                for id in &ids {
+                    if self.world.document.takes.get(*id).is_none() {
+                        return Err(format!("No take {id}"));
+                    }
+                }
+                self.takes_view.selection = ids;
+                self.takes_view.anchor = anchor;
                 Ok(())
             }
             Action::Pin(ids, pinned) => ids
                 .into_iter()
                 .try_for_each(|id| self.world.edit_take(id, |t| t.pinned = pinned).map(drop)),
-            Action::Bind(id) => self.toggle_binding(id),
-            Action::Play(id) => self.play_take(id),
+            Action::BindTargets { id, targets, bind } => {
+                self.world.bind_take(&targets?, bind.then_some(id), None)
+            }
+            Action::PlayTargets(id, targets) => self.play_take(id, targets?),
             Action::Rename(id, name) => {
                 self.takes_view.rename = None;
                 let name = name.trim().to_owned();
@@ -593,7 +674,7 @@ impl App {
                 self.status = format!("Deleted {count} take(s)");
                 refused
             }
-            Action::Copy(ids) => self.copy_takes(&ids),
+            Action::Copy(ids) => self.copy_takes(&ids, ctx),
             Action::Duplicate(ids) => {
                 let copies: Vec<Take> = ids
                     .iter()
@@ -608,6 +689,11 @@ impl App {
                 Ok(())
             }
             Action::Export(id) => {
+                self.world
+                    .document
+                    .takes
+                    .get(id)
+                    .ok_or_else(|| format!("No take {id}"))?;
                 self.take_dialog(Some(id));
                 Ok(())
             }
@@ -615,19 +701,34 @@ impl App {
                 self.take_dialog(None);
                 Ok(())
             }
-            Action::FromAnimation => self.takes_from_selection(true),
-            Action::FromPose => self.takes_from_selection(false),
+            Action::Create {
+                animation,
+                objects,
+                camera,
+                camera_pose,
+            } => self.takes_from_targets(animation, objects, camera, camera_pose, frame),
+            Action::Imported(result) => {
+                let take = result.map_err(|error| format!("Take import failed: {error}"))?;
+                let name = take.name.clone();
+                self.world.add_take(take);
+                self.status = format!("Imported take {name}");
+                Ok(())
+            }
             Action::Derive(id, derive) => {
-                let Some(take) = self.world.document.takes.get(id).cloned() else {
-                    return;
-                };
+                let take = self
+                    .world
+                    .document
+                    .takes
+                    .get(id)
+                    .cloned()
+                    .ok_or_else(|| format!("No take {id}"))?;
                 let named = |t: Take, suffix: &str| Take {
                     name: format!("{} {suffix}", take.name),
                     pinned: false,
                     ..t
                 };
                 let playhead = take.seconds_at(
-                    f64::from(self.world_ui.playhead),
+                    frame,
                     self.world.document.first,
                     self.world.document.last,
                     fps,
@@ -652,45 +753,127 @@ impl App {
             Action::SetFilters(id, filters) => {
                 self.world.edit_take(id, |t| t.filters = filters).map(drop)
             }
-            Action::Bake(id) => {
-                self.bake_take(id);
+            Action::BakeTargets(id, targets) => self.bake_take(id, targets?),
+            Action::Paste(text) => match crate::takes::from_clipboard(&text) {
+                Some(takes) => takes.map(|takes| self.add_takes(takes, "Pasted")),
+                None => Err("Clipboard does not contain WarpBro takes".into()),
+            },
+            Action::Recording(recording) => {
+                self.record_takes = recording;
+                if !recording {
+                    self.takes_recorder.cancel();
+                    self.drag_recorder.cancel();
+                }
+                Ok(())
+            }
+            Action::MinSeconds(seconds) => {
+                if !seconds.is_finite() || !(crate::takes::MIN_SECS..=600.0).contains(&seconds) {
+                    return Err("Invalid minimum take duration".into());
+                }
+                self.min_take_secs = seconds;
+                self.takes_recorder.min_secs = seconds;
+                self.drag_recorder.min_secs = seconds;
+                Ok(())
+            }
+            Action::RecorderOptions(options) => {
+                if !options.tolerance.is_finite() || !(0.0..=1.0).contains(&options.tolerance) {
+                    return Err("Invalid take reduction tolerance".into());
+                }
+                self.recorder_options = options;
+                Ok(())
+            }
+            Action::Filter(filter) => {
+                self.takes_view.filter = filter;
+                Ok(())
+            }
+            Action::PinnedOnly(pinned_only) => {
+                self.takes_view.pinned_only = pinned_only;
+                Ok(())
+            }
+            Action::PickerComplete { export, path } => {
+                let command = match export {
+                    Some(id) => {
+                        let take = self
+                            .world
+                            .document
+                            .takes
+                            .get(id)
+                            .ok_or_else(|| format!("No take {id}"))?;
+                        crate::io_service::Command::Write {
+                            path,
+                            text: take.to_clip(self.world.document.fps)?,
+                        }
+                    }
+                    None => crate::io_service::Command::OpenTake { path },
+                };
+                self.io.send(command)?;
+                if export.is_none() {
+                    self.takes_view
+                        .pending_imports
+                        .push_back(NodeId(self.world.document.graph.id));
+                }
+                Ok(())
+            }
+            Action::PickerHistory {
+                export,
+                directory,
+                filter,
+            } => {
+                let key = if export {
+                    crate::file_dialogs::TAKE_EXPORT
+                } else {
+                    crate::file_dialogs::TAKE_IMPORT
+                };
+                if let Some(directory) = directory {
+                    self.world_ui
+                        .file_dialogs
+                        .directories
+                        .insert(key.into(), directory);
+                }
+                self.world_ui
+                    .file_dialogs
+                    .filters
+                    .insert(key.into(), filter);
                 Ok(())
             }
         };
         self.evaluated_world = None;
-        if let Err(error) = result {
-            self.status = error;
-        }
+        result.map(|()| serde_json::Value::Null)
     }
 
     /// Plain click selects one take, Ctrl toggles it, Shift extends from the anchor over the
     /// visible (filtered) order.
-    pub(super) fn select_take(&mut self, id: u64, ctrl: bool, shift: bool) {
+    fn take_selection_action(&self, id: u64, ctrl: bool, shift: bool) -> Action {
+        let mut selection = self.takes_view.selection.clone();
         if shift && let Some(anchor) = self.takes_view.anchor {
             let visible = self.visible_takes();
-            let view = &mut self.takes_view;
             let (a, b) = (
                 visible.iter().position(|t| *t == anchor),
                 visible.iter().position(|t| *t == id),
             );
             if let (Some(a), Some(b)) = (a, b) {
                 if !ctrl {
-                    view.selection.clear();
+                    selection.clear();
                 }
-                view.selection.extend(&visible[a.min(b)..=a.max(b)]);
-                return;
+                selection.extend(&visible[a.min(b)..=a.max(b)]);
+                return Action::Selection {
+                    ids: selection,
+                    anchor: Some(anchor),
+                };
             }
         }
-        let view = &mut self.takes_view;
         if ctrl {
-            if !view.selection.remove(&id) {
-                view.selection.insert(id);
+            if !selection.remove(&id) {
+                selection.insert(id);
             }
         } else {
-            view.selection.clear();
-            view.selection.insert(id);
+            selection.clear();
+            selection.insert(id);
         }
-        view.anchor = Some(id);
+        Action::Selection {
+            ids: selection,
+            anchor: Some(id),
+        }
     }
 
     /// Store new takes and select them.
@@ -705,7 +888,7 @@ impl App {
         self.status = format!("{verb} {count} take(s)");
     }
 
-    fn copy_takes(&mut self, ids: &[u64]) -> Result<(), String> {
+    fn copy_takes(&mut self, ids: &[u64], ctx: &egui::Context) -> Result<(), String> {
         let takes: Vec<&Take> = ids
             .iter()
             .filter_map(|id| self.world.document.takes.get(*id).map(|t| &**t))
@@ -715,7 +898,7 @@ impl App {
         }
         let text = crate::takes::to_clipboard(&takes, self.world.document.fps)?;
         let count = takes.len();
-        self.takes_view.clipboard = Some(text);
+        ctx.copy_text(text);
         self.status = format!("Copied {count} take(s)");
         Ok(())
     }
@@ -725,16 +908,13 @@ impl App {
         use crate::hotkeys::{self, Command as Hotkey, Scope};
         let selected = self.selected_takes();
         if hotkeys::consume(ctx, Scope::Global, Hotkey::Duplicate) && !selected.is_empty() {
-            self.take_action(Action::Duplicate(selected.clone()));
+            self.emit_take(Action::Duplicate(selected.clone()));
         }
         if hotkeys::consume(ctx, Scope::Takes, Hotkey::Delete) && !selected.is_empty() {
-            self.take_action(Action::Delete(selected.clone()));
+            self.emit_take(Action::Delete(selected.clone()));
         }
         if hotkeys::take_copy(ctx, !selected.is_empty()) {
-            self.take_action(Action::Copy(selected));
-        }
-        if let Some(text) = self.takes_view.clipboard.take() {
-            ctx.copy_text(text);
+            self.emit_take(Action::Copy(selected));
         }
     }
 
@@ -745,11 +925,7 @@ impl App {
         else {
             return;
         };
-        match crate::takes::from_clipboard(&text) {
-            Some(Ok(takes)) => self.add_takes(takes, "Pasted"),
-            Some(Err(error)) => self.status = error,
-            None => {}
-        }
+        self.emit_take(Action::Paste(text));
     }
 
     /// The placed objects among the selected nodes: what a transform take binds to and is made of.
@@ -795,18 +971,11 @@ impl App {
         Ok(targets)
     }
 
-    /// Bind take `id` to its targets ([`Self::take_targets`]); returns them.
-    fn bind_targets(&mut self, id: u64) -> Result<Vec<NodeId>, String> {
-        let targets = self.take_targets(id)?;
-        self.world.bind_take(&targets, Some(id), None)?;
-        Ok(targets)
-    }
-
     /// Bind take `id` and play from where it begins playing: the first frame of its bar on the
     /// timeline (`WorldDocument::take_span`: its timing and the node's `/take/offset` and
     /// speed), else, when none of it falls in the work area, its play start.
-    fn play_take(&mut self, id: u64) -> Result<(), String> {
-        let targets = self.bind_targets(id)?;
+    fn play_take(&mut self, id: u64, targets: Vec<NodeId>) -> Result<(), String> {
+        self.world.bind_take(&targets, Some(id), None)?;
         let document = &self.world.document;
         let span = match targets.first() {
             Some(node) => document.take_span(*node)?,
@@ -824,35 +993,29 @@ impl App {
         Ok(())
     }
 
-    /// Unbind take `id` everywhere when it drives anything, else bind it to its targets.
-    fn toggle_binding(&mut self, id: u64) -> Result<(), String> {
-        let bound = self.world.document.take_users(id);
-        if bound.is_empty() {
-            return self.bind_targets(id).map(drop);
-        }
-        self.world.bind_take(&bound, None, None)
-    }
-
     /// New takes from the selected objects (transform takes) or, with none selected, from the
     /// active camera: their timeline animation over the work area (`animation`), or their
     /// current pose as a still take.
-    fn takes_from_selection(&mut self, animation: bool) -> Result<(), String> {
+    fn takes_from_targets(
+        &mut self,
+        animation: bool,
+        objects: Vec<NodeId>,
+        camera: Option<NodeId>,
+        camera_pose: crate::scene::Camera,
+        frame: f64,
+    ) -> Result<(), String> {
         let document = &self.world.document;
         let fps = document.fps;
-        let (first, playhead) = (f64::from(document.first), f64::from(self.world_ui.playhead));
+        let first = f64::from(document.first);
         let name = if animation { "Animation" } else { "Pose" };
-        let objects = self.selected_objects();
         let mut made = Vec::new();
         if objects.is_empty() {
             let take = if animation {
-                Take::from_frames(
-                    first,
-                    fps,
-                    document.active_camera,
-                    document.camera_frames()?,
-                )?
+                let mut camera_document = document.clone();
+                camera_document.active_camera = camera;
+                Take::from_frames(first, fps, camera, camera_document.camera_frames()?)?
             } else {
-                Take::still(self.scene.camera, playhead, fps, document.active_camera)?
+                Take::still(camera_pose, frame, fps, camera)?
             };
             made.push(take);
         }
@@ -860,12 +1023,7 @@ impl App {
             let take = if animation {
                 Take::from_frames(first, fps, Some(node), document.trs_frames(node)?)?
             } else {
-                Take::still(
-                    document.authored_trs(node, playhead)?,
-                    playhead,
-                    fps,
-                    Some(node),
-                )?
+                Take::still(document.authored_trs(node, frame)?, frame, fps, Some(node))?
             };
             made.push(take);
         }
@@ -882,11 +1040,15 @@ impl App {
 
     /// Key take `id` onto the nodes it drives (else its targets) as one undoable edit each, then
     /// release the bindings: the keys now show the same motion. The playhead stays where it is.
-    fn bake_take(&mut self, id: u64) {
-        let Some(name) = self.world.document.takes.get(id).map(|t| t.name.clone()) else {
-            return;
-        };
-        let result = self.take_targets(id).and_then(|targets| {
+    fn bake_take(&mut self, id: u64, targets: Vec<NodeId>) -> Result<(), String> {
+        let name = self
+            .world
+            .document
+            .takes
+            .get(id)
+            .map(|t| t.name.clone())
+            .ok_or_else(|| format!("No take {id}"))?;
+        let result: Result<_, String> = (|| {
             let mut total = (0, 0, 0.0f64);
             for node in targets {
                 let (samples, keys, error, _) =
@@ -894,14 +1056,12 @@ impl App {
                 total = (total.0 + samples, total.1 + keys, total.2.max(error));
             }
             Ok(total)
-        });
+        })();
         self.evaluated_world = None;
-        self.status = match result {
-            Ok((samples, keys, error)) => {
-                format!("Baked {name}: {samples} samples -> {keys} keys (sample error {error:.6})")
-            }
-            Err(error) => format!("Bake failed: {error}"),
-        };
+        let (samples, keys, error) = result.map_err(|error| format!("Bake failed: {error}"))?;
+        self.status =
+            format!("Baked {name}: {samples} samples -> {keys} keys (sample error {error:.6})");
+        Ok(())
     }
 
     /// Export `Some(take)` as a clip file, or import one (None).
@@ -927,48 +1087,141 @@ impl App {
         } else {
             dialog.pick_file();
         }
-        self.takes_view.picker = Some((export, dialog));
+        self.takes_view.picker = Some((export, NodeId(self.world.document.graph.id), dialog));
     }
 
     pub(super) fn update_take_picker(&mut self, ctx: &egui::Context) {
-        let Some((export, picker)) = &mut self.takes_view.picker else {
+        let Some((export, document, picker)) = &mut self.takes_view.picker else {
             return;
         };
+        let document = *document;
         picker.update(ctx);
         let key = if export.is_some() {
             crate::file_dialogs::TAKE_EXPORT
         } else {
             crate::file_dialogs::TAKE_IMPORT
         };
-        self.world_ui.file_dialogs.observe(key, picker);
-        let Some(path) = picker.take_picked() else {
-            if matches!(
-                picker.state(),
-                egui_file_dialog::DialogState::Closed | egui_file_dialog::DialogState::Cancelled
-            ) {
-                self.takes_view.picker = None;
+        let mut actions = Vec::new();
+        if !matches!(picker.state(), egui_file_dialog::DialogState::Closed) {
+            let directory = picker.directory().map(std::path::Path::to_path_buf);
+            let filter = picker
+                .selected_file_filter()
+                .map(|filter| filter.name.clone());
+            if directory.as_ref().is_some_and(|directory| {
+                self.world_ui.file_dialogs.directories.get(key) != Some(directory)
+            }) || self.world_ui.file_dialogs.filters.get(key) != Some(&filter)
+            {
+                actions.push(Action::PickerHistory {
+                    export: export.is_some(),
+                    directory,
+                    filter,
+                });
             }
-            return;
-        };
-        let export = *export;
-        self.takes_view.picker = None;
-        let command = match export {
-            Some(id) => {
-                let Some(take) = self.world.document.takes.get(id) else {
-                    return;
-                };
-                match take.to_clip(self.world.document.fps) {
-                    Ok(text) => crate::io_service::Command::Write { path, text },
-                    Err(error) => {
-                        self.status = error;
-                        return;
-                    }
-                }
-            }
-            None => crate::io_service::Command::OpenTake { path },
-        };
-        if let Err(error) = self.io.send(command) {
-            self.status = error;
         }
+        if let Some(path) = picker.take_picked() {
+            actions.push(Action::PickerComplete {
+                export: *export,
+                path,
+            });
+            self.takes_view.picker = None;
+        } else if matches!(
+            picker.state(),
+            egui_file_dialog::DialogState::Closed | egui_file_dialog::DialogState::Cancelled
+        ) {
+            self.takes_view.picker = None;
+        }
+        for action in actions {
+            self.emit_take_for_document(action, document);
+        }
+    }
+
+    /// Complete imports through the same bus, retaining the request's original document.
+    pub(super) fn take_import_result(&mut self, result: Result<Take, String>) {
+        if let Some(document) = self.takes_view.pending_imports.pop_front() {
+            self.emit_take_for_document(Action::Imported(result), document);
+        } else {
+            self.emit_take(Action::Imported(Err(
+                "Unexpected take import completion without a request".into(),
+            )));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn camera_take(app: &mut App) -> u64 {
+        let take = Take::still(
+            app.scene.camera,
+            f64::from(app.world.document.first),
+            app.world.document.fps,
+            app.world.document.active_camera,
+        )
+        .unwrap();
+        app.world.add_take(take)
+    }
+
+    #[test]
+    fn take_intents_wait_for_event_dispatch() {
+        let mut app = App::new();
+        let ctx = egui::Context::default();
+        let id = camera_take(&mut app);
+        let before_name = app.world.document.takes.get(id).unwrap().name.clone();
+        let before_secs = app.min_take_secs;
+        let before_recording = app.record_takes;
+        app.emit_take(Action::Rename(id, "Event take".into()));
+        app.emit_take(Action::Recording(!before_recording));
+        app.emit_take(Action::MinSeconds(before_secs + 1.0));
+        app.emit_take(Action::Select {
+            id,
+            ctrl: false,
+            shift: false,
+        });
+        assert_eq!(app.world.document.takes.get(id).unwrap().name, before_name);
+        assert_eq!(app.min_take_secs, before_secs);
+        assert_eq!(app.record_takes, before_recording);
+        assert!(app.takes_view.selection.is_empty());
+        app.handle_events(&ctx);
+        assert_eq!(app.world.document.takes.get(id).unwrap().name, "Event take");
+        assert_eq!(app.min_take_secs, before_secs + 1.0);
+        assert_eq!(app.record_takes, !before_recording);
+        assert_eq!(app.takes_view.selection, BTreeSet::from([id]));
+    }
+
+    #[test]
+    fn import_completion_keeps_its_origin_document() {
+        let mut app = App::new();
+        let ctx = egui::Context::default();
+        let take = Take::still(app.scene.camera, 0.0, app.world.document.fps, None).unwrap();
+        let count = app.world.document.takes.list().len();
+        let origin = NodeId(app.world.document.graph.id);
+        app.takes_view.pending_imports.push_back(origin);
+        app.world.document.graph.id = NodeId::new().uuid();
+        app.take_import_result(Ok(take.clone()));
+        assert!(app.takes_view.pending_imports.is_empty());
+        assert_eq!(app.world.document.takes.list().len(), count);
+        app.handle_events(&ctx);
+        assert_eq!(app.world.document.takes.list().len(), count);
+        // An unrequested completion must report a failure instead of adopting the current document.
+        app.take_import_result(Ok(take));
+        app.handle_events(&ctx);
+        assert_eq!(app.world.document.takes.list().len(), count);
+        assert!(app.status.contains("Unexpected take import completion"));
+    }
+
+    #[test]
+    fn queued_take_play_uses_the_camera_captured_at_publication() {
+        let mut app = App::new();
+        let ctx = egui::Context::default();
+        let camera = app.world.document.active_camera.unwrap();
+        let id = camera_take(&mut app);
+        app.emit_take(Action::Play(id));
+        assert_eq!(app.world.document.take_clip(camera).unwrap(), None);
+        app.world.document.active_camera = None;
+        app.handle_events(&ctx);
+        assert_eq!(app.world.document.take_clip(camera).unwrap(), Some(id));
+        assert_eq!(app.world.document.active_camera, None);
+        assert!(app.world_ui.playing);
     }
 }

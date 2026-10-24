@@ -52,7 +52,7 @@ impl Panel {
         }
     }
     /// The Viewport is the workspace's one fixed panel: it never closes.
-    fn permissions(&self) -> Permissions {
+    pub(super) fn permissions(&self) -> Permissions {
         Permissions {
             closable: *self != Self::Viewport,
             ..Permissions::default()
@@ -202,7 +202,7 @@ impl DockContent<Panel> for Viewer<'_> {
     fn panel_menu(&mut self, ui: &mut egui::Ui, _: &Panel) {
         for panel in Panel::ALL {
             if ui.button(panel.title()).clicked() {
-                self.app.panels_to_open.push(panel);
+                self.app.emit_app(super::AppAction::OpenPanel(panel));
                 ui.close();
             }
         }
@@ -275,21 +275,18 @@ impl App {
     /// The host places this inline in the top-right of its main toolbar.
     pub(super) fn layout_manager_ui(&mut self, ui: &mut egui::Ui) {
         let previous = self.layouts.store.current().to_owned();
+        let mut store = self.layouts.store.clone();
+        let mut save_selected = None;
         ui.push_id("frac-layout-manager", |ui| {
             // The bar reads a picked layout before selecting it; WarpBro also needs the Viewport.
-            match self
-                .layouts
-                .bar
-                .show(ui, &mut self.layouts.store, &self.dock)
-            {
+            match self.layouts.bar.show(ui, &mut store, &self.dock) {
                 Ok(output) => match output.restored {
                     Some(layout) if valid_layout(&layout) => {
-                        self.dock = layout;
-                        self.panels_to_open.clear();
+                        self.emit_app(super::AppAction::RestoreLayout(layout));
                     }
                     Some(_) => {
                         if !previous.is_empty() {
-                            self.layouts.store.select(&previous);
+                            store.select(&previous);
                         }
                         self.status = format!("Layout restore failed: {INVALID_LAYOUT}");
                     }
@@ -298,38 +295,34 @@ impl App {
                 Err(error) => self.status = format!("Layout: {error}"),
             }
             ui.menu_button("Layout", |ui| {
-                let selected = self.layouts.store.current().to_owned();
+                let selected = store.current().to_owned();
                 if ui
                     .add_enabled(
-                        !selected.is_empty() && !self.layouts.store.is_builtin(&selected),
+                        !selected.is_empty() && !store.is_builtin(&selected),
                         egui::Button::new("Update selected"),
                     )
                     .clicked()
                 {
-                    let saved = soluwell_chrome::dock_layout::to_blob(&self.dock)
-                        .map_err(|e| e.to_string())
-                        .and_then(|blob| {
-                            self.layouts
-                                .store
-                                .save(&selected, blob)
-                                .map_err(|e| e.to_string())
-                        });
-                    if let Err(error) = saved {
-                        self.status = format!("Layout save failed: {error}");
-                    }
+                    save_selected = Some(selected);
                     ui.close();
                 }
                 if ui.button("Reset to default").clicked() {
-                    self.reset_layout();
+                    self.emit_app(super::AppAction::ResetLayout);
                     ui.close();
                 }
             });
         });
+        if store != self.layouts.store {
+            self.emit_app(super::AppAction::LayoutStore(store));
+        }
+        if let Some(selected) = save_selected {
+            self.emit_app(super::AppAction::SaveLayout(selected));
+        }
     }
 
     /// The default workspace (`default_layout`): Layout > Reset to default and Window > Reset
     /// layout. Panels queued to open are dropped with the old layout.
-    fn reset_layout(&mut self) {
+    pub(super) fn reset_layout(&mut self) {
         self.dock = default_layout();
         self.panels_to_open.clear();
     }
@@ -339,17 +332,17 @@ impl App {
             for panel in Panel::ALL {
                 let open = self.dock.contains(&panel);
                 if ui.selectable_label(open, panel.title()).clicked() {
-                    self.panels_to_open.push(panel);
+                    self.emit_app(super::AppAction::OpenPanel(panel));
                     ui.close();
                 }
             }
             ui.separator();
             if ui.button("Reset layout").clicked() {
-                self.reset_layout();
+                self.emit_app(super::AppAction::ResetLayout);
                 ui.close();
             }
             if ui.button("Fonts…").clicked() {
-                self.open_settings(super::SettingsPage::Fonts);
+                self.emit_app(super::AppAction::OpenSettings(super::SettingsPage::Fonts));
                 ui.close();
             }
         });
@@ -386,13 +379,11 @@ impl App {
             self.dock_focus = output.focused;
         }
         for action in output.actions {
-            if let Err(error) = self.dock.apply_with_permissions(action, Panel::permissions) {
-                self.status = format!("Dock: {error}");
-            }
+            self.emit_app(super::AppAction::DockAction(action));
         }
         // Attribute Editor > Show in timeline brings the Timeline forward.
         if self.world_ui.take_timeline_request() {
-            self.panels_to_open.push(Panel::Timeline);
+            self.emit_app(super::AppAction::OpenPanel(Panel::Timeline));
         }
         self.open_panels(area);
     }
@@ -416,17 +407,15 @@ impl App {
                 ui.add_space(ui.spacing().item_spacing.x);
                 match self.camera_slots.ui(
                     ui,
-                    &mut self.scene.camera,
                     self.controls.swap_slot_buttons,
                 ) {
                     Some(crate::camera_slots::SlotAction::Stored(i)) => {
-                        self.status = format!("Camera {} stored", i + 1);
+                        self.emit_app(super::AppAction::StoreCameraSlot(i));
                     }
                     Some(crate::camera_slots::SlotAction::Restored(i)) => {
                         // The viewport commit authors the pasted camera; flight inertia must not
                         // carry on from the previous pose.
-                        self.fly = None;
-                        self.status = format!("Camera {} restored", i + 1);
+                        self.emit_app(super::AppAction::RecallCameraSlot(i));
                     }
                     Some(crate::camera_slots::SlotAction::Empty(i)) => {
                         self.status = format!("CamClip {} is empty: store a camera first", i + 1);
@@ -443,7 +432,7 @@ impl App {
                             .on_hover_text(tip)
                             .clicked()
                         {
-                            self.tool = tool;
+                            self.emit_app(super::AppAction::SetTool(tool));
                         }
                     }
                     // Twenty toggles: the menu stays open until a click elsewhere or on its button.
@@ -471,40 +460,30 @@ impl App {
                             None,
                         );
                         if exposure != effective.render.exposure_stops
-                            && let Ok(viewport_id) = self.world.document.viewport_settings_id()
+                            && self.world.document.viewport_settings_id().is_ok()
                         {
                             // The camera's gesture: the drag shares the navigation's undo step.
                             let gesture = ui
                                 .input(|input| input.pointer.primary_down())
                                 .then(|| self.camera_gesture())
                                 .or_else(|| self.world.active_edit());
-                            if let Err(error) = self.world.execute_edit(
-                                crate::world::WorldCommand::SetAttribute {
-                                    id: viewport_id,
-                                    path: "/render/exposure_stops".into(),
-                                    value: serde_json::json!(exposure),
-                                    frame,
-                                },
-                                gesture,
-                            ) {
-                                self.status = error;
-                            }
+                            self.emit_app(super::AppAction::Exposure { value: exposure, frame, gesture });
                         }
                     }
                     ui.separator();
-                    let changed = self.colour.quick_view_ui(ui);
-                    self.apply_colour_change(changed);
+                    if let Some(selection) = self.colour.quick_view_ui(ui) { self.emit_app(super::AppAction::ColourSelection(selection)); }
                     if ui
                         .button(ph::GEAR)
                         .on_hover_text("Colour management settings")
                         .clicked()
                     {
-                        self.open_settings(super::SettingsPage::Color);
+                        self.emit_app(super::AppAction::OpenSettings(super::SettingsPage::Color));
                     }
                     ui.separator();
                     let actions = crate::render_profiles_ui::toolbar(
                         ui,
-                        &mut self.world,
+                        &self.world,
+                        &self.event_emitter(),
                         f64::from(self.world_ui.playhead),
                         active.as_ref(),
                     );
@@ -523,7 +502,7 @@ impl App {
                         .clicked()
                     {
                         shown = !shown;
-                        self.raw_view = !shown;
+                        self.emit_app(super::AppAction::SetRaw(!shown));
                     }
                     if ui
                         .selectable_label(self.scene.camera.free_flight, ph::FLIGHT)
@@ -532,7 +511,7 @@ impl App {
                         )
                         .clicked()
                     {
-                        self.toggle_flight_mode();
+                        self.emit_app(super::AppAction::ToggleFlight);
                     }
                     // One button keeps the toolbar narrow: click saves as displayed, the context menu
                     // (right click) offers the other snapshot files, as File does.
@@ -540,13 +519,17 @@ impl App {
                         "Save the viewport as displayed (PNG) · right click: more formats",
                     );
                     if snapshot.clicked() {
-                        self.save_frame(super::Monitor::read(ui.ctx()), None);
+                        self.emit_app(super::AppAction::SaveFrame { monitor: super::Monitor::read(ui.ctx()), file: None });
                     }
                     snapshot.context_menu(|ui| self.snapshot_menu(ui));
                 });
             });
         });
-        self.toolbar = state;
+        if self.toolbar != state {
+            self.emit_app(super::AppAction::PatchSettings(
+                serde_json::json!({ "toolbar": state }),
+            ));
+        }
         response
     }
 }
@@ -599,7 +582,7 @@ impl super::App {
             edit = Some(("/viewport/extras".into(), extras));
         }
         if let Some((path, value)) = edit {
-            self.set_viewport_flag(&path, value);
+            self.emit_app(super::AppAction::ViewportFlag { path, value });
         }
     }
 }
@@ -626,30 +609,30 @@ impl Default for Fonts {
     }
 }
 impl App {
-    pub(super) fn fonts_ui(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn fonts_ui(&mut self, ui: &mut egui::Ui, fonts: &mut Fonts) {
         soluwell_panels::prefs::section_header(ui, "Fonts & UI scale");
         let definitions = egui::FontDefinitions::default();
         egui::ComboBox::from_id_salt("ui-font")
-            .selected_text(&self.fonts.face)
+            .selected_text(&fonts.face)
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.fonts.face, "Default".into(), "Default");
+                ui.selectable_value(&mut fonts.face, "Default".into(), "Default");
                 for name in definitions.font_data.keys() {
-                    ui.selectable_value(&mut self.fonts.face, name.clone(), name);
+                    ui.selectable_value(&mut fonts.face, name.clone(), name);
                 }
             });
         egui::Grid::new("font-sizes").num_columns(2).show(ui, |ui| {
             for (label, value) in [
-                ("Body / controls", &mut self.fonts.body),
-                ("Small text", &mut self.fonts.small),
-                ("Headings", &mut self.fonts.heading),
-                ("Monospace", &mut self.fonts.monospace),
+                ("Body / controls", &mut fonts.body),
+                ("Small text", &mut fonts.small),
+                ("Headings", &mut fonts.heading),
+                ("Monospace", &mut fonts.monospace),
             ] {
                 ui.label(label);
                 ui.add(egui::DragValue::new(value).range(8.0..=36.0).suffix(" pt"));
                 ui.end_row();
             }
             ui.label("UI scale");
-            ui.add(egui::Slider::new(&mut self.fonts.zoom, 0.75..=2.0));
+            ui.add(egui::Slider::new(&mut fonts.zoom, 0.75..=2.0));
             ui.end_row();
         });
         ui.separator();
