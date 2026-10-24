@@ -1,3 +1,46 @@
+# HANDOFF (2026-10-23, bug hunt plan1)
+
+Read first: `plan1.md` (full report + execution state, sections 7.4-7.6), `CHANGELOG.md`
+"Unreleased - 2026-10-23", `AGENTS.md` (per-family modules, window adapter).
+
+## State
+- Branch `fix/plan1` @ `ecd1df0` (pushed). `origin/main` = `4313f89` (behind by 21e4250 WIP +
+  ecd1df0). NOT pushed to main: wait for the operator's word.
+- ecd1df0: plan1 7.5 done (WGSL one estimator call site per loop: march phase loop
+  MARCH_STEP/FIRST_HIT/SURFACE, march_sample, fractional_march_distance, march_leaving /
+  visibility_leaving 2-pass, stencil_normal 6-probe loop, surface_normal 2-endpoint loop).
+  Inlined family_distance copies: trace 169 -> 22, pick 18 -> 3 (scratchpad callsites.py, regex
+  call graph). Plus OCIO fix from colmap-rs: `Ocio::output_transform` resolves against all views
+  with `?` (no `.ok()`), candidates = every view (video-io ca041bd contract); lock rev edited by
+  hand to ca041bd. Test `ocio::tests::output_transform_refuses_a_view_the_config_lacks`.
+  FAMILY_WORLD guard in `wgpu_shader_modules_contain_their_entry_points` now checks naga
+  constants (a WGSL comment names it).
+- Verified: clippy --all-targets --locked clean; release tests ocio:: color:: wgsl
+  render_wgpu:: (23) + 5 GPU-free tests hidden by `--skip gpu_` all pass.
+
+## Next (only with the operator's go)
+1. Push fix/plan1 -> main when told.
+2. GPU (ask first, idle machine): WGPU world test `cuda_wgpu_renders_mandelbulb_world_and_picks_object`
+   (compile time; was 4946 s before 7.5), `parity_tests::cuda_wgpu_primary_guides_agree_per_pixel`,
+   one A/B `--world-bench --backend wgpu --case <one>`. Any slowdown -> revisit that change.
+3. Later: plan1 7.6 CUDA per-family world kernels (fractal-rs); one independent reviewer of
+   the branch; add the buildlock rule to AGENTS.md.
+
+## Traps (learned the hard way)
+- `--skip gpu_` also skips GPU-free tests named `wgpu_*` / `*_gpu_*` (substring match). GPU-free
+  ones: render_wgpu::tests::wgpu_shader_modules_contain_their_entry_points,
+  render::tests::wgpu_display_decides_denoise_once_per_step, world::tests::per_object_gpu_iterations_*,
+  world::tests::snapshot_and_gpu_upload_*, render_service::tests::interactive_export_batches_*.
+  world_tests.rs is mounted as `world::tests`.
+- Tests need `--release`: debug device codegen of fractal-kernels fails (PTX verification).
+  Keep `target/release` (deleting it costs a ~10 min rebuild).
+- Commands: `python C:/projects/projects.rust.cg/cglibs/.buildlock/buildlock.py cargo oxide test -- --release --locked -- <filters>`;
+  clippy: `FRAC_ALLOW_PLAIN_CARGO=1 ... buildlock.py cargo clippy --all-targets --locked`.
+- Shared machine (~7 projects): no GPU tests/benches without the operator's yes; never build
+  while still editing; no legacy compat; never cargo update -p a git dep (edit lock rev).
+- git commit from a pwsh stdin script stopped after `git add` (stderr CRLF warnings): commit
+  with `git commit -F <file>` as a separate command.
+
 # HANDOFF (2026-10-16)
 
 Direct display (2026-10-16): pushed; `cargo oxide test -- --release --locked -- direct` on the
