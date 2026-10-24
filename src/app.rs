@@ -1893,14 +1893,17 @@ impl App {
     /// The colour controls (Settings > Color, the toolbar's view, a picked config file) changed
     /// the working selection (`colour.sel`): it goes to the scene, which the end-of-frame diff
     /// authors into the document (`refresh_scene` then mirrors the document back with
-    /// `State::set_sel`), and it becomes the selection of new documents. The renderer drops
-    /// its colour caches, so a reloaded config file is read again.
+    /// `State::set_sel`), and it becomes the selection of new documents. A new selection reaches
+    /// the renderer with the viewport request and reuses its cached transforms (instant); only a
+    /// config read again from disk with the same selection (Reload) needs `ReloadColour` to
+    /// redisplay, the new load being keyed by its `Ocio::serial`.
     fn apply_colour_change(&mut self, changed: bool) {
         if changed {
+            let reloaded = self.scene.colour == self.colour.sel;
             self.scene.render.reinhard = false;
             self.scene.colour = self.colour.sel.clone();
             self.default_colour = self.colour.sel.clone();
-            if let Err(error) = self.renderer.try_command(Command::ReloadColour) {
+            if reloaded && let Err(error) = self.renderer.try_command(Command::ReloadColour) {
                 self.status = format!("Colour reload: {error}");
             }
         }

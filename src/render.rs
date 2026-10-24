@@ -378,7 +378,6 @@ pub struct Gpu {
         std::collections::BTreeMap<(String, u64), Result<Arc<crate::environment::Map>, String>>,
     pub name: String,
     colour: crate::color::ColorPipeline,
-    colour_revision: u64,
     denoiser: Option<Result<crate::denoise::Processor, String>>,
     /// Regression oracle only: exercise the unchanged runtime material dispatcher.
     #[cfg(test)]
@@ -476,6 +475,16 @@ impl Target {
     }
 }
 
+/// The OCIO config load `scene`'s display reads now (`Ocio::serial`), the same rule as
+/// `ColorPipeline::apply_into`: None when OCIO is off or the Reinhard curve replaces it. `Err`
+/// when the config cannot load; the display transform then reports why (`colour_error`).
+fn colour_load(scene: &Scene) -> Result<Option<u64>, String> {
+    if !scene.colour.on || scene.render.reinhard {
+        return Ok(None);
+    }
+    crate::ocio::shared(&crate::ocio::source(&scene.colour.config)).map(|ocio| Some(ocio.serial()))
+}
+
 /// The step's one denoise decision. [`crate::denoise::State::due`] consumes the attempt, so a
 /// step asks once and hands the answer on ([`Gpu::process_denoise`]); converging ends the
 /// render, so it counts as the final pass.
@@ -510,6 +519,33 @@ impl Gpu {
                 "WGPU backend is not initialized".into(),
             )),
         }
+    }
+
+    /// End a step: wait for `backend`'s submitted work, then record the step's time on `target`.
+    /// Launches are asynchronous, so a step that publishes nothing used to stamp only its submit
+    /// time; [`Batch::Budget`] then read a near-zero cost per sample and sized the next batch to
+    /// thousands of samples, which the next publishing step waited for (multi-second viewport
+    /// stalls). Waiting makes the cost the GPU's and keeps at most one batch in flight, so a
+    /// batch's budget bounds the latency of the next frame.
+    fn stamp(
+        &self,
+        backend: Backend,
+        target: &mut Target,
+        started: Instant,
+        spp: u32,
+    ) -> Result<(), RenderError> {
+        if spp > 0 {
+            match backend {
+                Backend::Wgpu => self.wgpu()?.finish()?,
+                _ => self
+                    .cuda()?
+                    .stream
+                    .synchronize()
+                    .map_err(|e| device("CUDA stream synchronize", e))?,
+            }
+        }
+        target.stamp(started, spp);
+        Ok(())
     }
 
     /// The WGPU engine, initialized on first use.
@@ -635,11 +671,6 @@ impl Gpu {
         Ok(())
     }
 
-    pub fn invalidate_colour(&mut self) {
-        self.colour = crate::color::ColorPipeline::new();
-        self.colour_revision = self.colour_revision.wrapping_add(1);
-    }
-
     pub fn new() -> Result<Self, RenderError> {
         let cuda = CudaEngine::new();
         let (name, wgpu) = match &cuda {
@@ -665,7 +696,6 @@ impl Gpu {
             environments: Default::default(),
             name,
             colour: crate::color::ColorPipeline::new(),
-            colour_revision: 0,
             denoiser: None,
             #[cfg(test)]
             force_mixed_world: false,
@@ -1067,7 +1097,7 @@ impl Gpu {
                         full,
                         force_mixed,
                     )?;
-                    target.stamp(t0, spp);
+                    self.stamp(launch.backend, target, t0, spp)?;
                     return Ok(());
                 }
                 let due = denoise_due(target, scene, final_pass);
@@ -1087,8 +1117,9 @@ impl Gpu {
                     target.denoise_selected = false;
                     target.light_kind = crate::color::DisplayLight::Relative;
                     target.colour_error = None;
-                    target.display_key = Some(DisplayKey::new(scene, self.colour_revision));
-                    target.stamp(t0, spp);
+                    // Fused only without OCIO (`fused_display`): no config load to key.
+                    target.display_key = Some(DisplayKey::new(scene, None));
+                    self.stamp(launch.backend, target, t0, spp)?;
                     return Ok(());
                 }
                 decided = Some(due);
@@ -1120,7 +1151,7 @@ impl Gpu {
                 target.samples = next_samples;
                 target.display_key = None;
                 if !display(target) {
-                    target.stamp(t0, spp);
+                    self.stamp(launch.backend, target, t0, spp)?;
                     return Ok(());
                 }
             }
@@ -1229,7 +1260,7 @@ impl Gpu {
                 self.adapt(target, scene)?;
             }
             if !display(target) {
-                target.stamp(t0, spp);
+                self.stamp(launch.backend, target, t0, spp)?;
                 return Ok(());
             }
         }
@@ -1242,10 +1273,12 @@ impl Gpu {
             None => denoise_due(target, scene, final_pass),
         };
         let denoise_changed = self.process_denoise(target, scene, due)?;
-        let display_changed = !target
-            .display_key
-            .as_ref()
-            .is_some_and(|key| key.matches(scene, self.colour_revision));
+        let config_load = colour_load(scene);
+        // A config that cannot load redisplays: the transform below reports why.
+        let display_changed = match (&target.display_key, &config_load) {
+            (Some(key), Ok(load)) => !key.matches(scene, *load),
+            _ => true,
+        };
         if spp == 0 && !denoise_changed && !display_changed {
             return Ok(());
         }
@@ -1259,10 +1292,10 @@ impl Gpu {
             )?;
             target.light_kind = crate::color::DisplayLight::Relative;
             target.colour_error = None;
-            if display_changed {
-                target.display_key = Some(DisplayKey::new(scene, self.colour_revision));
+            if display_changed && let Ok(load) = config_load {
+                target.display_key = Some(DisplayKey::new(scene, load));
             }
-            target.stamp(t0, spp);
+            self.stamp(launch.backend, target, t0, spp)?;
             return Ok(());
         }
         if target.denoise_selected
@@ -1325,14 +1358,13 @@ impl Gpu {
             Ok(kind) => {
                 target.light_kind = kind;
                 target.colour_error = None;
-                if display_changed {
-                    target.display_key = Some(DisplayKey::new(scene, self.colour_revision));
+                if display_changed && let Ok(load) = config_load {
+                    target.display_key = Some(DisplayKey::new(scene, load));
                 }
             }
             Err(e) => target.colour_error = Some(e),
         }
-        target.stamp(t0, spp);
-        Ok(())
+        self.stamp(launch.backend, target, t0, spp)
     }
 
     #[cfg(test)]
@@ -2668,18 +2700,18 @@ mod tests {
     }
 
     #[test]
-    fn typed_display_key_tracks_colour_and_revision_without_denoise() {
+    fn typed_display_key_tracks_colour_and_config_load_without_denoise() {
         let _gpu_test = crate::test_gpu::lock();
         let mut scene = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
-        let key = DisplayKey::new(&scene, 0);
+        let key = DisplayKey::new(&scene, Some(0));
         scene.render.denoise.interval += 1;
-        assert!(key.matches(&scene, 0));
-        assert!(!key.matches(&scene, 1));
+        assert!(key.matches(&scene, Some(0)));
+        assert!(!key.matches(&scene, Some(1)), "a reloaded config redisplays");
         scene.render.exposure_stops += 0.25;
-        assert!(!key.matches(&scene, 0));
+        assert!(!key.matches(&scene, Some(0)));
         scene.render.exposure_stops -= 0.25;
         scene.colour.on = !scene.colour.on;
-        assert!(!key.matches(&scene, 0));
+        assert!(!key.matches(&scene, Some(0)));
     }
 
     #[test]
@@ -4981,7 +5013,7 @@ mod tests {
     /// ran with adaptive sampling off. The step now decides once; a due denoise never takes the
     /// fused path and the second question is (correctly) false, which is why it is not asked.
     #[test]
-    fn wgpu_display_decides_denoise_once_per_step() {
+    fn fused_display_decides_denoise_once_per_step() {
         let mut scene = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));
         scene.colour.on = false;
         scene.render.adaptive.enabled = false;

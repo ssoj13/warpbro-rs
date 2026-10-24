@@ -1179,11 +1179,21 @@ impl WgpuEngine {
         Ok(())
     }
 
+    /// Wait until every submission of this backend has run: the end of a traced step that reads
+    /// nothing back (`Gpu::stamp`), so its measured time is the GPU's.
+    pub(crate) fn finish(&self) -> Result<(), RenderError> {
+        self.shared
+            .device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .map(|_| ())
+            .map_err(|e| RenderError::Device(format!("device poll: {e}")))
+    }
+
     /// One submission of this backend, the only place that encodes, submits and reads back:
     /// `record` encodes the work, then each `(buffer, bytes)` of `reads` is copied into `staging`
     /// back to back, mapped once and handed to `read` as one byte slice. All of it runs inside
     /// error scopes, so a bad dispatch, binding or copy is an `Err`. Without `reads` nothing is
-    /// waited for: the GPU runs on while the host prepares the next launch.
+    /// waited for here; the step that launched it waits at its end ([`Self::finish`]).
     fn run<R>(
         &self,
         label: &str,
@@ -1711,7 +1721,7 @@ mod tests {
     /// family module's `family_distance` is that family's estimator alone, the dynamic one a
     /// switch over every family of the registry.
     #[test]
-    fn wgpu_shader_modules_contain_their_entry_points() {
+    fn shader_modules_contain_their_entry_points() {
         let families = std::iter::once(None).chain((0..FAMILIES as u32).map(Some));
         for family in families {
             let src = shader_source(family);

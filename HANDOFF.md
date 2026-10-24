@@ -17,8 +17,9 @@ Read first: `plan1.md` (full report + execution state, sections 7.4-7.6), `CHANG
   checkbox (section "Audit of the open checkboxes") with what is left.
 - Left without GPU: the `.ok()` sweep part 2 (`nodes()` -> `Result`, see plan1.md).
   Needs the operator: merge to main, GPU tests, Q2 (`conn`), Q4 (`path_convergence.rs`), 7.3.
-- GPU-free suite skip list (naming contract of `test_gpu.rs`): `--skip cuda_ --skip gpu_hevc
-  --skip gpu_quality --skip gpu_shared --skip gpu_wgpu --skip gpu_window` (NOT `--skip gpu_`).
+- GPU-free suite: `--skip cuda_ --skip gpu_` (the naming contract is now enforced by the test
+  `test_gpu::device_prefixes_only_start_test_names`; the 5 offending GPU-free names were
+  renamed).
 - `target/release` kept for the GPU tests (operator OK); delete it after them.
 - 2fda5a3: independent review of 7.5 found no divergence; follow-ups applied (quick View picker
   stores its display too; FAMILY_WORLD guard = comment-stripped text check). Tests + clippy green.

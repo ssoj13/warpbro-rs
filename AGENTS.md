@@ -31,9 +31,11 @@ The machine is shared: every cargo build / check / clippy / test goes through th
 lock, `python C:/projects/projects.rust.cg/cglibs/.buildlock/buildlock.py <cmd>` (its `SLOTS`
 is set by the operator; never nest it; `d:\temp\buildsem.ps1` only forwards to it). Build once after the edits are finished, never
 while still editing. Tests need `--release` (debug device codegen of fractal-kernels fails):
-`buildlock.py cargo oxide test -- --release --locked -- <filters>`. libtest `--skip gpu_` is a
-substring match and also drops GPU-free tests named `wgpu_*` / `*_gpu_*`: run those by exact
-name. CUDA / WGPU tests and benches only with the operator's go.
+`buildlock.py cargo oxide test -- --release --locked -- <filters>`. GPU-free suite:
+`--skip cuda_ --skip gpu_` (libtest `--skip` is a substring match; device tests start with
+`cuda_` / `gpu_` and no other test name may contain them, enforced by
+`test_gpu::device_prefixes_only_start_test_names`). CUDA / WGPU tests and benches only with the
+operator's go.
 
 ## Module map
 

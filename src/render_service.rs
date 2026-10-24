@@ -319,6 +319,10 @@ pub enum Command {
         reply: Option<SyncSender<RenderEvent>>,
     },
     CancelExport,
+    /// The OCIO config was read again from disk (the Colour panel's Reload) with the selection
+    /// unchanged: the viewport redisplays. The new load has a new `Ocio::serial`, so the display
+    /// key and the transform cache see it themselves; a selection change needs no command, its
+    /// request differs.
     ReloadColour,
     /// A viewport click: the fractal of `scene` (the viewport's) under `ndc` (`Gpu::pick`),
     /// answered with [`RenderEvent::Picked`].
@@ -1487,7 +1491,6 @@ impl Worker {
                 push_event(shared, RenderEvent::Picked { id, hit });
             }
             Command::ReloadColour => {
-                self.gpu.invalidate_colour();
                 if let Some(v) = &mut self.viewport {
                     v.dirty = true;
                 }
@@ -2631,7 +2634,7 @@ mod tests {
     }
 
     #[test]
-    fn interactive_export_batches_require_a_known_small_gpu_cost() {
+    fn interactive_export_batches_require_a_known_small_device_cost() {
         let _gpu_test = crate::test_gpu::lock();
         assert!(!background_batch_allowed(0.0, 0, 8.0, true));
         assert!(!background_batch_allowed(32.0, 1, 8.0, true));

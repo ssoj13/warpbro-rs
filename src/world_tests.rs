@@ -1569,7 +1569,7 @@ fn parent_camera_pose_environment_visibility_and_ancestor_lock() {
     .unwrap();
 }
 #[test]
-fn per_object_gpu_iterations_are_independent_of_world_ray_settings() {
+fn per_object_kernel_iterations_are_independent_of_world_ray_settings() {
     let mut e = editor();
     let first = find(&e, WorldKind::Fractal);
     e.execute(WorldCommand::Create {
@@ -2260,7 +2260,7 @@ fn camera_recording_replays_visible_pose_with_animated_nonuniform_camera_scale()
 }
 
 #[test]
-fn snapshot_and_gpu_upload_reject_invalid_lens_payload_without_repair() {
+fn snapshot_and_device_upload_reject_invalid_lens_payload_without_repair() {
     let mut e = editor();
     let camera = find(&e, WorldKind::Camera);
     // Malformed persisted authoring values must reach the evaluated lens boundary.

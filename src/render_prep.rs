@@ -512,28 +512,32 @@ pub(crate) fn untile_into(
     }
 }
 
+/// What the displayed pixels of a film were made with: the display settings and the OCIO config
+/// load (`Ocio::serial`, None without OCIO). A config reloaded from disk is a new load, so the
+/// same selection redisplays; the transforms themselves are cached by selection and load
+/// (`color::ColorPipeline`), so a selection change never drops them.
 #[derive(Clone, PartialEq)]
 pub(crate) struct DisplayKey {
     exposure: f32,
     saturation: f32,
     reinhard: bool,
-    colour_revision: u64,
+    config_load: Option<u64>,
     colour: crate::ocio::Sel,
 }
 impl DisplayKey {
-    pub(crate) fn matches(&self, scene: &Scene, colour_revision: u64) -> bool {
+    pub(crate) fn matches(&self, scene: &Scene, config_load: Option<u64>) -> bool {
         self.exposure == scene.render.exposure_stops
             && self.saturation == scene.render.saturation
             && self.reinhard == scene.render.reinhard
-            && self.colour_revision == colour_revision
+            && self.config_load == config_load
             && self.colour == scene.colour
     }
-    pub(crate) fn new(scene: &Scene, colour_revision: u64) -> Self {
+    pub(crate) fn new(scene: &Scene, config_load: Option<u64>) -> Self {
         Self {
             exposure: scene.render.exposure_stops,
             saturation: scene.render.saturation,
             reinhard: scene.render.reinhard,
-            colour_revision,
+            config_load,
             colour: scene.colour.clone(),
         }
     }
