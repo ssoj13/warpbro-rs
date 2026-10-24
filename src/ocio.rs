@@ -804,7 +804,7 @@ impl State {
     /// Compact direct View control; lists use the already-loaded metadata only.
     pub fn quick_view_ui(&mut self, ui: &mut egui::Ui) -> bool {
         self.poll();
-        let (current, views) = self
+        let (display, current, views) = self
             .config()
             .ok()
             .and_then(|ocio| {
@@ -814,9 +814,9 @@ impl State {
                     .into_iter()
                     .map(str::to_owned)
                     .collect::<Vec<_>>();
-                Some((names.view, views))
+                Some((names.display, names.view, views))
             })
-            .unwrap_or_else(|| (self.sel.view.clone(), Vec::new()));
+            .unwrap_or_else(|| (self.sel.display.clone(), self.sel.view.clone(), Vec::new()));
         ui.label("View:");
         let mut selected = current.clone();
         egui::ComboBox::from_id_salt("viewport_ocio_view")
@@ -833,6 +833,9 @@ impl State {
             });
         if selected != current {
             self.sel.on = true;
+            // The view belongs to the display it was listed from: store both, so the choice
+            // never depends on which display an empty field defaults to elsewhere.
+            self.sel.display = display;
             self.sel.view = selected;
             self.rebuild();
             true

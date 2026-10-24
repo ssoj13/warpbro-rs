@@ -1745,14 +1745,10 @@ mod tests {
                     }
                 }
             }
-            // Checked on the parsed module, not the text: comments may name it to explain why.
-            let module = naga::front::wgsl::parse_str(&src)
-                .unwrap_or_else(|e| panic!("{family:?}: {}", e.emit_to_string(&src)));
+            // Code only: comments may name it to explain why it is not used.
             assert!(
-                module
-                    .constants
-                    .iter()
-                    .all(|(_, c)| c.name.as_deref() != Some("FAMILY_WORLD")),
+                src.lines()
+                    .all(|line| !line.split("//").next().unwrap_or("").contains("FAMILY_WORLD")),
                 "the dynamic family is FAMILY_DYNAMIC, never fractal-core's FAMILY_WORLD (= family 8)"
             );
         }

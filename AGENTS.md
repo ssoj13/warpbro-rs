@@ -28,8 +28,8 @@ Build only through cuda-oxide (`cargo oxide build`, `python bootstrap.py b`); ty
 check for clippy / rust-analyzer).
 
 The machine is shared: every cargo build / check / clippy / test goes through the machine-wide
-lock, `python C:/projects/projects.rust.cg/cglibs/.buildlock/buildlock.py <cmd>` (2 slots;
-`d:\temp\buildsem.ps1` only forwards to it). Build once after the edits are finished, never
+lock, `python C:/projects/projects.rust.cg/cglibs/.buildlock/buildlock.py <cmd>` (its `SLOTS`
+is set by the operator; never nest it; `d:\temp\buildsem.ps1` only forwards to it). Build once after the edits are finished, never
 while still editing. Tests need `--release` (debug device codegen of fractal-kernels fails):
 `buildlock.py cargo oxide test -- --release --locked -- <filters>`. libtest `--skip gpu_` is a
 substring match and also drops GPU-free tests named `wgpu_*` / `*_gpu_*`: run those by exact
