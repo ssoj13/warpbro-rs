@@ -307,6 +307,37 @@ struct Snap {
     requested: bool,
 }
 
+impl Snap {
+    /// The `FRAC_SNAP*` environment, read once: None without `FRAC_SNAP`.
+    fn from_env() -> Result<Option<Self>, String> {
+        let Some(path) = std::env::var_os("FRAC_SNAP") else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            path: PathBuf::from(path),
+            spp: env_number("FRAC_SNAP_SPP")?.unwrap_or(256),
+            wait_thumbs: !std::env::var("FRAC_SNAP_WAIT_THUMBS").is_ok_and(|v| v == "0"),
+            requested: false,
+        }))
+    }
+}
+
+/// Environment number `name`: None when unset; set but malformed is an error for the status
+/// line, never the default silently (a typo would otherwise shoot at the wrong sample count).
+fn env_number<T: std::str::FromStr>(name: &str) -> Result<Option<T>, String>
+where
+    T::Err: std::fmt::Display,
+{
+    match std::env::var(name) {
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(error) => Err(format!("{name}: {error}")),
+        Ok(value) => value
+            .parse()
+            .map(Some)
+            .map_err(|error| format!("{name}={value:?}: {error}")),
+    }
+}
+
 /// Shared fitted tile geometry for scene, workspace-material and library cards.
 fn thumbnail_grid(width: f32, maximum: Vec2, gap: f32) -> (usize, Vec2) {
     let width = width.max(1.0);
@@ -882,6 +913,13 @@ impl App {
                 unreadable.len()
             ),
         };
+        let (snap, status) = match Snap::from_env() {
+            Ok(snap) => (snap, status),
+            Err(error) => {
+                log::error!("Documentation screenshot not armed: {error}");
+                (None, format!("Documentation screenshot not armed: {error}"))
+            }
+        };
 
         let wake = crate::render_service::Wake::default();
 
@@ -993,15 +1031,7 @@ impl App {
             orbit_drag: cam_controls_egui::OrbitDragState::default(),
             orbit_written: None,
             controls: Default::default(),
-            snap: std::env::var("FRAC_SNAP").ok().map(|path| Snap {
-                path: PathBuf::from(path),
-                spp: std::env::var("FRAC_SNAP_SPP")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(256),
-                wait_thumbs: !std::env::var("FRAC_SNAP_WAIT_THUMBS").is_ok_and(|v| v == "0"),
-                requested: false,
-            }),
+            snap,
             window_shot: None,
             fatal: None,
         }
@@ -1923,27 +1953,38 @@ impl App {
     /// library preset to the selection's material, `FRAC_SNAP_TAB=materials` shows the
     /// Materials panel: the documentation screenshots' scene (`App::handle_snap`).
     fn with_snap_preset(mut self) -> Self {
-        if let Some(i) = std::env::var("FRAC_SNAP_PRESET")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            && let Some(e) = self.gallery.get(i)
-        {
-            let scene = e.scene.clone();
-            self.load(scene, Load::New);
-            self.card = Some(Card::Gallery(i));
+        match env_number::<usize>("FRAC_SNAP_PRESET") {
+            Ok(None) => {}
+            Ok(Some(i)) => match self.gallery.get(i) {
+                Some(e) => {
+                    let scene = e.scene.clone();
+                    self.load(scene, Load::New);
+                    self.card = Some(Card::Gallery(i));
+                }
+                None => {
+                    self.status = format!(
+                        "FRAC_SNAP_PRESET={i}: the gallery has {} presets",
+                        self.gallery.len()
+                    );
+                }
+            },
+            Err(error) => self.status = error,
         }
-        if let Ok(name) = std::env::var("FRAC_SNAP_MATERIAL")
-            && let Some(p) = crate::materials::PRESETS.iter().find(|p| p.name() == name)
-        {
-            let before = self.scene.clone();
-            p.apply(&mut self.scene.material);
-            if let Err(error) = self.world.edit_snapshot(
-                self.world.active(),
-                &before,
-                &self.scene,
-                f64::from(self.world_ui.playhead),
-            ) {
-                self.status = format!("FRAC_SNAP_MATERIAL {name}: {error}");
+        if let Ok(name) = std::env::var("FRAC_SNAP_MATERIAL") {
+            match crate::materials::PRESETS.iter().find(|p| p.name() == name) {
+                Some(p) => {
+                    let before = self.scene.clone();
+                    p.apply(&mut self.scene.material);
+                    if let Err(error) = self.world.edit_snapshot(
+                        self.world.active(),
+                        &before,
+                        &self.scene,
+                        f64::from(self.world_ui.playhead),
+                    ) {
+                        self.status = format!("FRAC_SNAP_MATERIAL {name}: {error}");
+                    }
+                }
+                None => self.status = format!("FRAC_SNAP_MATERIAL {name}: no such material preset"),
             }
         }
         if std::env::var("FRAC_SNAP_TAB").is_ok_and(|t| t == "materials") {

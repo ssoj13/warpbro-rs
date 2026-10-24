@@ -3,9 +3,23 @@
 Read first: `plan1.md` (full report + execution state, sections 7.4-7.6), `CHANGELOG.md`
 "Unreleased - 2026-10-23", `AGENTS.md` (per-family modules, window adapter).
 
-## State
-- Branch `fix/plan1` @ `2fda5a3` (pushed). `origin/main` = `4313f89` (behind by 21e4250 WIP,
-  ecd1df0, fda1fbd, e8de11f, 2fda5a3). NOT pushed to main: wait for the operator's word.
+## State (updated 2026-10-23 evening, usage-limit stop)
+- Branch `fix/plan1` (pushed; see `git log origin/main..origin/fix/plan1`). `origin/main` =
+  `4313f89`. NOT merged to main: the operator was asked directly and has not answered (a peer
+  relay is not the operator's answer).
+- Last commit (`.ok()` sweep part 1: `main.rs` `arg()` errors on a malformed number,
+  `FRAC_SNAP_*` env errors to the status line) is **NOT yet verified**: its clippy run was in
+  the buildlock queue at the stop. First thing next session: one `cargo clippy --all-targets
+  --locked` through buildlock, then the GPU-free suite (see Traps for the skip list).
+- Since 2fda5a3: c16eee8 OCIO note + EDR/linear/log never fit SDR (video-io a8c77c8); 26b0f54
+  no swallowed errors in takes/metadata/catalogs, one Duplicate path; 8b9b2d6 one selection
+  field (last = active), GPU-free suite 340/0/7. plan1.md has an audit of every stale
+  checkbox (section "Audit of the open checkboxes") with what is left.
+- Left without GPU: the `.ok()` sweep part 2 (`nodes()` -> `Result`, see plan1.md).
+  Needs the operator: merge to main, GPU tests, Q2 (`conn`), Q4 (`path_convergence.rs`), 7.3.
+- GPU-free suite skip list (naming contract of `test_gpu.rs`): `--skip cuda_ --skip gpu_hevc
+  --skip gpu_quality --skip gpu_shared --skip gpu_wgpu --skip gpu_window` (NOT `--skip gpu_`).
+- `target/release` kept for the GPU tests (operator OK); delete it after them.
 - 2fda5a3: independent review of 7.5 found no divergence; follow-ups applied (quick View picker
   stores its display too; FAMILY_WORLD guard = comment-stripped text check). Tests + clippy green.
 - ecd1df0: plan1 7.5 done (WGSL one estimator call site per loop: march phase loop

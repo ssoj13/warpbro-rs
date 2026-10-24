@@ -472,11 +472,24 @@ Most unchecked boxes above are stale: the waves fixed them. Verified state:
   private ordered `selected` (last = active) behind `active` / `selected` / `select_only` /
   `toggle` / `set_selection` / `set_lead` / `clear_selection`; undo snapshots carry it; GPU-free
   suite 340/0/7.
-- [ ] **New: `.ok()` sweep.** 38 non-test `.ok()` remain; most are legitimate (`try_recv`,
-  `try_lock`, probing whether text is a fragment), but some are silent fallbacks to review:
-  `main.rs` `arg()` (a malformed CLI number silently becomes the default), `app.rs` env-var
-  parses (`FRAC_SNAP` size, ~1923), `world.rs` `info(..).ok()` / `node(..).ok()` /
-  `info_at(..).ok()` in listings, `preview.rs` `frame_count().ok()`, `exr_io.rs` header read.
+  5.7 closed, not a duplicate: `Frame::save_png` (video-io `write_png`) and the export's
+  `video_io::still::write_still` PNG path are one encoder (`write_png_as`, documented by video-io
+  as the encoder of viewport, export and CLI); the wrappers differ only by the export's alpha
+  choice. 5.4 closed: the worker no longer patches quality; a thumbnail's quality is its
+  `Command::Thumbnail` request from one place (`App::render_one_thumbnail`). A document profile
+  does not fit: gallery / bookmark cards are other documents and swatches are app data. 7.2's
+  per-edit `validate_render_profiles` stays until measured (small documents; no perf change
+  without a measurement).
+- [ ] **New: `.ok()` sweep.** 38 non-test `.ok()` remained; most are legitimate (`try_recv`,
+  `try_lock`, probing whether text is a fragment). Done 2026-10-23: `main.rs` `arg()` (a
+  malformed CLI number is an error; a `--flag` in an optional slot still means absent),
+  `FRAC_SNAP_SPP` / `FRAC_SNAP_PRESET` / `FRAC_SNAP_MATERIAL` (`env_number`, errors to the
+  status line). Open, larger: `WorldDocument::nodes_at` drops a node whose `info_at` fails and
+  `info_at_with` defaults a flag whose value fails (`world.rs` ~4247, ~4116); `delete_take`
+  names, `edit_snapshot` material, `descends` read `.ok()` too. Validation after every edit
+  makes these invariant violations, but the honest fix is `nodes()` -> `Result` across its many
+  callers: one dedicated pass. Also `warpbro_dir()` falls back to `.` without a home dir;
+  `preview.rs` `frame_count().ok()`; `exr_io.rs` header read.
 
 ## Execution state (2026-10-23)
 

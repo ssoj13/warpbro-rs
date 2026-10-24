@@ -65,8 +65,18 @@ mod world_ui;
 
 use std::time::Instant;
 
-fn arg<T: std::str::FromStr>(args: &[String], i: usize, default: T) -> T {
-    args.get(i).and_then(|v| v.parse().ok()).unwrap_or(default)
+/// Optional positional argument `i`: absent, or a `--flag` in its place (`--gallery DIR --hdr`),
+/// takes `default`; anything else must parse, so `--bench 96O` is an error, not 960 silently.
+fn arg<T: std::str::FromStr>(args: &[String], i: usize, default: T) -> anyhow::Result<T>
+where
+    T::Err: std::fmt::Display,
+{
+    match args.get(i).filter(|v| !v.starts_with("--")) {
+        None => Ok(default),
+        Some(v) => v
+            .parse()
+            .map_err(|e| anyhow::anyhow!("argument {i} ({v:?}): {e}")),
+    }
 }
 
 /// The WarpBro profile, `~/.warpbro` (or `$WARPBRO_HOME`): `settings.json`, `bookmarks/`,
@@ -243,27 +253,27 @@ fn main() -> anyhow::Result<()> {
             args.get(2)
                 .map(String::as_str)
                 .unwrap_or("animated-fixtures"),
-            arg(&args, 3, 640),
-            arg(&args, 4, 360),
-            arg(&args, 5, 32),
+            arg(&args, 3, 640)?,
+            arg(&args, 4, 360)?,
+            arg(&args, 5, 32)?,
             args.iter().any(|a| a == "--all-frames"),
         ),
         Some("--gallery") => {
             let dir = args.get(2).cloned().unwrap_or_else(|| "gallery".into());
             headless(
                 Some(&dir),
-                arg(&args, 3, 960),
-                arg(&args, 4, 540),
-                arg(&args, 5, 64),
+                arg(&args, 3, 960)?,
+                arg(&args, 4, 540)?,
+                arg(&args, 5, 64)?,
                 args.iter().any(|a| a == "--hdr"),
                 args.iter().any(|a| a == "--display-exr"),
             )
         }
         Some("--bench") => headless(
             None,
-            arg(&args, 2, 960),
-            arg(&args, 3, 540),
-            arg(&args, 4, 32),
+            arg(&args, 2, 960)?,
+            arg(&args, 3, 540)?,
+            arg(&args, 4, 32)?,
             false,
             false,
         ),
