@@ -1,6 +1,33 @@
 # Changelog
 
-## Unreleased - 2026-10-23 (bug hunt plan1: waves 1-3)
+## Unreleased - 2026-10-24
+
+- **Viewport stalls fixed:** a render step now waits for its own GPU work before recording the
+  batch's time (`Gpu::stamp`). Launches are asynchronous, so a step that published no frame used
+  to record only its submit time (~0 ms); the 8 ms batch budget then sized the next batch to
+  thousands of samples and the next frame waited for all of them (multi-second freezes: the
+  selection box moved, the image did not; colour changes waited behind it).
+- **Instant colour changes:** a display / view / look change no longer drops the cached OCIO
+  transforms. The display key is keyed by the config load (`Ocio::serial`); `ReloadColour` is
+  only sent for a real config reload with the selection unchanged.
+- **OCIO output transform:** a scene view replaced to fit the file (an HDR / EDR view for an SDR
+  file) is reported in the export dialog and the export status (video-io `OutputChoice::note`);
+  EDR, scene-linear, display-linear and log views never fit an SDR file (EDR highlights would
+  clip). The viewport's quick View picker stores the display it lists from.
+- **One selection:** `WorldEditor` keeps one ordered selection whose last node is the active one
+  (`active`, `select_only`, `toggle`, `set_selection`, `set_lead`), carried by undo.
+- **No swallowed errors:** an invalid recorded take, an unreadable node metadata, an invalid
+  catalog role or enum variant, a malformed CLI number and a malformed `FRAC_SNAP_*` value are
+  reported instead of dropped or replaced by a default. The material card's Duplicate goes
+  through `WorldEditor::duplicate`.
+- **Test naming enforced:** device tests start with `cuda_` / `gpu_` and no other test name may
+  contain them (`test_gpu::device_prefixes_only_start_test_names`); five GPU-free tests that
+  `--skip gpu_` used to drop are renamed and run again.
+- **Docs:** PLAN.md keeps rules, open work and findings (the dated state sections and the
+  finished BUG1.md, MANDELBULB_PROGRESS.md, RELEASE_PROGRESS.md and plans/ are removed; their
+  history is here and in git); plan2.md plans render pacing and the display path.
+
+## 2026-10-23 (bug hunt plan1: waves 1-3)
 
 - **Render robustness:** typed `RenderError` from every step and launch (no panics on device or
   scene failures), typed thumbnail and command failures, one accumulate loop (`Gpu::advance`)

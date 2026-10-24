@@ -62,7 +62,7 @@ App owns:
   scene: Scene = document.snapshot(playhead)                  <- evaluated per-frame scratch copy
   renderer: RenderService (render_service.rs:393, worker thread owns Gpu)
   io: IoService (io_service.rs:102, file worker)   preview: PreviewController   export: ExportController
-  colour: ocio::State (+ copies of the selection, see plan1.md: colour SSOT)
+  colour: ocio::State (UI; the document owns the selection, refresh_scene mirrors it with set_sel)
 
 App::ui per frame:
   sync_preview -> world_ui.advance (playhead) -> refresh_scene (snapshot if (graph id, revision, frame) changed)
@@ -82,7 +82,7 @@ Anything that edits `self.scene` outside that window, or keeps a parallel copy o
 ## World document and edits
 
 ```
-FILE --io_service::decode_scene--> WorldDocument::decode_json (world.rs:5602) --hydrate_schema (5639)
+FILE --io_service::decode_scene--> WorldDocument::decode_json (strict: node_shape, check_format, validate)
 NEW  --WorldDocument::from_scene--> seed settings nodes + Fractal, Camera, Sun, Environment, Material
 
 WorldDocument: graph (playa_graph::SubnetFile: nodes{uuid -> type, parent, host: Attrs, gpu: JSON template,
@@ -112,6 +112,11 @@ run_worker (render_service.rs:1126) owns Gpu:
            trace_entry -> TraceEntry {world, shade, family} -> the family's module, compiled on first use)
     adapt (active tiles) / tally (unresolved) / process_denoise (OIDN, denoise::State::due cadence)
     display: tonemap -> ColorPipeline::apply_into (OCIO) -> Target.light / Target.pixels
+             (skipped while Target.display_key matches: exposure, saturation, reinhard, Sel and
+             the config load Ocio::serial; transforms cached per selection + load)
+    end of step: Gpu::stamp waits for the backend's work, then records last_ms / last_spp:
+             Batch::Budget sizes the next batch from that GPU time (launches are async; stamping
+             the submit time made thousands-of-samples batches and multi-second stalls)
   Frame::snapshot (render_service.rs:144) -> publish_frame -> UI texture | ExportFrame -> writer
 ```
 
@@ -127,20 +132,24 @@ IoService thread: settings / scenes / bookmarks (tmp + rename), frame and window
 
 ## Invariants and traps
 
-- No legacy data compatibility (operator rule): no migrations, serde aliases or compat defaults.
-  `hydrate_schema` currently violates it (plan1.md decides).
-- WGSL is a hand port of the CUDA kernels; there is no per-family CUDA vs WGPU parity test yet, and
-  several families diverge (plan1.md). Any kernel change must land in both.
+- No legacy data compatibility (operator rule): no migrations, serde aliases or compat defaults
+  (the migrations were removed after converting the shipped templates once).
+- WGSL is a hand port of the CUDA kernels; `parity_tests::cuda_wgpu_primary_guides_agree_per_pixel`
+  compares them but has not run on a GPU yet (tolerances unmeasured). Any kernel change must land
+  in both.
 - `denoise::State::due` mutates the cadence: call it exactly once per step.
 - Render errors on the worker must reach the requester as a typed event; never leave a job waiting.
 - Undo granularity is one open edit per gesture id; text fields and drag values need a gesture.
 - egui: nested `ui.input` inside `hotkeys::active` deadlocks; read `active` first.
 - Many sources are CRLF; scripted replacements must match `\r\n`.
-- Tests: `cuda_*` need a CUDA device, `gpu_*` another GPU API; hosted CI skips both.
+- Tests: `cuda_*` need a CUDA device, `gpu_*` another GPU API, and no other test name contains
+  them (`test_gpu::device_prefixes_only_start_test_names`); hosted CI skips both.
 
 ## TODO
 
-- [ ] Execute plan1.md after approval (bug hunt 2026-10-22).
+- [ ] plan2.md: render pacing and the display path (stage 0 measurements first).
+- [ ] oiio-rs plan-cuda-oxide.md: CUDA OCIO on the film (plan2 stage 3 depends on it).
+- [ ] plan1.md leftovers: see its "Audit of the open checkboxes".
 
 <!-- gitnexus-rs:start -->
 # GitNexus-rs — Code Intelligence

@@ -14,103 +14,45 @@ egui-widgets-rs. Topic docs (how things work) live in docs/; this file only trac
   share these repos. `cargo fmt` may touch foreign code: check `git diff -U0`.
 - One independent review per finished branch plus a look at screenshots; no review per small fix.
   Tests sparingly: analyse, then one targeted run at the end.
-- Push when told (branch and main). Own deps via SSH on `main`, third-party HTTPS, no `[patch]`.
+- Every finished commit goes to its branch AND `main` at once. Own deps via SSH on `main`,
+  third-party HTTPS, no `[patch]`; bump an own git dep by editing the lock's rev (a plain
+  `cargo update -p` collapses windows-sys), then build `--locked`.
+- Shared machine: every build / check / test through
+  `python C:/projects/projects.rust.cg/cglibs/.buildlock/buildlock.py <cmd>` (never nested), only
+  after the edits are finished. CUDA / WGPU tests and benches only with the operator's go.
 - Build and test only through cuda-oxide: `python bootstrap.py b`, `cargo oxide test -- --release
-  -- <filter>`; type-check with `FRAC_ALLOW_PLAIN_CARGO=1 cargo check --all-targets`.
+  --locked -- <filter>` (tests need `--release`); type-check with
+  `FRAC_ALLOW_PLAIN_CARGO=1 cargo clippy --all-targets --locked`.
 - A test that needs a CUDA device is named `cuda_*`, one that needs another GPU API (wgpu,
-  Vulkan Video) `gpu_*` (src/test_gpu.rs); hosted CI skips both.
+  Vulkan Video) `gpu_*`, and no other test name contains these (src/test_gpu.rs, enforced by
+  `device_prefixes_only_start_test_names`); the GPU-free suite is `--skip cuda_ --skip gpu_`.
 - No compatibility with old data: no legacy loaders, serde aliases or migrations. Convert
   checked-in or operator files once with a throwaway script (and a backup).
 - References: D:\Projects\vfx.ref.
 
-## State (2026-10-17)
+## Current plans
 
-- **Unified `wgpu` / `cuda` compute backend (`BUG1.md`)**: `RenderSettings` and `Scene::render` carry `Backend { Auto, Cuda, Wgpu }` (`/render/backend`), shown in the Attribute Editor, profile summary, and status bar (`CUDA · <gpu>` / `WGPU · <gpu>`). Scene preparation is isolated in `src/render_prep.rs`; `src/render_wgpu.rs` + `src/render_wgpu.wgsl` run all 28 compute entry points (`world`, `world_fast`, `world_fast_bulb`, `world_direct`, `fast_<family>`, `full_<family>`, `direct_<family>`, `tally`, `adapt`, `tonemap`, `pick`) on `gpu_info::shared_device()` inside `OutOfMemory` + `Validation` error scopes. `Gpu::resolve_backend` prefers CUDA under `Auto` and refuses silent fallback when `Cuda` or `Wgpu` is explicitly selected.
+- **plan2.md** - render pacing and the display path (two batches in flight, GPU timers, no
+  synchronous per-step readbacks, tonemap + OCIO on the GPU, zero-copy present).
+- **oiio-rs plan-cuda-oxide.md** - CUDA for vfx-compute and vfx-ocio on cuda-oxide (the
+  cudarc / NVRTC engine removed); feeds plan2 stage 3 (WarpBro's CUDA film colour-managed on
+  the GPU).
+- **plan1.md** - the 2026-10-23 bug hunt; what is left is in its "Audit of the open
+  checkboxes" section.
+- **HANDOFF.md** - the current state and next steps.
 
-## State (2026-10-16)
+## Facts still true (history is in CHANGELOG.md and git)
 
-- **Direct display (`world_direct`)**: fractal-rs `74147e2` adds `world_direct` with per-object
-  material shading and all directional lights; WarpBro exposes `DirectShading` (`/render/direct/*`)
-  on every `RenderSettings` node, dispatches `world_direct` / `direct_<family>` on a deterministic
-  square grid up to 16×16 (`DirectShading::MAX_GRID`), and disables adaptive sampling under Direct.
-- **Bounds refused on Output**: `EffectiveRender::export_quality` is the single validator shared by
-  the Render / Encode UI and `ExportController::start`, refusing `Display::Bounds` on the `Output`
-  profile.
-- **Tab menu memory in settings**: `WorldUi` persists `History`, `Favorites`, and sorted `Usage`
-  in `Settings::add_menu` (`settings.json`) and keeps them across `WorldUi::reset`.
-- **Status bar adaptive sampling**: `Frame` and `FrameMetadata` carry `active_tiles: (usize, usize)`,
-  and `sample_status_ui` displays converged tile percentage and tooltip details in both status bar
-  layouts.
-- **Explicit queue-send handling**: `App::browser` only removes a deleted bookmark after
-  `io::Command::Delete` succeeds (`Status::Error` on failure), and `export.rs` handles disconnected
-  command/event channels explicitly according to cancellation state.
-
-## State (2026-10-13)
-
-- **Animatable formula parameters** (branch `mandelbulb-params`, fractal-rs ABI 5): Julia mix
-  (replaces the switch), orbit offset, fractional iterations (all families), spherical inversion
-  (all families, out-of-line `inverted_estimate`). Kernel float bits follow the code layout
-  (NVPTX multiply-add fusion per basic block): A/B against the former kernels was bit-identical
-  on 34 of 36 gallery routes, world Hybrid within ULPs. Details: MANDELBULB_PROGRESS.md.
-
-## State (2026-10-12)
-
-- **Takes** play through node attributes: `/take/clip` (node data, set like `/material_id`),
-  `/take/offset` and keyable `/take/speed` (time warp: `WorldDocument::take_frame` integrates the
-  speed). Undo history counts as playing a take (retention, deletion). Timeline: a Take lane with
-  the take's bar (egui-track-timeline lane clip) and a band on the node's bar (clip bands); both
-  pick the take. Takes take the timeline's curve effects (`Take::effected`, `world_ui::effect_rows`).
-- **Viewport kind filter** (Blender's object_type_exclude_viewport / _select) on ViewportSettings
-  (`/viewport/show|select/<kind>`, `/viewport/extras`); one predicate `WorldDocument::shows`;
-  `snapshot_with_render_profile(.., View)` says Output or Viewport. Extras in `overlay.rs`.
-- **Display modes** per render profile (`/render/display` PathTraced / Direct / Bounds,
-  `/render/thinning` = a Cells mask): `EffectiveRender::show`.
-- **Masks** (Sphere / Box / Cells) are nodes; fractal-rs ABI 4 (and Mask Array in ABI 6).
-- Scene identity: templates, presets and bookmarks load as new documents (`Load::New`), Save As
-  renews the UUID. File > New / Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S.
-- Own git deps are bumped by editing the lock's rev (a plain `cargo update -p` collapses
-  windows-sys 0.61 to 0.52); build with `--locked`.
-- **Picking**: `Gpu::pick` (fractal-rs `pick` kernel, one camera ray between launches) through
-  `Command::Pick` / `RenderEvent::Picked`; world objects and Bounds carry `Scene::node`, extras
-  wires their node (`overlay::wire_at`). One click rule: `WorldEditor::click_select`.
-- **Add menus**: one list `world_ui::add_items` through egui-tab-menu (`TabMenu`, Tab at the
-  cursor; `menu_ui` for + Add / Add child; the outliner's context items from `TabMenu::tree`).
-- **Flight look**: cam-controls `SpaceFlight` queues the pointer's turn and eases it in
-  (`look_smoothing`); Ctrl aligns (`set_align`), L locks, the wheel moves along the view.
-- **Curve effects**: curves-rs `Effect::Smooth` is a filtfilt Butterworth, `Simplify` pins
-  extrema and corners (`Fitter::fit_pinned`); effects are given in seconds and retimed to the
-  keys' frames (`Effect::scale_time`).
-- **Release v0.1.0** points at the current main (`gh release`, CI builds both archives; locally
-  `python bootstrap.py ci --cubins` packs dist/).
-
-## State (2026-10-09)
-
-- **Render settings are graph nodes**: RenderSettings, QualitySettings, ViewportSettings and
-  OutputSettings (the export recipe), with Profile / Template catalogs; preferences keep only the
-  export job (name, range, cadence). Viewport routing has one producer (`App::step_viewport` ->
-  `ViewportRender`) and the toolbar shows the active binding. Details: docs/render-profiles.md.
-- **cuda-oxide fork** `ssoj13/cuda-rust-windows` `750e60b` (renamed from cuda-oxide-windows,
-  synced with the NVIDIA/cuda-rust monorepo via ansidium) carries every `#[inline]` intent to LLVM
-  (`noinline` included), pins release codegen in the Cargo profile instead of rustflags (so
-  `test -- --release` then `build` compiles 1 crate instead of ~680), and keeps `#[constant]`
-  memory through cubin LTO (see Findings: cubin). cuda-core, cuda-host and cuda-device all come
-  from it; the lock,
-  bootstrap's cargo-oxide pin and the installed tool match it. `.cargo/cuda-oxide.toml` fixes
-  `default-arch = "sm_75"` for every build and test.
-- **DE boundary** narrowed to `inverse_affine`: fast-metal +27.5%, exact routes bit-identical.
-- **Lint**: `cargo fmt --check` and `clippy --all-targets -D warnings` pass on the whole crate.
-- **CI** (on main): `python bootstrap.py ci` on Windows and Linux runners (no GPU): toolchain,
-  fmt + clippy, tests without cuda_/gpu_, release build for sm_75,
-  `dist/warpbro-<version>-<platform>.zip`; a `v*` tag publishes both archives. Warm runs take
-  ~24 min; the Rust caches are keyed on the cuda-oxide revision (Windows 4.8 + Linux 4.1 GB of
-  the 10 GB repo limit). The repo is public, so runner minutes are free.
-- **Cubins in releases** (fork 158229b5b, `cubin-archs`): tag builds (`bootstrap.py ci --cubins`,
-  locally `b --cubins`) embed one compressed fat binary with ptxas cubins for sm_75/86/89/120
-  ahead of the sm_75 PTX; the loader falls back to the PTX when the driver rejects it (older
-  driver, other GPU). 6.1 MB of cubins against 8.9 MB of PTX; cold module load 0.26 s against
-  ~97 s of PTX JIT; CUDA tests 18/18 in 9 s with the JIT cache disabled. The 23 MB / 15 min
-  cubin of `--materialize-cubin` came from its libNVVM + nvJitLink LTO route, not from the
-  kernels. Branch builds stay PTX-only. Evidence: C:\projects\projects.rust.cg\nv\prs\cubin-probe.
+- **CI** (`python bootstrap.py ci`, Windows and Linux runners, no GPU): toolchain, fmt + clippy,
+  tests without `cuda_` / `gpu_`, release build, `dist/warpbro-<version>-<platform>.zip`; a `v*`
+  tag publishes both archives. Rust caches are keyed on the cuda-oxide revision.
+- **Cubins in releases**: tag builds (`bootstrap.py ci --cubins`, locally `b --cubins`) embed
+  ptxas cubins for sm_75/86/89/120 ahead of the PTX; the loader falls back to the PTX when the
+  driver rejects them. Cold module load 0.26 s against ~97 s of PTX JIT.
+- **cuda-oxide fork** `ssoj13/cuda-rust-windows` (cuda-core, cuda-host, cuda-device all from it)
+  honours `#[inline]` intents incl. `noinline`, pins release codegen in the Cargo profile, keeps
+  `#[constant]` memory through cubin LTO. `.cargo/cuda-oxide.toml` fixes the default arch.
+- **v0.1.0** was reissued 2026-10-13 (the previous tag kept as `archive/v0.1.0-before-20261013`).
 
 ## Open work (priority order)
 
