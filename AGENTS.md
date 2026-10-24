@@ -27,6 +27,14 @@ Build only through cuda-oxide (`cargo oxide build`, `python bootstrap.py b`); ty
 `FRAC_ALLOW_PLAIN_CARGO=1 cargo check --all-targets` or `cargo clippy` (build.rs skips the backend
 check for clippy / rust-analyzer).
 
+The machine is shared: every cargo build / check / clippy / test goes through the machine-wide
+lock, `python C:/projects/projects.rust.cg/cglibs/.buildlock/buildlock.py <cmd>` (2 slots;
+`d:\temp\buildsem.ps1` only forwards to it). Build once after the edits are finished, never
+while still editing. Tests need `--release` (debug device codegen of fractal-kernels fails):
+`buildlock.py cargo oxide test -- --release --locked -- <filters>`. libtest `--skip gpu_` is a
+substring match and also drops GPU-free tests named `wgpu_*` / `*_gpu_*`: run those by exact
+name. CUDA / WGPU tests and benches only with the operator's go.
+
 ## Module map
 
 | Area | Files | Role |
