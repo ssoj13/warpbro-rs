@@ -15,14 +15,18 @@ open checkboxes"), `plan2.md` (render pacing / display speed), `CHANGELOG.md` "U
 - The stop-gap costs GPU idle time between steps; plan2.md removes it (two batches in flight,
   GPU timers, no synchronous per-step readbacks, display on the GPU).
 - In progress elsewhere: oiio-rs `plan-cuda-oxide.md` (approved 2026-10-24): CUDA for
-  vfx-compute and vfx-ocio on cuda-oxide, the cudarc/NVRTC engine removed. Stage 0 spike in the
-  session scratchpad (`oxide-probe/`: math, kernels, host). WarpBro then runs tonemap + OCIO on
-  its CUDA film without leaving the GPU (plan2 stage 3).
+  vfx-compute and vfx-ocio on cuda-oxide, the cudarc/NVRTC engine removed. WarpBro then runs
+  tonemap + OCIO on its CUDA film without leaving the GPU (plan2 stage 3). Stages 0, 0b and the
+  first slice of stage 1 are done: see oiio-rs `HANDOFF.md` (2026-10-24 section).
+- d9980e1: Cargo.lock on cuda-rust-windows fbb7df9 (committed CUDA driver bindings: no CUDA
+  toolkit needed to build; `cuda_toolkit_dir()` removed; `links = "cuda_bindings"` forbids two
+  fork revisions in one graph). Only `cuda-bindings` / `cuda-core` were checked (`--locked`); the
+  full app was not rebuilt. Details: `nv/cuda-oxide-windows/HANDOFF.md`.
 
 ## Next
 
-1. oiio-rs plan-cuda-oxide.md stage 0 results -> stages 1.. (shared no_std math, kernel crate,
-   vfx-ocio CudaExecutor, old engine removal).
+1. oiio-rs plan-cuda-oxide.md: rest of stage 1, then stages 2-4 (see oiio-rs HANDOFF.md).
+   Then plan2 stage 3 here.
 2. plan2.md stage 0 (measurements; GPU runs approved 2026-10-24) -> stage 1 pacing.
 3. plan1.md leftovers: the `.ok()` sweep part 2 (`nodes()` -> `Result`); operator decisions
    Q2 (`conn`), Q4 (`path_convergence.rs`), 7.3 (GPU->CPU->GPU display, now plan2 stage 4).
