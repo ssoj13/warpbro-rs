@@ -6,7 +6,7 @@
 //! [`ExportSettings`] is a `video_io::job::ExportSettings` (job, preset, folder: video-io's file
 //! names and checks) plus what WarpBro fixes when a job starts (samples, output transform).
 use crate::{
-    ocio::{Ocio, OutputKind, Sel},
+    ocio::{Ocio, OutputKind, OutputTransform, Sel},
     render_service::{
         Command, Frame, HdrLevels, PngEncoding, RenderEvent, RenderPort, RenderService,
     },
@@ -139,7 +139,7 @@ impl OutputSettings {
         &self,
         ocio: &Ocio,
         current: &Sel,
-    ) -> Result<Option<(String, String)>, String> {
+    ) -> Result<Option<OutputTransform>, String> {
         let Some(kind) = self.ocio_kind(current) else {
             return Ok(None);
         };
@@ -162,7 +162,12 @@ impl OutputSettings {
                     names.display, names.view
                 ));
             }
-            return Ok(Some((names.display, names.view)));
+            // The user picked this exact transform: nothing was replaced.
+            return Ok(Some(OutputTransform {
+                display: names.display,
+                view: names.view,
+                note: None,
+            }));
         }
         ocio.output_transform(current, kind, self.preset.png_peak_nits)
             .map(Some)
@@ -189,9 +194,10 @@ pub struct ExportSettings {
     pub denoise_at_completion: bool,
     /// Resolved Output quality target for a frozen export job, never authored here.
     pub samples: u32,
-    /// The display / view this export renders through (`OutputSettings::resolve_transform`);
-    /// None = scene-linear (EXR) or the scene's own built-in SDR display.
-    pub transform: Option<(String, String)>,
+    /// The display / view this export renders through (`OutputSettings::resolve_transform`),
+    /// with the note when it replaced the scene's view; None = scene-linear (EXR) or the scene's
+    /// own built-in SDR display.
+    pub transform: Option<OutputTransform>,
     /// The light of that transform: an HDR view's measured peak is a video's mastering peak, by
     /// the same rule (`video_io::export::hdr_scale`) the PNG writer applies to each frame's light.
     pub light: crate::color::DisplayLight,
@@ -248,10 +254,10 @@ impl ExportSettings {
     /// the legacy Reinhard curve, which would otherwise bypass OCIO (`ColorPipeline::apply_into`)
     /// and write an HDR file of SDR-relative light.
     pub fn apply_transform(&self, scene: &mut Scene) {
-        if let Some((display, view)) = &self.transform {
+        if let Some(transform) = &self.transform {
             scene.colour.on = true;
-            scene.colour.display = display.clone();
-            scene.colour.view = view.clone();
+            scene.colour.display = transform.display.clone();
+            scene.colour.view = transform.view.clone();
             scene.render.reinhard = false;
         }
     }
@@ -311,14 +317,14 @@ impl ExportSettings {
                 "The colour configuration {src} is still loading; start again in a moment"
             ));
         }
-        let Some((display, view)) = output.resolve_transform(ocio, current)? else {
+        let Some(transform) = output.resolve_transform(ocio, current)? else {
             return Ok(());
         };
         let names = ocio
             .resolve(
                 &Sel {
-                    display: display.clone(),
-                    view: view.clone(),
+                    display: transform.display.clone(),
+                    view: transform.view.clone(),
                     ..current.clone()
                 },
                 true,
@@ -329,15 +335,26 @@ impl ExportSettings {
             .map_err(|e| format!("{e:#}"))?
             .light()?;
         if kind != OutputKind::Sdr && !self.light.hdr() {
-            return Err(format!("{display} · {view} is not an HDR view"));
+            return Err(format!(
+                "{} · {} is not an HDR view",
+                transform.display, transform.view
+            ));
         }
         if self.codes16() {
             self.encoder = Some(Arc::new(
                 ocio.encoder(&names).map_err(|e| format!("{e:#}"))?,
             ));
         }
-        self.transform = Some((display, view));
+        self.transform = Some(transform);
         Ok(())
+    }
+    /// `status` with the note of a replaced output view appended: the user is told at start and
+    /// again in the final status, so the file's transform is never a silent substitute.
+    fn with_note(&self, status: String) -> String {
+        match self.transform.as_ref().and_then(|t| t.note.as_deref()) {
+            Some(note) => format!("{status} ({note})"),
+            None => status,
+        }
     }
 }
 
@@ -548,7 +565,7 @@ impl ExportController {
         self.next_id += u64::from(settings.io.job.frame_count()) + 1;
         let progress = Arc::new(Reports {
             state: Mutex::new(Progress {
-                status: "Starting export".into(),
+                status: settings.with_note("Starting export".into()),
                 samples: (0, settings.samples),
                 ..Default::default()
             }),
@@ -626,6 +643,7 @@ impl ExportController {
                 if !complete {
                     remove_if_empty(&config.io.dir);
                 }
+                let status = config.with_note(status);
                 shared.edit(|state| {
                     state.status = status;
                     state.done = true;
@@ -634,7 +652,7 @@ impl ExportController {
             .map_err(|e| e.to_string())?;
         self.completed = 0;
         self.sample_progress = (0, settings.samples);
-        self.status = "Starting export".into();
+        self.status = settings.with_note("Starting export".into());
         self.last = Some(settings.clone());
         self.run = Some(Run {
             settings,
@@ -917,10 +935,19 @@ impl OutputSettings {
         );
         ui.vertical(|ui| {
             match &resolved {
-                Ok(Some((display, view))) => ui.label(format!("{display} · {view}")),
-                Ok(None) => ui.label("Built-in display (OCIO off)"),
-                Err(error) => ui.colored_label(egui::Color32::LIGHT_RED, error),
-            };
+                Ok(Some(t)) => {
+                    ui.label(format!("{} · {}", t.display, t.view));
+                    if let Some(note) = &t.note {
+                        ui.colored_label(ui.visuals().warn_fg_color, note);
+                    }
+                }
+                Ok(None) => {
+                    ui.label("Built-in display (OCIO off)");
+                }
+                Err(error) => {
+                    ui.colored_label(egui::Color32::LIGHT_RED, error);
+                }
+            }
             ui.horizontal(|ui| {
                 let owned = |v: Vec<&str>| v.into_iter().map(str::to_owned).collect::<Vec<_>>();
                 let displays = owned(
@@ -945,7 +972,7 @@ impl OutputSettings {
                         .as_ref()
                         .ok()
                         .and_then(Option::as_ref)
-                        .map(|(d, _)| d.clone())
+                        .map(|t| t.display.clone())
                         .unwrap_or_default()
                 } else {
                     self.output_display.clone()
@@ -2823,26 +2850,27 @@ mod tests {
         };
         let sdr = output.resolve_transform(&ocio, &scene).unwrap().unwrap();
         assert_eq!(
-            (sdr.0.as_str(), sdr.1.as_str()),
-            (scene.display.as_str(), scene.view.as_str())
+            (sdr.display.as_str(), sdr.view.as_str(), sdr.note),
+            (scene.display.as_str(), scene.view.as_str(), None)
         );
         output.preset.png = PngEncoding::Hdr10;
-        let (display, view) = output.resolve_transform(&ocio, &scene).unwrap().unwrap();
+        let pq = output.resolve_transform(&ocio, &scene).unwrap().unwrap();
         assert!(
-            ocio.display_is(&display, OutputKind::Pq) && view.contains("1000 nits"),
-            "{display} / {view}"
+            ocio.display_is(&pq.display, OutputKind::Pq) && pq.view.contains("1000 nits"),
+            "{pq:?}"
         );
+        assert!(pq.note.is_some(), "the SDR scene view was replaced for PQ: {pq:?}");
         output.preset.png_peak_nits = 500.0;
         assert!(
             output
                 .resolve_transform(&ocio, &scene)
                 .unwrap()
                 .unwrap()
-                .1
+                .view
                 .contains("500 nits")
         );
         output.preset.png = PngEncoding::Hlg;
-        let (display, _) = output.resolve_transform(&ocio, &scene).unwrap().unwrap();
+        let display = output.resolve_transform(&ocio, &scene).unwrap().unwrap().display;
         assert!(display.contains("HLG"), "{display}");
         // An SDR-only format renders for SDR whatever the signal field says.
         output.preset.format = ExportFormat::Jpeg;
@@ -2859,7 +2887,11 @@ mod tests {
         assert_eq!(output.resolve_transform(&ocio, &off).unwrap(), None);
         // The frame scene gets the resolved display / view.
         let s = ExportSettings {
-            transform: Some((display.clone(), "view".into())),
+            transform: Some(OutputTransform {
+                display: display.clone(),
+                view: "view".into(),
+                note: None,
+            }),
             ..ExportSettings::default()
         };
         let mut frame = Scene::preset(Formula::Mandelbulb(Bulb::PRESET));

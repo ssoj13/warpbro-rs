@@ -10286,7 +10286,7 @@ dependencies = [
 [[package]]
 name = "video-io"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/video-io-rs.git?branch=main#ca041bd6de77fac38782cbe0aa72f56882dd8d24"
+source = "git+ssh://git@github.com/ssoj13/video-io-rs.git?branch=main#a8c77c8bec1e9c7a312b0fa69325f49fbc65a257"
 dependencies = [
  "av-codec",
  "av-codec-core",
@@ -10315,7 +10315,7 @@ dependencies = [
 [[package]]
 name = "video-io-egui"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/video-io-rs.git?branch=main#ca041bd6de77fac38782cbe0aa72f56882dd8d24"
+source = "git+ssh://git@github.com/ssoj13/video-io-rs.git?branch=main#a8c77c8bec1e9c7a312b0fa69325f49fbc65a257"
 dependencies = [
  "egui",
  "serde",

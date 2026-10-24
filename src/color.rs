@@ -190,13 +190,14 @@ impl ColorPipeline {
         let preview_names = if absolute {
             // An HDR view's codes are not SDR codes: the preview renders through the config's
             // own SDR choice (video-io's output-view policy), never a hard-coded display name.
-            // The peak argument only ranks HDR views.
-            let (display, view) = ocio
+            // The peak argument only ranks HDR views. Replacing the HDR view is the point of
+            // this preview (no file is written), so its `note` is not a user message here.
+            let sdr = ocio
                 .output_transform(sel, crate::ocio::OutputKind::Sdr, BT2408_SDR_WHITE_NITS)
                 .map_err(|e| format!("SDR preview of {}: {e:#}", names.view))?;
             let sdr = crate::ocio::Sel {
-                display,
-                view,
+                display: sdr.display,
+                view: sdr.view,
                 ..sel.clone()
             };
             ocio.resolve(&sdr, false).map_err(|e| format!("{e:#}"))?

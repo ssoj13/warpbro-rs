@@ -445,6 +445,25 @@ bytes), README / `test_gpu.rs` "CUDA worker" -> render worker. Not found (no lon
   `#[allow]`s, lists what the compiler sees as dead): **run 2026-10-23**, the only dead code is
   `path_convergence.rs` (5 items), the open Q4 draft; nothing else.
 
+## Audit of the open checkboxes (2026-10-23, read-only, against fix/plan1)
+
+Most unchecked boxes above are stale: the waves fixed them. Verified state:
+- **DONE:** Q1, Q3, Q5; 1.1-1.10, 1.12, 1.13 (1.3 in code, unverified above 8.4 MP); 2.5, 2.8
+  (local `FAMILY_DYNAMIC` sentinel); 3.1-3.8; 4.1-4.9, 4.11-4.15, 4.17; 5.1-5.3, 5.5, 5.6,
+  5.9-5.13; section 6 except the two items below; 7.1.
+- **Code done, GPU-unverified:** 2.0 (parity test never run, tolerances guessed), 2.1-2.4, 2.6,
+  2.7, 2.9.
+- **PARTLY / OPEN, GPU-free:** 1.11 `CancelExport` without id; 4.10 material browser Duplicate
+  bypasses `WorldEditor::duplicate` (`app.rs` ~2596); 4.16 leftover swallowed errors
+  (`world_ui.rs` metadata `.ok()`, `take_clip(..).ok().flatten()`, `takes.rs` `Take::new(..).ok()`,
+  `world.rs` `attribute_choices` `to_value(..).ok()`); 5.4 thumbnail quality constants in
+  `app.rs` (`THUMB_SPP`, `MAX_BOUNCES`, `SEED`) instead of a profile; 5.7 two still writers
+  (`Frame::save_png` / `save_display_exr` vs `video_io::still::write_still`); 5.8 `WorldEditor`
+  has both `selection` and `selected`; section 6 unused `_service` on `ExportController::cancel`;
+  7.2 `validate_render_profiles` on every edit.
+- **Needs the operator:** Q2 (`conn`: finish a connect-attribute UI or delete it); Q4
+  (`path_convergence.rs`, A/B on GPU); 7.3 (GPU->CPU->GPU display, design change, GPU).
+
 ## Execution state (2026-10-23)
 
 **Current:** wave 1 = e75a8c6, wave 2 = 621baa6 on `fix/plan1`. GPU-free suite green (333/0/7),

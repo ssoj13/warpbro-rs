@@ -141,6 +141,17 @@ pub struct Names {
     pub look: String,
 }
 
+/// The display / view an output renders through ([`Ocio::output_transform`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputTransform {
+    pub display: String,
+    pub view: String,
+    /// Set when the scene's own view exists but cannot be written to the file's signal and was
+    /// replaced: the sentence the user MUST be shown (video-io `OutputChoice::note`), so a file
+    /// is never written through another view without saying so.
+    pub note: Option<String>,
+}
+
 /// A loaded config.
 pub struct Ocio {
     /// What it was loaded from ([`source`]).
@@ -298,15 +309,24 @@ impl Ocio {
     }
 
     /// The view as video-io's output-view selection sees it: its signal is classified here
-    /// (video-io takes it as host data and never guesses it from names).
+    /// (video-io takes it as host data and never guesses it from names). Only an SDR (or
+    /// untagged, OCIO v1) view fits an SDR file: an EDR view's highlights above 1.0 would clip
+    /// in it, and linear / log views are not display code values, so all of those are `Data`
+    /// (never chosen, and a current choice of one is replaced and reported).
     fn output_view<'a>(&self, display: &'a str, view: &'a str) -> OutputView<'a> {
         OutputView {
             display,
             view,
             signal: match self.view_encoding(display, view) {
+                None | Some(Encoding::Sdr | Encoding::Unknown) => ViewSignal::Sdr,
                 Some(Encoding::Hdr) => hdr_signal(display),
-                Some(Encoding::Data) => ViewSignal::Data,
-                _ => ViewSignal::Sdr,
+                Some(
+                    Encoding::Edr
+                    | Encoding::SceneLinear
+                    | Encoding::DisplayLinear
+                    | Encoding::Log
+                    | Encoding::Data,
+                ) => ViewSignal::Data,
             },
         }
     }
@@ -317,14 +337,14 @@ impl Ocio {
     /// view for SDR. A `current` naming a colour space, display, view or look this config lacks
     /// is an error, never a silent substitute: a stale choice would export through another
     /// transform. `current` is resolved against every view and the candidates are every view of
-    /// the config (video-io's contract): an existing view that does not fit `kind` (an HDR view
-    /// for an SDR file) is still replaced.
+    /// the config (video-io's contract): an existing view that does not fit `kind` (an HDR or
+    /// EDR view for an SDR file) is replaced, and [`OutputTransform::note`] says so for the user.
     pub fn output_transform(
         &self,
         current: &Sel,
         kind: OutputKind,
         peak_nits: f32,
-    ) -> Result<(String, String)> {
+    ) -> Result<OutputTransform> {
         let names = self.resolve(current, true)?;
         let mut candidates = Vec::new();
         for display in self.displays(true) {
@@ -340,7 +360,11 @@ impl Ocio {
             |display, view| self.view_peak(current, display, view),
         )
         .map_err(anyhow::Error::msg)?;
-        Ok((selected.display.to_owned(), selected.view.to_owned()))
+        Ok(OutputTransform {
+            display: selected.view.display.to_owned(),
+            view: selected.view.view.to_owned(),
+            note: selected.note(),
+        })
     }
 
     /// The measured peak in nits of HDR `view` on `display` (with `current`'s input and look),
@@ -1385,10 +1409,36 @@ mod tests {
         let hdr = Sel {
             display: "Rec.2100-PQ - Display".into(),
             view: "ACES 2.0 - HDR 1000 nits (P3 D65)".into(),
-            ..sdr
+            ..sdr.clone()
         };
-        let (display, view) = o.output_transform(&hdr, OutputKind::Sdr, 100.0).unwrap();
-        assert!(o.view_is(&display, &view, OutputKind::Sdr), "{display} / {view}");
+        let out = o.output_transform(&hdr, OutputKind::Sdr, 100.0).unwrap();
+        assert!(o.view_is(&out.display, &out.view, OutputKind::Sdr), "{out:?}");
+        let note = out.note.expect("a replaced choice is reported");
+        assert!(note.contains(&hdr.view) && note.contains(&out.view), "{note}");
+        // A fitting choice is kept, silently.
+        let kept = o.output_transform(&sdr, OutputKind::Sdr, 100.0).unwrap();
+        assert_eq!((kept.view.as_str(), kept.note), (sdr.view.as_str(), None));
+    }
+
+    /// An EDR view (extended range relative to SDR white, e.g. Display P3 HDR) cannot be written
+    /// to an SDR file without clipping its highlights: it is replaced by an SDR view, reported.
+    #[test]
+    fn edr_view_is_replaced_for_an_sdr_file() {
+        let o = Ocio::load("ocio://studio-config-latest").unwrap();
+        let edr = Sel {
+            display: "Display P3 HDR - Display".into(),
+            view: "ACES 2.0 - SDR 100 nits (Rec.709)".into(),
+            ..crate::color::default_selection()
+        };
+        assert_eq!(
+            o.view_encoding(&edr.display, &edr.view),
+            Some(Encoding::Edr),
+            "the test needs an EDR view"
+        );
+        let out = o.output_transform(&edr, OutputKind::Sdr, 100.0).unwrap();
+        assert_eq!(o.view_encoding(&out.display, &out.view), Some(Encoding::Sdr), "{out:?}");
+        let note = out.note.expect("the EDR choice was replaced");
+        assert!(note.contains(&edr.view) && note.contains(&out.view), "{note}");
     }
 
     /// An HDR output picks the view whose MEASURED peak is nearest the requested one (no name
@@ -1398,7 +1448,7 @@ mod tests {
         let o = Ocio::load("ocio://studio-config-latest").unwrap();
         let sdr = crate::color::default_selection();
         for (want, nits) in [(4000.0, "4000"), (1000.0, "1000")] {
-            let (_, view) = o.output_transform(&sdr, OutputKind::Pq, want).unwrap();
+            let view = o.output_transform(&sdr, OutputKind::Pq, want).unwrap().view;
             assert!(view.contains(nits), "{want} nits -> {view}");
         }
         let names = o
