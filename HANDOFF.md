@@ -4,8 +4,10 @@ Read first: `plan1.md` (full report + execution state, sections 7.4-7.6), `CHANG
 "Unreleased - 2026-10-23", `AGENTS.md` (per-family modules, window adapter).
 
 ## State
-- Branch `fix/plan1` @ `ecd1df0` (pushed). `origin/main` = `4313f89` (behind by 21e4250 WIP +
-  ecd1df0). NOT pushed to main: wait for the operator's word.
+- Branch `fix/plan1` @ `2fda5a3` (pushed). `origin/main` = `4313f89` (behind by 21e4250 WIP,
+  ecd1df0, fda1fbd, e8de11f, 2fda5a3). NOT pushed to main: wait for the operator's word.
+- 2fda5a3: independent review of 7.5 found no divergence; follow-ups applied (quick View picker
+  stores its display too; FAMILY_WORLD guard = comment-stripped text check). Tests + clippy green.
 - ecd1df0: plan1 7.5 done (WGSL one estimator call site per loop: march phase loop
   MARCH_STEP/FIRST_HIT/SURFACE, march_sample, fractional_march_distance, march_leaving /
   visibility_leaving 2-pass, stencil_normal 6-probe loop, surface_normal 2-endpoint loop).
