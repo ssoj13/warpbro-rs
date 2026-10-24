@@ -944,19 +944,15 @@ impl WorldUi {
         nodes: &[WorldNodeInfo],
     ) {
         if range {
-            if let Some(anchor) = e.selection
+            if let Some(anchor) = e.active()
                 && let (Some(a), Some(b)) = (
                     nodes.iter().position(|n| n.id == anchor),
                     nodes.iter().position(|n| n.id == id),
                 )
             {
-                e.selected = nodes[a.min(b)..=a.max(b)].iter().map(|n| n.id).collect();
+                e.set_selection(nodes[a.min(b)..=a.max(b)].iter().map(|n| n.id).collect());
             }
-            e.selection = if e.selected.contains(&id) {
-                Some(id)
-            } else {
-                e.selected.last().copied()
-            };
+            e.set_lead(id);
         } else {
             e.click_select(Some(id), add);
         }
@@ -1027,11 +1023,10 @@ impl WorldUi {
                 // The widget resolved the gesture: `ids` is the new selection. The Attribute
                 // Editor follows the row it landed on, else the last selected.
                 OutlinerAction::Select { ids, lead } => {
-                    e.selected = ids.iter().filter_map(|id| map.get(id).copied()).collect();
-                    e.selection = lead
-                        .and_then(|id| map.get(&id).copied())
-                        .filter(|id| e.selected.contains(id))
-                        .or_else(|| e.selected.last().copied());
+                    e.set_selection(ids.iter().filter_map(|id| map.get(id).copied()).collect());
+                    if let Some(lead) = lead.and_then(|id| map.get(&id).copied()) {
+                        e.set_lead(lead);
+                    }
                 }
                 // Every toggle of one press-and-sweep shares `gesture`: one undo step.
                 OutlinerAction::ToggleVisible {
@@ -1202,7 +1197,7 @@ impl WorldUi {
         cache
             .model
             .selection
-            .extend(e.selected.iter().map(|id| wid(*id)));
+            .extend(e.selected().iter().map(|id| wid(*id)));
         cache
     }
     fn take_cache(&mut self, e: &WorldEditor) -> AttributeCache {
@@ -1634,7 +1629,7 @@ impl WorldUi {
         model.fps = e.document.fps as f32;
         model.playhead = self.playhead as i64;
         model.selection.clear();
-        model.selection.extend(e.selected.iter().map(|id| wid(*id)));
+        model.selection.extend(e.selected().iter().map(|id| wid(*id)));
         model.work_area = Some(WorkArea {
             start: e.document.first as i64,
             end: e.document.last as i64 + 1,
@@ -1849,7 +1844,7 @@ impl WorldUi {
         if !r.intersects(ui.clip_rect()) {
             return;
         }
-        if e.selected.contains(&n.id) {
+        if e.selected().contains(&n.id) {
             ui.painter()
                 .rect_filled(r, 0.0, ui.visuals().selection.bg_fill);
         }
@@ -1979,7 +1974,7 @@ impl WorldUi {
                     nodes,
                 );
             }
-            if source.secondary_clicked() && !e.selected.contains(&n.id) {
+            if source.secondary_clicked() && !e.selected().contains(&n.id) {
                 self.select(e, n.id, false, false, nodes);
             }
             source.context_menu(|ui| {
@@ -2212,8 +2207,7 @@ impl WorldUi {
                 }
             }
             TimelineAction::ClearSelection => {
-                e.selection = None;
-                e.selected.clear();
+                e.clear_selection();
             }
             // Live drag frames and the closing Done (a cancel restores the start range) join one
             // undo step; a cancelled drag leaves the document as it was, so it records none.
@@ -2233,17 +2227,23 @@ impl WorldUi {
                 if !add {
                     self.keys.clear();
                 }
+                let mut lead = None;
                 for k in keys {
                     if let Some(key) = Self::key_identity(nodes, lanes, k) {
-                        e.selection = Some(key.node);
+                        lead = Some(key.node);
                         self.keys.insert(key);
                     }
                 }
-                e.selected = nodes
-                    .iter()
-                    .filter(|n| self.keys.iter().any(|k| k.node == n.id))
-                    .map(|n| n.id)
-                    .collect();
+                e.set_selection(
+                    nodes
+                        .iter()
+                        .filter(|n| self.keys.iter().any(|k| k.node == n.id))
+                        .map(|n| n.id)
+                        .collect(),
+                );
+                if let Some(lead) = lead {
+                    e.set_lead(lead);
+                }
             }
             TimelineAction::ClearKeySelection => self.keys.clear(),
             // Markers are the document's ten time-mark slots (0-9); a marker's id is its slot.
@@ -2694,7 +2694,7 @@ impl WorldUi {
         }
     }
     pub fn inspector(&mut self, ui: &mut egui::Ui, e: &mut WorldEditor) {
-        let Some(id) = e.selection else {
+        let Some(id) = e.active() else {
             ui.label("Select an object to edit its properties.");
             return;
         };
@@ -2709,8 +2709,8 @@ impl WorldUi {
             self.cache = cache;
             return;
         };
-        let targets: Vec<NodeId> = if e.selection == Some(id) && e.selected.contains(&id) {
-            e.selected
+        let targets: Vec<NodeId> = if e.active() == Some(id) {
+            e.selected()
                 .iter()
                 .copied()
                 .filter(|&sel| {
@@ -2773,11 +2773,11 @@ impl WorldUi {
             ui.colored_label(kind_color(node.kind), kind_icon(node.kind));
             ui.heading(&node.name);
         });
-        if e.selection == Some(id) && e.selected.len() > 1 {
+        if e.active() == Some(id) && e.selected().len() > 1 {
             if targets.len() > 1 {
                 ui.weak(format!(
                     "{} selected; showing {}, editing {} {}s",
-                    e.selected.len(),
+                    e.selected().len(),
                     node.name,
                     targets.len(),
                     kind_label(node.kind),
@@ -2785,7 +2785,7 @@ impl WorldUi {
             } else {
                 ui.weak(format!(
                     "{} objects selected; editing {}",
-                    e.selected.len(),
+                    e.selected().len(),
                     node.name
                 ));
             }
@@ -2813,8 +2813,7 @@ impl WorldUi {
             self.error = Some(error);
         }
         if let Some(edit) = actions.edit {
-            e.selection = Some(edit);
-            e.selected = vec![edit];
+            e.select_only(edit);
         }
         if node.kind == WorldKind::Camera && ui.button("Use as active camera").clicked() {
             self.command(e, WorldCommand::SetActiveCamera(id));
@@ -3810,7 +3809,7 @@ mod tests {
     #[test]
     fn show_in_timeline_expands_the_layer_group_and_components() {
         let e = editor();
-        let object = e.selection.unwrap();
+        let object = e.active().unwrap();
         let attrs = e.document.attributes(object, 0.0).unwrap();
         let channel = attrs
             .iter()
@@ -3973,7 +3972,7 @@ mod tests {
     #[test]
     fn keyed_filter_without_keys_or_toggled_off_leaves_the_layer_collapsed() {
         let mut e = editor();
-        let object = e.selection.unwrap();
+        let object = e.active().unwrap();
         let ctx = egui::Context::default();
         let mut state = WorldUi::default();
         let inside = Pos2::new(80.0, 80.0);
@@ -4033,7 +4032,7 @@ mod tests {
     #[test]
     fn timeline_keyboard_focus_survives_pointer_exit_and_clears_on_outside_click() {
         let mut e = editor();
-        let object = e.selection.unwrap();
+        let object = e.active().unwrap();
         let ctx = egui::Context::default();
         let mut state = WorldUi::default();
         shortcut_frame(&ctx, &mut state, &mut e, vec![]);
@@ -4115,7 +4114,7 @@ mod tests {
     #[test]
     fn timeline_shortcuts_filter_selected_properties_without_authoring_edits() {
         let mut e = editor();
-        let object = e.selection.unwrap();
+        let object = e.active().unwrap();
         e.execute(WorldCommand::Key {
             id: object,
             path: "/transform/position/0".into(),
@@ -4209,7 +4208,7 @@ mod tests {
     #[test]
     fn selection_preview_shortcuts_use_full_union_and_emit_distinct_nonblocking_intents() {
         let mut e = editor();
-        let object = e.selection.unwrap();
+        let object = e.active().unwrap();
         let camera = e.document.active_camera.unwrap();
         e.execute(WorldCommand::Batch(vec![
             WorldCommand::SetSpan {
@@ -4229,7 +4228,7 @@ mod tests {
             },
         ]))
         .unwrap();
-        e.selected = vec![object, camera];
+        e.set_selection(vec![camera, object]);
         let ctx = egui::Context::default();
         let mut state = WorldUi::default();
         shortcut_frame(
@@ -4303,8 +4302,7 @@ mod tests {
                 mode: crate::preview::PreviewMode::DraftCacheThenPlay,
             })
         );
-        e.selected.clear();
-        e.selection = None;
+        e.clear_selection();
         assert_eq!(selection_bounds(&e.document.nodes(), &e), (10, 70));
     }
     #[test]
@@ -4369,7 +4367,7 @@ mod tests {
     #[test]
     fn filtered_timeline_reuses_idle_projection_and_preserves_key_identity() {
         let mut e = editor();
-        let object = e.selection.unwrap();
+        let object = e.active().unwrap();
         e.execute(WorldCommand::Key {
             id: object,
             path: "/transform/position/0".into(),
@@ -4744,7 +4742,7 @@ mod tests {
                 .iter()
                 .any(|(text, _)| text == "Delete selected layers")
         );
-        assert_eq!(e.selection, Some(node.id));
+        assert_eq!(e.active(), Some(node.id));
         assert!(state.drag_order.is_none());
         assert!(ctx.dragged_id().is_none());
     }
@@ -4824,7 +4822,7 @@ mod tests {
     #[test]
     fn referenced_material_editor_keeps_fractal_selection() {
         let mut e = editor();
-        let selected = e.selection;
+        let selected = e.active();
         let material = e
             .document
             .assigned_material(selected.unwrap())
@@ -4837,7 +4835,7 @@ mod tests {
             egui::CentralPanel::default()
                 .show(root, |ui| state.attribute_editor(ui, &mut e, material));
         });
-        assert_eq!(e.selection, selected);
+        assert_eq!(e.active(), selected);
         assert_eq!(e.document, original);
         assert!(state.cache.sections.contains_key(&(material, "Material")));
     }
@@ -4863,7 +4861,7 @@ mod tests {
     #[test]
     fn clean_metadata_tracks_undo_redo_while_dirty_drafts_survive_unrelated_edits() {
         let mut e = editor();
-        let id = e.selection.unwrap();
+        let id = e.active().unwrap();
         let mut state = WorldUi::default();
         e.execute(WorldCommand::SetMetadata {
             id,
@@ -4915,23 +4913,21 @@ mod tests {
     #[test]
     fn outliner_cache_keeps_tree_and_updates_selection_and_revision() {
         let mut e = editor();
-        let id = e.selection.unwrap();
+        let id = e.active().unwrap();
         let mut state = WorldUi::default();
         let cache = state.take_outliner_cache(&e);
         let roots = cache.model.roots.as_ptr();
         let nodes = cache.nodes.as_ptr();
         let map_capacity = cache.map.capacity();
         state.outliner_cache = cache;
-        e.selected.clear();
-        e.selection = None;
+        e.clear_selection();
         let cache = state.take_outliner_cache(&e);
         assert_eq!(cache.model.roots.as_ptr(), roots);
         assert_eq!(cache.nodes.as_ptr(), nodes);
         assert_eq!(cache.map.capacity(), map_capacity);
         assert!(cache.model.selection.is_empty());
         state.outliner_cache = cache;
-        e.selected.push(id);
-        e.selection = Some(id);
+        e.select_only(id);
         let cache = state.take_outliner_cache(&e);
         assert_eq!(cache.model.selection, vec![wid(id)]);
         assert_eq!(cache.model.roots.as_ptr(), roots);
@@ -4960,7 +4956,7 @@ mod tests {
     fn idle_cache_keeps_descriptor_and_timeline_storage() {
         let mut e = editor();
         let mut state = WorldUi::default();
-        let id = e.selection.unwrap();
+        let id = e.active().unwrap();
         let cache = state.take_cache(&e);
         let node_storage = cache.nodes.as_ptr();
         let attr_storage = cache.attributes[&id].as_ptr();
@@ -5001,7 +4997,7 @@ mod tests {
     #[test]
     fn frame_cache_updates_values_and_flags_without_rebuilding_stable_schema() {
         let mut e = editor();
-        let id = e.selection.unwrap();
+        let id = e.active().unwrap();
         for (path, value) in [
             ("/transform/position/0", json!(10.0)),
             ("/visible", json!(false)),
@@ -5048,7 +5044,7 @@ mod tests {
     #[test]
     fn layer_drop_is_one_undo_and_preserves_spans_keys_and_selection() {
         let mut e = editor();
-        let id = e.selection.unwrap();
+        let id = e.active().unwrap();
         e.execute(WorldCommand::Key {
             id,
             path: "/transform/position/0".into(),
@@ -5069,7 +5065,7 @@ mod tests {
             .find(|&&candidate| candidate != id)
             .unwrap();
         let before = e.document.attributes(id, 12.25).unwrap();
-        let selection = e.selected.clone();
+        let selection = e.selected().to_vec();
         let reordered = layer_drop_order(&nodes, &order, id, target, true);
         e.execute(WorldCommand::Reorder {
             ids: reordered.clone(),
@@ -5088,7 +5084,7 @@ mod tests {
                 (&b.path, &b.value, &b.frames)
             );
         }
-        assert_eq!(e.selected, selection);
+        assert_eq!(e.selected(), selection);
         assert!(e.undo());
         assert_eq!(
             e.document.nodes().iter().map(|n| n.id).collect::<Vec<_>>(),
@@ -5172,7 +5168,7 @@ mod tests {
         for width in [430.0, 300.0] {
             CONTROL_TRACES.with(|trace| trace.borrow_mut().clear());
             let mut e = editor();
-            let id = e.selection.unwrap();
+            let id = e.active().unwrap();
             let attrs = e.document.attributes(id, 0.0).unwrap();
             let nodes = e.document.nodes();
             let mut template = attrs
@@ -5322,7 +5318,7 @@ mod tests {
     #[test]
     fn actual_inspector_numeric_drag_is_one_undo_after_release() {
         let mut e = editor();
-        let id = e.selection.unwrap();
+        let id = e.active().unwrap();
         let mut state = WorldUi::default();
         let ctx = egui::Context::default();
         let initial = e
@@ -5416,7 +5412,7 @@ mod tests {
     #[test]
     fn inspector_splitter_drag_updates_every_section_and_persists_into_timeline() {
         let mut e = editor();
-        let id = e.selection.unwrap();
+        let id = e.active().unwrap();
         let mut state = WorldUi::default();
         let ctx = egui::Context::default();
         let render = |state: &mut WorldUi, e: &mut WorldEditor, events, time| {
@@ -5525,7 +5521,7 @@ mod tests {
     fn grid_and_timeline_use_the_same_actual_editor_origins() {
         for width in [430.0, 300.0] {
             let mut e = editor();
-            let id = e.selection.unwrap();
+            let id = e.active().unwrap();
             let original = e.document.attributes(id, 0.0).unwrap();
             let base = original
                 .iter()
@@ -5658,7 +5654,7 @@ mod tests {
     #[test]
     fn vector_components_default_collapsed_and_open_when_keyed() {
         let mut e = editor();
-        let id = e.selection.unwrap();
+        let id = e.active().unwrap();
         let mut state = WorldUi::default();
         state.groups.insert((id, "@Transform".into()));
         let attrs = e.document.attributes(id, 0.0).unwrap();
@@ -5702,7 +5698,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut e = editor();
         let mut state = WorldUi::default();
-        let id = e.selection.unwrap();
+        let id = e.active().unwrap();
         state.expanded.insert(id);
         state.groups.insert((id, "@Transform".into()));
         let viewport_node = e.document.viewport_settings_id().unwrap();
@@ -5867,10 +5863,10 @@ mod tests {
     #[test]
     fn inspector_edits_all_selected_same_kind_layers_in_one_undo_while_showing_last_selected() {
         let mut e = editor();
-        let first_fractal = e.selection.unwrap();
+        let first_fractal = e.active().unwrap();
         e.execute(WorldCommand::Duplicate(vec![first_fractal]))
             .unwrap();
-        let second_fractal = e.selection.unwrap();
+        let second_fractal = e.active().unwrap();
         assert_ne!(first_fractal, second_fractal);
         e.execute(WorldCommand::SetAttribute {
             id: first_fractal,
@@ -5895,7 +5891,7 @@ mod tests {
         e.click_select(Some(first_fractal), false);
         e.click_select(Some(camera), true);
         e.click_select(Some(second_fractal), true);
-        assert_eq!(e.selection, Some(second_fractal));
+        assert_eq!(e.active(), Some(second_fractal));
 
         let mut state = WorldUi::default();
         let ctx = egui::Context::default();
@@ -6057,7 +6053,7 @@ mod tests {
             ]
         );
 
-        let fractal_id = e.selection.unwrap();
+        let fractal_id = e.active().unwrap();
         let transform_paths: Vec<String> = e
             .document
             .attributes(fractal_id, 0.0)

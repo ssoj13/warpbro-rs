@@ -286,7 +286,7 @@ mod tests {
                 parent: None,
             })
             .unwrap();
-        let second = editor.selection.unwrap();
+        let second = editor.active().unwrap();
         (editor, first, second)
     }
     fn texture(ctx: &egui::Context) -> egui::TextureHandle {
@@ -369,7 +369,7 @@ mod tests {
     #[test]
     fn idle_projection_preserves_storage_selection_and_authoring_revision() {
         let (editor, _, _) = world();
-        let selection = editor.selection;
+        let selection = editor.active();
         let revision = editor.revision();
         let mut gallery = MaterialGallery::default();
         assert!(gallery.refresh(&editor, 0.0).unwrap());
@@ -394,7 +394,7 @@ mod tests {
         assert!(gallery.refresh(&editor, 1.0).unwrap());
         assert_eq!(gallery.entries[0].name.as_ptr(), name_pointer);
         assert_eq!(gallery.entries.as_ptr(), storage.0);
-        assert_eq!(editor.selection, selection);
+        assert_eq!(editor.active(), selection);
         assert_eq!(editor.revision(), revision);
         assert!(gallery.refresh(&editor, f64::NAN).is_err());
         assert_eq!(gallery.entries.len(), 2);

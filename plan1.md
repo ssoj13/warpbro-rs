@@ -468,7 +468,10 @@ Most unchecked boxes above are stale: the waves fixed them. Verified state:
   `settings_nodes`, `render_profiles`, `settings_choices` return `Result` instead of
   `.ok()`-filtering an invalid catalog role or variant); 4.10 (material card Duplicate through
   `WorldEditor::duplicate`); section 6 `_service` removed from `ExportController::cancel`.
-  1.11 left as is: a single export at a time makes a stale cancel unreachable.
+  1.11 left as is: a single export at a time makes a stale cancel unreachable. 5.8 done: one
+  private ordered `selected` (last = active) behind `active` / `selected` / `select_only` /
+  `toggle` / `set_selection` / `set_lead` / `clear_selection`; undo snapshots carry it; GPU-free
+  suite 340/0/7.
 - [ ] **New: `.ok()` sweep.** 38 non-test `.ok()` remain; most are legitimate (`try_recv`,
   `try_lock`, probing whether text is a fragment), but some are silent fallbacks to review:
   `main.rs` `arg()` (a malformed CLI number silently becomes the default), `app.rs` env-var

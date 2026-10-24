@@ -425,7 +425,7 @@ mod tests {
             parent: None,
         })
         .unwrap();
-        let group = e.selection.unwrap();
+        let group = e.active().unwrap();
         e.execute(crate::world::WorldCommand::Reparent {
             id: fractal,
             parent: Some(group),

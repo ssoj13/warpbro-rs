@@ -1938,7 +1938,7 @@ impl App {
             let before = self.scene.clone();
             p.apply(&mut self.scene.material);
             if let Err(error) = self.world.edit_snapshot(
-                self.world.selection,
+                self.world.active(),
                 &before,
                 &self.scene,
                 f64::from(self.world_ui.playhead),
@@ -2357,11 +2357,11 @@ impl App {
     fn remember_material_targets(&mut self) {
         use std::hash::{Hash, Hasher};
         let mut hash = std::collections::hash_map::DefaultHasher::new();
-        self.world.selected.hash(&mut hash);
+        self.world.selected().hash(&mut hash);
         let stamp = (
             playa_graph::NodeId(self.world.document.graph.id),
             self.world.revision(),
-            self.world.selection,
+            self.world.active(),
             hash.finish(),
         );
         if self.material_selection_stamp == Some(stamp) {
@@ -2553,7 +2553,7 @@ impl App {
                                             );
                                         }
                                         let mut label = RichText::new(&entry.name).small();
-                                        if self.world.selection == Some(entry.id) {
+                                        if self.world.active() == Some(entry.id) {
                                             label = label
                                                 .strong()
                                                 .color(ui.visuals().selection.stroke.color);
@@ -2662,7 +2662,7 @@ impl App {
                 name: name.into(),
             }) {
                 Ok(()) => {
-                    if let Some(id) = self.world.selection {
+                    if let Some(id) = self.world.active() {
                         self.select_material_node(id);
                     }
                 }
@@ -2685,7 +2685,7 @@ impl App {
                 name: preset.name().into(),
             }) {
             Ok(()) => {
-                if let Some(id) = self.world.selection {
+                if let Some(id) = self.world.active() {
                     self.select_material_node(id);
                 }
                 self.panels_to_open.push(dock::Panel::Materials);
@@ -4134,7 +4134,7 @@ impl App {
             }
         });
         self.remember_material_targets();
-        if let Some(material) = self.world.selection
+        if let Some(material) = self.world.active()
             && self
                 .world
                 .document
@@ -5162,7 +5162,7 @@ impl App {
                     });
                 let result = if gesture.is_some() {
                     self.world.edit_snapshot_with_gesture(
-                        self.world.selection,
+                        self.world.active(),
                         before,
                         &self.scene,
                         edit_frame,
@@ -5170,7 +5170,7 @@ impl App {
                     )
                 } else {
                     self.world
-                        .edit_snapshot(self.world.selection, before, &self.scene, edit_frame)
+                        .edit_snapshot(self.world.active(), before, &self.scene, edit_frame)
                 };
                 if let Err(error) = result {
                     // A refused edit must not leave unauthored values (or a colour selection
@@ -5307,7 +5307,7 @@ mod tests {
         let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
         let before = serde_json::to_string(&app.world.document).unwrap();
-        let object = app.world.selection.unwrap();
+        let object = app.world.active().unwrap();
         let assignment = app.world.document.assigned_material(object).unwrap();
         let ctx = egui::Context::default();
         for _ in 0..3 {
@@ -5324,7 +5324,7 @@ mod tests {
         }
         assert_eq!(serde_json::to_string(&app.world.document).unwrap(), before);
         app.add_library_material(0);
-        let material = app.world.selection.unwrap();
+        let material = app.world.active().unwrap();
         assert_ne!(material, object);
         assert_eq!(
             app.world.document.assigned_material(object).unwrap(),
@@ -5386,8 +5386,7 @@ mod tests {
                     })
                     .unwrap();
             }
-            app.world.selection = None;
-            app.world.selected.clear();
+            app.world.clear_selection();
             let ctx = egui::Context::default();
             let mut found = Vec::new();
             for _ in 0..3 {
@@ -5479,7 +5478,7 @@ mod tests {
     fn material_card_selects_existing_attribute_editor_without_assignment() {
         let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
-        let object = app.world.selection.unwrap();
+        let object = app.world.active().unwrap();
         let assignment = app.world.document.assigned_material(object).unwrap();
         app.world
             .execute(crate::world::WorldCommand::CreateMaterial {
@@ -5487,9 +5486,8 @@ mod tests {
                 name: "Gallery test material".into(),
             })
             .unwrap();
-        let material = app.world.selection.unwrap();
-        app.world.selection = Some(object);
-        app.world.selected = vec![object];
+        let material = app.world.active().unwrap();
+        app.world.select_only(object);
         app.panels_to_open.clear();
         let before = serde_json::to_value(&app.world.document).unwrap();
         let ctx = egui::Context::default();
@@ -5529,8 +5527,8 @@ mod tests {
                 }],
             );
         }
-        assert_eq!(app.world.selection, Some(material));
-        assert_eq!(app.world.selected, [material]);
+        assert_eq!(app.world.active(), Some(material));
+        assert_eq!(app.world.selected(), [material]);
         assert!(app.panels_to_open.contains(&dock::Panel::Inspector));
         assert_eq!(
             app.world.document.assigned_material(object).unwrap(),
@@ -5544,7 +5542,7 @@ mod tests {
         let _gpu_test = crate::test_gpu::lock();
         use crate::world::{WorldCommand, WorldKind};
         let mut app = App::new();
-        let object = app.world.selection.unwrap();
+        let object = app.world.active().unwrap();
         let original = app.world.document.assigned_material(object).unwrap();
         app.remember_material_targets();
         app.world
@@ -5553,7 +5551,7 @@ mod tests {
                 name: "Apply test".into(),
             })
             .unwrap();
-        let material = app.world.selection.unwrap();
+        let material = app.world.active().unwrap();
         app.select_material_node(material);
         app.remember_material_targets();
         assert_eq!(app.material_targets, [object]);
@@ -5562,7 +5560,7 @@ mod tests {
         app.assign_gallery_material(material, AssignTo::Selected)
             .unwrap();
         assert_eq!(
-            app.world.selection,
+            app.world.active(),
             Some(material),
             "Apply must retain the material in the editor"
         );
@@ -5583,8 +5581,7 @@ mod tests {
             .find(|n| n.kind == WorldKind::Camera)
             .unwrap()
             .id;
-        app.world.selection = Some(camera);
-        app.world.selected = vec![camera];
+        app.world.select_only(camera);
         app.remember_material_targets();
         assert!(app.material_targets.is_empty());
         assert!(
@@ -5932,17 +5929,16 @@ mod tests {
         let _gpu_test = crate::test_gpu::lock();
         use crate::world::WorldCommand;
         let mut app = App::new();
-        let object = app.world.selection.unwrap();
+        let object = app.world.active().unwrap();
         app.world
             .execute(WorldCommand::CreateMaterial {
                 material: Material::default(),
                 name: "Shared gallery material".into(),
             })
             .unwrap();
-        let material = app.world.selection.unwrap();
+        let material = app.world.active().unwrap();
         let count = app.world.document.nodes().len();
-        app.world.selection = Some(object);
-        app.world.selected = vec![object];
+        app.world.select_only(object);
         let old = app.world.document.assigned_material(object).unwrap();
         app.assign_gallery_material(material, AssignTo::Selected)
             .unwrap();
@@ -5950,7 +5946,7 @@ mod tests {
             app.world.document.assigned_material(object).unwrap(),
             Some(material)
         );
-        assert_eq!(app.world.selection, Some(object));
+        assert_eq!(app.world.active(), Some(object));
         assert_eq!(app.world.document.nodes().len(), count);
         assert!(app.world.undo());
         assert_eq!(app.world.document.assigned_material(object).unwrap(), old);
@@ -7075,7 +7071,7 @@ mod tests {
                 parent: None,
             })
             .unwrap();
-        let second = app.world.selection.expect("created fractal selected");
+        let second = app.world.active().expect("created fractal selected");
         app.world
             .execute(crate::world::WorldCommand::SetAttribute {
                 id: second,
@@ -7085,8 +7081,7 @@ mod tests {
             })
             .unwrap();
         app.refresh_scene().unwrap();
-        app.world.selection = Some(second);
-        app.world.selected = vec![second];
+        app.world.select_only(second);
         app.frame_camera(1600, 900);
         assert!(
             (app.scene.camera.target[0] - 25.0).abs() < 1e-4,

@@ -171,7 +171,7 @@ fn dialogs(ui: &egui::Ui, world: &mut WorldEditor) -> Actions {
     if accepted {
         match name_command(&dialog).and_then(|command| world.execute(command)) {
             Ok(()) => {
-                actions.edit = world.selection;
+                actions.edit = world.active();
                 cancelled = true;
             }
             Err(error) => dialog.error = Some(error),
@@ -953,7 +953,7 @@ mod tests {
         let save = text_center(&dialog, "Save");
         draw(pointer(save, true), &mut world);
         draw(pointer(save, false), &mut world);
-        let id = world.selection.unwrap();
+        let id = world.active().unwrap();
         assert!(!original.nodes().iter().any(|node| node.id == id));
         assert!(world.undo());
         assert_eq!(world.document, original);
@@ -971,7 +971,7 @@ mod tests {
                 target: None,
             })
             .unwrap();
-        let profile = world.selection.unwrap();
+        let profile = world.active().unwrap();
         let original = world.document.clone();
         let viewport_before = world.document.viewport_policy(0.0).unwrap();
         let ctx = egui::Context::default();
@@ -1006,7 +1006,7 @@ mod tests {
                 target: None,
             })
             .unwrap();
-        let template = world.selection.unwrap();
+        let template = world.active().unwrap();
         let original = world.document.clone();
         let ctx = egui::Context::default();
         let mut world_ui = crate::world_ui::WorldUi::default();
@@ -1074,7 +1074,7 @@ mod tests {
                 target: None,
             })
             .unwrap();
-        let created = world.selection.unwrap();
+        let created = world.active().unwrap();
         world
             .execute(binding_command(
                 viewport,

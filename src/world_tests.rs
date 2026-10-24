@@ -6,7 +6,7 @@ fn glass_node_transmission_is_keyable_shared_and_roundtrips() {
     let mut e = editor();
     let first = find(&e, WorldKind::Fractal);
     e.execute(WorldCommand::Duplicate(vec![first])).unwrap();
-    let second = e.selection.unwrap();
+    let second = e.active().unwrap();
     let material = find(&e, WorldKind::Material);
     e.execute(WorldCommand::AssignMaterial {
         id: second,
@@ -160,7 +160,7 @@ fn standalone_material_creation_selects_one_node_without_assigning_and_undo_rest
     let mut e = editor();
     let fractal = find(&e, WorldKind::Fractal);
     let before = e.document.clone();
-    let previous_selection = e.selection;
+    let previous_selection = e.active();
     let mut surface = crate::scene::Material::default();
     crate::materials::PRESETS[1].apply(&mut surface);
     e.execute(WorldCommand::CreateMaterial {
@@ -168,8 +168,8 @@ fn standalone_material_creation_selects_one_node_without_assigning_and_undo_rest
         name: "Shared copper".into(),
     })
     .unwrap();
-    let id = e.selection.unwrap();
-    assert_eq!(e.selected, vec![id]);
+    let id = e.active().unwrap();
+    assert_eq!(e.selected(), vec![id]);
     assert_eq!(e.document.info(id).unwrap().kind, WorldKind::Material);
     assert_eq!(e.document.info(id).unwrap().name, "Shared copper");
     assert_eq!(e.document.material(id, 0.0).unwrap(), surface);
@@ -181,11 +181,11 @@ fn standalone_material_creation_selects_one_node_without_assigning_and_undo_rest
     let created = e.document.clone();
     assert!(e.undo());
     assert_eq!(e.document, before);
-    assert_eq!(e.selection, previous_selection);
+    assert_eq!(e.active(), previous_selection);
     assert!(e.redo());
     assert_eq!(e.document, created);
-    assert_eq!(e.selection, Some(id));
-    assert_eq!(e.selected, vec![id]);
+    assert_eq!(e.active(), Some(id));
+    assert_eq!(e.selected(), vec![id]);
     let mut isolated = e.document.clone();
     isolated.active_camera = Some(NodeId::new());
     assert!(isolated.snapshot(0.0).is_err());
@@ -199,13 +199,13 @@ fn shared_material_assignments_reuse_uuid_and_animated_edits_roundtrip_for_all_c
     let mut e = editor();
     let first = find(&e, WorldKind::Fractal);
     e.execute(WorldCommand::Duplicate(vec![first])).unwrap();
-    let second = e.selection.unwrap();
+    let second = e.active().unwrap();
     e.execute(WorldCommand::CreateMaterial {
         material: crate::scene::Material::default(),
         name: "Animated shared surface".into(),
     })
     .unwrap();
-    let material = e.selection.unwrap();
+    let material = e.active().unwrap();
     let before_assignment = e.document.clone();
     e.execute(WorldCommand::Batch(
         vec![first, second]
@@ -278,13 +278,13 @@ fn material_assignment_batch_rejects_locked_or_invalid_targets_without_partial_e
     let mut e = editor();
     let first = find(&e, WorldKind::Fractal);
     e.execute(WorldCommand::Duplicate(vec![first])).unwrap();
-    let second = e.selection.unwrap();
+    let second = e.active().unwrap();
     e.execute(WorldCommand::CreateMaterial {
         material: crate::scene::Material::default(),
         name: "Candidate".into(),
     })
     .unwrap();
-    let material = e.selection.unwrap();
+    let material = e.active().unwrap();
     set(&mut e, second, "/locked", json!(true), 0.0);
     let before = e.document.clone();
     let revision = e.revision();
@@ -390,7 +390,7 @@ fn camera_navigation_solves_affine_parent_scale_pivot_and_orbit_into_visible_trs
         parent: None,
     })
     .unwrap();
-    let parent = e.selection.unwrap();
+    let parent = e.active().unwrap();
     e.execute(WorldCommand::Reparent {
         id: camera,
         parent: Some(parent),
@@ -845,7 +845,7 @@ fn render_settings_drag_shares_deferred_history_and_undo() {
         let before = e.document.snapshot(0.0).unwrap();
         let mut after = before.clone();
         after.render.exposure_stops = exposure;
-        e.edit_snapshot_with_gesture(e.selection, &before, &after, 0.0, Some(23))
+        e.edit_snapshot_with_gesture(e.active(), &before, &after, 0.0, Some(23))
             .unwrap();
         assert_eq!(e.undo.len(), 0);
         assert_eq!(
@@ -877,7 +877,7 @@ fn material_library_assignment_is_atomic_and_keeps_object_selection() {
     .unwrap();
     let assigned = e.document.assigned_material(fractal).unwrap().unwrap();
     assert_eq!(assigned, old_material);
-    assert_eq!(e.selection, Some(fractal));
+    assert_eq!(e.active(), Some(fractal));
     assert_eq!(
         e.document.node_scene(old_material, 0.0).unwrap().material,
         material
@@ -1166,7 +1166,7 @@ fn parent_nonuniform_rotation_chain_is_full_matrix_and_span_half_open() {
         parent: None,
     })
     .unwrap();
-    let parent = e.selection.unwrap();
+    let parent = e.active().unwrap();
     set(
         &mut e,
         parent,
@@ -1247,7 +1247,7 @@ fn parent_nonuniform_rotation_chain_is_full_matrix_and_span_half_open() {
             }
         }
     }
-    e.selection = Some(parent);
+    e.select_only(parent);
     assert_eq!(bounds, e.document.snapshot(4.0).unwrap().framing_bounds());
 }
 #[test]
@@ -1255,7 +1255,7 @@ fn graph_transactions_rollback_cycles_and_undo_atomically() {
     let mut e = editor();
     let id = find(&e, WorldKind::Fractal);
     let camera = find(&e, WorldKind::Camera);
-    e.selected = vec![id, camera];
+    e.set_selection(vec![id, camera]);
     let before = e.document.clone();
     assert!(
         e.execute(WorldCommand::Batch(vec![
@@ -1271,7 +1271,7 @@ fn graph_transactions_rollback_cycles_and_undo_atomically() {
         .is_err()
     );
     assert_eq!(e.document, before);
-    assert_eq!(e.selected, vec![id, camera]);
+    assert_eq!(e.selected(), vec![id, camera]);
     assert!(!e.can_undo());
     e.execute(WorldCommand::Batch(vec![
         WorldCommand::Rename {
@@ -1281,7 +1281,7 @@ fn graph_transactions_rollback_cycles_and_undo_atomically() {
         switch(id, "/visible", false),
     ]))
     .unwrap();
-    assert_eq!(e.selected, vec![id, camera]);
+    assert_eq!(e.selected(), vec![id, camera]);
     assert!(e.document.snapshot(0.0).unwrap().objects.is_empty());
     assert!(e.undo());
     assert_eq!(e.document, before);
@@ -1306,7 +1306,7 @@ fn duplicate_retains_independent_keys_and_all_visible_objects() {
         10.0,
     );
     e.execute(WorldCommand::Duplicate(vec![original])).unwrap();
-    let duplicate = e.selection.unwrap();
+    let duplicate = e.active().unwrap();
     assert_ne!(original, duplicate);
     assert_eq!(e.document.snapshot(5.0).unwrap().objects.len(), 2);
     set(
@@ -1399,7 +1399,7 @@ fn camera_reference_survives_visibility_reorder_and_formula_differences() {
         parent: None,
     })
     .unwrap();
-    let second = e.selection.unwrap();
+    let second = e.active().unwrap();
     set(
         &mut e,
         second,
@@ -1467,14 +1467,14 @@ fn delete_prunes_layer_order_and_refuses_locked_descendants() {
         parent: None,
     })
     .unwrap();
-    let group = e.selection.unwrap();
+    let group = e.active().unwrap();
     e.execute(WorldCommand::Create {
         kind: WorldKind::Group,
         name: "Child".into(),
         parent: Some(group),
     })
     .unwrap();
-    let child = e.selection.unwrap();
+    let child = e.active().unwrap();
     e.execute(switch(child, "/locked", true)).unwrap();
     let before = e.document.clone();
     assert!(e.execute(WorldCommand::Delete(group)).is_err());
@@ -1503,7 +1503,7 @@ fn parent_camera_pose_environment_visibility_and_ancestor_lock() {
         parent: None,
     })
     .unwrap();
-    let parent = e.selection.unwrap();
+    let parent = e.active().unwrap();
     set(
         &mut e,
         parent,
@@ -1578,7 +1578,7 @@ fn per_object_gpu_iterations_are_independent_of_world_ray_settings() {
         parent: None,
     })
     .unwrap();
-    let second = e.selection.unwrap();
+    let second = e.active().unwrap();
     set(&mut e, first, "/render/iterations", json!(7), 0.0);
     set(&mut e, second, "/render/iterations", json!(19), 0.0);
     let snapshot = e.document.snapshot(0.0).unwrap();
@@ -1762,9 +1762,9 @@ fn clipboard_copy_paste_and_duplicate_remap_ids_in_one_undo_step() {
     e.execute(WorldCommand::Duplicate(vec![fractal, material]))
         .unwrap();
     assert_eq!(e.document.nodes().len(), count + 2);
-    assert_eq!(e.selected.len(), 2);
+    assert_eq!(e.selected().len(), 2);
     let copy = *e
-        .selected
+        .selected()
         .iter()
         .find(|id| e.document.supports_material(**id))
         .unwrap();
@@ -1773,7 +1773,7 @@ fn clipboard_copy_paste_and_duplicate_remap_ids_in_one_undo_step() {
         copied_material, material,
         "a reference inside the fragment follows the remap"
     );
-    assert!(e.selected.contains(&copied_material));
+    assert!(e.selected().contains(&copied_material));
     assert!(e.undo());
     assert_eq!(e.document.nodes().len(), count);
 
@@ -1781,14 +1781,14 @@ fn clipboard_copy_paste_and_duplicate_remap_ids_in_one_undo_step() {
     let text = e.document.copy_fragment(&[fractal]).unwrap();
     e.execute(WorldCommand::Delete(fractal)).unwrap();
     assert_eq!(e.paste(&text).unwrap().roots, 1);
-    let pasted = e.selection.unwrap();
+    let pasted = e.active().unwrap();
     assert_ne!(pasted, fractal, "paste never reuses the source UUID");
     assert_eq!(
         e.document.assigned_material(pasted).unwrap(),
         Some(material)
     );
     e.paste(&text).unwrap();
-    assert_ne!(e.selection.unwrap(), pasted, "every paste is a new node");
+    assert_ne!(e.active().unwrap(), pasted, "every paste is a new node");
 
     // A copy holds the material's UUID, not the material: once the material is gone the
     // reference is unresolved, the paste clears it and reports it as a material.
@@ -1808,7 +1808,7 @@ fn clipboard_copy_paste_and_duplicate_remap_ids_in_one_undo_step() {
         }
     );
     assert_eq!(
-        e.document.assigned_material(e.selection.unwrap()).unwrap(),
+        e.document.assigned_material(e.active().unwrap()).unwrap(),
         None
     );
 
@@ -2400,7 +2400,7 @@ fn render_template_instantiation_clones_profile_and_undoes_assignment_atomically
         target: None,
     })
     .unwrap();
-    let template = e.selection.unwrap();
+    let template = e.active().unwrap();
     assert_eq!(
         e.document.catalog_role(template).unwrap(),
         Some(CatalogRole::Template)
@@ -2414,7 +2414,7 @@ fn render_template_instantiation_clones_profile_and_undoes_assignment_atomically
         target: Some(ProfileTarget::Still),
     })
     .unwrap();
-    let instance = e.selection.unwrap();
+    let instance = e.active().unwrap();
     assert_ne!(instance, template);
     assert_eq!(e.document.nodes().len(), count + 1);
     assert_eq!(e.document.viewport_policy(0.0).unwrap().still_id, instance);
@@ -2502,7 +2502,7 @@ fn profile_reference_validation_rejects_missing_wrong_template_and_animated_refs
     use crate::render_profiles::CatalogRole;
     let mut e = editor();
     let viewport = e.document.viewport_settings_id().unwrap();
-    let fractal = e.selection.unwrap();
+    let fractal = e.active().unwrap();
     let saved = e.document.clone();
     for target in [fractal, NodeId::new()] {
         assert!(
@@ -2523,7 +2523,7 @@ fn profile_reference_validation_rejects_missing_wrong_template_and_animated_refs
         target: None,
     })
     .unwrap();
-    let template = e.selection.unwrap();
+    let template = e.active().unwrap();
     let before = e.document.clone();
     assert!(e.execute(WorldCommand::SetOutputRender(template)).is_err());
     assert_eq!(e.document, before);
@@ -2596,7 +2596,7 @@ fn profile_fast_materials_are_evaluated_only_and_preserve_transmission_and_geome
     scene.material.model = MaterialModel::StandardSurface;
     scene.material.transmission = 0.0;
     let mut e = WorldEditor::new(WorldDocument::from_scene(&scene));
-    let fractal = e.selection.unwrap();
+    let fractal = e.active().unwrap();
     let material = e.document.assigned_material(fractal).unwrap().unwrap();
     let policy = e.document.viewport_policy(0.0).unwrap();
     let saved = e.document.clone();
@@ -2658,7 +2658,7 @@ fn canonical_settings_validation_rejects_missing_fields_and_invalid_unused_templ
         target: None,
     })
     .unwrap();
-    let template = e.selection.unwrap();
+    let template = e.active().unwrap();
     let mut broken = e.document.clone();
     let mut attrs = broken.attrs(template).unwrap();
     attrs.set("/quality/samples", to_attr(&json!("not samples")));
@@ -2850,7 +2850,7 @@ fn output_settings_node_is_the_typed_static_export_recipe() {
         assign: false,
     })
     .unwrap();
-    let template = e.selection.unwrap();
+    let template = e.active().unwrap();
     assert!(
         e.execute(WorldCommand::SetOutputSettings(template))
             .is_err()
@@ -3312,7 +3312,7 @@ fn masks_reach_the_fractals_of_their_scope_with_their_world_matrix() {
         parent: None,
     })
     .unwrap();
-    let mask = e.selection.unwrap();
+    let mask = e.active().unwrap();
     set(
         &mut e,
         mask,
@@ -3334,7 +3334,7 @@ fn masks_reach_the_fractals_of_their_scope_with_their_world_matrix() {
         parent: None,
     })
     .unwrap();
-    let group = e.selection.unwrap();
+    let group = e.active().unwrap();
     e.execute(WorldCommand::Reparent {
         id: mask,
         parent: Some(group),
@@ -3466,13 +3466,13 @@ fn the_take_row_lists_takes_of_the_nodes_kind_and_copies_keep_their_take_in_one_
     let text = e.document.copy_fragment(&[frac]).unwrap();
     assert_eq!(e.paste(&text).unwrap().takes, 0);
     assert_eq!(
-        e.document.take_clip(e.selection.unwrap()).unwrap(),
+        e.document.take_clip(e.active().unwrap()).unwrap(),
         Some(id)
     );
     let mut other = editor();
     assert_eq!(other.paste(&text).unwrap().takes, 1, "reported as a take");
     assert_eq!(
-        other.document.take_clip(other.selection.unwrap()).unwrap(),
+        other.document.take_clip(other.active().unwrap()).unwrap(),
         None
     );
 }
@@ -3536,7 +3536,7 @@ fn a_copy_whose_take_is_gone_pastes_playing_none_and_a_release_joins_its_gesture
             .any(|(_, field)| *field == "take")
     );
     e.paste(&text).unwrap();
-    assert_eq!(e.document.take_clip(e.selection.unwrap()).unwrap(), None);
+    assert_eq!(e.document.take_clip(e.active().unwrap()).unwrap(), None);
     // A drag that releases a played take is one undo step with its writes.
     let id = e.add_take(
         crate::takes::Take::still(
@@ -3763,27 +3763,27 @@ fn a_click_selects_alone_shift_toggles_and_nothing_clears() {
     let ids: Vec<NodeId> = e.document.nodes().iter().take(3).map(|n| n.id).collect();
     e.click_select(Some(ids[0]), false);
     assert_eq!(
-        (e.selected.clone(), e.selection),
+        (e.selected().to_vec(), e.active()),
         (vec![ids[0]], Some(ids[0]))
     );
     e.click_select(Some(ids[1]), true);
     assert_eq!(
-        (e.selected.clone(), e.selection),
+        (e.selected().to_vec(), e.active()),
         (vec![ids[0], ids[1]], Some(ids[1]))
     );
     e.click_select(Some(ids[1]), true);
     assert_eq!(
-        (e.selected.clone(), e.selection),
+        (e.selected().to_vec(), e.active()),
         (vec![ids[0]], Some(ids[0]))
     );
     e.click_select(None, true);
     assert_eq!(
-        e.selected,
+        e.selected(),
         vec![ids[0]],
         "Shift on nothing keeps the selection"
     );
     e.click_select(None, false);
-    assert_eq!((e.selected.clone(), e.selection), (vec![], None));
+    assert_eq!((e.selected().to_vec(), e.active()), (vec![], None));
 }
 
 #[test]
@@ -3835,7 +3835,7 @@ fn a_mask_array_is_a_line_or_a_ring_and_cells_are_not_copies() {
         parent: None,
     })
     .unwrap();
-    let id = e.selection.unwrap();
+    let id = e.active().unwrap();
     let mask = e.document.mask(id, 0.0).unwrap();
     assert_eq!(mask.array.kind, ArrayKind::Linear);
     assert_eq!(mask.array.count, 1);
@@ -3914,9 +3914,9 @@ fn reset_is_one_undo_step_that_keeps_the_identity() {
     e.reset(fresh).unwrap();
     assert_ne!(e.document, before);
     assert_eq!(e.document.graph.id, before.graph.id);
-    let selection = e.selection.expect("a fractal is selected");
+    let selection = e.active().expect("a fractal is selected");
     assert_eq!(e.document.info(selection).unwrap().kind, WorldKind::Fractal);
-    assert_eq!(e.selected, vec![selection]);
+    assert_eq!(e.selected(), vec![selection]);
     assert!(e.undo());
     assert_eq!(e.document, before);
     assert!(e.redo());

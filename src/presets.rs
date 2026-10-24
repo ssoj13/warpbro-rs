@@ -130,7 +130,7 @@ pub fn scene(preset: Animated, name: &str) -> Result<Scene, String> {
         Animated::VerdantFold => base.formula = Formula::Kifs(Kifs::preset(KifsKind::Octahedron)),
     }
     let mut editor = WorldEditor::new(WorldDocument::from_scene(&base));
-    let object = editor.selection.ok_or("Preset has no fractal")?;
+    let object = editor.active().ok_or("Preset has no fractal")?;
     let camera = editor
         .document
         .active_camera

@@ -420,7 +420,7 @@ mod tests {
                 fps: 30.0,
             })
             .unwrap();
-        let object = editor.selection.unwrap();
+        let object = editor.active().unwrap();
         editor
             .execute(WorldCommand::SetMetadata {
                 id: object,
@@ -442,7 +442,7 @@ mod tests {
                 parent: None,
             })
             .unwrap();
-        let material = editor.selection.unwrap();
+        let material = editor.active().unwrap();
         editor
             .execute(WorldCommand::AssignMaterial {
                 id: object,

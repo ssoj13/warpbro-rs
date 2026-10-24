@@ -347,7 +347,8 @@ pub enum WorldCommand {
         frame: f64,
     },
 }
-type WorldEditSnapshot = (WorldDocument, Option<NodeId>, Vec<NodeId>);
+/// The document and the selection (its last node is the active one): what undo restores.
+type WorldEditSnapshot = (WorldDocument, Vec<NodeId>);
 
 /// One undo / redo state and what it costs of the history budget (`WorldEditor::push_undo`).
 #[derive(Clone, Debug)]
@@ -411,8 +412,10 @@ pub struct Pasted {
 #[derive(Clone, Debug)]
 pub struct WorldEditor {
     pub document: WorldDocument,
-    pub selection: Option<NodeId>,
-    pub selected: Vec<NodeId>,
+    /// The selection: ordered, unique, the LAST node is the active (lead) one, as in Maya. One
+    /// field, so "the active node is selected" holds by construction; read and written only
+    /// through the methods below.
+    selected: Vec<NodeId>,
     undo: Vec<HistoryStep>,
     redo: Vec<HistoryStep>,
     /// Bytes the undo and redo states may hold together ([`UNDO_BUDGET`]); the oldest undo
@@ -433,7 +436,6 @@ impl WorldEditor {
             .map(|n| n.id);
         Self {
             document,
-            selection,
             selected: selection.into_iter().collect(),
             undo: vec![],
             redo: vec![],
@@ -448,35 +450,66 @@ impl WorldEditor {
     /// selection unless `add`. The one click rule of the outliner, timeline and viewport.
     pub fn click_select(&mut self, id: Option<NodeId>, add: bool) {
         match (id, add) {
-            (Some(id), true) => {
-                if let Some(i) = self.selected.iter().position(|n| *n == id) {
-                    self.selected.remove(i);
-                } else {
-                    self.selected.push(id);
-                }
-            }
-            (Some(id), false) => self.selected = vec![id],
-            (None, true) => return,
-            (None, false) => self.selected.clear(),
+            (Some(id), true) => self.toggle(id),
+            (Some(id), false) => self.select_only(id),
+            (None, true) => {}
+            (None, false) => self.clear_selection(),
         }
-        self.selection = match id {
-            Some(id) if self.selected.contains(&id) => Some(id),
-            _ => self.selected.last().copied(),
-        };
+    }
+    /// The active (lead) node: the last selected. The Attribute Editor, the inspector and the
+    /// range anchor follow it.
+    pub fn active(&self) -> Option<NodeId> {
+        self.selected.last().copied()
+    }
+    /// The whole selection in order; the active node is last.
+    pub fn selected(&self) -> &[NodeId] {
+        &self.selected
+    }
+    /// Make `id` the whole selection (a plain click, a create, a paste of one node).
+    pub fn select_only(&mut self, id: NodeId) {
+        self.selected.clear();
+        self.selected.push(id);
+    }
+    /// Shift/Ctrl click: add `id` as the new active node, or take it out when selected.
+    pub fn toggle(&mut self, id: NodeId) {
+        match self.selected.iter().position(|n| *n == id) {
+            Some(i) => {
+                self.selected.remove(i);
+            }
+            None => self.selected.push(id),
+        }
+    }
+    /// Select nothing.
+    pub fn clear_selection(&mut self) {
+        self.selected.clear();
+    }
+    /// Replace the selection by `ids` (a range, a box, a paste): duplicates dropped, the order
+    /// kept, so the last one becomes active. A caller that wants another lead calls
+    /// [`Self::set_lead`] after.
+    pub fn set_selection(&mut self, ids: Vec<NodeId>) {
+        self.selected.clear();
+        for id in ids {
+            if !self.selected.contains(&id) {
+                self.selected.push(id);
+            }
+        }
+    }
+    /// Make `id` the active node when it is selected (it moves to the end); otherwise nothing
+    /// changes. For gestures that name the row they landed on, which need not be the last one.
+    pub fn set_lead(&mut self, id: NodeId) {
+        if let Some(i) = self.selected.iter().position(|n| *n == id) {
+            self.selected.remove(i);
+            self.selected.push(id);
+        }
     }
     /// The nodes a command acts on: the selection, or `row` alone when the command comes from a
     /// row that is not part of it (a right-clicked outliner or timeline row). `row` None: a
     /// toolbar button or hotkey, the selection. The ONE "selected, else this one" rule of
     /// Duplicate, Delete, the property filters and the take targets.
     pub fn targets(&self, row: Option<NodeId>) -> Vec<NodeId> {
-        let selected: Vec<NodeId> = if self.selected.is_empty() {
-            self.selection.into_iter().collect()
-        } else {
-            self.selected.clone()
-        };
         match row {
-            Some(row) if !selected.contains(&row) => vec![row],
-            _ => selected,
+            Some(row) if !self.selected.contains(&row) => vec![row],
+            _ => self.selected.clone(),
         }
     }
     /// Duplicate `targets(row)` with their descendants as one undo step; the copies become the
@@ -515,8 +548,7 @@ impl WorldEditor {
             .map(|n| n.id);
         self.apply_edit(None, |editor| {
             editor.document = document;
-            editor.selection = selection;
-            editor.selected = selection.into_iter().collect();
+            editor.set_selection(selection.into_iter().collect());
             Ok(())
         })
     }
@@ -584,7 +616,7 @@ impl WorldEditor {
     }
 
     fn differs_from(&self, snapshot: &WorldEditSnapshot) -> bool {
-        self.document != snapshot.0 || self.selection != snapshot.1 || self.selected != snapshot.2
+        self.document != snapshot.0 || self.selected != snapshot.1
     }
 
     fn record_edit(&mut self, before: WorldEditSnapshot, gesture: Option<u64>) {
@@ -613,14 +645,13 @@ impl WorldEditor {
         self.finish_edit_unless(gesture);
         // This rollback snapshot is temporary; only the first changed edit's snapshot
         // is retained for the gesture's history entry.
-        let before = (self.document.clone(), self.selection, self.selected.clone());
+        let before = (self.document.clone(), self.selected.clone());
         if let Err(error) = apply(self).and_then(|()| {
             self.document
                 .validate_render_profiles(f64::from(self.document.first))
         }) {
             self.document = before.0;
-            self.selection = before.1;
-            self.selected = before.2;
+            self.selected = before.1;
             return Err(error);
         }
         self.record_edit(before, gesture);
@@ -694,17 +725,15 @@ impl WorldEditor {
     pub fn undo(&mut self) -> bool {
         self.finish_edit();
         if let Some(HistoryStep {
-            state: (d, s, selected),
+            state: (d, selected),
             ..
         }) = self.undo.pop()
         {
             let d = self.keep_live(d);
             self.redo.push(HistoryStep::new((
                 std::mem::replace(&mut self.document, d),
-                self.selection,
                 self.selected.clone(),
             )));
-            self.selection = s;
             self.selected = selected;
             self.revision = self.revision.wrapping_add(1);
             true
@@ -715,18 +744,16 @@ impl WorldEditor {
     pub fn redo(&mut self) -> bool {
         self.finish_edit();
         if let Some(HistoryStep {
-            state: (d, s, selected),
+            state: (d, selected),
             ..
         }) = self.redo.pop()
         {
             let d = self.keep_live(d);
             let before = (
                 std::mem::replace(&mut self.document, d),
-                self.selection,
                 self.selected.clone(),
             );
             self.push_undo(before);
-            self.selection = s;
             self.selected = selected;
             self.revision = self.revision.wrapping_add(1);
             true
@@ -976,8 +1003,7 @@ impl WorldEditor {
         let order = self.document.nodes();
         let mut roots = roots;
         roots.sort_by_key(|id| order.iter().position(|n| n.id == *id));
-        self.selection = roots.last().copied();
-        self.selected = roots.clone();
+        self.set_selection(roots.clone());
         pasted.roots = roots.len();
         Ok((roots, pasted))
     }
@@ -1024,8 +1050,7 @@ impl WorldEditor {
                 self.document.validate_parent(None, parent)?;
                 let scene = self.document.snapshot(0.0)?;
                 let id = self.document.insert(kind, &name, &scene, parent)?;
-                self.selection = Some(id);
-                self.selected = vec![id];
+                self.select_only(id);
             }
             WorldCommand::Delete(id) => {
                 let remove = self.document.subtree(&[id]);
@@ -1060,9 +1085,6 @@ impl WorldEditor {
                     });
                 }
                 self.selected.retain(|id| !remove.contains(id));
-                if self.selection.is_some_and(|id| remove.contains(&id)) {
-                    self.selection = self.selected.first().copied();
-                }
                 if self
                     .document
                     .active_camera
@@ -1151,8 +1173,7 @@ impl WorldEditor {
                 let id = self
                     .document
                     .insert(WorldKind::Material, &name, &scene, None)?;
-                self.selection = Some(id);
-                self.selected = vec![id];
+                self.select_only(id);
             }
             WorldCommand::CreateMaterialFor {
                 material,
@@ -1163,7 +1184,7 @@ impl WorldEditor {
                     return Err("Select an object that supports materials".into());
                 }
                 self.apply(WorldCommand::CreateMaterial { material, name })?;
-                let created = self.selection.ok_or("The new material was not selected")?;
+                let created = self.active().ok_or("The new material was not selected")?;
                 for id in targets {
                     self.apply(WorldCommand::AssignMaterial {
                         id,
@@ -2878,8 +2899,7 @@ impl WorldEditor {
         let id = *roots.first().ok_or("Cloned settings node missing")?;
         self.document.node_mut(id)?["name"] = json!(name.trim());
         self.document.node_mut(id)?["metadata"]["catalog_role"] = json!(role);
-        self.selection = Some(id);
-        self.selected = vec![id];
+        self.select_only(id);
         Ok(id)
     }
     fn create_output_settings(
