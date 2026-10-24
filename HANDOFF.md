@@ -8,9 +8,9 @@ Read first: `plan1.md` (full report + execution state, sections 7.4-7.6), `CHANG
   `4313f89`. NOT merged to main: the operator was asked directly and has not answered (a peer
   relay is not the operator's answer).
 - Last commit (`.ok()` sweep part 1: `main.rs` `arg()` errors on a malformed number,
-  `FRAC_SNAP_*` env errors to the status line) is **NOT yet verified**: its clippy run was in
-  the buildlock queue at the stop. First thing next session: one `cargo clippy --all-targets
-  --locked` through buildlock, then the GPU-free suite (see Traps for the skip list).
+  `FRAC_SNAP_*` env errors to the status line): clippy `--all-targets --locked` clean (finished
+  after the stop); its tests have not run yet. First thing next session: the GPU-free suite
+  (skip list below).
 - Since 2fda5a3: c16eee8 OCIO note + EDR/linear/log never fit SDR (video-io a8c77c8); 26b0f54
   no swallowed errors in takes/metadata/catalogs, one Duplicate path; 8b9b2d6 one selection
   field (last = active), GPU-free suite 340/0/7. plan1.md has an audit of every stale
