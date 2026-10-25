@@ -637,42 +637,84 @@ def ptx_call_graph(source: str) -> tuple[set[str], dict[str, set[str]]]:
     return entries, graph
 
 
-def parse_ptxas_stats(output: str) -> dict[str, dict[str, int]]:
-    """Retain every reported entry/helper; absent fields stay absent, never assumed zero."""
-    stats: dict[str, dict[str, int]] = {}
-    current = None
-    sections: set[str] = set()
-    compiled: set[str] = set()
-    for line in output.splitlines():
-        entry = re.search(r"Compiling entry function '([^']+)'", line)
+def parse_ptxas_stats(output: str) -> dict[str, dict]:
+    """Preserve ordered reports and per-symbol maxima, without guessing helper ownership.
+
+    ptxas repeats a helper while reporting different entry compilations. A log block
+    is validated only when it starts with its own unique entry properties and has no
+    other entry properties. Its heading is provenance, never a helper owner claim.
+    Parallel/interleaved blocks remain unattributed and retain every occurrence.
+    """
+    entry_pattern = re.compile(r"Compiling entry function '([^']+)'")
+    compiled = [match[1] for match in entry_pattern.finditer(output)]
+    if len(compiled) != len(set(compiled)):
+        raise RuntimeError("Duplicate compiling-entry header")
+    entries = set(compiled)
+    occurrences: list[dict] = []
+    blocks: list[dict] = []
+    entry_sections: set[str] = set()
+    block = current = None
+    for line_number, line in enumerate(output.splitlines(), 1):
+        if entry := entry_pattern.search(line):
+            block = {"entry": entry[1], "occurrences": []}
+            blocks.append(block)
+            current = None
         properties = re.search(r"""Function properties for\s+['"]?([^'"\s:]+)""", line)
-        for marker, seen in ((entry, compiled), (properties, sections)):
-            if marker:
-                if marker[1] in seen:
-                    raise RuntimeError(f"Duplicate resource section for {marker[1]}")
-                seen.add(marker[1])
-        if entry or properties:
-            current = (entry or properties)[1]
-            stats.setdefault(current, {})
-        if current is None:
-            continue
-        row = stats[current]
-        for label, phrase in (("frame", "stack frame"), ("st", "spill stores"), ("ld", "spill loads")):
-            if match := re.search(rf"(\d+) bytes {phrase}", line):
-                if label in row:
-                    raise RuntimeError(f"Duplicate {phrase} field for {current}")
-                row[label] = int(match[1])
-        if match := re.search(r"Used (\d+) registers", line):
-            if "regs" in row:
-                raise RuntimeError(f"Duplicate register field for {current}")
-            row["regs"] = int(match[1])
+        if properties:
+            name = properties[1]
+            if name in entries:
+                if name in entry_sections:
+                    raise RuntimeError(f"Duplicate entry resource section for {name}")
+                entry_sections.add(name)
+            current = {
+                "function": name, "ordinal": len(occurrences) + 1, "line": line_number,
+                "compiler_context": name if name in entries else None,
+                "log_block_entry": block["entry"] if block else None,
+                "log_block_validated": False, "resources": {},
+            }
+            occurrences.append(current)
+            if block is not None:
+                block["occurrences"].append(current)
+        for label, pattern in (
+            ("frame", r"(\d+) bytes stack frame"),
+            ("st", r"(\d+) bytes spill stores"),
+            ("ld", r"(\d+) bytes spill loads"),
+            ("regs", r"Used (\d+) registers"),
+        ):
+            matches = re.findall(pattern, line)
+            if not matches:
+                continue
+            if current is None:
+                raise RuntimeError(f"Resource field without function properties at line {line_number}")
+            if len(matches) != 1 or label in current["resources"]:
+                raise RuntimeError(f"Duplicate {label} field for {current['function']} at line {line_number}")
+            current["resources"][label] = int(matches[0])
+
+    for block in blocks:
+        reports = block["occurrences"]
+        reported_entries = [item["function"] for item in reports if item["function"] in entries]
+        validated = bool(reports) and reports[0]["function"] == block["entry"] and reported_entries == [block["entry"]]
+        if validated:
+            seen: set[str] = set()
+            for item in reports:
+                if item["function"] in seen:
+                    raise RuntimeError(f"Duplicate resource section for {item['function']} in entry log block {block['entry']}")
+                seen.add(item["function"])
+                item["log_block_validated"] = True
+
+    stats: dict[str, dict] = {}
+    for item in occurrences:
+        row = stats.setdefault(item["function"], {"occurrences": []})
+        row["occurrences"].append(item)
+        for field, value in item["resources"].items():
+            row[field] = max(row[field], value) if field in row else value
     return stats
 
 
 def read_ptxas_receipt(
     receipt: Path, ptx: Path, arch: str, ptx_sha256: str,
     entries: set[str], calls: dict[str, set[str]],
-) -> tuple[dict[str, dict[str, int]], dict] | None:
+) -> tuple[dict[str, dict], dict] | None:
     """Validate a production receipt; a different PTX hash is historical evidence."""
     def unique_object(pairs: list[tuple[str, object]]) -> dict:
         result = {}
@@ -736,7 +778,8 @@ def read_ptxas_receipt(
     if not isinstance(raw_name, str) or not raw_name or raw_name in (".", "..") or "/" in raw_name or "\\" in raw_name:
         raise RuntimeError(f"Invalid raw-log name in {receipt}")
     raw = receipt.parent / raw_name
-    output = raw.read_text(encoding="utf-8")
+    raw_bytes = raw.read_bytes()
+    output = raw_bytes.decode("utf-8")
     compiled = re.findall(r"Compiling entry function '([^']+)' for '([^']+)'", output)
     if (len(compiled) != len(entries) or {name for name, _ in compiled} != entries
             or any(target != arch for _, target in compiled)):
@@ -749,12 +792,13 @@ def read_ptxas_receipt(
         "resource_source": "production-aot-receipt",
         "ptxas_path": str(tool.resolve()), "ptxas_sha256": tool_sha256,
         "compiler_options": options, "host_target": metadata["host_target"],
+        "raw_log": str(raw), "raw_log_sha256": hashlib.sha256(raw_bytes).hexdigest(),
     }
 
 
 def retained_kernel_stats(
     ptx: Path, arch: str, ptx_sha256: str, entries: set[str], calls: dict[str, set[str]],
-) -> tuple[dict[str, dict[str, int]], dict]:
+) -> tuple[dict[str, dict], dict]:
     """Accept equivalent repeated builds, reject conflicting evidence without guessing."""
     accepted = []
     for receipt in sorted(ptx.parent.glob(f"{ptx.stem}.*.ptxas-report/{arch}.ptxas.json")):
@@ -763,15 +807,30 @@ def retained_kernel_stats(
     if not accepted:
         raise RuntimeError(f"No production {arch} receipt matches this PTX; build with native cubins, "
                            "or explicitly use k --assemble for a separate standalone assembly")
-    canonical = accepted[0][1]
-    if any(result != canonical for _, result in accepted[1:]):
+    def identity(result: tuple[dict, dict]) -> tuple[dict, dict]:
+        stats, provenance = result
+        variants = {
+            name: sorted(tuple(sorted(item["resources"].items())) for item in row["occurrences"])
+            for name, row in stats.items()
+        }
+        return variants, {key: value for key, value in provenance.items()
+                          if key not in ("raw_log", "raw_log_sha256")}
+
+    canonical = identity(accepted[0][1])
+    if any(identity(result) != canonical for _, result in accepted[1:]):
         raise RuntimeError(f"Conflicting production {arch} receipts for this PTX: "
                            + ", ".join(str(path) for path, _ in accepted))
-    stats, provenance = canonical
-    return stats, {**provenance, "receipts": [str(path) for path, _ in accepted]}
+    stats, provenance = accepted[0][1]
+    return stats, {
+        **provenance, "receipts": [str(path) for path, _ in accepted],
+        "raw_logs": [
+            {"receipt": str(path), "path": result[1]["raw_log"], "sha256": result[1]["raw_log_sha256"]}
+            for path, result in accepted
+        ],
+    }
 
 
-def ptxas_kernel_stats(ptx: Path, arch: str, line_info: bool) -> tuple[dict[str, dict[str, int]], Path, dict]:
+def ptxas_kernel_stats(ptx: Path, arch: str, line_info: bool) -> tuple[dict[str, dict], Path, dict]:
     """Assemble PTX and retain entry/helper resources plus the raw compiler receipt."""
     KERNEL_REPORT_DIR.mkdir(parents=True, exist_ok=True)
     cubin = KERNEL_REPORT_DIR / f"{arch}.cubin"
@@ -788,7 +847,7 @@ def ptxas_kernel_stats(ptx: Path, arch: str, line_info: bool) -> tuple[dict[str,
 
 
 def kernel_resource_report(
-    stats: dict[str, dict[str, int]], entries: set[str], calls: dict[str, set[str]],
+    stats: dict[str, dict], entries: set[str], calls: dict[str, set[str]],
 ) -> dict:
     """Verify entry coverage and associate reported helpers with their PTX callers.
 
@@ -798,10 +857,19 @@ def kernel_resource_report(
     """
     errors = [f"Missing entry resource report: {name}" for name in sorted(entries - stats.keys())]
     errors.extend(f"Unknown reported function: {name}" for name in sorted(stats.keys() - calls.keys()))
+    occurrences = []
     for name, row in sorted(stats.items()):
+        reports = row["occurrences"]
+        if not reports:
+            errors.append(f"No resource occurrences for {name}")
+        if name in entries and len(reports) != 1:
+            errors.append(f"Entry {name} has {len(reports)} resource occurrences; expected exactly one")
         required = {"frame", "st", "ld"} | ({"regs"} if name in entries else set())
-        if missing := required - row.keys():
-            errors.append(f"Incomplete resource report for {name}: missing {', '.join(sorted(missing))}")
+        for report in reports:
+            if missing := required - report["resources"].keys():
+                errors.append(f"Incomplete resource report for {name} occurrence {report['ordinal']} "
+                              f"(line {report['line']}): missing {', '.join(sorted(missing))}")
+            occurrences.append(report)
 
     chains = {}
     for entry in sorted(entries):
@@ -822,8 +890,19 @@ def kernel_resource_report(
         "coverage_errors": errors,
         "entries": chains,
         "functions": dict(sorted(stats.items())),
-        "spilling_functions": sorted(name for name, row in stats.items() if row.get("st", 0) or row.get("ld", 0)),
-        "local_frame_functions": sorted(name for name, row in stats.items() if row.get("frame", 0)),
+        "function_aggregation": "per-field maxima across occurrences; the maxima need not coexist in one variant",
+        "helper_context_attribution": "unknown; log_block_entry records only the observed log heading, not a proven helper owner",
+        "reported_occurrences": len(occurrences),
+        "spilling_functions": sorted(name for name, row in stats.items() if row.get("st") or row.get("ld")),
+        "local_frame_functions": sorted(name for name, row in stats.items() if row.get("frame")),
+        "spilling_occurrences": sorted(
+            (item for item in occurrences if item["resources"].get("st") or item["resources"].get("ld")),
+            key=lambda item: item["ordinal"],
+        ),
+        "local_frame_occurrences": sorted(
+            (item for item in occurrences if item["resources"].get("frame")),
+            key=lambda item: item["ordinal"],
+        ),
     }
 
 

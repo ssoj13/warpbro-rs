@@ -215,6 +215,118 @@ class ResourceReceiptTests(unittest.TestCase):
     def test_missing_raw_entry(self):
         self.assert_rejected(log=LOG.split("\n", 1)[1])
 
+
+    def multiple_entry_fixture(self, second_log=None):
+        source = PTX + b".visible .entry kernel2() {call.uni helper, (); ret;}\n"
+        self.ptx.write_bytes(source)
+        self.sha = hashlib.sha256(source).hexdigest()
+        self.entries, self.calls = bootstrap.ptx_call_graph(source.decode())
+        self.metadata["ptx_sha256"] = self.sha
+        self.metadata["entries"] = ["kernel", "kernel2"]
+        second = LOG.replace("kernel", "kernel2") if second_log is None else second_log
+        return LOG + second
+
+    def test_helper_variants_across_entry_blocks_keep_worst_positive_count(self):
+        log = self.multiple_entry_fixture()
+        prefix, helper = LOG.split("ptxas info : Function properties for helper", 1)
+        first = prefix + "ptxas info : Function properties for helper" + helper.replace(
+            "0 bytes spill stores", "12 bytes spill stores",
+        )
+        log = first + log[len(LOG):]
+        self.write_receipt(self.metadata, log)
+        statistics, _ = self.retained()
+        variants = statistics["helper"]["occurrences"]
+        self.assertEqual(len(variants), 2)
+        self.assertEqual([item["resources"]["st"] for item in variants], [12, 0])
+        self.assertEqual(statistics["helper"]["st"], 12)
+        self.assertTrue(all(item["compiler_context"] is None for item in variants))
+        self.assertEqual(self.invoke(), 1)
+
+    def test_incomplete_variant_is_not_hidden_by_complete_aggregate(self):
+        second = LOG.replace("kernel", "kernel2")
+        second = second.rsplit(", 0 bytes spill loads", 1)[0] + "\n"
+        log = self.multiple_entry_fixture(second)
+        self.assert_rejected(self.metadata, log)
+
+    def test_entry_properties_cannot_repeat_in_another_block(self):
+        log = self.multiple_entry_fixture()
+        log += LOG.split("\n", 1)[1]
+        self.assert_rejected(self.metadata, log)
+
+    def test_parallel_order_does_not_guess_helper_kernel_owner(self):
+        self.multiple_entry_fixture()
+        first_header, first_body = LOG.split("\n", 1)
+        second_header, second_body = LOG.replace("kernel", "kernel2").split("\n", 1)
+        log = first_header + "\n" + second_header + "\n" + first_body + second_body
+        self.write_receipt(self.metadata, log)
+        statistics, _ = self.retained()
+        variants = statistics["helper"]["occurrences"]
+        self.assertEqual(len(variants), 2)
+        self.assertTrue(all(item["compiler_context"] is None for item in variants))
+        self.assertTrue(all(not item["log_block_validated"] for item in variants))
+        self.assertEqual([item["ordinal"] for item in variants], [2, 4])
+
+    def test_equivalent_repeated_builds_allow_different_entry_output_order(self):
+        log = self.multiple_entry_fixture()
+        self.write_receipt(self.metadata, log)
+        self.write_receipt(self.metadata, LOG.replace("kernel", "kernel2") + LOG, 1)
+        self.assertEqual(len(self.retained()[1]["receipts"]), 2)
+
+    def test_helper_register_count_stays_unknown_when_not_reported(self):
+        statistics, _ = self.retained()
+        self.assertNotIn("regs", statistics["helper"])
+        self.assertNotIn("regs", statistics["helper"]["occurrences"][0]["resources"])
+
+    def test_234_entry_log_preserves_all_helper_variants(self):
+        names = [f"world_mixed_f{index}" for index in range(234)]
+        source = b".visible .func helper() {ret;}\n" + b"".join(
+            f".visible .entry {name}() {{call.uni helper, (); ret;}}\n".encode()
+            for name in names
+        )
+        self.ptx.write_bytes(source)
+        self.sha = hashlib.sha256(source).hexdigest()
+        self.entries, self.calls = bootstrap.ptx_call_graph(source.decode())
+        self.metadata["ptx_sha256"] = self.sha
+        self.metadata["entries"] = names
+        blocks = []
+        for index, name in enumerate(names):
+            entry, helper = LOG.replace("kernel", name).split(
+                "ptxas info : Function properties for helper", 1,
+            )
+            helper = helper.replace("0 bytes spill stores", f"{index % 3 * 4} bytes spill stores")
+            helper = helper.replace("0 bytes spill loads", f"{index % 5 * 4} bytes spill loads")
+            blocks.append(entry + "ptxas info : Function properties for helper" + helper)
+        self.write_receipt(self.metadata, "".join(blocks))
+        statistics, _ = self.retained()
+        self.assertEqual(len(statistics), 235)
+        self.assertEqual(sum(len(row["occurrences"]) for row in statistics.values()), 468)
+        self.assertEqual(len(statistics["helper"]["occurrences"]), 234)
+        self.assertEqual(statistics["helper"]["st"], 8)
+        self.assertEqual(statistics["helper"]["ld"], 16)
+        self.assertTrue(all(len(statistics[name]["occurrences"]) == 1 for name in names))
+
+    @unittest.skipUnless(
+        os.environ.get("WARPBRO_TEST_PTXAS_RECEIPT"),
+        "set WARPBRO_TEST_PTXAS_RECEIPT to validate retained raw occurrence preservation",
+    )
+    def test_actual_raw_log_preserves_every_resource_occurrence(self):
+        receipt = Path(os.environ["WARPBRO_TEST_PTXAS_RECEIPT"])
+        metadata = json.loads(receipt.read_text(encoding="utf-8"))
+        log = (receipt.parent / metadata["raw_log"]).read_text(encoding="utf-8")
+        statistics = bootstrap.parse_ptxas_stats(log)
+        occurrences = [item for row in statistics.values() for item in row["occurrences"]]
+        self.assertEqual(len(occurrences), log.count("Function properties for "))
+        self.assertEqual(sorted(item["ordinal"] for item in occurrences), list(range(1, len(occurrences) + 1)))
+        for name in metadata["entries"]:
+            self.assertEqual(len(statistics[name]["occurrences"]), 1)
+        for row in statistics.values():
+            for field in ("frame", "st", "ld", "regs"):
+                reported = [item["resources"][field] for item in row["occurrences"] if field in item["resources"]]
+                if reported:
+                    self.assertEqual(row[field], max(reported))
+                else:
+                    self.assertNotIn(field, row)
+
     def test_helper_only_spill_is_gated(self):
         before, after = LOG.rsplit("0 bytes spill stores", 1)
         self.write_receipt(self.metadata, before + "8 bytes spill stores" + after)
