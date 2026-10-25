@@ -837,7 +837,6 @@ impl App {
                 Ok(())
             }
         };
-        self.evaluated_world = None;
         result.map(|()| serde_json::Value::Null)
     }
 
@@ -1136,14 +1135,23 @@ impl App {
     }
 
     /// Complete imports through the same bus, retaining the request's original document.
-    pub(super) fn take_import_result(&mut self, result: Result<Take, String>) {
-        if let Some(document) = self.takes_view.pending_imports.pop_front() {
-            self.emit_take_for_document(Action::Imported(result), document);
-        } else {
-            self.emit_take(Action::Imported(Err(
-                "Unexpected take import completion without a request".into(),
-            )));
-        }
+    pub(super) fn take_import_result(&mut self, result: Result<Take, String>, ctx: &egui::Context) {
+        let (document, result) = match self.takes_view.pending_imports.pop_front() {
+            Some(document) => (document, result),
+            None => (
+                NodeId(self.world.document.graph.id),
+                Err("Unexpected take import completion without a request".into()),
+            ),
+        };
+        self.emit_retained(
+            crate::events::UiCommand {
+                document: Some(document),
+                frame: None,
+                camera: None,
+                action: crate::events::Action::Take(Action::Imported(result)),
+            },
+            ctx,
+        );
     }
 }
 
@@ -1198,13 +1206,13 @@ mod tests {
         let origin = NodeId(app.world.document.graph.id);
         app.takes_view.pending_imports.push_back(origin);
         app.world.document.graph.id = NodeId::new().uuid();
-        app.take_import_result(Ok(take.clone()));
+        app.take_import_result(Ok(take.clone()), &ctx);
         assert!(app.takes_view.pending_imports.is_empty());
         assert_eq!(app.world.document.takes.list().len(), count);
         app.handle_events(&ctx);
         assert_eq!(app.world.document.takes.list().len(), count);
         // An unrequested completion must report a failure instead of adopting the current document.
-        app.take_import_result(Ok(take));
+        app.take_import_result(Ok(take), &ctx);
         app.handle_events(&ctx);
         assert_eq!(app.world.document.takes.list().len(), count);
         assert!(app.status.contains("Unexpected take import completion"));

@@ -3465,10 +3465,7 @@ fn the_take_row_lists_takes_of_the_nodes_kind_and_copies_keep_their_take_in_one_
     // A copy pasted into the same scene plays the same take; into another scene, none.
     let text = e.document.copy_fragment(&[frac]).unwrap();
     assert_eq!(e.paste(&text).unwrap().takes, 0);
-    assert_eq!(
-        e.document.take_clip(e.active().unwrap()).unwrap(),
-        Some(id)
-    );
+    assert_eq!(e.document.take_clip(e.active().unwrap()).unwrap(), Some(id));
     let mut other = editor();
     assert_eq!(other.paste(&text).unwrap().takes, 1, "reported as a take");
     assert_eq!(

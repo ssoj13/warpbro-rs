@@ -45,7 +45,8 @@ pub fn run() -> anyhow::Result<()> {
     crate::window::run()
 }
 
-struct Entry {
+#[derive(Clone)]
+pub(crate) struct Entry {
     scene: Scene,
     thumb: Option<TextureHandle>,
     path: Option<PathBuf>,
@@ -54,14 +55,15 @@ struct Entry {
 /// The gallery or bookmark card the current document was made from: the card the browser
 /// highlights. Identity, not scene equality: a loaded card's document gets a new id.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum Card {
+pub(crate) enum Card {
     Gallery(usize),
     Bookmark(PathBuf),
 }
 
 /// A bookmark file operation waiting for the file worker (answered as an
 /// `io_service::SceneEvent` with its id): the bookmark list changes only once the file did.
-enum BookmarkOp {
+#[derive(Clone)]
+pub(crate) enum BookmarkOp {
     /// The card a successful save adds (its path is the event's); boxed: an entry holds a scene.
     Save(Box<Entry>),
     Delete,
@@ -69,7 +71,7 @@ enum BookmarkOp {
 
 /// A document history intent shared by the Edit menu, hotkeys and REST.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum History {
+pub(crate) enum History {
     Undo,
     Redo,
     /// Back to the document the scene was loaded as (`App::origin`), one undoable step.
@@ -277,6 +279,8 @@ pub(crate) struct App {
     show_ui: bool,
     status: String,
     event_bus: playa_events::EventBus,
+    // Own the listener for the app lifetime; unit tests use explicit isolated servers.
+    #[cfg_attr(test, allow(dead_code))]
     control: Option<app_control::Server>,
     control_started: bool,
     frame_ms: f32,
@@ -2061,9 +2065,14 @@ impl App {
 
     /// Send a scene or template `action` on `path` to the file worker; its answer comes back by
     /// id (`scene_file_event`).
-    fn submit_scene_action(&mut self, mut path: PathBuf, action: crate::templates::FileAction) {
+    fn submit_scene_action(
+        &mut self,
+        mut path: PathBuf,
+        action: crate::templates::FileAction,
+    ) -> Result<(), String> {
         let save = action.save();
-        self.world.finish_edit();
+        let mut world = self.world.clone();
+        world.finish_edit();
         if save && path.extension().is_none() {
             path.set_extension(crate::fs_name::SCENE_SUFFIX);
         }
@@ -2072,18 +2081,18 @@ impl App {
         if action == crate::templates::FileAction::Save
             && self.scene_file_path.as_ref() != Some(&path)
         {
-            self.world.renew_identity();
+            world.renew_identity();
         }
         if save {
-            // The scene file carries the CamClip as it is now.
-            self.world.document.camera_slots = self.camera_slots;
+            // Stage file identity and CamClip until the worker accepts the request.
+            world.document.camera_slots = self.camera_slots;
         }
         let id = self.next_file_id();
         let command = if save {
             crate::io_service::Command::SaveScene {
                 id,
                 path: path.clone(),
-                document: Box::new(self.world.document.clone()),
+                document: Box::new(world.document.clone()),
             }
         } else {
             crate::io_service::Command::OpenScene {
@@ -2091,17 +2100,15 @@ impl App {
                 path: path.clone(),
             }
         };
-        match self.io.send(command) {
-            Ok(()) => {
-                self.scene_file_pending = Some((id, self.load_revision, action));
-                self.status = format!(
-                    "{} {}",
-                    if save { "Saving" } else { "Opening" },
-                    path.display()
-                );
-            }
-            Err(error) => self.status = error,
-        }
+        self.io.send(command)?;
+        self.world = world;
+        self.scene_file_pending = Some((id, self.load_revision, action));
+        self.status = format!(
+            "{} {}",
+            if save { "Saving" } else { "Opening" },
+            path.display()
+        );
+        Ok(())
     }
 
     fn update_scene_picker(&mut self, ctx: &egui::Context) {
@@ -2126,7 +2133,18 @@ impl App {
         }
     }
 
-    fn scene_file_event(&mut self, event: crate::io_service::SceneEvent) {
+    fn scene_file_event(&mut self, event: crate::io_service::SceneEvent, ctx: &egui::Context) {
+        self.emit_completion(
+            AppAction::SceneFileCompleted {
+                id: event.id,
+                path: event.path,
+                result: event.result,
+            },
+            ctx,
+        );
+    }
+
+    fn apply_scene_file_event(&mut self, event: crate::io_service::SceneEvent) {
         let Some((id, revision, action)) = self.scene_file_pending else {
             return;
         };
@@ -2163,7 +2181,24 @@ impl App {
     }
 
     /// A finished bookmark save or delete (`BookmarkOp`): the list follows the file only now.
-    fn bookmark_event(&mut self, op: BookmarkOp, event: crate::io_service::SceneEvent) {
+    fn bookmark_event(
+        &mut self,
+        op: BookmarkOp,
+        event: crate::io_service::SceneEvent,
+        ctx: &egui::Context,
+    ) {
+        self.emit_completion(
+            AppAction::BookmarkCompleted {
+                op,
+                id: event.id,
+                path: event.path,
+                result: event.result,
+            },
+            ctx,
+        );
+    }
+
+    fn apply_bookmark_event(&mut self, op: BookmarkOp, event: crate::io_service::SceneEvent) {
         if let Err(error) = event.result {
             self.status = format!("Bookmark {}: {error}", event.path.display());
             return;
@@ -2197,12 +2232,13 @@ impl App {
     }
 
     /// File > Save: to the scene's file, or through the dialog for a scene that has none.
-    fn save_scene(&mut self) {
+    fn save_scene(&mut self) -> Result<(), String> {
         if let Some(path) = self.scene_file_path.clone() {
-            self.submit_scene_action(path, crate::templates::FileAction::Save);
+            self.submit_scene_action(path, crate::templates::FileAction::Save)?;
         } else {
             self.scene_action_dialog(crate::templates::FileAction::Save);
         }
+        Ok(())
     }
 
     /// File > New: everything cleared, the scene the app starts with loaded as a new document.
@@ -2241,6 +2277,11 @@ impl App {
     /// gets its own identity: `WorldDocument::renew_identity`). A new history starts; the
     /// colour state follows the document at the next `refresh_scene`.
     fn load(&mut self, mut scene: Scene, mode: Load) {
+        self.fly = None;
+        self.fly_speed_scale = 1.0;
+        self.orbit = cam_controls::HoudiniOrbit::default();
+        self.orbit_drag = Default::default();
+        self.orbit_written = None;
         self.takes_recorder.cancel();
         self.preview.cancel();
         self.preview_key = None;
@@ -2265,6 +2306,7 @@ impl App {
         self.world_ui.reset();
         self.world_ui.seek(document.first);
         self.world = crate::world::WorldEditor::new(document.clone());
+        self.world.new_key = self.world_ui.new_key;
         self.material_gallery.invalidate();
         self.origin = scene.clone();
         scene.document = Some(Box::new(document));
@@ -2702,30 +2744,6 @@ impl App {
                 targets: None,
                 open: true,
             });
-        }
-    }
-
-    /// Presets are reusable sources. Only this explicit action creates a
-    /// workspace Material node; creation never changes object assignments.
-    #[cfg(test)]
-    fn add_library_material(&mut self, index: usize) {
-        let preset = &crate::materials::PRESETS[index];
-        let mut material = Material::default();
-        preset.apply(&mut material);
-        self.world.finish_edit();
-        match self
-            .world
-            .execute(crate::world::WorldCommand::CreateMaterial {
-                material,
-                name: preset.name().into(),
-            }) {
-            Ok(()) => {
-                if let Some(id) = self.world.active() {
-                    self.select_material_node(id);
-                }
-                self.panels_to_open.push(dock::Panel::Materials);
-            }
-            Err(error) => self.status = error,
         }
     }
 
@@ -3330,9 +3348,9 @@ impl App {
             match self.bookmark_ops.iter().position(|(id, _)| *id == event.id) {
                 Some(index) => {
                     let (_, op) = self.bookmark_ops.remove(index);
-                    self.bookmark_event(op, event);
+                    self.bookmark_event(op, event, ctx);
                 }
-                None => self.scene_file_event(event),
+                None => self.scene_file_event(event, ctx),
             }
         }
         while let Some(result) = self.io.poll() {
@@ -3345,7 +3363,7 @@ impl App {
             self.window_event(ctx, event);
         }
         while let Some(result) = self.io.poll_take() {
-            self.take_import_result(result);
+            self.take_import_result(result, ctx);
         }
     }
     pub(crate) fn gui_fps(&self) -> u32 {
@@ -4306,11 +4324,7 @@ impl App {
         if pending.document != playa_graph::NodeId(self.world.document.graph.id)
             || pending.camera != self.world.document.active_camera
             || pending.frame != f64::from(self.world_ui.playhead)
-            || (pending.focus
-                && self
-                    .request
-                    .as_ref()
-                    .is_none_or(|request| request.generation != pending.generation))
+            || (pending.focus && self.world.revision() != pending.revision)
         {
             return;
         }
@@ -4501,7 +4515,7 @@ struct PendingPick {
     document: crate::world::NodeId,
     camera: Option<crate::world::NodeId>,
     frame: f64,
-    generation: u64,
+    revision: u64,
     nodes: Vec<Option<playa_graph::NodeId>>,
     add: bool,
     focus: bool,
@@ -5141,6 +5155,21 @@ fn flight_held(ui: &egui::Ui, resp: &egui::Response) -> bool {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    fn assert_camera_orientation_roundtrip(actual: glam::Quat, expected: glam::Quat) {
+        let relative = actual * expected.conjugate();
+        // atan2 retains precision near identity; acos(dot) loses it after f32 rounding.
+        let angle = 2.0
+            * glam::Vec3::new(relative.x, relative.y, relative.z)
+                .length()
+                .atan2(relative.w.abs());
+        // Camera authoring passes through matrix, quaternion and Euler reconstruction.
+        let roundtrip_radians = 32.0 * f32::EPSILON;
+        assert!(
+            angle <= roundtrip_radians,
+            "camera orientation drifted by {angle} radians"
+        );
+    }
 
     #[test]
     fn queued_camera_edit_uses_the_emission_frame_and_one_undo() {
@@ -5937,6 +5966,61 @@ mod tests {
     }
 
     #[test]
+    fn a_new_document_does_not_continue_the_previous_flight_or_orbit() {
+        let _gpu_test = crate::test_gpu::lock();
+        let mut app = App::new();
+        let ctx = egui::Context::default();
+        app.refresh_scene().unwrap();
+        let default_camera = app.scene.camera;
+        app.emit_app(AppAction::CameraPatch(
+            serde_json::json!({"target":[8.0,0.0,0.0]}),
+        ));
+        app.handle_events(&ctx);
+        app.start_flight();
+        app.orbit_written = Some(app.scene.camera);
+        assert!(app.fly.is_some());
+        app.emit_app(AppAction::NewScene);
+        app.handle_events(&ctx);
+        assert!(app.fly.is_none());
+        assert!(app.orbit_written.is_none());
+        app.emit_app(AppAction::Fly(FlyInput {
+            intents: Vec::new(),
+            wheel: 0.0,
+            held: false,
+            align: false,
+            dt: 1.0 / 60.0,
+            width: 640,
+            height: 360,
+            speed_scale: 1.0,
+        }));
+        app.handle_events(&ctx);
+        assert_eq!(app.scene.camera, default_camera);
+    }
+
+    #[test]
+    fn idle_event_dispatch_keeps_the_evaluated_scene_cached() {
+        let _gpu_test = crate::test_gpu::lock();
+        let mut app = App::new();
+        let ctx = egui::Context::default();
+        app.refresh_scene().unwrap();
+        let clones = app.snapshot_clones;
+        let objects = app.scene.objects.as_ptr();
+        for _ in 0..32 {
+            crate::world_events::emit_action(
+                &app.event_emitter(),
+                &app.world,
+                f64::from(app.world_ui.playhead),
+                crate::world_events::WorldAction::FinishEdit { held: None },
+            )
+            .unwrap();
+            app.emit_app(AppAction::ShowUi(true));
+            app.handle_events(&ctx);
+        }
+        assert_eq!(app.snapshot_clones, clones);
+        assert_eq!(app.scene.objects.as_ptr(), objects);
+    }
+
+    #[test]
     fn cached_preview_skips_world_evaluation_until_pause() {
         let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
@@ -5969,6 +6053,61 @@ mod tests {
     }
 
     #[test]
+    fn full_event_bus_retains_terminal_scene_and_bookmark_results() {
+        use crate::events::{Action, UiCommand, UiEvent};
+        let _gpu_test = crate::test_gpu::lock();
+        let mut app = App::new();
+        let ctx = egui::Context::default();
+        let fill = |app: &App| {
+            let mut count = 0;
+            loop {
+                let event = UiEvent::ui(UiCommand {
+                    document: None,
+                    frame: None,
+                    camera: None,
+                    action: Action::Query("get.commands".into()),
+                });
+                if app.event_emitter().try_emit(event).is_err() {
+                    break;
+                }
+                count += 1;
+            }
+            assert!(count > 0);
+        };
+        let scene = Scene::preset(Formula::Mandelbox(MandelBox::PRESET));
+        app.scene_file_pending = Some((71, app.load_revision, crate::templates::FileAction::Open));
+        fill(&app);
+        app.scene_file_event(
+            crate::io_service::SceneEvent {
+                id: 71,
+                path: PathBuf::from("completion.frac.json"),
+                result: Ok(Some(Box::new(scene))),
+            },
+            &ctx,
+        );
+        app.handle_events(&ctx);
+        assert!(app.scene_file_pending.is_none());
+        assert!(matches!(app.scene.formula, Formula::Mandelbox(_)));
+        let count = app.bookmarks.len();
+        fill(&app);
+        app.bookmark_event(
+            BookmarkOp::Save(Box::new(Entry {
+                scene: app.frozen_world_scene(),
+                thumb: None,
+                path: None,
+            })),
+            crate::io_service::SceneEvent {
+                id: 72,
+                path: PathBuf::from("completion-bookmark.json"),
+                result: Ok(None),
+            },
+            &ctx,
+        );
+        app.handle_events(&ctx);
+        assert_eq!(app.bookmarks.len(), count + 1);
+    }
+
+    #[test]
     fn file_load_completion_preserves_document_and_discards_stale_requests() {
         let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
@@ -5977,11 +6116,18 @@ mod tests {
         let expected = serde_json::to_value(&document).unwrap();
         scene.document = Some(Box::new(document));
         app.scene_file_pending = Some((7, app.load_revision, crate::templates::FileAction::Open));
-        app.scene_file_event(crate::io_service::SceneEvent {
-            id: 7,
-            path: PathBuf::from("opened.frac.json"),
-            result: Ok(Some(Box::new(scene))),
-        });
+        let previous = serde_json::to_value(&app.world.document).unwrap();
+        let ctx = egui::Context::default();
+        app.scene_file_event(
+            crate::io_service::SceneEvent {
+                id: 7,
+                path: PathBuf::from("opened.frac.json"),
+                result: Ok(Some(Box::new(scene))),
+            },
+            &ctx,
+        );
+        assert_eq!(serde_json::to_value(&app.world.document).unwrap(), previous);
+        app.handle_events(&ctx);
         assert_eq!(serde_json::to_value(&app.world.document).unwrap(), expected);
         assert_eq!(
             app.scene_file_path.as_deref(),
@@ -5995,13 +6141,17 @@ mod tests {
         assert_eq!(app.snapshot_clones, clones);
         app.scene_file_pending = Some((8, app.load_revision, crate::templates::FileAction::Open));
         app.load(Scene::preset(Formula::Mandelbulb(Bulb::PRESET)), Load::New);
-        app.scene_file_event(crate::io_service::SceneEvent {
-            id: 8,
-            path: PathBuf::from("stale.frac.json"),
-            result: Ok(Some(Box::new(Scene::preset(Formula::Mandelbox(
-                MandelBox::PRESET,
-            ))))),
-        });
+        app.scene_file_event(
+            crate::io_service::SceneEvent {
+                id: 8,
+                path: PathBuf::from("stale.frac.json"),
+                result: Ok(Some(Box::new(Scene::preset(Formula::Mandelbox(
+                    MandelBox::PRESET,
+                ))))),
+            },
+            &ctx,
+        );
+        app.handle_events(&ctx);
         assert!(matches!(
             app.scene.formula,
             crate::scene::Formula::Mandelbulb(_)
@@ -6027,6 +6177,46 @@ mod tests {
                 });
             });
         }
+    }
+
+    #[test]
+    fn dock_save_and_restore_events_preserve_the_drawn_layout() {
+        let _gpu_test = crate::test_gpu::lock();
+        let mut app = App::new();
+        let ctx = egui::Context::default();
+        let expected_layout = app.dock.clone();
+        let expected = expected_layout.panels();
+        app.emit_app(AppAction::SaveLayout("EventBus regression".into()));
+        let _ = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 720.0),
+                )),
+                ..Default::default()
+            },
+            |root| app.dock_ui(root),
+        );
+        app.handle_events(&ctx);
+        let blob = app.layouts.store.select("EventBus regression").unwrap();
+        let saved = dock::restore_layout(&blob).unwrap();
+        assert_eq!(
+            saved.panels(),
+            expected,
+            "save must see the authoritative layout"
+        );
+
+        // Dock drawing reads a snapshot; accepting a layout edit keeps the authored copy.
+        let snapshot = app.dock.clone();
+        app.emit_app(AppAction::ResetLayout);
+        app.emit_app(AppAction::RestoreLayout(saved.clone()));
+        app.handle_events(&ctx);
+        assert_eq!(snapshot.panels(), expected);
+        assert_eq!(app.event_bus.queue_len(), 0);
+        assert_eq!(
+            soluwell_chrome::dock_layout::to_blob(&app.dock).unwrap(),
+            blob
+        );
     }
 
     #[test]
@@ -6289,7 +6479,7 @@ mod tests {
             moved.dot(up).abs() < 1e-3 * moved.length(),
             "no drift across the rolled axis: {moved}"
         );
-        assert_eq!(app.scene.camera.roll_degrees, 90.0);
+        assert_camera_orientation_roundtrip(app.scene.camera.orientation(), orientation);
 
         // Shift + LMB keeps the nearest world plane while allowing continuous yaw.
         app.scene.camera.roll_degrees = 0.0;
@@ -6654,6 +6844,8 @@ mod tests {
     fn right_button_enters_flight_moves_and_releases_capture() {
         let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
+        app.refresh_scene().unwrap();
+        let home_camera = app.scene.camera;
         let ctx = egui::Context::default();
         let mut time = 0.0;
         let mut frame = |app: &mut App, events: Vec<egui::Event>| {
@@ -6842,7 +7034,23 @@ mod tests {
         );
         assert!(app.fly.is_none());
         frame(&mut app, vec![shortcut(egui::Key::H)]);
-        assert_eq!(app.scene.camera, app.origin.camera);
+        let restored = app.scene.camera;
+        assert_eq!(restored.target, home_camera.target);
+        assert_eq!(restored.free_flight, home_camera.free_flight);
+        assert_eq!(restored.fov_y_degrees, home_camera.fov_y_degrees);
+        assert_eq!(restored.f_number, home_camera.f_number);
+        assert_eq!(restored.sensor_height, home_camera.sensor_height);
+        assert_eq!(restored.focus_distance, home_camera.focus_distance);
+        assert_camera_orientation_roundtrip(restored.orientation(), home_camera.orientation());
+        // TRS reconstruction computes distance from a transformed eye; allow its f32 rounding.
+        let distance_roundtrip =
+            8.0 * f32::EPSILON * restored.distance.abs().max(home_camera.distance.abs());
+        assert!(
+            (restored.distance - home_camera.distance).abs() <= distance_roundtrip,
+            "home distance changed: {} -> {}",
+            home_camera.distance,
+            restored.distance
+        );
         let mut home_release = shortcut(egui::Key::H);
         if let egui::Event::Key { pressed, .. } = &mut home_release {
             *pressed = false;
@@ -7292,7 +7500,8 @@ mod tests {
         app.submit_scene_action(
             std::env::temp_dir().join("warpbro-identity-copy.json"),
             crate::templates::FileAction::Save,
-        );
+        )
+        .unwrap();
         let copy = app.world.document.graph.id;
         assert_ne!(copy, second);
         assert!(app.world.undo());
@@ -7366,7 +7575,8 @@ mod tests {
         app.submit_scene_action(
             std::env::temp_dir().join("warpbro-camclip.json"),
             crate::templates::FileAction::Save,
-        );
+        )
+        .unwrap();
         assert_eq!(app.world.document.camera_slots.slots[0], Some(stored));
         // A scene that carries a CamClip replaces the application's.
         let mut other = app.scene.clone();
@@ -7557,6 +7767,7 @@ mod tests {
         let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
         let count = app.bookmarks.len();
+        let ctx = egui::Context::default();
         let path = PathBuf::from("bookmark-test.json");
         let event = |result: Result<Option<Box<Scene>>, String>| crate::io_service::SceneEvent {
             id: 1,
@@ -7571,18 +7782,28 @@ mod tests {
         app.bookmark_event(
             BookmarkOp::Save(Box::new(card(&app))),
             event(Err("disk full".into())),
+            &ctx,
+        );
+        app.handle_events(&ctx);
+        assert_eq!(app.bookmarks.len(), count);
+        app.bookmark_event(
+            BookmarkOp::Save(Box::new(card(&app))),
+            event(Ok(None)),
+            &ctx,
         );
         assert_eq!(app.bookmarks.len(), count);
-        app.bookmark_event(BookmarkOp::Save(Box::new(card(&app))), event(Ok(None)));
+        app.handle_events(&ctx);
         assert_eq!(app.bookmarks.len(), count + 1);
         assert_eq!(
             app.bookmarks.last().and_then(|entry| entry.path.clone()),
             Some(path.clone())
         );
         assert!(app.panels_to_open.contains(&dock::Panel::Bookmarks));
-        app.bookmark_event(BookmarkOp::Delete, event(Err("locked".into())));
+        app.bookmark_event(BookmarkOp::Delete, event(Err("locked".into())), &ctx);
+        app.handle_events(&ctx);
         assert_eq!(app.bookmarks.len(), count + 1);
-        app.bookmark_event(BookmarkOp::Delete, event(Ok(None)));
+        app.bookmark_event(BookmarkOp::Delete, event(Ok(None)), &ctx);
+        app.handle_events(&ctx);
         assert_eq!(app.bookmarks.len(), count);
     }
 }

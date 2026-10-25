@@ -814,6 +814,7 @@ impl State {
 
     /// Use another config: the names of the old one mean nothing there, so they go
     /// back to the new config's defaults.
+    #[cfg(test)]
     pub fn set_config(&mut self, config: String) {
         self.sel = Sel {
             on: self.sel.on,

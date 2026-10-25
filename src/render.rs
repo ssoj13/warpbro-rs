@@ -864,7 +864,9 @@ impl Gpu {
         &mut self,
         scene: &Scene,
     ) -> Result<Option<[u8; 32]>, RenderError> {
-        Ok(self.environment_for(scene.environment.key().as_ref())?.map(|m| m.fingerprint()))
+        Ok(self
+            .environment_for(scene.environment.key().as_ref())?
+            .map(|m| m.fingerprint()))
     }
 
     /// Nonblocking shader admission for the interactive worker. CLI callers keep the normal
@@ -882,13 +884,16 @@ impl Gpu {
         if self.resolve_backend(scene)? != Backend::Wgpu {
             return Ok(true);
         }
-        let prepared = self.preparation.get(scene, width as u32, height as u32)
+        let prepared = self
+            .preparation
+            .get(scene, width as u32, height as u32)
             .map_err(RenderError::Scene)?;
         #[cfg(test)]
         let force_mixed = self.force_mixed_world;
         #[cfg(not(test))]
         let force_mixed = false;
-        self.wgpu()?.pipeline_ready(scene, &prepared, pick, force_mixed)
+        self.wgpu()?
+            .pipeline_ready(scene, &prepared, pick, force_mixed)
     }
 
     /// Admission of a job before it is queued: the backend resolves (an unavailable explicit
@@ -2737,7 +2742,10 @@ mod tests {
         let key = DisplayKey::new(&scene, Some(0));
         scene.render.denoise.interval += 1;
         assert!(key.matches(&scene, Some(0)));
-        assert!(!key.matches(&scene, Some(1)), "a reloaded config redisplays");
+        assert!(
+            !key.matches(&scene, Some(1)),
+            "a reloaded config redisplays"
+        );
         scene.render.exposure_stops += 0.25;
         assert!(!key.matches(&scene, Some(0)));
         scene.render.exposure_stops -= 0.25;

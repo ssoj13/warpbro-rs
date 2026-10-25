@@ -48,6 +48,17 @@ pub(crate) enum AppAction {
         path: PathBuf,
         action: crate::templates::FileAction,
     },
+    SceneFileCompleted {
+        id: u64,
+        path: PathBuf,
+        result: Result<Option<Box<Scene>>, String>,
+    },
+    BookmarkCompleted {
+        op: BookmarkOp,
+        id: u64,
+        path: PathBuf,
+        result: Result<Option<Box<Scene>>, String>,
+    },
     SaveScene,
     RefreshTemplates,
     BuiltinTemplate(usize),
@@ -114,11 +125,6 @@ pub(crate) enum AppAction {
     ColourPresets(crate::ocio::ColourPresets),
     StoreCameraSlot(usize),
     RecallCameraSlot(usize),
-    CameraPose {
-        camera: Camera,
-        gesture: Option<u64>,
-        navigated: bool,
-    },
     FocusDistance(f32),
     FrameCamera {
         width: u32,
@@ -176,6 +182,126 @@ pub(crate) enum AppAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resting_pole_orbit_preserves_controller_heading_until_an_external_camera_edit() {
+        use cam_controls::{CameraIntent, OrbitSnapMode};
+        let mut app = App::new();
+        let ctx = egui::Context::default();
+        let orbit = |intents| {
+            AppAction::Orbit(OrbitInput {
+                intents,
+                dt: 1.0 / 60.0,
+                width: 800,
+                height: 450,
+            })
+        };
+        app.emit_app(AppAction::CameraPatch(json!({
+            "yaw_degrees": 0.0, "pitch_degrees": 80.0, "roll_degrees": 0.0,
+        })));
+        app.handle_events(&ctx);
+        app.emit_app(orbit(vec![CameraIntent::OrbitSnap {
+            yaw_delta: 0.0,
+            pitch_delta: 20.0_f32.to_radians(),
+            start: true,
+            mode: OrbitSnapMode::Axis,
+        }]));
+        app.handle_events(&ctx);
+        let top = app.scene.camera;
+        assert!((top.pitch_degrees - 90.0).abs() < 1e-3);
+        assert!(!app.orbit.rig.has_inertia());
+        let pole_orientation = app.orbit.rig.pose.orientation;
+        let heading = cam_controls::yaw_pitch_from_orientation(pole_orientation).0;
+        app.emit_app(orbit(Vec::new()));
+        app.handle_events(&ctx);
+        assert_eq!(
+            app.orbit.rig.pose.orientation, pole_orientation,
+            "an idle dispatch must retain the controller's pole orientation"
+        );
+        app.emit_app(orbit(vec![CameraIntent::Orbit {
+            yaw_delta: 0.0,
+            pitch_delta: -10.0_f32.to_radians(),
+        }]));
+        app.handle_events(&ctx);
+        let left_heading =
+            cam_controls::yaw_pitch_from_orientation(app.orbit.rig.pose.orientation).0;
+        assert!(
+            (left_heading - heading).abs() < 1e-4,
+            "leaving the pole changed controller heading: {heading} -> {left_heading}"
+        );
+        assert!(
+            (app.scene.camera.yaw_degrees - top.yaw_degrees).abs() < 1e-2,
+            "leaving the pole changed accepted heading: {} -> {}",
+            top.yaw_degrees,
+            app.scene.camera.yaw_degrees
+        );
+
+        app.emit_app(AppAction::CameraPatch(
+            json!({"yaw_degrees": 65.0, "pitch_degrees": 25.0}),
+        ));
+        app.handle_events(&ctx);
+        let external = app.scene.camera;
+        app.emit_app(orbit(Vec::new()));
+        app.handle_events(&ctx);
+        let expected = cam_controls::OrbitPose::from_yaw_pitch(
+            (external.yaw_degrees - 90.0).to_radians(),
+            external.pitch_degrees.to_radians(),
+            external.distance * app.scene.camera_radius(),
+            glam::Vec3::from_array(external.target),
+        );
+        assert_eq!(
+            app.orbit.rig.pose.orientation, expected.orientation,
+            "an external camera edit must replace the controller orientation"
+        );
+    }
+
+    #[test]
+    fn pick_preparation_uses_accepted_camera_and_viewport_profile_without_an_old_request() {
+        let mut app = App::new();
+        let ctx = egui::Context::default();
+        let frame = f64::from(app.world_ui.playhead);
+        let stale_camera = app.scene.camera;
+        let mut camera = stale_camera;
+        camera.target[0] += 0.75;
+        let profile = app
+            .world
+            .document
+            .viewport_render(frame, true)
+            .unwrap()
+            .effective
+            .profile;
+        app.emit_app(AppAction::Edit {
+            command: crate::world::WorldCommand::SetAttribute {
+                id: profile,
+                path: "/quality/max_bounces".into(),
+                value: json!(7),
+                frame,
+            },
+            gesture: None,
+        });
+        app.emit_app(AppAction::CameraPatch(
+            serde_json::to_value(camera).unwrap(),
+        ));
+        app.handle_events(&ctx);
+        let accepted = app.world.document.snapshot(frame).unwrap().camera;
+        assert_eq!(accepted.target[0], stale_camera.target[0] + 0.75);
+        assert!(app.request.is_none());
+        // Playback may have been started after the camera edit but before the click.
+        app.world_ui.playing = true;
+        app.showing_preview = true;
+        let picked = app.prepare_pick_scene(frame).unwrap();
+        assert_eq!(picked.camera, accepted);
+        assert_ne!(picked.camera.target, stale_camera.target);
+        assert_eq!(picked.render.max_bounces, 7);
+        assert!(!app.world_ui.playing);
+        assert!(!app.showing_preview);
+        app.viewport_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(800.0, 450.0),
+        ));
+        assert_eq!(app.action_extent(&ctx), [800, 450]);
+    }
+
     #[test]
     fn preference_delta_keeps_intervening_edits_and_inserts_file_history() {
         let before = json!({"controls":{"look":1,"speed":2},"file_dialogs":{"directories":{}}});
@@ -263,8 +389,7 @@ impl App {
         let edit_frame = frame.unwrap_or_else(|| f64::from(self.world_ui.playhead));
         if matches!(
             &action,
-            AppAction::CameraPose { .. }
-                | AppAction::CameraPatch(_)
+            AppAction::CameraPatch(_)
                 | AppAction::CameraOrbit { .. }
                 | AppAction::CameraPan { .. }
                 | AppAction::CameraZoom { .. }
@@ -436,8 +561,19 @@ impl App {
                 self.card = card;
             }
             AppAction::SceneDialog(action) => self.scene_action_dialog(action),
-            AppAction::SceneFile { path, action } => self.submit_scene_action(path, action),
-            AppAction::SaveScene => self.save_scene(),
+            AppAction::SceneFile { path, action } => self.submit_scene_action(path, action)?,
+            AppAction::SceneFileCompleted { id, path, result } => {
+                self.apply_scene_file_event(crate::io_service::SceneEvent { id, path, result });
+            }
+            AppAction::BookmarkCompleted {
+                op,
+                id,
+                path,
+                result,
+            } => {
+                self.apply_bookmark_event(op, crate::io_service::SceneEvent { id, path, result });
+            }
+            AppAction::SaveScene => self.save_scene()?,
             AppAction::RefreshTemplates => self.refresh_templates(),
             AppAction::BuiltinTemplate(index) => {
                 let scene = crate::templates::builtin_scene(index)?;
@@ -641,22 +777,6 @@ impl App {
                 camera.focus_distance = distance;
                 self.author_camera(camera, edit_frame, self.world_ui.auto_key, None, false)?;
             }
-            AppAction::CameraPose {
-                camera,
-                gesture,
-                navigated,
-            } => {
-                self.cancel_navigation_preview();
-                self.fly = None;
-                self.orbit.rig.stop_inertia();
-                self.author_camera(
-                    camera,
-                    edit_frame,
-                    self.world_ui.auto_key,
-                    gesture,
-                    navigated,
-                )?;
-            }
             AppAction::FrameCurrentCamera => {
                 let [width, height] = self.action_extent(ctx);
                 return self.handle_app_action(
@@ -720,7 +840,7 @@ impl App {
                 self.world.click_select(id, add);
             }
             AppAction::Pick { ndc, add, focus } => {
-                self.queue_pick(ndc, add, focus, edit_frame)?;
+                self.queue_pick(ndc, add, focus, edit_frame, ctx)?;
                 return Ok(json!({"queued": true, "pick_id": self.pick_sequence}));
             }
             AppAction::SetPlaying(playing) => {
@@ -797,7 +917,7 @@ impl App {
             }
             AppAction::LayoutStore(store) => self.layouts.store = store,
         }
-        self.evaluated_world = None;
+        self.refresh_scene()?;
         Ok(
             json!({"success": true, "revision": self.world.revision(), "selection": self.world.selected(), "camera": self.scene.camera}),
         )
@@ -844,7 +964,6 @@ impl App {
             None,
         )?;
         self.default_colour = selection;
-        self.scene = edited;
         Ok(())
     }
 
@@ -917,6 +1036,8 @@ impl App {
         if let Some(staged) = staged {
             self.world = staged;
         }
+        // The document canonicalizes the requested pose through its transform matrix.
+        self.evaluated_world = None;
         self.scene.camera = camera;
         self.navigated |= navigated;
         Ok(())
@@ -928,34 +1049,61 @@ impl App {
         add: bool,
         focus: bool,
         frame: f64,
+        ctx: &egui::Context,
     ) -> Result<(), String> {
         if ndc.iter().any(|v| !v.is_finite() || v.abs() > 1.0) {
             return Err("Pick NDC must be in [-1,1]".into());
         }
-        let request = self.request.as_ref().ok_or("No viewport request")?;
+        let scene = self.prepare_pick_scene(frame)?;
+        let [width, height] = self.action_extent(ctx);
         self.pick_sequence = self.pick_sequence.wrapping_add(1);
         let pending = PendingPick {
             id: self.pick_sequence,
             document: playa_graph::NodeId(self.world.document.graph.id),
             camera: self.world.document.active_camera,
             frame,
-            generation: request.generation,
-            nodes: request.scene.objects.iter().map(|o| o.node).collect(),
+            revision: self.world.revision(),
+            nodes: scene.objects.iter().map(|o| o.node).collect(),
             add,
             focus,
-            camera_radius: request.scene.camera_radius(),
+            camera_radius: scene.camera_radius(),
         };
         self.renderer
             .try_command(Command::Pick {
                 id: pending.id,
-                scene: Box::new(request.scene.clone()),
-                width: request.width,
-                height: request.height,
+                scene: Box::new(scene),
+                width: width as usize,
+                height: height as usize,
                 ndc,
             })
             .map_err(|e| e.to_string())?;
         self.pick_pending = Some(pending);
         Ok(())
+    }
+
+    fn prepare_pick_scene(&mut self, frame: f64) -> Result<Scene, String> {
+        self.cancel_navigation_preview();
+        let document = &self.world.document;
+        let policy = document.viewport_policy(frame)?;
+        let mut traced = document.snapshot(frame)?;
+        // Match viewport settling: display-only changes do not select the moving profile.
+        traced.animation = self.last_scene.animation.clone();
+        traced.render.exposure_stops = self.last_scene.render.exposure_stops;
+        traced.render.saturation = self.last_scene.render.saturation;
+        traced.render.reinhard = self.last_scene.render.reinhard;
+        traced.render.denoise = self.last_scene.render.denoise;
+        traced.colour = self.last_scene.colour.clone();
+        let moving = traced != self.last_scene
+            || self.last_change.elapsed().as_secs_f32() * 1000.0 < policy.settle_delay_ms;
+        let selection = document.viewport_render(frame, moving)?;
+        let mut scene = document.snapshot_with_render_profile(
+            selection.effective.profile,
+            frame,
+            crate::world::View::Viewport,
+        )?;
+        selection.effective.apply_to(&mut scene);
+        scene.animation = Default::default();
+        Ok(scene)
     }
 }
 
@@ -1053,8 +1201,20 @@ impl App {
         let radius = self.scene.camera_radius();
         let mut camera = self.scene.camera;
         let rig = &mut self.orbit.rig;
-        if rig.has_inertia() && self.orbit_written != Some(camera) {
+        let continuing = self.orbit_written == Some(camera);
+        if !continuing {
             rig.stop_inertia();
+            rig.pose = OrbitPose::from_yaw_pitch(
+                (camera.yaw_degrees - 90.0).to_radians(),
+                camera.pitch_degrees.to_radians(),
+                camera.distance * radius,
+                Vec3::from_array(camera.target),
+            );
+        } else {
+            // Keep the controller's pole heading; the document's Euler decomposition is
+            // ambiguous there. Position still follows the accepted camera and scene radius.
+            rig.pose.distance = camera.distance * radius;
+            rig.pose.target = Vec3::from_array(camera.target);
         }
         rig.apply_navigation(
             self.controls
@@ -1065,13 +1225,7 @@ impl App {
         rig.pitch_limit = 89.0_f32.to_radians();
         rig.projection.distance_min = 0.05 * radius;
         rig.projection.distance_max = f32::MAX;
-        let seed = OrbitPose::from_yaw_pitch(
-            (camera.yaw_degrees - 90.0).to_radians(),
-            camera.pitch_degrees.to_radians(),
-            camera.distance * radius,
-            Vec3::from_array(camera.target),
-        );
-        rig.pose = seed;
+        let seed = rig.pose;
         let viewport = cam_viewport::ViewportSize::new(input.width, input.height);
         let (sin, cos) = camera.roll_degrees.to_radians().sin_cos();
         let unroll = |x: f32, y: f32| (x * cos + y * sin, y * cos - x * sin);
@@ -1122,7 +1276,6 @@ impl App {
             }
             changed = true;
         }
-        self.orbit_written = rig.has_inertia().then_some(camera);
         if changed {
             self.author_camera(
                 camera,

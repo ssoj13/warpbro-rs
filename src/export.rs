@@ -769,7 +769,7 @@ impl ExportController {
         actions: &mut UiActions,
     ) {
         let kind_before = output.output_kind();
-        self.dialog.export_mut().preset = (*output).preset.clone();
+        self.dialog.export_mut().preset = output.preset.clone();
         let config = video_io_egui::ShowConfig {
             show_range: false,
             show_size: true,
@@ -785,8 +785,8 @@ impl ExportController {
                 output.output_transform_ui(ui, ocio, current, kind);
             }
         });
-        if self.dialog.export().preset != (*output).preset {
-            (*output).preset = self.dialog.export().preset.clone();
+        if self.dialog.export().preset != output.preset {
+            output.preset = self.dialog.export().preset.clone();
         }
         if let Some(req) = self.dialog.take_preset_pick_request() {
             actions.preset_dialog = Some(req);
@@ -811,8 +811,10 @@ impl ExportController {
         rows: impl FnOnce(&mut egui::Ui),
     ) -> UiActions {
         let running = self.is_running();
-        let mut actions = UiActions::default();
-        actions.preset_file = self.update_preset_picker(ui.ctx());
+        let mut actions = UiActions {
+            preset_file: self.update_preset_picker(ui.ctx()),
+            ..Default::default()
+        };
         let mut job = self.job.clone();
         let mut output = self.output.clone();
         ui.add_enabled_ui(!running, |ui| {

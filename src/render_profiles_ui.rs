@@ -238,6 +238,10 @@ struct CatalogOps<'a> {
 /// Attribute Editor gear and the create / copy / template menu of `kind`'s catalog.
 /// One row of a two-column grid (the caller's): the label, then the profile menu with its
 /// edit and new / copy / template buttons, so every binding's menu lines up.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Keep the row's UI bindings and catalog operations explicit"
+)]
 fn catalog_selector(
     ui: &mut egui::Ui,
     world: &WorldEditor,

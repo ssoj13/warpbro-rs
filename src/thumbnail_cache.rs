@@ -66,8 +66,10 @@ impl ThumbnailCache for DiskCache {
             width,
             height,
             pixels: data[48..]
-                .chunks_exact(4)
-                .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| u32::from_le_bytes(*b))
                 .collect(),
         }))
     }

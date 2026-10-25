@@ -44,7 +44,6 @@ pub(crate) enum WorldAction {
     Playing(bool),
     Looping(bool),
     Preview(PreviewAction),
-    PlaybackRange(Option<(u32, u32)>),
     TimelineOptions {
         auto_key: Option<bool>,
         new_key: Option<curves::Tan>,

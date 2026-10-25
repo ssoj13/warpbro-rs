@@ -9,7 +9,7 @@ use soluwell_chrome::dock_layout::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub(super) enum Panel {
+pub(crate) enum Panel {
     Viewport,
     Gallery,
     Bookmarks,
@@ -189,8 +189,8 @@ impl DockContent<Panel> for Viewer<'_> {
             Panel::MaterialLibrary => self.app.material_library(ui),
             Panel::Settings => self.app.settings_ui(ui),
             Panel::Export => self.app.export_ui(ui),
-            Panel::Timeline => self.app.world_ui.timeline(ui, &mut self.app.world),
-            Panel::Outliner => self.app.world_ui.outliner(ui, &mut self.app.world),
+            Panel::Timeline => self.app.world_ui.timeline(ui, &self.app.world),
+            Panel::Outliner => self.app.world_ui.outliner(ui, &self.app.world),
             Panel::Takes => self.app.takes_panel(ui),
             Panel::Materials => self.app.materials_tab(ui),
             Panel::Gallery | Panel::Bookmarks => self.app.browser(ui, *panel),
@@ -358,20 +358,21 @@ impl App {
     }
 
     pub(super) fn dock_ui(&mut self, ui: &mut egui::Ui) {
+        self.handle_events(ui.ctx());
         let area = ui.available_rect_before_wrap();
         let style = DockStyle::from_ui(ui);
         self.open_panels(area);
         self.dock
             .pin_around(|p| *p == Panel::Viewport, area, style.gap);
-        // The bodies borrow the whole App; the layout is only read while drawing.
-        let layout = std::mem::take(&mut self.dock);
+        // Bodies may dispatch actions while drawing; retain the accepted layout in App.
+        let layout = self.dock.clone();
         let output = DockArea::new(egui::Id::new("frac-workspace")).show_with(
             ui,
             &layout,
             &style,
             &mut Viewer { app: self },
         );
-        self.dock = layout;
+        self.handle_events(ui.ctx());
         if let Some(error) = output.error {
             self.status = format!("Dock layout not shown: {error}");
         }
@@ -385,6 +386,7 @@ impl App {
         if self.world_ui.take_timeline_request() {
             self.emit_app(super::AppAction::OpenPanel(Panel::Timeline));
         }
+        self.handle_events(ui.ctx());
         self.open_panels(area);
     }
 

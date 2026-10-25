@@ -1,31 +1,81 @@
-# HANDOFF (2026-10-24)
+# HANDOFF (2026-10-25)
 
-## WIP checkpoint for urgent push
+## EventBus migration completed and verified
 
-The user requested an immediate push before the session limit. This migration is unfinished;
-the architecture descriptions below describe source changes, not accepted runtime behavior.
+The migration is complete. Source review, formatting, strict Clippy, final release tests/build
+and real API/UI acceptance passed. Git history and remote branch refs provide the commit identity
+and publication status.
 
-- First migration release compile exited 101 with four integration errors. All four reported
-  errors have source fixes, but compilation has not been rerun. Migration CPU tests and new
-  real-API acceptance have not run. The available app binary is checkpoint `47509bb`, not
-  a verified migration build.
+- Final machine-locked pipeline exited 0: WarpBro CPU suite **365 passed, 0 failed, 7 ignored,
+  47 filtered** in 45.76 s; app-control **4 passed**; release build passed in 57.39 s.
+  The CPU suite excluded device tests. Separate authorized CUDA Play and Scrub regressions
+  passed in 2.90 s and 2.30 s. Receipt:
+  `C:/Users/joss1/.filesystem-mcp-rs/tmp/run_command_1792913341583_083b9c3c-d882-4027-a23f-5d4e8fc64011_stdout.log`.
+- Strict `FRAC_ALLOW_PLAIN_CARGO=1 cargo clippy --workspace --all-targets --locked -- -D warnings`
+  passed in 23.49 s; the full-entry formatting check passed.
+- Real API/UI acceptance passed; receipts and before/after PNGs are under
+  `C:/Users/joss1/.warpbro/diagnostics/eventbus-20261025/` (`result.json`). It checked the actual
+  Playa EventBus and enumerated 39 advertised commands; all five navigation actions plus Undo had camera
+  acknowledgements matching queries; picking stopped playback; Save/New/Open restored document
+  identity; invalid zoom returned HTTP 400; and colour slot 3 selected the exact 1000-nit HDR view.
+  The app exited cleanly through `app.exit` with code 0 (PID 49440).
+- The accepted Bristorbrot frame at 932×683 reached 32 spp in 8.385 s (OIDN 242.5 ms).
+  Orbit changed generation 19 to 21; the new frame reached 32 spp (OIDN 205.4 ms), and its PNG
+  differed. Both PNGs were visually inspected. Cached WGPU `world_fast_f9` prepared in
+  0.0475857 s. These are workload-specific receipts, not a general frame-rate guarantee.
+- Installed `~/.local/bin/WarpBro.exe` matches the built binary: 162,332,672 bytes, SHA-256
+  `9a331e1594e604f92c400cb69089771241174b624f8cc1b74b9928134394439e`.
+  The installed binary's real main profile was set through REST on port 19878 to
+  **ACES 2.0 - HDR 1000 nits (P3 D65)** on **Display P3 HDR - Display**. The installed-profile
+  receipt (`installed-hdr-result.json`, PID 18452) reports success and exit code 0; controls,
+  fonts, presets, recording, camera slots and GUI FPS preferences were preserved. Previous
+  executable/settings backups remain in the diagnostics directory. All acceptance app processes
+  and HTTP listeners are closed.
+- Earlier failures are resolved by this CPU run: the first compile exited 101 with four
+  integration errors, intermediate runs were 357 passed / 4 failed and 360 passed / 2 failed,
+  and app-control previously had one port-reuse failure.
 - Upstream video-io `90477c3689ab97a9f1b419c8ae9b5b7f79ab75b5` is pushed and pinned;
-  its 26 release tests passed. This does not establish WarpBro integration acceptance.
-- **P1 review follow-up:** `dock_ui` uses `mem::take(&mut self.dock)` while viewport code may
-  dispatch events. Save can capture an empty layout; Restore, Reset or DockAction can be
-  overwritten when the borrowed layout returns. Prevent dispatch while that layout is borrowed,
-  or correct ownership before applying those actions.
-- **P2 review follow-up:** `scene_file_event` loads directly outside the shared bus.
-  `submit_scene_action` swallows I/O queue failures, allowing HTTP success, and renews identity
-  before sending. Route the completion through the bus; stage changes and return a `Result`
-  so failed admission cannot acknowledge or apply the operation.
-- **P2 review follow-up:** `queue_pick` can use stale `self.request` scene data and does not
-  cancel playback. Pick the accepted current-frame scene/profile after cancelling preview.
-- Source fixes already made, still unverified in the migration build: raw-input preview
-  cancellation emits `CancelPreview`; material Duplicate captures `world.targets(Some(id))`;
-  `apply_settings` synchronizes `world.new_key`.
-- Resume with the review fixes, then the machine-locked release compile/tests and real API/UI
-  checks. Preserve the operator's untracked `BUG1.md` and unrelated backlog.
+  its 26 release tests passed; the separate WarpBro acceptance receipts are above.
+- **P1 dock ownership fixed in source:** `dock_ui` renders an immutable layout clone while App
+  retains the authoritative layout, with event drains around rendering. Save no longer observes
+  a temporary empty dock, and returning a borrowed layout cannot overwrite Restore/Reset/actions.
+- **P2 file completion/admission fixed in source:** Scene and Bookmark completion DTOs enter
+  the central EventBus dispatcher. Scene save stages identity/document changes and applies them
+  only after I/O admission; `submit_scene_action` returns a `Result`, propagating queue failures
+  instead of reporting HTTP success.
+- **P2 picking fixed in source:** picks cancel playback/preview and evaluate the accepted frame
+  with its viewport profile, rather than copying stale `self.request` data. Pending results carry
+  document/camera/frame/revision guards.
+- Verified source regressions: raw-input preview cancellation emits `CancelPreview`; material
+  Duplicate captures `world.targets(Some(id))`; preferences and scene load immediately synchronize
+  `world.new_key`. A captured no-op ColourSelection no longer assigns a whole stale-frame Scene.
+  `idle_event_dispatch_keeps_the_evaluated_scene_cached` and the UI no-op cache regression pass;
+  FinishEdit/UI no-ops preserve evaluated-scene caching while camera authoring/error recovery
+  still canonicalize.
+- Orbit-pole correction retains the rig quaternion while its canonical orbit marker matches,
+  including at rest. External camera edits reseed the controller; a new document clears it.
+  Existing coast/rest assertions pass with the corrected post-dispatch navigation marking.
+- **Terminal backpressure fixed in source:** generic `emit_retained` keeps a rejected typed
+  event, drains the actual shared EventBus and retries. Scene/Bookmark completions and Take
+  imports survive a full bus; Take imports retain their original request document. No separate
+  application-command queue is added. Review confirmed the seven prior findings and this
+  backpressure issue resolved in source; that review is not a passing test receipt.
+- **Windows HTTP dependency fix published:** tiny_http 0.12 detached its accept thread, so the
+  port could remain bound after server Drop. The fork
+  [ssoj13/tiny-http](https://github.com/ssoj13/tiny-http) is pushed on `main` at
+  `69b64907d74968ad520124306a856432be7e6f47`, based on official 0.12 tag commit
+  `212b1c45852fef2093dc1374875a9393c55eb4b9`; Cargo.toml and Cargo.lock are manually pinned.
+  The fix joins the accept thread, wakes wildcard listeners through loopback, and moves TLS
+  handshakes to the existing connection pool. Public API, dependencies/version and socket
+  reuse flags are unchanged. Default release checks had 50 passes including 9 doc tests;
+  Rustls checks had 51 passes including 9 doc tests. These are upstream receipts, not final
+  WarpBro integration results. The shared cglibs catalog now lists the fork.
+- Acceptance history: the first harness attempt used an incorrect asynchronous generation wait,
+  which was corrected. The user confirmed that the intermediate diagnostic window was closed
+  manually. The instrumented third run passed.
+- The broader GPU/parity checks in the backlog are separate from the completed migration's two
+  CUDA regressions and real WGPU acceptance above. Preserve the operator's untracked `BUG1.md`
+  and unrelated backlog.
 
 Read first: `PLAN.md` (rules, open work), `plan1.md` (bug hunt: remaining items in "Audit of the
 open checkboxes"), `plan2.md` (render pacing / display speed), `CHANGELOG.md` "Unreleased",
@@ -34,8 +84,9 @@ open checkboxes"), `plan2.md` (render pacing / display speed), `CHANGELOG.md` "U
 ## State
 
 - Checkpoint `47509bb` was pushed atomically to `origin/main` and `origin/fix/plan1` as requested.
-  The current Playa EventBus migration follows that checkpoint; its final build, tests and push are
-  not yet accepted. The previous assertion that all work was already on local `main` was wrong.
+  The completed Playa EventBus migration follows that checkpoint; its final checks, release build
+  and real API/UI acceptance pass. Use Git history and remote branch refs for publication status.
+  The previous assertion that all work was already on local `main` was wrong.
 - Viewport stalls fixed (52f6545): `Gpu::stamp` waits for the backend's work before recording a
   batch's time, so `Batch::Budget` sizes batches from the GPU's real cost. Colour changes reuse
   the cached OCIO transforms (`DisplayKey` keyed by `Ocio::serial`). Correction to the previous
@@ -63,9 +114,10 @@ open checkboxes"), `plan2.md` (render pacing / display speed), `CHANGELOG.md` "U
   only HTTP transport/typed decoding and acknowledgement channels; its parser channel carries
   sockets, not application commands. See [the REST reference](docs/reference/rest-api.md).
 - Playa's reliable `EventBus::try_emit` / emitter admission is published upstream as `72ed08b`:
-  overflow refuses the new event without evicting an accepted event. Migration verification is
-  pending; do not treat the pre-migration checkpoint's receipts below as tests of this architecture.
-  Video-io deferred preset-request support is also under upstream testing.
+  overflow refuses the new event without evicting an accepted event. Migration verification and
+  real API/UI acceptance pass as recorded above; older checkpoint receipts remain historical.
+  Video-io deferred preset-request support is pushed/pinned at `90477c3` with 26 upstream release
+  tests passed; WarpBro integration is covered by the separate acceptance receipts above.
 - WGPU trace/pick preflight now polls deduplicated compile tickets serviced by a separate
   `warpbro-shader-compiler` thread. Render targets remain owned by one RenderWorker. The UI
   reports `Preparing shader` with elapsed time/entry and labels extended-family Auto scenes WGPU.
@@ -105,10 +157,9 @@ open checkboxes"), `plan2.md` (render pacing / display speed), `CHANGELOG.md` "U
 
 ## Next
 
-1. Finish and verify the UI/REST Playa EventBus migration, including deferred video-io preset
-   requests, document/frame/camera/target capture, gesture Undo and reliable overflow handling.
-   Run final locked checks and app acceptance, then record receipts and publish the migration;
-   checkpoint `47509bb` is already pushed to both branches.
+1. For migration provenance, inspect `git log` and
+   `git ls-remote origin refs/heads/main refs/heads/fix/plan1`. Checkpoint `47509bb` is historical;
+   the actual migration commit and publication status come from those records.
 2. oiio-rs plan-cuda-oxide.md: rest of stage 1, then stages 2-4 (see oiio-rs HANDOFF.md).
    Then plan2 stage 3 here.
 3. plan2.md stage 0 (measurements; GPU runs approved 2026-10-24) -> stage 1 pacing.

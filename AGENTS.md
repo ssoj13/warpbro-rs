@@ -96,6 +96,15 @@ older accepted action. Apply mutations in the central handlers, never in a widge
 EventBus subscriber. Draft deltas merge onto current accepted state rather than replacing unrelated
 intervening edits.
 
+`emit_retained` holds a rejected terminal event, drains this same EventBus and retries admission;
+it does not apply the action directly or create a second command queue. Scene/Bookmark completion
+DTOs use this path; Take imports also retain the request's original document. Scene-save identity
+and document changes are staged until the I/O worker accepts the request, and admission errors
+propagate to HTTP. The dock renders an immutable layout clone while App keeps authoritative layout
+ownership, so dispatch cannot save a temporary empty tree or overwrite a newly restored layout.
+Picks evaluate the accepted frame and effective viewport profile after cancelling playback/preview;
+late results are guarded by document, active camera, frame and revision.
+
 ## World document and edits
 
 ```

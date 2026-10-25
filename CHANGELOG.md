@@ -1,12 +1,23 @@
 # Changelog
 
-## Unreleased - 2026-10-24
+## Unreleased - 2026-10-25
 
 - **Shared UI/REST EventBus:** widgets, hotkeys and HTTP publish the same typed
   `app_control::Event<UiCommand>` to App's Playa EventBus. Central deferred dispatch applies
   App, World, Take and Query actions with captured document/frame/camera/target context;
   widget drafts remain transient. Reliable `try_emit` refuses overflow without evicting an
   accepted action. HTTP parser channels carry sockets; reply channels carry acknowledgements.
+- **Deferred completion and context fixes:** Scene/Bookmark results and Take imports return
+  through the shared dispatcher; terminal events retain/retry admission under backpressure,
+  with imports bound to their original document. Scene-save identity changes wait for I/O
+  admission and queue failures propagate to HTTP. Dock drawing keeps authoritative layout
+  ownership in App. Picks use the accepted frame/viewport profile and reject stale results.
+- **Camera and evaluated-scene cache:** preserve orbit orientation at the poles and at rest,
+  reseed after external camera edits, and clear the controller on document changes. No-op colour
+  or UI events preserve cached evaluation; scene loads synchronize the accepted key preference.
+- **HTTP shutdown:** use the tiny-http fork with joined accept-thread shutdown, loopback wake
+  for wildcard listeners and TLS handshakes on the existing connection pool; public API and
+  dependencies/version remain unchanged.
 - **Local REST control:** separate `app-control` transport crate and UI-thread WarpBro adapter,
   bound to loopback with typed EventBus actions and application acknowledgements. Supports
   document/node/attribute queries and edits, undo/redo, timeline, materials, settings, exports,
@@ -50,6 +61,12 @@
 - **Docs:** PLAN.md keeps rules, open work and findings (the dated state sections and the
   finished BUG1.md, MANDELBULB_PROGRESS.md, RELEASE_PROGRESS.md and plans/ are removed; their
   history is here and in git); plan2.md plans render pacing and the display path.
+
+Final verification passed: 365 CPU tests (7 ignored, 47 filtered), 4 app-control tests, strict
+workspace/all-target Clippy, formatting and the release build. Separate CUDA Play/Scrub tests and
+real EventBus REST/navigation/Undo, scene I/O, rendering and installed HDR-profile checks passed.
+Detailed receipts, timing limits and the user-confirmed manual window closure are recorded in
+[HANDOFF.md](HANDOFF.md).
 
 ## 2026-10-23 (bug hunt plan1: waves 1-3)
 

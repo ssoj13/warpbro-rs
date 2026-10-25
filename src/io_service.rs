@@ -362,6 +362,14 @@ impl IoService {
             take_events,
         }
     }
+    #[cfg(test)]
+    pub(crate) fn stop_for_test(&mut self) {
+        self.tx.take();
+        if let Some(worker) = self.worker.take() {
+            worker.join().expect("file worker must stop cleanly");
+        }
+    }
+
     pub fn send(&self, cmd: Command) -> Result<(), String> {
         let tx = self.tx.as_ref().ok_or("File writer stopped")?;
         tx.try_send(cmd).map_err(|e| match e {

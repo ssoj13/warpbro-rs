@@ -672,11 +672,9 @@ impl WorldUi {
     pub(crate) fn set_emitter(&mut self, emitter: EventEmitter) {
         self.emitter = emitter;
     }
+    #[cfg(test)]
     pub(crate) fn emitter(&self) -> &EventEmitter {
         &self.emitter
-    }
-    pub(crate) fn report_error(&mut self, error: String) {
-        self.error = Some(error);
     }
     fn emit_action(&mut self, world: &WorldEditor, action: WorldAction) -> bool {
         self.event_document = Some(NodeId(world.document.graph.id));
@@ -791,7 +789,6 @@ impl WorldUi {
                 self.playing = false;
                 self.preview_action = Some(action);
             }
-            WorldAction::PlaybackRange(range) => self.playback_range = range,
             WorldAction::TimelineOptions {
                 auto_key,
                 new_key,
@@ -896,22 +893,22 @@ impl WorldUi {
     #[cfg(test)]
     pub(crate) fn dispatch_events(&mut self, world: &mut WorldEditor) {
         for event in self.emitter.poll() {
-            if let Some(event) = playa_events::downcast_event::<crate::events::UiEvent>(&event) {
-                if let crate::events::Action::World(action) = &event.command.action {
-                    assert!(
-                        !event
-                            .command
-                            .document
-                            .is_some_and(|id| id != NodeId(world.document.graph.id))
-                    );
-                    crate::world_events::apply(
-                        world,
-                        self,
-                        action.clone(),
-                        event.command.frame.unwrap_or_default(),
-                    )
-                    .unwrap();
-                }
+            if let Some(event) = playa_events::downcast_event::<crate::events::UiEvent>(&event)
+                && let crate::events::Action::World(action) = &event.command.action
+            {
+                assert!(
+                    !event
+                        .command
+                        .document
+                        .is_some_and(|id| id != NodeId(world.document.graph.id))
+                );
+                crate::world_events::apply(
+                    world,
+                    self,
+                    action.clone(),
+                    event.command.frame.unwrap_or_default(),
+                )
+                .unwrap();
             }
         }
     }
@@ -3344,16 +3341,16 @@ impl WorldUi {
                                         }
                                     }
                                 }
-                                if let Some(width) = section.state.table.widths.first() {
-                                    if *width != self.attribute_label_width {
-                                        self.emit_action(
-                                            e,
-                                            WorldAction::TimelineWidths {
-                                                attribute: Some(*width),
-                                                outline: None,
-                                            },
-                                        );
-                                    }
+                                if let Some(width) = section.state.table.widths.first()
+                                    && *width != self.attribute_label_width
+                                {
+                                    self.emit_action(
+                                        e,
+                                        WorldAction::TimelineWidths {
+                                            attribute: Some(*width),
+                                            outline: None,
+                                        },
+                                    );
                                 }
                                 if !value_commands.is_empty() {
                                     self.value_command(ui, e, WorldCommand::Batch(value_commands));
@@ -4116,7 +4113,7 @@ mod tests {
                     ..Default::default()
                 },
                 |root| {
-                    state.timeline(root, &mut e);
+                    state.timeline(root, &e);
                     state.dispatch_events(&mut e);
                 },
             )
@@ -4699,7 +4696,7 @@ mod tests {
                     egui::CentralPanel::default().show(root, |ui| {
                         ui.add(egui::TextEdit::singleline(text).id(focus))
                             .request_focus();
-                        state.timeline_shortcuts(ui, &mut e, &nodes);
+                        state.timeline_shortcuts(ui, &e, &nodes);
                         state.dispatch_events(&mut e);
                     });
                 },
@@ -4768,7 +4765,7 @@ mod tests {
                     },
                     |root| {
                         egui::CentralPanel::default().show(root, |ui| {
-                            state.timeline(ui, &mut e);
+                            state.timeline(ui, &e);
                             state.dispatch_events(&mut e);
                         });
                     },
@@ -4787,7 +4784,7 @@ mod tests {
                 },
                 |root| {
                     egui::CentralPanel::default().show(root, |ui| {
-                        state.timeline(ui, &mut e);
+                        state.timeline(ui, &e);
                         state.dispatch_events(&mut e);
                     });
                 },
@@ -4982,7 +4979,7 @@ mod tests {
         let original = nodes.iter().map(|n| n.id).collect::<Vec<_>>();
         let mut state = WorldUi::default();
         state.timeline_action(
-            &mut e,
+            &e,
             &nodes,
             &[],
             TimelineAction::MoveClip {
@@ -5085,7 +5082,7 @@ mod tests {
                     egui::CentralPanel::default().show(root, |ui| {
                         state.layer_row(
                             ui,
-                            &mut e,
+                            &e,
                             node,
                             &nodes,
                             Rect::from_min_size(Pos2::new(20.0, 20.0), Vec2::new(400.0, 24.0)),
@@ -5158,7 +5155,7 @@ mod tests {
                         for (i, node) in nodes.iter().enumerate() {
                             state.layer_row(
                                 ui,
-                                &mut e,
+                                &e,
                                 node,
                                 &nodes,
                                 Rect::from_min_size(
@@ -5218,7 +5215,7 @@ mod tests {
         let mut state = WorldUi::default();
         let _ = ctx.run_ui(Default::default(), |root| {
             egui::CentralPanel::default().show(root, |ui| {
-                state.attribute_editor(ui, &mut e, material);
+                state.attribute_editor(ui, &e, material);
                 state.dispatch_events(&mut e);
             });
         });
@@ -5263,7 +5260,7 @@ mod tests {
         );
         state.metadata = json!({"label":"Applied"}).to_string();
         state.metadata_dirty = true;
-        assert!(state.apply_metadata(&mut e, id));
+        assert!(state.apply_metadata(&e, id));
         assert!(state.metadata_dirty, "enqueueing is not an acknowledgement");
         state.dispatch_events(&mut e);
         assert!(!state.metadata_dirty);
@@ -5290,7 +5287,7 @@ mod tests {
         assert_eq!(state.metadata, "{\"unsaved\":99}");
         assert!(state.metadata_dirty);
         state.metadata = "invalid JSON".into();
-        assert!(!state.apply_metadata(&mut e, id));
+        assert!(!state.apply_metadata(&e, id));
         assert!(state.metadata_dirty);
         assert_eq!(e.document.metadata(id).unwrap(), json!({"label":"Applied"}));
         let other = e.document.nodes().iter().find(|n| n.id != id).unwrap().id;
@@ -5359,7 +5356,7 @@ mod tests {
         let ctx = egui::Context::default();
         let _ = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
-                state.timeline(ui, &mut e);
+                state.timeline(ui, &e);
                 state.dispatch_events(&mut e);
             });
         });
@@ -5367,7 +5364,7 @@ mod tests {
         let lanes = state.timeline_cache.lanes.as_ptr();
         let _ = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
-                state.timeline(ui, &mut e);
+                state.timeline(ui, &e);
                 state.dispatch_events(&mut e);
             });
         });
@@ -5599,7 +5596,7 @@ mod tests {
                         );
                         state.lane_row(
                             ui,
-                            &mut e,
+                            &e,
                             &mut lane,
                             row,
                             LaneData {
@@ -5898,7 +5895,7 @@ mod tests {
                     );
                     state.lane_row(
                         ui,
-                        &mut e,
+                        &e,
                         &mut lane,
                         row,
                         LaneData {
@@ -6005,7 +6002,7 @@ mod tests {
                         };
                         state.lane_row(
                             ui,
-                            &mut e,
+                            &e,
                             &mut lane,
                             Rect::from_min_size(
                                 Pos2::new(
@@ -6117,19 +6114,19 @@ mod tests {
         );
         let _ = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
-                state.timeline(ui, &mut e);
+                state.timeline(ui, &e);
                 state.dispatch_events(&mut e);
             });
         });
         let _ = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
-                state.outliner(ui, &mut e);
+                state.outliner(ui, &e);
                 state.dispatch_events(&mut e);
             });
         });
         let _ = ctx.run_ui(Default::default(), |ui| {
             egui::CentralPanel::default().show(ui, |ui| {
-                state.inspector(ui, &mut e);
+                state.inspector(ui, &e);
                 state.dispatch_events(&mut e);
             });
         });
@@ -6485,7 +6482,7 @@ mod tests {
         let mut state = WorldUi::default();
         let _ = ctx.run_ui(Default::default(), |root| {
             egui::CentralPanel::default().show(root, |ui| {
-                state.attribute_editor(ui, &mut e, render_id);
+                state.attribute_editor(ui, &e, render_id);
                 state.dispatch_events(&mut e);
             });
         });

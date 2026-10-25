@@ -3,7 +3,7 @@ use crate::world::NodeId;
 use playa_events::EventEmitter;
 #[derive(Clone)]
 pub(crate) enum Action {
-    App(crate::app::AppAction),
+    App(Box<crate::app::AppAction>),
     World(crate::world_events::WorldAction),
     Take(crate::app::takes_ui::Action),
     Query(String),

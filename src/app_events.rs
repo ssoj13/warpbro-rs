@@ -15,7 +15,6 @@ impl App {
                 | AppAction::CameraPan { .. }
                 | AppAction::CameraZoom { .. }
                 | AppAction::CameraFly { .. }
-                | AppAction::CameraPose { .. }
                 | AppAction::FrameCamera { .. }
                 | AppAction::FrameCurrentCamera
                 | AppAction::RestoreCamera
@@ -24,6 +23,7 @@ impl App {
                 | AppAction::Fly(_)
                 | AppAction::Orbit(_)
                 | AppAction::FocusDistance(_)
+                | AppAction::Pick { .. }
                 | AppAction::Exposure { .. }
                 | AppAction::RecallCameraSlot(_)
                 | AppAction::StoreCameraSlot(_)
@@ -41,6 +41,8 @@ impl App {
             | AppAction::LayoutStore(_)
             | AppAction::RestoreLayout(_)
             | AppAction::DockAction(_)
+            | AppAction::SceneFileCompleted { .. }
+            | AppAction::BookmarkCompleted { .. }
             | AppAction::Exit => None,
             _ => Some(NodeId(self.world.document.graph.id)),
         };
@@ -50,12 +52,39 @@ impl App {
                 document,
                 frame: Some(f64::from(self.world_ui.playhead)),
                 camera,
-                action: Action::App(action),
+                action: Action::App(Box::new(action)),
             },
         ) {
             self.status = error;
         }
     }
+    /// Terminal I/O results must survive backpressure. Keep the rejected event until
+    /// earlier accepted events make room; application changes still happen only on dispatch.
+    pub(crate) fn emit_completion(&mut self, action: AppAction, ctx: &egui::Context) {
+        self.emit_retained(
+            UiCommand {
+                document: None,
+                frame: None,
+                camera: None,
+                action: Action::App(Box::new(action)),
+            },
+            ctx,
+        );
+    }
+
+    pub(crate) fn emit_retained(&mut self, command: UiCommand, ctx: &egui::Context) {
+        let mut event = UiEvent::ui(command);
+        loop {
+            match self.event_emitter().try_emit(event) {
+                Ok(()) => break,
+                Err(rejected) => {
+                    event = rejected;
+                    self.handle_events(ctx);
+                }
+            }
+        }
+    }
+
     pub(crate) fn emit_take(&mut self, action: takes_ui::Action) {
         self.emit_take_for_document(action, NodeId(self.world.document.graph.id));
     }
@@ -93,6 +122,12 @@ impl App {
                 }
                 let outcome = self.dispatch_command(event.command.clone(), ctx);
                 if let Err(error) = &outcome {
+                    // A rejected camera helper may have changed evaluated scratch state.
+                    // Restore it from the unchanged document before another intent uses it.
+                    self.evaluated_world = None;
+                    if let Err(restore) = self.refresh_scene() {
+                        log::error!("EventBus scene restore: {restore}");
+                    }
                     self.status = error.clone();
                     log::error!("EventBus: {error}");
                 }
@@ -119,8 +154,9 @@ impl App {
         let frame = command
             .frame
             .unwrap_or_else(|| f64::from(self.world_ui.playhead));
+        let orbit_input = matches!(&command.action, Action::App(action) if matches!(action.as_ref(), AppAction::Orbit(_)));
         let value = match command.action {
-            Action::App(action) => self.handle_app_action(action, command.frame, ctx)?,
+            Action::App(action) => self.handle_app_action(*action, command.frame, ctx)?,
             Action::World(action) => {
                 if matches!(
                     action,
@@ -131,15 +167,15 @@ impl App {
                     self.preview_key = None;
                     self.showing_preview = false;
                 }
-                let value =
-                    crate::world_events::apply(&mut self.world, &mut self.world_ui, action, frame)?;
-                self.evaluated_world = None;
-                value
+                crate::world_events::apply(&mut self.world, &mut self.world_ui, action, frame)?
             }
             Action::Take(action) => self.handle_take_action(action, frame, ctx)?,
             Action::Query(query) => return self.control_query(&query, ctx),
         };
         self.refresh_scene()?;
+        if orbit_input {
+            self.orbit_written = Some(self.scene.camera);
+        }
         ctx.request_repaint();
         Ok(app_control::Reply::Json(value))
     }

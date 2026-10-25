@@ -512,17 +512,6 @@ impl WorldEditor {
             _ => self.selected.clone(),
         }
     }
-    /// Duplicate `targets(row)` with their descendants as one undo step; the copies become the
-    /// selection. Returns how many nodes were copied. Every Duplicate of the UI ends here.
-    pub fn duplicate(&mut self, row: Option<NodeId>) -> Result<usize, String> {
-        let ids = self.targets(row);
-        if ids.is_empty() {
-            return Err("Select the nodes to duplicate".into());
-        }
-        let count = ids.len();
-        self.execute(WorldCommand::Duplicate(ids))?;
-        Ok(count)
-    }
     /// Paste a clipboard fragment of `WorldDocument::copy_fragment` (Ctrl+V) as one undo step; the
     /// pasted roots become the selection. The report counts what the paste cleared.
     pub fn paste(&mut self, text: &str) -> Result<Pasted, String> {

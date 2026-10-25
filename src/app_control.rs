@@ -105,7 +105,7 @@ struct Path {
 
 /// Runs on the HTTP parser thread: parses values but cannot access or mutate App.
 pub(super) fn decode_control(command: &str, data: Value) -> Result<UiCommand, String> {
-    let app = |action| Action::App(action);
+    let app = |action| Action::App(Box::new(action));
     let action = match command {
         query if query.starts_with("get.") => Action::Query(query.to_owned()),
         "scene.new" => app(AppAction::NewScene),
@@ -389,7 +389,126 @@ mod tests {
             .unwrap_or_else(|_| panic!("EventBus full"));
     }
     #[test]
+    fn stopped_file_worker_returns_http_error_without_changing_document_identity() {
+        use std::io::{Read, Write};
+        use std::time::{Duration, Instant};
+        let _gpu_test = crate::test_gpu::lock();
+        let mut app = App::new();
+        app.io.stop_for_test();
+        let before = serde_json::to_value(&app.world.document).unwrap();
+        let server = app_control::Server::start(
+            0,
+            app.event_emitter(),
+            Arc::new(decode_control),
+            Arc::new(|| {}),
+        )
+        .unwrap();
+        let port = server.port();
+        let client = std::thread::spawn(move || {
+            let body = json!({"path":"not-written.frac.json"}).to_string();
+            let mut socket = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            write!(socket, "POST /api/scene/save HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
+            let mut result = String::new();
+            socket.read_to_string(&mut result).unwrap();
+            result
+        });
+        let started = Instant::now();
+        while app.event_bus.queue_len() == 0 {
+            assert!(started.elapsed() < Duration::from_secs(2));
+            std::thread::yield_now();
+        }
+        app.handle_events(&egui::Context::default());
+        let response = client.join().unwrap();
+        assert!(response.contains("400 Bad Request"), "{response}");
+        assert!(response.contains("File writer stopped"), "{response}");
+        assert_eq!(serde_json::to_value(&app.world.document).unwrap(), before);
+        assert!(app.scene_file_pending.is_none());
+        assert!(app.scene_file_path.is_none());
+    }
+
+    #[test]
+    fn settings_and_camera_keys_use_the_accepted_interpolation_in_one_drain() {
+        let _gpu_test = crate::test_gpu::lock();
+        let mut app = App::new();
+        let ctx = egui::Context::default();
+        let camera = app.world.document.active_camera.unwrap();
+        let before = app.scene.camera.fov_y_degrees;
+        app.world_ui.seek(10);
+        publish(
+            &app,
+            "settings.set",
+            json!({"new_key": curves::Tan::Linear, "auto_key":true}),
+        );
+        publish(
+            &app,
+            "scene.document",
+            serde_json::to_value(&app.world.document).unwrap(),
+        );
+        publish(&app, "timeline.seek", json!({"frame":10}));
+        publish(
+            &app,
+            "world.command",
+            json!(WorldCommand::Key {
+                id: camera,
+                path: "/camera/fov_y_degrees".into(),
+                frame: 0.0,
+            }),
+        );
+        app.emit_app(AppAction::CameraPatch(json!({"fov_y_degrees":before+40.0})));
+        app.handle_events(&ctx);
+        let quarter = app
+            .world
+            .document
+            .attribute_value(camera, "/camera/fov_y_degrees", 2.5)
+            .unwrap()
+            .as_f64()
+            .unwrap();
+        assert!(
+            (quarter - f64::from(before + 10.0)).abs() < 0.001,
+            "{quarter}"
+        );
+        assert_eq!(app.world_ui.playhead, 10);
+    }
+
+    #[test]
+    fn a_noop_colour_event_keeps_the_current_frame_after_an_earlier_seek() {
+        let _gpu_test = crate::test_gpu::lock();
+        let mut app = App::new();
+        let ctx = egui::Context::default();
+        app.world_ui.auto_key = true;
+        app.emit_app(AppAction::CameraPatch(json!({"fov_y_degrees":40.0})));
+        app.handle_events(&ctx);
+        app.world_ui.seek(10);
+        app.emit_app(AppAction::CameraPatch(json!({"fov_y_degrees":80.0})));
+        app.handle_events(&ctx);
+        app.world_ui.seek(0);
+        app.refresh_scene().unwrap();
+        assert_eq!(app.scene.camera.fov_y_degrees, 40.0);
+        assert!(!app.scene.render.reinhard);
+        let revision = app.world.revision();
+        let colour = app.scene.colour.clone();
+        publish(&app, "timeline.seek", json!({"frame":10}));
+        app.emit_app(AppAction::ColourSelection(colour));
+        app.handle_events(&ctx);
+        assert_eq!(
+            app.world.revision(),
+            revision,
+            "colour edit is a true no-op"
+        );
+        assert_eq!(app.world_ui.playhead, 10);
+        assert_eq!(app.scene.camera.fov_y_degrees, 80.0);
+        assert_eq!(
+            app.scene.camera,
+            app.world.document.snapshot(10.0).unwrap().camera
+        );
+    }
+
+    #[test]
     fn rest_and_ui_navigation_publish_then_use_the_same_dispatcher() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut ui = App::new();
         let mut rest = App::new();
         let ctx = egui::Context::default();
@@ -420,6 +539,7 @@ mod tests {
     }
     #[test]
     fn camera_lens_and_colour_changes_are_undoable_bus_actions() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
         let ctx = egui::Context::default();
         let before = app.scene.camera;
@@ -448,6 +568,7 @@ mod tests {
     }
     #[test]
     fn viewport_intent_cannot_edit_a_different_active_camera() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
         let ctx = egui::Context::default();
         app.emit_app(AppAction::CameraOrbit {
@@ -462,6 +583,7 @@ mod tests {
     }
     #[test]
     fn stale_document_action_is_rejected_without_overwriting_current_scene() {
+        let _gpu_test = crate::test_gpu::lock();
         let mut app = App::new();
         let ctx = egui::Context::default();
         let before = app.scene.camera;

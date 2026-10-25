@@ -1714,7 +1714,7 @@ impl Worker {
         let outcome = self
             .gpu
             .pipeline_ready(&job.scene, job.target.width, job.target.height, false)
-            .and_then(|ready| if ready { Ok(Some(())) } else { Ok(None) });
+            .map(|ready| ready.then_some(()));
         if matches!(outcome, Ok(None)) {
             return false;
         }
