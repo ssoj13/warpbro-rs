@@ -28,7 +28,7 @@ Commands:
     docs          Rebuild the README images in docs/ (needs uv for Pillow)
     i(nstall)     Copy the release binary to ~/.local/bin/WarpBro
     c(heck)       cargo fmt --check + cargo clippy
-    k(ernels)     Entry/helper resources and JSON receipts (ptxas -v); --lines maps local accesses
+    k(ernels)     Import verified native assembly receipts; --assemble explicitly invokes ptxas
     ci            Hosted CI without a GPU: toolchain, check, tests (--skip cuda_ gpu_), build, dist/*.zip
     cl(ean)       cargo clean (+ stray *.ll / *.ptx dumps in the repo root)
     h(elp)        Print help
@@ -67,7 +67,7 @@ RELEASE_BIN = ROOT_DIR / "target" / "release" / BIN_NAME
 INSTALL_DIR = Path.home() / ".local" / "bin"
 
 CUDA_OXIDE_GIT = "ssh://git@github.com/ssoj13/cuda-rust-windows.git"
-CUDA_OXIDE_REV = "5e15109343fadd82d73ec95dc8a737ebdbfebb60"
+CUDA_OXIDE_REV = "3a73b5eedfb638db601fe6b704b3a57dce4ff5e9"
 RUST_COMPONENTS = ["rust-src", "rustc-dev", "rust-analyzer", "clippy", "rustfmt", "llvm-tools"]
 # Release builds (`--cubins`) also embed cubins for these GPUs (RTX 20/30/40/50), assembled
 # from the sm_75 PTX by cuda-oxide into one fat binary ahead of that PTX: those GPUs skip the
@@ -641,9 +641,16 @@ def parse_ptxas_stats(output: str) -> dict[str, dict[str, int]]:
     """Retain every reported entry/helper; absent fields stay absent, never assumed zero."""
     stats: dict[str, dict[str, int]] = {}
     current = None
+    sections: set[str] = set()
+    compiled: set[str] = set()
     for line in output.splitlines():
         entry = re.search(r"Compiling entry function '([^']+)'", line)
         properties = re.search(r"""Function properties for\s+['"]?([^'"\s:]+)""", line)
+        for marker, seen in ((entry, compiled), (properties, sections)):
+            if marker:
+                if marker[1] in seen:
+                    raise RuntimeError(f"Duplicate resource section for {marker[1]}")
+                seen.add(marker[1])
         if entry or properties:
             current = (entry or properties)[1]
             stats.setdefault(current, {})
@@ -652,23 +659,132 @@ def parse_ptxas_stats(output: str) -> dict[str, dict[str, int]]:
         row = stats[current]
         for label, phrase in (("frame", "stack frame"), ("st", "spill stores"), ("ld", "spill loads")):
             if match := re.search(rf"(\d+) bytes {phrase}", line):
-                row[label] = max(row.get(label, 0), int(match[1]))
+                if label in row:
+                    raise RuntimeError(f"Duplicate {phrase} field for {current}")
+                row[label] = int(match[1])
         if match := re.search(r"Used (\d+) registers", line):
-            row["regs"] = max(row.get("regs", 0), int(match[1]))
+            if "regs" in row:
+                raise RuntimeError(f"Duplicate register field for {current}")
+            row["regs"] = int(match[1])
     return stats
 
 
-def ptxas_kernel_stats(ptx: Path, arch: str, line_info: bool) -> tuple[dict[str, dict[str, int]], Path]:
+def read_ptxas_receipt(
+    receipt: Path, ptx: Path, arch: str, ptx_sha256: str,
+    entries: set[str], calls: dict[str, set[str]],
+) -> tuple[dict[str, dict[str, int]], dict] | None:
+    """Validate a production receipt; a different PTX hash is historical evidence."""
+    def unique_object(pairs: list[tuple[str, object]]) -> dict:
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise RuntimeError(f"Duplicate JSON field {key} in {receipt}")
+            result[key] = value
+        return result
+
+    metadata = json.loads(receipt.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
+    fields = {"schema", "kind", "module", "host_target", "arch", "ptx_name", "ptx_sha256",
+              "ptxas_path", "ptxas_sha256", "options", "entries", "raw_log",
+              "assembly_succeeded", "resource_coverage_complete"}
+    if not isinstance(metadata, dict) or metadata.keys() != fields:
+        raise RuntimeError(f"Unknown or missing receipt fields: {receipt}")
+    if type(metadata["schema"]) is not int or metadata["schema"] != 1 or metadata["kind"] != "ptxas-assembly-receipt":
+        raise RuntimeError(f"Unsupported assembly receipt schema: {receipt}")
+    for field in ("ptx_sha256", "ptxas_sha256"):
+        if not isinstance(metadata[field], str) or not re.fullmatch(r"[0-9a-f]{64}", metadata[field]):
+            raise RuntimeError(f"Invalid {field} in {receipt}")
+    if metadata["ptx_sha256"] != ptx_sha256:
+        return None
+    if (metadata["module"] != ptx.stem or metadata["ptx_name"] != ptx.name
+            or metadata["arch"] != arch or not isinstance(metadata["host_target"], str)
+            or not metadata["host_target"]):
+        raise RuntimeError(f"Receipt module, PTX name, host or architecture mismatch: {receipt}")
+    if metadata["assembly_succeeded"] is not True or metadata["resource_coverage_complete"] is not None:
+        raise RuntimeError(f"Unsupported assembly outcome/coverage claim: {receipt}")
+    inventory = metadata["entries"]
+    if (not isinstance(inventory, list) or any(not isinstance(name, str) for name in inventory)
+            or len(inventory) != len(set(inventory)) or set(inventory) != entries):
+        raise RuntimeError(f"Missing, duplicate or unknown receipt entries: {receipt}")
+    options = metadata["options"]
+    if not isinstance(options, list) or any(not isinstance(option, str) for option in options):
+        raise RuntimeError(f"Invalid compiler options in {receipt}")
+    keys = [option.split("=", 1)[0] for option in options]
+    allowed = {"--gpu-name", "--fmad", "--split-compile", "--verbose",
+               "--generate-line-info", "--device-debug"}
+    if (len(keys) != len(set(keys)) or set(keys) - allowed
+            or f"--gpu-name={arch}" not in options or "--verbose" not in options
+            or sum(option in ("--fmad=true", "--fmad=false") for option in options) != 1
+            or ("--generate-line-info" in options and "--device-debug" in options)
+            or any(option.startswith(("--verbose=", "--generate-line-info=", "--device-debug="))
+                   for option in options)):
+        raise RuntimeError(f"Unknown, duplicate or inconsistent compiler options: {receipt}")
+    for option in options:
+        if option.startswith("--split-compile"):
+            value = option.partition("=")[2]
+            if not re.fullmatch(r"[1-9][0-9]*", value) or int(value) > 0xffffffff:
+                raise RuntimeError(f"Invalid split-compilation budget in {receipt}")
+    if not isinstance(metadata["ptxas_path"], str):
+        raise RuntimeError(f"Invalid assembler path in {receipt}")
+    tool = Path(metadata["ptxas_path"])
+    if not tool.is_absolute() or not tool.is_file():
+        raise RuntimeError(f"Receipt assembler is unavailable: {tool}")
+    with tool.open("rb") as source:
+        tool_sha256 = hashlib.file_digest(source, "sha256").hexdigest()
+    if tool_sha256 != metadata["ptxas_sha256"]:
+        raise RuntimeError(f"Receipt assembler hash mismatch: {receipt}")
+    raw_name = metadata["raw_log"]
+    if not isinstance(raw_name, str) or not raw_name or raw_name in (".", "..") or "/" in raw_name or "\\" in raw_name:
+        raise RuntimeError(f"Invalid raw-log name in {receipt}")
+    raw = receipt.parent / raw_name
+    output = raw.read_text(encoding="utf-8")
+    compiled = re.findall(r"Compiling entry function '([^']+)' for '([^']+)'", output)
+    if (len(compiled) != len(entries) or {name for name, _ in compiled} != entries
+            or any(target != arch for _, target in compiled)):
+        raise RuntimeError(f"Missing, duplicate, unknown or wrong-architecture raw entries: {raw}")
+    stats = parse_ptxas_stats(output)
+    coverage = kernel_resource_report(stats, entries, calls)
+    if not coverage["complete"]:
+        raise RuntimeError(f"Incomplete production receipt {receipt}: " + "; ".join(coverage["coverage_errors"]))
+    return stats, {
+        "resource_source": "production-aot-receipt",
+        "ptxas_path": str(tool.resolve()), "ptxas_sha256": tool_sha256,
+        "compiler_options": options, "host_target": metadata["host_target"],
+    }
+
+
+def retained_kernel_stats(
+    ptx: Path, arch: str, ptx_sha256: str, entries: set[str], calls: dict[str, set[str]],
+) -> tuple[dict[str, dict[str, int]], dict]:
+    """Accept equivalent repeated builds, reject conflicting evidence without guessing."""
+    accepted = []
+    for receipt in sorted(ptx.parent.glob(f"{ptx.stem}.*.ptxas-report/{arch}.ptxas.json")):
+        if result := read_ptxas_receipt(receipt, ptx, arch, ptx_sha256, entries, calls):
+            accepted.append((receipt, result))
+    if not accepted:
+        raise RuntimeError(f"No production {arch} receipt matches this PTX; build with native cubins, "
+                           "or explicitly use k --assemble for a separate standalone assembly")
+    canonical = accepted[0][1]
+    if any(result != canonical for _, result in accepted[1:]):
+        raise RuntimeError(f"Conflicting production {arch} receipts for this PTX: "
+                           + ", ".join(str(path) for path, _ in accepted))
+    stats, provenance = canonical
+    return stats, {**provenance, "receipts": [str(path) for path, _ in accepted]}
+
+
+def ptxas_kernel_stats(ptx: Path, arch: str, line_info: bool) -> tuple[dict[str, dict[str, int]], Path, dict]:
     """Assemble PTX and retain entry/helper resources plus the raw compiler receipt."""
     KERNEL_REPORT_DIR.mkdir(parents=True, exist_ok=True)
     cubin = KERNEL_REPORT_DIR / f"{arch}.cubin"
-    cmd = ["ptxas", f"-arch={arch}", "-O3", "--verbose", *(["--generate-line-info"] if line_info else []),
-           str(ptx), "-o", str(cubin)]
+    options = [f"-arch={arch}", "-O3", "--verbose", *(["--generate-line-info"] if line_info else [])]
+    cmd = ["ptxas", *options, str(ptx), "-o", str(cubin)]
     code, output, _ = run(cmd, capture=True)
     cubin.with_suffix(".ptxas.txt").write_text(output, encoding="utf-8")
     if code != 0:
         raise RuntimeError(f"ptxas {arch} failed:\n{output}")
-    return parse_ptxas_stats(output), cubin
+    return parse_ptxas_stats(output), cubin, {
+        "resource_source": "standalone-ptxas", "compiler_options": options,
+        "raw_log": str(cubin.with_suffix(".ptxas.txt")), "cubin": str(cubin),
+    }
 
 
 def kernel_resource_report(
@@ -681,6 +797,7 @@ def kernel_resource_report(
     Gates inspect every reported function, including helpers outside a parsed chain.
     """
     errors = [f"Missing entry resource report: {name}" for name in sorted(entries - stats.keys())]
+    errors.extend(f"Unknown reported function: {name}" for name in sorted(stats.keys() - calls.keys()))
     for name, row in sorted(stats.items()):
         required = {"frame", "st", "ld"} | ({"regs"} if name in entries else set())
         if missing := required - row.keys():
@@ -748,6 +865,10 @@ def run_kernels(args: argparse.Namespace) -> int:
     local frames (arrays/call ABI storage), retaining its stronger historical meaning.
     """
     header("KERNELS")
+    assemble = getattr(args, "assemble", False)
+    if args.lines and not assemble:
+        err("--lines requires --assemble: production receipts retain resources, not temporary cubins")
+        return 1
     archs = args.rest or CUBIN_ARCHS.split(",")
     if args.build or args.lines:
         env = build_env()
@@ -765,14 +886,26 @@ def run_kernels(args: argparse.Namespace) -> int:
         return 1
     ptx_bytes = KERNEL_PTX.read_bytes()
     entries, calls = ptx_call_graph(ptx_bytes.decode("utf-8"))
+    ptx_sha256 = hashlib.sha256(ptx_bytes.removesuffix(b"\0")).hexdigest()
+    KERNEL_REPORT_DIR.mkdir(parents=True, exist_ok=True)
     coverage_failed = False
     spills: list[str] = []
     frames: list[str] = []
     for arch in archs:
-        stats, cubin = ptxas_kernel_stats(KERNEL_PTX, arch, args.lines)
+        try:
+            if assemble:
+                warn(f"{arch}: explicitly assembling standalone PTX; this is separate from production AOT")
+                stats, cubin, provenance = ptxas_kernel_stats(KERNEL_PTX, arch, args.lines)
+            else:
+                stats, provenance = retained_kernel_stats(KERNEL_PTX, arch, ptx_sha256, entries, calls)
+                step(f"{arch}: importing {len(provenance['receipts'])} verified production assembly receipt(s)")
+                cubin = None
+        except (OSError, ValueError, RuntimeError) as error:
+            err(f"{arch}: {error}")
+            return 1
         report = {
             "schema": 1, "arch": arch, "ptx": str(KERNEL_PTX),
-            "ptx_sha256": hashlib.sha256(ptx_bytes).hexdigest(),
+            "ptx_sha256": ptx_sha256, "provenance": provenance,
             "call_graph_source": "PTX before ptxas optimization",
             **kernel_resource_report(stats, entries, calls),
         }
@@ -848,8 +981,9 @@ COMMANDS
   docs    regenerate docs/ (README images, bench table)
   i       install to ~/.local/bin (copies the release binary; -f rebuilds)
   c       cargo fmt --check + cargo clippy --all-targets -D warnings
-  k       entry/helper resources + JSON under target/oxide-ptx/kernels:  k [ARCH...]
-            --build   rebuild the PTX first     --lines   attribute local loads/stores to source lines
+  k       import verified production entry/helper resources:  k [ARCH...]
+            --build   rebuild the PTX first     --lines   map local accesses (requires --assemble)
+            --assemble  explicitly run standalone ptxas if production receipts are unavailable
             --no-spills  fail on register spills     --strict  also fail on local frames
             Missing entry/resource diagnostics always fail; frames and spills are distinct.
   ci      what hosted CI runs (no GPU): d --fix, c, tests --skip cuda_ gpu_, build, dist/*.zip
@@ -907,7 +1041,8 @@ def main() -> int:
     parser.add_argument("--cubins", action="store_true",
                         help=f"b / ci: also embed cubins for {CUBIN_ARCHS} (release archives)")
     parser.add_argument("--build", action="store_true", help="k: rebuild the PTX first")
-    parser.add_argument("--lines", action="store_true", help="k: map local loads/stores to source lines")
+    parser.add_argument("--assemble", action="store_true", help="k: explicitly assemble standalone PTX instead of importing production receipts")
+    parser.add_argument("--lines", action="store_true", help="k: rebuild with line tables and map local accesses (requires --assemble)")
     parser.add_argument("--strict", action="store_true", help="k: fail on entry/helper local frames or register spills")
     parser.add_argument("--no-spills", action="store_true", help="k: fail on entry/helper register spills; report frames separately")
     parser.add_argument("--fix", action="store_true", help="doctor: install missing user-level tools")

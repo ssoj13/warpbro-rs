@@ -448,6 +448,34 @@ fn run_families(args: &[String]) -> anyhow::Result<()> {
                     );
                     ensure!(warm_target.colour_error.is_none(), "Warmup display failed");
                 }
+                // Pipeline compilation can leave the GPU idle for a long time. Warm the
+                // actual sample workload after every backend is ready, before timed rounds.
+                let warmup_started = Instant::now();
+                let mut warmup_samples = vec![0u64; backends.len()];
+                while warmup_started.elapsed().as_secs_f64() < 2.0 {
+                    for (index, &backend) in backends.iter().enumerate() {
+                        let mut warm_scene = scene.clone();
+                        warm_scene.render.backend = backend;
+                        let mut warm_target = Target::new(width, height);
+                        while !gpu.advance(
+                            &mut warm_target,
+                            &warm_scene,
+                            samples,
+                            seed,
+                            Batch::Fixed(batch),
+                        )? {}
+                        ensure!(
+                            warm_target.samples == samples,
+                            "Workload warmup sample count"
+                        );
+                        ensure!(
+                            warm_target.colour_error.is_none(),
+                            "Workload warmup display failed"
+                        );
+                        warmup_samples[index] += u64::from(warm_target.samples);
+                    }
+                }
+                let warmup_seconds = warmup_started.elapsed().as_secs_f64();
                 for round in 0..repeats {
                     let indices: Vec<_> = if round % 2 == 0 {
                         (0..backends.len()).collect()
@@ -547,6 +575,8 @@ fn run_families(args: &[String]) -> anyhow::Result<()> {
                     "scope": scope, "shade": shade, "width": width, "height": height,
                     "samples": samples, "seed": seed, "batch": batch, "repeats": repeats,
                     "gpu": gpu.name, "round_backend_order": order,
+                    "workload_warmup_seconds": warmup_seconds,
+                    "workload_warmup_samples_per_backend": warmup_samples,
                     "timing_scope": "Synchronized Gpu::advance including final display; excludes JIT, warmup, allocation, preparation, raw readback and artifact I/O. Not isolated kernel-event timing.",
                     "results": results, "radiance_comparison": comparison,
                     "raw_format": "little-endian f32 RGB, row-major, scene-linear ACEScg, no header",

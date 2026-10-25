@@ -264,7 +264,8 @@ impl PolyhedralKifs {
     pub const PRESET: Self = Self {
         symmetry: PolyhedralSymmetry::Icosahedron,
         scale: 2.05,
-        offset: [0.850_650_8, 0.525_731_1, 0.0],
+        // The golden-ratio vertex must lie in the reflection fold's fundamental cone.
+        offset: [0.525_731_1, 0.0, 0.850_650_8],
         shell_thickness: 0.12,
         rotation_degrees: [8.0, 12.0, 0.0],
         bound_radius: 1.85,

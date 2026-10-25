@@ -3159,7 +3159,7 @@ dependencies = [
 [[package]]
 name = "cuda-artifact-finalizer"
 version = "0.2.1"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#fbb7df9969ffad4336c4e965d862387e66d12622"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#3a73b5eedfb638db601fe6b704b3a57dce4ff5e9"
 dependencies = [
  "libnvvm-sys",
  "nvjitlink-sys",
@@ -3171,16 +3171,20 @@ dependencies = [
 [[package]]
 name = "cuda-bindings"
 version = "0.4.0"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#fbb7df9969ffad4336c4e965d862387e66d12622"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#3a73b5eedfb638db601fe6b704b3a57dce4ff5e9"
 dependencies = [
+ "bindgen",
  "libloading 0.8.9",
- "serde_json",
+ "prettyplease 0.2.37",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]
 name = "cuda-core"
 version = "0.4.0"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#fbb7df9969ffad4336c4e965d862387e66d12622"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#3a73b5eedfb638db601fe6b704b3a57dce4ff5e9"
 dependencies = [
  "anyhow",
  "cuda-bindings",
@@ -3192,7 +3196,7 @@ dependencies = [
 [[package]]
 name = "cuda-core-derive"
 version = "0.4.0"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#fbb7df9969ffad4336c4e965d862387e66d12622"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#3a73b5eedfb638db601fe6b704b3a57dce4ff5e9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3202,7 +3206,7 @@ dependencies = [
 [[package]]
 name = "cuda-device"
 version = "0.2.1"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#fbb7df9969ffad4336c4e965d862387e66d12622"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#3a73b5eedfb638db601fe6b704b3a57dce4ff5e9"
 dependencies = [
  "cuda-macros",
 ]
@@ -3210,7 +3214,7 @@ dependencies = [
 [[package]]
 name = "cuda-host"
 version = "0.2.1"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#fbb7df9969ffad4336c4e965d862387e66d12622"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#3a73b5eedfb638db601fe6b704b3a57dce4ff5e9"
 dependencies = [
  "cuda-artifact-finalizer",
  "cuda-core",
@@ -3226,7 +3230,7 @@ dependencies = [
 [[package]]
 name = "cuda-macros"
 version = "0.2.1"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#fbb7df9969ffad4336c4e965d862387e66d12622"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#3a73b5eedfb638db601fe6b704b3a57dce4ff5e9"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -3237,12 +3241,12 @@ dependencies = [
 [[package]]
 name = "cuda-target-spec"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#fbb7df9969ffad4336c4e965d862387e66d12622"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#3a73b5eedfb638db601fe6b704b3a57dce4ff5e9"
 
 [[package]]
 name = "cuda-toolkit-discovery"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#fbb7df9969ffad4336c4e965d862387e66d12622"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#3a73b5eedfb638db601fe6b704b3a57dce4ff5e9"
 
 [[package]]
 name = "cudarc"
@@ -4323,7 +4327,7 @@ dependencies = [
 [[package]]
 name = "fractal-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#6d1235d4ba8d038d1c57bb7f8bf50159663e591e"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#5a21813e0f8ae8f4d49a423d56564f84e5629dfd"
 dependencies = [
  "standard-surface-bsdf",
 ]
@@ -4331,7 +4335,7 @@ dependencies = [
 [[package]]
 name = "fractal-env"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#6d1235d4ba8d038d1c57bb7f8bf50159663e591e"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#5a21813e0f8ae8f4d49a423d56564f84e5629dfd"
 dependencies = [
  "fractal-core",
  "pt-integrator",
@@ -4341,7 +4345,7 @@ dependencies = [
 [[package]]
 name = "fractal-kernels"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#6d1235d4ba8d038d1c57bb7f8bf50159663e591e"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#5a21813e0f8ae8f4d49a423d56564f84e5629dfd"
 dependencies = [
  "cuda-core",
  "cuda-device",
@@ -4353,7 +4357,7 @@ dependencies = [
 [[package]]
 name = "fractal-materials"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#6d1235d4ba8d038d1c57bb7f8bf50159663e591e"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#5a21813e0f8ae8f4d49a423d56564f84e5629dfd"
 
 [[package]]
 name = "funty"
@@ -5848,7 +5852,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "libnvvm-sys"
 version = "0.2.1"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#fbb7df9969ffad4336c4e965d862387e66d12622"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#3a73b5eedfb638db601fe6b704b3a57dce4ff5e9"
 dependencies = [
  "cuda-target-spec",
  "cuda-toolkit-discovery",
@@ -6453,7 +6457,7 @@ dependencies = [
 [[package]]
 name = "nvjitlink-sys"
 version = "0.2.1"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#fbb7df9969ffad4336c4e965d862387e66d12622"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#3a73b5eedfb638db601fe6b704b3a57dce4ff5e9"
 dependencies = [
  "cuda-toolkit-discovery",
  "libloading 0.8.9",
@@ -7607,7 +7611,7 @@ dependencies = [
 [[package]]
 name = "ptx-parse"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#fbb7df9969ffad4336c4e965d862387e66d12622"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#3a73b5eedfb638db601fe6b704b3a57dce4ff5e9"
 
 [[package]]
 name = "pulp"
@@ -8096,7 +8100,7 @@ checksum = "19b30a45b0cd0bcca8037f3d0dc3421eaf95327a17cad11964fb8179b4fc4832"
 [[package]]
 name = "reserved-oxide-symbols"
 version = "0.2.1"
-source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#fbb7df9969ffad4336c4e965d862387e66d12622"
+source = "git+ssh://git@github.com/ssoj13/cuda-rust-windows.git?branch=main#3a73b5eedfb638db601fe6b704b3a57dce4ff5e9"
 
 [[package]]
 name = "rgb"

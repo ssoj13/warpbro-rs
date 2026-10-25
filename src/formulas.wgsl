@@ -329,8 +329,12 @@ fn harmonic_bulb_distance(
             return vec2<f32>(0.0, trap);
         }
         let t = apply_iter_rot(rot, z);
-        let theta = acos(clamp(t.z / r, -1.0, 1.0));
-        let phi = atan2(t.y, t.x);
+        // Avoid the ill-conditioned acos(z / length) evaluation at the poles.
+        let theta = atan2(length(t.xy), t.z);
+        var phi = 0.0;
+        if t.x != 0.0 || t.y != 0.0 {
+            phi = atan2(t.y, t.x);
+        }
         let y_lm = cos(harm_l * theta) * cos(harm_m * phi);
         let mod_factor = max(1.0 + amp * y_lm, 0.25);
         let r_pow_m1 = pow(r, power - 1.0);
@@ -830,8 +834,11 @@ fn superformula_distance(
     if r < 1.0e-6 {
         return vec2<f32>(-0.5, TRAP_START);
     }
-    let phi = atan2(q.y, q.x);
-    let theta = asin(clamp(q.z / r, -1.0, 1.0));
+    var phi = 0.0;
+    if q.x != 0.0 || q.y != 0.0 {
+        phi = atan2(q.y, q.x);
+    }
+    let theta = atan2(q.z, length(q.xy));
     let r1 = gielis_r(phi, m1, n1_1, n2_1, n3_1);
     let r2 = gielis_r(theta, m2, n1_2, n2_2, n3_2);
     let target_r = r1 * r2;
@@ -885,8 +892,9 @@ fn phyllotaxis_distance(
     let f0 = round(fk);
     let f1 = round(fk * phi_gold);
 
-    let b00 = 2.0 * 3.14159265 * fract((f0 + 1.0) * (phi_gold - 1.0)) - ga;
-    let b01 = 2.0 * 3.14159265 * fract((f1 + 1.0) * (phi_gold - 1.0)) - ga;
+    // Match the positive golden-angle winding used to construct each candidate seed.
+    let b00 = 2.0 * 3.14159265 * ((phi_gold - 1.0) - fract((f0 + 1.0) * (phi_gold - 1.0)));
+    let b01 = 2.0 * 3.14159265 * ((phi_gold - 1.0) - fract((f1 + 1.0) * (phi_gold - 1.0)));
     let b10 = -2.0 * f0 / n_florets;
     let b11 = -2.0 * f1 / n_florets;
     let inv_det = 1.0 / (b00 * b11 - b01 * b10);

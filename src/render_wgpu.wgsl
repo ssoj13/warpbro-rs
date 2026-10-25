@@ -1520,6 +1520,146 @@ fn march_span(is_world: bool, origin: vec3<f32>, dir: vec3<f32>) -> Span {
     return Span(true, max(-b - root, 0.0), min(t_exit, max_distance));
 }
 
+// Conservative beam/sphere entry, matching fractal_core::ray_bounds. Directed
+// neighbours bound each scalar operation; widening subnormals also covers FTZ devices.
+fn beam_lower(v: f32) -> f32 {
+    let bits = bitcast<u32>(v);
+    if (bits & 0x7fffffffu) < 0x00800000u {
+        return -bitcast<f32>(0x00800000u);
+    }
+    if bits == 0xff800000u {
+        return v;
+    }
+    if (bits & 0x80000000u) != 0u {
+        return bitcast<f32>(bits + 1u);
+    }
+    return bitcast<f32>(bits - 1u);
+}
+
+fn beam_upper(v: f32) -> f32 {
+    let bits = bitcast<u32>(v);
+    if (bits & 0x7fffffffu) < 0x00800000u {
+        return bitcast<f32>(0x00800000u);
+    }
+    if bits == 0x7f800000u {
+        return v;
+    }
+    if (bits & 0x80000000u) != 0u {
+        return bitcast<f32>(bits - 1u);
+    }
+    return bitcast<f32>(bits + 1u);
+}
+
+fn beam_dot_lower(a: vec3<f32>, b: vec3<f32>) -> f32 {
+    return beam_lower(beam_lower(beam_lower(a.x * b.x) + beam_lower(a.y * b.y)) + beam_lower(a.z * b.z));
+}
+
+fn beam_sqrt_upper(v: f32) -> f32 {
+    if !(v > 0.0) {
+        return 0.0;
+    }
+    if v > F32_MAX {
+        return F32_MAX;
+    }
+    var root = beam_upper(sqrt(v));
+    while beam_lower(root * root) < v {
+        root = beam_upper(root);
+    }
+    return root;
+}
+
+fn beam_ratio_upper(numerator: f32, denominator: f32) -> f32 {
+    if numerator == 0.0 {
+        return 0.0;
+    }
+    if !(numerator > 0.0 && numerator <= F32_MAX && denominator > 0.0 && denominator <= F32_MAX) {
+        return F32_MAX;
+    }
+    var value = beam_upper(numerator / denominator);
+    while beam_lower(value * denominator) < numerator {
+        value = beam_upper(value);
+    }
+    return value;
+}
+
+fn beam_dot_upper(a: vec3<f32>, b: vec3<f32>) -> f32 {
+    return beam_upper(beam_upper(beam_upper(a.x * b.x) + beam_upper(a.y * b.y)) + beam_upper(a.z * b.z));
+}
+
+fn beam_gram_error(a: vec3<f32>, b: vec3<f32>, diagonal: bool) -> f32 {
+    let lo = beam_dot_lower(a, b);
+    let hi = beam_dot_upper(a, b);
+    if diagonal {
+        return max(beam_upper(hi - 1.0), beam_upper(1.0 - lo));
+    }
+    return max(hi, -lo);
+}
+
+// Packed-basis condition bound and camera arithmetic ledger match
+// fractal_core::ray_bounds::pixel_beam_slope (no assumed orthonormality).
+fn pixel_beam_slope(basis: array<vec3<f32>, 3>, half_width: f32, half_height: f32, width: f32, height: f32) -> f32 {
+    let e00 = beam_gram_error(basis[0], basis[0], true);
+    let e11 = beam_gram_error(basis[1], basis[1], true);
+    let e22 = beam_gram_error(basis[2], basis[2], true);
+    let e01 = beam_gram_error(basis[0], basis[1], false);
+    let e02 = beam_gram_error(basis[0], basis[2], false);
+    let e12 = beam_gram_error(basis[1], basis[2], false);
+    let rho = max(max(beam_upper(beam_upper(e00 + e01) + e02),
+        beam_upper(beam_upper(e11 + e01) + e12)), beam_upper(beam_upper(e22 + e02) + e12));
+    if !(rho >= 0.0 && rho < 1.0) {
+        return F32_MAX;
+    }
+    let kappa = beam_sqrt_upper(beam_ratio_upper(beam_upper(1.0 + rho), beam_lower(1.0 - rho)));
+    let x = beam_ratio_upper(beam_upper(2.0 * half_width), width);
+    let y = beam_ratio_upper(beam_upper(2.0 * half_height), height);
+    let squared = beam_upper(beam_upper(x * x) + beam_upper(y * y));
+    if !(squared > 0.0 && squared <= F32_MAX) {
+        return F32_MAX;
+    }
+    let geometric = beam_upper(0.5 * beam_sqrt_upper(squared));
+    let unit = 0.000000059604644775390625;
+    let relative_nu = beam_upper(32.0 * max(width, height) * unit);
+    if relative_nu >= 1.0 {
+        return F32_MAX;
+    }
+    let relative = beam_ratio_upper(relative_nu, beam_lower(1.0 - relative_nu));
+    let gamma3 = beam_ratio_upper(3.0 * unit, beam_lower(1.0 - 3.0 * unit));
+    let eta = beam_upper(beam_upper(bitcast<f32>(0x3fddb3d8u) * kappa) * gamma3);
+    if !(eta < 1.0) {
+        return F32_MAX;
+    }
+    let assembly = beam_ratio_upper(eta, beam_lower(1.0 - eta));
+    let normalization = beam_ratio_upper(16.0 * unit, beam_lower(1.0 - 16.0 * unit));
+    let arithmetic = beam_upper(beam_upper(2.0 * assembly) + beam_upper(2.0 * normalization));
+    return beam_upper(beam_upper(beam_upper(kappa * geometric) * beam_upper(1.0 + relative)) + arithmetic);
+}
+
+fn beam_sphere_entry(offset: vec3<f32>, direction: vec3<f32>, radius: f32, slope: f32) -> f32 {
+    let a = beam_lower(beam_dot_lower(direction, direction) - beam_upper(slope * slope));
+    let b = beam_lower(beam_dot_lower(offset, direction) - beam_upper(radius * slope));
+    let c = beam_lower(beam_dot_lower(offset, offset) - beam_upper(radius * radius));
+    if !(c >= bitcast<f32>(0x00800000u) && abs(a) <= F32_MAX && abs(b) <= F32_MAX && c <= F32_MAX) {
+        return 0.0;
+    }
+    let discriminant = beam_upper(beam_upper(b * b) - beam_lower(a * c));
+    if !(discriminant > 0.0 && discriminant <= F32_MAX) {
+        return 0.0;
+    }
+    let root = beam_sqrt_upper(discriminant);
+    let denominator = beam_upper(root - b);
+    if !(denominator > 0.0 && denominator <= F32_MAX) {
+        return 0.0;
+    }
+    var near = max(beam_lower(c / denominator), 0.0);
+    if near > F32_MAX {
+        return 0.0;
+    }
+    while beam_upper(near * denominator) > c {
+        near = max(beam_lower(near), 0.0);
+    }
+    return near;
+}
+
 // The ray length below which no camera ray of the pixel with centre ray `dir` can hit
 // (fractal-kernels `cone_start`): a cone march along the centre ray with the pixel cone of one
 // pixel on the unit image plane, its own step budget (`CONE_START_STEPS`), 0 when the centre ray
@@ -1531,10 +1671,10 @@ fn cone_start(is_world: bool, family_override: u32, origin: vec3<f32>, dir: vec3
     }
     let step_cap = 2.0 * (span.exit - span.enter) / STEP_CAP_STEPS;
     let slope = param(P_FOOTPRINT);
-    let w = 2.0 * param(P_HALF_W) / param(P_WIDTH);
-    let h = 2.0 * param(P_HALF_H) / param(P_HEIGHT);
-    let cone = 0.5 * sqrt(w * w + h * h);
-    var t = span.enter;
+    let cone = pixel_beam_slope(array<vec3<f32>, 3>(param3(P_CAM_FORWARD), param3(P_CAM_RIGHT), param3(P_CAM_UP)),
+        param(P_HALF_W), param(P_HALF_H), param(P_WIDTH), param(P_HEIGHT));
+    // A jittered ray can hit before the centre ray enters the sphere.
+    var t = min(beam_sphere_entry(origin - param3(P_CLIP_CENTER), dir, param(P_CLIP_RADIUS), cone), span.enter);
     for (var i = 0u; i < CONE_START_STEPS; i = i + 1u) {
         if t > span.exit {
             break;
