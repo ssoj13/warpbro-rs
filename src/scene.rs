@@ -1074,13 +1074,6 @@ impl Default for Material {
 }
 
 impl Scene {
-    /// Whether this scene (or any object in a world scene) uses an extended formula (`code >= 8`)
-    /// supported by the WGPU compute shader.
-    pub fn uses_extended_formula(&self) -> bool {
-        self.formula.code() >= 8
-            || (self.world_render && self.objects.iter().any(|o| o.formula.code() >= 8))
-    }
-
     /// World-space bounds: use the DE's explicit bounds, otherwise a local 10³ box.
     pub fn framing_bounds(&self) -> (glam::Vec3, glam::Vec3) {
         use glam::Vec3;

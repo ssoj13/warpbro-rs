@@ -282,8 +282,8 @@ impl PreparationInputs {
 
 /// Material specialization belongs to the evaluated world, not the root scene's snapshot
 /// material. Cache it with the packed upload so launches do not rescan authoring nodes.
-/// Only homogeneous Fast worlds use specialized kernels; Full and mixed worlds retain
-/// the universal dispatcher because material specialization did not establish a speed gain.
+/// Fast and Full worlds compile out the unused BSDF; mixed material worlds choose per hit.
+/// Family specialization is independent and uses `PreparedScene::homogeneous_family`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WorldMaterial {
     Fast,
@@ -310,9 +310,7 @@ impl WorldMaterial {
 pub(crate) struct PreparedScene {
     pub(crate) upload: WorldUpload,
     pub(crate) world_material: WorldMaterial,
-    /// Inline the known DE only for one actual Fast Mandelbulb object.
-    pub(crate) single_fast_bulb: bool,
-    /// When every world object uses the same formula family (`0..Formula::COUNT`), WGPU can
+    /// When every world object uses the same formula family (`0..Formula::COUNT`), both backends
     /// dispatch a family-specialized world pipeline instead of the 28-way dynamic switch.
     pub(crate) homogeneous_family: Option<u32>,
     pub(crate) trace: Vec<f32>,
@@ -323,9 +321,6 @@ impl PreparedScene {
     pub(crate) fn new(scene: &Scene, width: u32, height: u32) -> Result<Self, String> {
         let upload = WorldUpload::new(scene, width, height)?;
         let world_material = WorldMaterial::from_upload(&upload);
-        let single_fast_bulb = world_material == WorldMaterial::Fast
-            && upload.objects.len() == OBJECT_STRIDE
-            && upload.objects[P_FAMILY] as u32 == FAMILY_BULB;
         let homogeneous_family = {
             let mut objects = upload.objects.as_chunks::<OBJECT_STRIDE>().0.iter();
             if let Some(first) = objects.next() {
@@ -344,7 +339,6 @@ impl PreparedScene {
         Ok(Self {
             upload,
             world_material,
-            single_fast_bulb,
             homogeneous_family,
             trace: scene_trace_data(scene)?,
             palettes: std::iter::once(scene.palette)

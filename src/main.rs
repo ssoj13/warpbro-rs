@@ -1,7 +1,7 @@
 #![recursion_limit = "256"]
 //! WarpBro: a path-traced 3D fractal browser. The render worker drives the fractal-rs CUDA
 //! kernels (cuda-oxide) or their WGSL port: the distance-estimated families of
-//! `formulas::FORMULAS` (the classic ones on both backends, the extended ones on WGPU only), DE
+//! `formulas::FORMULAS` (all 28 families on CUDA and WGPU), DE
 //! sphere tracing, `pt-integrator` path tracing and `standard-surface-bsdf`. The UI is egui.
 //!
 //!   WarpBro                                          the browser

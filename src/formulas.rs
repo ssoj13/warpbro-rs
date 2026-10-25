@@ -1,5 +1,5 @@
 //! The formula family registry: [`FORMULAS`], one [`FormulaMeta`] row per family code (the 8
-//! classic fractal-kernels families and the 20 WGPU-only extended ones), and the parameter
+//! classic families and the 20 extended families, all shared by CUDA and WGPU), and the parameter
 //! structs and packing of the extended families.
 //!
 //! [`FORMULAS`] is the single source of truth for what the rest of the crate knows about a
@@ -19,28 +19,15 @@ use serde_json::{Value, json};
 
 use crate::params::*;
 
-pub const FAMILY_AMAZING_SURFACE: u32 = 8;
-pub const FAMILY_BRISTORBROT: u32 = 9;
-pub const FAMILY_BURNING_SHIP: u32 = 10;
-pub const FAMILY_KALEIDO_TWIST: u32 = 11;
-pub const FAMILY_POLYHEDRAL_KIFS: u32 = 12;
-pub const FAMILY_HARMONIC_BULB: u32 = 13;
-pub const FAMILY_MANDELBAR: u32 = 14;
-pub const FAMILY_MOBIUS_IFS: u32 = 15;
-pub const FAMILY_GYROID_TPMS: u32 = 16;
-pub const FAMILY_LIDINOID_TPMS: u32 = 17;
-pub const FAMILY_ATTRACTOR_TUBE: u32 = 18;
-pub const FAMILY_TORUS_KNOT: u32 = 19;
-pub const FAMILY_HOPF_FIBRATION: u32 = 20;
-pub const FAMILY_DUPIN_CYCLIDE: u32 = 21;
-pub const FAMILY_SUPERFORMULA: u32 = 22;
-pub const FAMILY_PHYLLOTAXIS: u32 = 23;
-pub const FAMILY_NAUTILUS: u32 = 24;
-pub const FAMILY_VORONOI_FOAM: u32 = 25;
-pub const FAMILY_CRYSTAL_GEODE: u32 = 26;
-pub const FAMILY_ASTROLABE: u32 = 27;
-
-pub const TOTAL_FORMULA_COUNT: u32 = 28;
+// Family IDs belong to the shared host/device ABI.
+pub use fractal_core::params::{
+    FAMILY_AMAZING_SURFACE, FAMILY_ASTROLABE, FAMILY_ATTRACTOR_TUBE, FAMILY_BRISTORBROT,
+    FAMILY_BURNING_SHIP, FAMILY_CRYSTAL_GEODE, FAMILY_DUPIN_CYCLIDE, FAMILY_GYROID_TPMS,
+    FAMILY_HARMONIC_BULB, FAMILY_HOPF_FIBRATION, FAMILY_KALEIDO_TWIST, FAMILY_LIDINOID_TPMS,
+    FAMILY_MANDELBAR, FAMILY_MOBIUS_IFS, FAMILY_NAUTILUS, FAMILY_PHYLLOTAXIS,
+    FAMILY_POLYHEDRAL_KIFS, FAMILY_SUPERFORMULA, FAMILY_TORUS_KNOT, FAMILY_VORONOI_FOAM,
+    TOTAL_FORMULA_COUNT,
+};
 
 // =============================================================================
 // Declarative Metadata Types
@@ -146,6 +133,8 @@ pub const ITERATING_MASK: u32 = family_mask(false);
 // every code.
 const _: () = {
     assert!(TOTAL_FORMULA_COUNT <= u32::BITS);
+    assert!(SIGNED_MASK == FAMILY_SIGNED_MASK);
+    assert!(ITERATING_MASK == FAMILY_ITERATING_MASK);
     let mut i = 0;
     while i < FORMULAS.len() {
         assert!(FORMULAS[i].code as usize == i);

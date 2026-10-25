@@ -4125,12 +4125,7 @@ impl App {
             .map(|s| s.effective.render.backend)
             .unwrap_or(self.scene.render.backend);
         let backend = if backend == crate::render_profiles::Backend::Auto
-            && (self
-                .request
-                .as_ref()
-                .map_or(&self.scene, |r| &r.scene)
-                .uses_extended_formula()
-                || self.gpu_name.ends_with("(WGPU)"))
+            && self.gpu_name.ends_with("(WGPU)")
         {
             crate::render_profiles::Backend::Wgpu
         } else {

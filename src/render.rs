@@ -19,6 +19,40 @@ use fractal_kernels::kernels;
 pub use crate::render_prep::PreparationStats;
 pub(crate) use crate::render_prep::*;
 
+/// One entry-selection rule shared by tracing and resource diagnostics.
+fn cuda_trace_entry(
+    scene: &Scene,
+    prepared: &PreparedScene,
+    force_dynamic: bool,
+) -> (fractal_kernels::TraceMaterial, Option<u32>) {
+    use fractal_kernels::TraceMaterial;
+    let shade = if scene.direct.is_some() {
+        TraceMaterial::Direct
+    } else if scene.world_render {
+        match if force_dynamic {
+            WorldMaterial::Mixed
+        } else {
+            prepared.world_material
+        } {
+            WorldMaterial::Fast => TraceMaterial::Fast,
+            WorldMaterial::Full => TraceMaterial::Full,
+            WorldMaterial::Mixed => TraceMaterial::Mixed,
+        }
+    } else if scene.material.model == crate::scene::MaterialModel::StandardSurface {
+        TraceMaterial::Full
+    } else {
+        TraceMaterial::Fast
+    };
+    let family = if !scene.world_render {
+        Some(scene.formula.code())
+    } else if force_dynamic {
+        None
+    } else {
+        prepared.homogeneous_family
+    };
+    (shade, family)
+}
+
 /// Why a render request, step or readback failed. A job (export, preview, thumbnail) ends with
 /// it as its typed failure event; the viewport shows it and stops until its request changes.
 /// Display problems (OCIO) are not render errors: they stay in [`Target::colour_error`] and the
@@ -557,23 +591,17 @@ impl Gpu {
     }
 
     /// Resolve the scene's requested backend (`Auto`, `Cuda`, `Wgpu`) to the engine that renders
-    /// it. An explicit backend never falls back: an unavailable one, or `Cuda` for a family CUDA
-    /// has no kernel for (the extended families, which Auto sends to WGPU), is a typed error.
+    /// it. All registered families have CUDA and WGPU kernels. An explicitly requested
+    /// unavailable backend is a typed error; only Auto selects an available backend.
     /// Admission ([`Self::prepare_scene`]) and every step resolve through here.
     pub fn resolve_backend(&mut self, scene: &Scene) -> Result<Backend, RenderError> {
-        let extended = scene.uses_extended_formula();
         match scene.render.backend {
-            Backend::Cuda if extended => Err(RenderError::Backend(
-                "This scene uses a formula family CUDA has no kernel for (the extended families \
-                 render on WGPU): choose the WGPU or Auto backend"
-                    .into(),
-            )),
             Backend::Cuda => match &self.cuda {
                 Ok(_) => Ok(Backend::Cuda),
                 Err(error) => Err(RenderError::Backend(error.clone())),
             },
             Backend::Wgpu => self.init_wgpu(),
-            Backend::Auto if extended || self.cuda.is_err() => self.init_wgpu(),
+            Backend::Auto if self.cuda.is_err() => self.init_wgpu(),
             Backend::Auto => Ok(Backend::Cuda),
         }
     }
@@ -897,7 +925,7 @@ impl Gpu {
     }
 
     /// Admission of a job before it is queued: the backend resolves (an unavailable explicit
-    /// backend, or CUDA for an extended family, fails here, not on every step), the scene packs
+    /// backend fails here, not on every step), the scene packs
     /// at the exact requested dimensions and its environment map loads. The steps reuse the
     /// cached preparation.
     pub fn prepare_scene(
@@ -937,13 +965,21 @@ impl Gpu {
             .map_err(RenderError::Scene)?;
         let env = self.environment_for(prepared.environment.as_ref())?;
         let p = prepared.params(scene);
+        #[cfg(test)]
+        let family = if self.force_mixed_world {
+            None
+        } else {
+            prepared.homogeneous_family
+        };
+        #[cfg(not(test))]
+        let family = prepared.homogeneous_family;
         if backend == Backend::Wgpu {
             let Some(Ok(wgpu)) = self.wgpu.as_mut() else {
                 return Err(RenderError::Backend("WGPU backend unavailable".into()));
             };
             wgpu.upload_prepared(&prepared, env.as_deref(), true, &mut self.stats)?;
             wgpu.set_params(&p)?;
-            return wgpu.pick(ndc, prepared.homogeneous_family);
+            return wgpu.pick(ndc, family);
         }
         let cuda = self
             .cuda
@@ -964,12 +1000,83 @@ impl Gpu {
             .copy_from_host(&cuda.stream, &[[ndc[0], ndc[1], 0.0, 0.0]])
             .map_err(|e| device("pick upload", e))?;
         let mut out = zeroed(&cuda.stream, 1, "pick result")?;
+        macro_rules! pick_entry {
+            ($prepare:ident, $run:ident) => {{
+                let launch = cuda
+                    .module
+                    .$prepare(LaunchConfig1D::new(1, 32, 0))
+                    .map_err(|e| device("prepare pick", e))?;
+                cuda.module
+                    .$run(
+                        &cuda.stream,
+                        &launch,
+                        &cuda.objects,
+                        &cuda.lights,
+                        &query,
+                        &mut out,
+                    )
+                    .map_err(|e| device("pick", e))?;
+            }};
+        }
+        fractal_kernels::dispatch_pick!(
+            pick_entry,
+            family,
+            return Err(RenderError::Scene("unsupported CUDA pick entry".into()))
+        );
+        let mut hit = [[0.0f32; 4]];
+        out.copy_to_host(&cuda.stream, &mut hit)
+            .map_err(|e| device("pick readback", e))?;
+        let [[object, _, depth, _]] = hit;
+        Ok((object >= 1.0).then(|| (object as usize - 1, depth)))
+    }
+
+    /// Select the unspecialized CUDA world route for the independent parity oracle.
+    #[cfg(test)]
+    pub(crate) fn set_force_mixed_world(&mut self, force: bool) {
+        self.force_mixed_world = force;
+    }
+
+    /// Evaluate object-local DE/trap samples before marching amplifies arithmetic differences.
+    #[cfg(test)]
+    pub(crate) fn probe_formula(
+        &mut self,
+        scene: &Scene,
+        points: &[[f32; 4]],
+    ) -> Result<Vec<[f32; 4]>, RenderError> {
+        if points.is_empty() {
+            return Ok(Vec::new());
+        }
+        let backend = self.resolve_backend(scene)?;
+        let p: [f32; P_COUNT] = scene.pack(1, 1).try_into().expect("packed parameter ABI");
+        if backend == Backend::Wgpu {
+            let wgpu = self
+                .wgpu
+                .as_mut()
+                .unwrap()
+                .as_mut()
+                .map_err(|e| RenderError::Backend(e.clone()))?;
+            wgpu.set_params(&p)?;
+            return wgpu.probe_formula(scene.formula.code(), points);
+        }
+        let cuda = self
+            .cuda
+            .as_mut()
+            .map_err(|e| RenderError::Backend(e.clone()))?;
+        cuda.module
+            .set_params(&cuda.stream, &p)
+            .map_err(|e| device("probe parameters", e))?;
+        let mut query = zeroed(&cuda.stream, points.len(), "formula probe queries")?;
+        query
+            .copy_from_host(&cuda.stream, points)
+            .map_err(|e| device("formula probe upload", e))?;
+        let mut out = zeroed(&cuda.stream, points.len(), "formula probe output")?;
+        let cfg = LaunchConfig1D::new((points.len() as u32).div_ceil(128), 128, 0);
         let launch = cuda
             .module
-            .prepare_pick(LaunchConfig1D::new(1, 32, 0))
-            .map_err(|e| device("pick", e))?;
+            .prepare_probe_formula(cfg)
+            .map_err(|e| device("prepare formula probe", e))?;
         cuda.module
-            .pick(
+            .probe_formula(
                 &cuda.stream,
                 &launch,
                 &cuda.objects,
@@ -977,12 +1084,52 @@ impl Gpu {
                 &query,
                 &mut out,
             )
-            .map_err(|e| device("pick", e))?;
-        let mut hit = [[0.0f32; 4]];
-        out.copy_to_host(&cuda.stream, &mut hit)
-            .map_err(|e| device("pick readback", e))?;
-        let [[object, _, depth, _]] = hit;
-        Ok((object >= 1.0).then(|| (object as usize - 1, depth)))
+            .map_err(|e| device("formula probe", e))?;
+        let mut result = vec![[0.0; 4]; points.len()];
+        out.copy_to_host(&cuda.stream, &mut result)
+            .map_err(|e| device("formula probe readback", e))?;
+        Ok(result)
+    }
+
+    /// Resources of the actual loaded CUDA image selected by the production dispatcher.
+    /// Queried explicitly by benchmarks, never on the per-frame rendering path.
+    pub(crate) fn cuda_kernel_resources(
+        &mut self,
+        scene: &Scene,
+        width: usize,
+        height: usize,
+    ) -> Result<serde_json::Value, RenderError> {
+        if self.resolve_backend(scene)? != Backend::Cuda {
+            return Err(RenderError::Backend(
+                "CUDA resources require the CUDA backend".into(),
+            ));
+        }
+        let prepared = self
+            .preparation
+            .get(scene, width as u32, height as u32)
+            .map_err(RenderError::Scene)?;
+        let (shade, family) = cuda_trace_entry(scene, &prepared, false);
+        let module = &self.cuda()?.module;
+        macro_rules! resources {
+            ($prepare:ident, $run:ident) => {{
+                let function = module.as_cuda_module().load_function(stringify!($run))
+                    .map_err(|e| device("query CUDA kernel", e))?;
+                Ok(serde_json::json!({
+                    "entry": stringify!($run),
+                    "registers": function.num_registers()
+                        .map_err(|e| device("CUDA register count", e))?,
+                    "local_bytes": function.local_size_bytes()
+                        .map_err(|e| device("CUDA local size", e))?,
+                }))
+            }};
+        }
+        fractal_kernels::dispatch_trace!(
+            resources,
+            scene.world_render,
+            shade,
+            family,
+            Err(RenderError::Scene("unsupported CUDA resource entry".into()))
+        )
     }
 
     pub fn preparation_stats(&self) -> PreparationStats {
@@ -1193,7 +1340,6 @@ impl Gpu {
             }
         } else {
             if spp > 0 {
-                let full = p[P_MATERIAL_MODEL] != 0.0;
                 let cuda = self.cuda()?;
                 let Some(Film::Cuda(ct)) = &mut target.film else {
                     return Err(film_mismatch());
@@ -1219,77 +1365,18 @@ impl Gpu {
                         .map_err(|e| device(stringify!($run), e))?;
                     }};
                 }
-                if scene.direct.is_some() {
-                    if scene.world_render {
-                        launch!(prepare_world_direct, world_direct)
-                    } else {
-                        match scene.formula.code() {
-                            FAMILY_BULB => launch!(prepare_direct_bulb, direct_bulb),
-                            FAMILY_BOX => launch!(prepare_direct_box, direct_box),
-                            FAMILY_QUAT => launch!(prepare_direct_quat, direct_quat),
-                            FAMILY_KIFS => launch!(prepare_direct_kifs, direct_kifs),
-                            FAMILY_KLEINIAN => {
-                                launch!(prepare_direct_kleinian, direct_kleinian)
-                            }
-                            FAMILY_PSEUDO_KLEINIAN => {
-                                launch!(prepare_direct_pseudo_kleinian, direct_pseudo_kleinian)
-                            }
-                            FAMILY_APOLLONIAN => {
-                                launch!(prepare_direct_apollonian, direct_apollonian)
-                            }
-                            _ => launch!(prepare_direct_hybrid, direct_hybrid),
-                        }
-                    }
-                } else if scene.world_render {
-                    #[cfg(test)]
-                    let world_material = if self.force_mixed_world {
-                        WorldMaterial::Mixed
-                    } else {
-                        prepared.world_material
-                    };
-                    #[cfg(not(test))]
-                    let world_material = prepared.world_material;
-                    match world_material {
-                        WorldMaterial::Fast if prepared.single_fast_bulb => {
-                            launch!(prepare_world_fast_bulb, world_fast_bulb)
-                        }
-                        WorldMaterial::Fast => launch!(prepare_world_fast, world_fast),
-                        WorldMaterial::Full | WorldMaterial::Mixed => {
-                            launch!(prepare_world, world)
-                        }
-                    }
-                } else {
-                    match (full, scene.formula.code()) {
-                        (false, FAMILY_BULB) => launch!(prepare_fast_bulb, fast_bulb),
-                        (false, FAMILY_BOX) => launch!(prepare_fast_box, fast_box),
-                        (false, FAMILY_QUAT) => launch!(prepare_fast_quat, fast_quat),
-                        (false, FAMILY_KIFS) => launch!(prepare_fast_kifs, fast_kifs),
-                        (false, FAMILY_KLEINIAN) => {
-                            launch!(prepare_fast_kleinian, fast_kleinian)
-                        }
-                        (false, FAMILY_PSEUDO_KLEINIAN) => {
-                            launch!(prepare_fast_pseudo_kleinian, fast_pseudo_kleinian)
-                        }
-                        (false, FAMILY_APOLLONIAN) => {
-                            launch!(prepare_fast_apollonian, fast_apollonian)
-                        }
-                        (false, _) => launch!(prepare_fast_hybrid, fast_hybrid),
-                        (true, FAMILY_BULB) => launch!(prepare_full_bulb, full_bulb),
-                        (true, FAMILY_BOX) => launch!(prepare_full_box, full_box),
-                        (true, FAMILY_QUAT) => launch!(prepare_full_quat, full_quat),
-                        (true, FAMILY_KIFS) => launch!(prepare_full_kifs, full_kifs),
-                        (true, FAMILY_KLEINIAN) => {
-                            launch!(prepare_full_kleinian, full_kleinian)
-                        }
-                        (true, FAMILY_PSEUDO_KLEINIAN) => {
-                            launch!(prepare_full_pseudo_kleinian, full_pseudo_kleinian)
-                        }
-                        (true, FAMILY_APOLLONIAN) => {
-                            launch!(prepare_full_apollonian, full_apollonian)
-                        }
-                        (true, _) => launch!(prepare_full_hybrid, full_hybrid),
-                    }
-                }
+                #[cfg(test)]
+                let force_dynamic = self.force_mixed_world;
+                #[cfg(not(test))]
+                let force_dynamic = false;
+                let (shade, family) = cuda_trace_entry(scene, prepared, force_dynamic);
+                fractal_kernels::dispatch_trace!(
+                    launch,
+                    scene.world_render,
+                    shade,
+                    family,
+                    return Err(RenderError::Scene("unsupported CUDA trace entry".into()))
+                );
                 target.samples += spp;
                 target.display_key = None;
                 target.tally_dirty = true;
@@ -1511,7 +1598,6 @@ impl Gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::formulas::AmazingSurface;
     use crate::scene::{Apollonian, Bulb, Formula, Hybrid, Kifs, KifsKind, Quat};
 
     /// Accumulated radiance, albedo and normal guides of `scene` at 96x64, one sample.
@@ -2350,10 +2436,14 @@ mod tests {
             [0.8, 0.2, 0.1],
         ));
         scene.objects[0].material.model = MaterialModel::StandardSurface;
-        assert!(!cache.get(&scene, 32, 24).unwrap().single_fast_bulb);
+        assert_eq!(
+            cache.get(&scene, 32, 24).unwrap().world_material,
+            WorldMaterial::Full
+        );
         scene.objects[0].material.model = MaterialModel::Fast;
         let single = cache.get(&scene, 32, 24).unwrap();
-        assert!(single.single_fast_bulb);
+        assert_eq!(single.world_material, WorldMaterial::Fast);
+        assert_eq!(single.homogeneous_family, Some(FAMILY_BULB));
         assert!(Arc::ptr_eq(&single, &cache.get(&scene, 32, 24).unwrap()));
         // Masks are part of the upload: a new mask must rebuild, never reuse the unmasked world.
         scene.objects[0].masks.push(crate::scene::MaskInstance {
@@ -2364,14 +2454,17 @@ mod tests {
         scene.objects[0].masks.clear();
         scene.objects[0].formula =
             crate::scene::Formula::QuaternionJulia(crate::scene::Quat::PRESET);
-        assert!(!cache.get(&scene, 32, 24).unwrap().single_fast_bulb);
+        assert_eq!(
+            cache.get(&scene, 32, 24).unwrap().homogeneous_family,
+            Some(FAMILY_QUAT)
+        );
         scene.objects.push(world_object(
             FAMILY_BULB,
             [1.0, 0.0, 0.0],
             [1.0; 3],
             [0.1, 0.2, 0.8],
         ));
-        assert!(!cache.get(&scene, 32, 24).unwrap().single_fast_bulb);
+        assert_eq!(cache.get(&scene, 32, 24).unwrap().homogeneous_family, None);
     }
 
     /// A compiler-specialized material path must preserve the complete world estimator,
@@ -2592,7 +2685,7 @@ mod tests {
     fn preparation_preview_full_and_all_formula_packs_remain_exact() {
         let _gpu_test = crate::test_gpu::lock();
         let mut cache = PreparationCache::default();
-        for family in 0..=FAMILY_HYBRID {
+        for family in 0..Formula::COUNT {
             let mut scene = Scene::preset(Formula::PRESETS[family as usize]);
             scene.render.max_bounces = 4;
             for world in [false, true] {
@@ -4157,17 +4250,15 @@ mod tests {
         assert_eq!(resolve(&mut gpu, Backend::Auto).unwrap(), Backend::Wgpu);
         gpu.cuda = cuda;
 
-        // An explicit CUDA backend never draws an extended family as Hybrid (plan1 Q3): it is
-        // refused at resolution, while Auto sends the family to WGPU.
-        let mut extended = Scene::preset(Formula::AmazingSurface(AmazingSurface::PRESET));
-        extended.render.backend = Backend::Cuda;
-        assert!(matches!(
-            gpu.resolve_backend(&extended),
-            Err(RenderError::Backend(_))
-        ));
-        assert!(gpu.prepare_scene(&extended, 8, 8).is_err());
-        extended.render.backend = Backend::Auto;
-        assert_eq!(gpu.resolve_backend(&extended).unwrap(), Backend::Wgpu);
+        // Every registered family is implemented on both backends, without silent substitution.
+        for formula in Formula::PRESETS {
+            let mut extended = Scene::preset(formula);
+            extended.render.backend = Backend::Cuda;
+            assert_eq!(gpu.resolve_backend(&extended).unwrap(), Backend::Cuda);
+            gpu.prepare_scene(&extended, 8, 8).unwrap();
+            extended.render.backend = Backend::Auto;
+            assert_eq!(gpu.resolve_backend(&extended).unwrap(), Backend::Cuda);
+        }
 
         // When WGPU is marked unavailable, explicit Backend::Wgpu must fail rather than fall back to CUDA.
         let saved_wgpu = gpu.wgpu.take();

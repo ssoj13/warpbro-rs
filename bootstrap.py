@@ -28,7 +28,7 @@ Commands:
     docs          Rebuild the README images in docs/ (needs uv for Pillow)
     i(nstall)     Copy the release binary to ~/.local/bin/WarpBro
     c(heck)       cargo fmt --check + cargo clippy
-    k(ernels)     Registers, local frame and spills per kernel (ptxas -v); --lines maps them to source
+    k(ernels)     Entry/helper resources and JSON receipts (ptxas -v); --lines maps local accesses
     ci            Hosted CI without a GPU: toolchain, check, tests (--skip cuda_ gpu_), build, dist/*.zip
     cl(ean)       cargo clean (+ stray *.ll / *.ptx dumps in the repo root)
     h(elp)        Print help
@@ -46,6 +46,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -602,31 +603,111 @@ KERNEL_PTX = ROOT_DIR / "target" / "oxide-ptx" / "fractal_kernels.ptx"
 KERNEL_REPORT_DIR = ROOT_DIR / "target" / "oxide-ptx" / "kernels"
 
 
+def ptx_call_graph(source: str) -> tuple[set[str], dict[str, set[str]]]:
+    """Read entry names and direct device calls before ptxas inlines/removes helpers."""
+    source = re.sub(r"/\*.*?\*/|//[^\n]*", "", source, flags=re.DOTALL)
+    declaration = re.compile(
+        r"(?m)^\s*(?:\.(?:visible|extern|weak)\s+)*\.(entry|func)\s+"
+        r"(?:\([^)]*\)\s*)?([A-Za-z_$][\w$]*)\s*\("
+    )
+    call = re.compile(
+        r"\bcall(?:\.\w+)*\s+(?:\([^;]*?\)\s*,\s*)?([A-Za-z_$][\w$]*)\s*,"
+    )
+    entries: set[str] = set()
+    graph: dict[str, set[str]] = {}
+    for match in declaration.finditer(source):
+        body = source.find("{", match.end())
+        terminator = source.find(";", match.end())
+        if body < 0 or 0 <= terminator < body:  # External declaration, not a body.
+            continue
+        depth, cursor = 1, body + 1
+        while cursor < len(source) and depth:
+            depth += (source[cursor] == "{") - (source[cursor] == "}")
+            cursor += 1
+        if depth:
+            raise RuntimeError(f"Unterminated PTX function {match[2]}")
+        name = match[2]
+        if name in graph:
+            raise RuntimeError(f"Duplicate PTX function {name}")
+        graph[name] = set(call.findall(source[body + 1:cursor - 1]))
+        if match[1] == "entry":
+            entries.add(name)
+    if not entries:
+        raise RuntimeError("No PTX entry points found; resource coverage cannot be verified")
+    return entries, graph
+
+
+def parse_ptxas_stats(output: str) -> dict[str, dict[str, int]]:
+    """Retain every reported entry/helper; absent fields stay absent, never assumed zero."""
+    stats: dict[str, dict[str, int]] = {}
+    current = None
+    for line in output.splitlines():
+        entry = re.search(r"Compiling entry function '([^']+)'", line)
+        properties = re.search(r"""Function properties for\s+['"]?([^'"\s:]+)""", line)
+        if entry or properties:
+            current = (entry or properties)[1]
+            stats.setdefault(current, {})
+        if current is None:
+            continue
+        row = stats[current]
+        for label, phrase in (("frame", "stack frame"), ("st", "spill stores"), ("ld", "spill loads")):
+            if match := re.search(rf"(\d+) bytes {phrase}", line):
+                row[label] = max(row.get(label, 0), int(match[1]))
+        if match := re.search(r"Used (\d+) registers", line):
+            row["regs"] = max(row.get("regs", 0), int(match[1]))
+    return stats
+
+
 def ptxas_kernel_stats(ptx: Path, arch: str, line_info: bool) -> tuple[dict[str, dict[str, int]], Path]:
-    """Assemble `ptx` for `arch` with `ptxas --verbose` and return, per entry point, its
-    registers, own stack frame and spill bytes, plus the cubin path. These are the numbers the
-    driver's JIT would produce for the same PTX and architecture."""
+    """Assemble PTX and retain entry/helper resources plus the raw compiler receipt."""
     KERNEL_REPORT_DIR.mkdir(parents=True, exist_ok=True)
     cubin = KERNEL_REPORT_DIR / f"{arch}.cubin"
     cmd = ["ptxas", f"-arch={arch}", "-O3", "--verbose", *(["--generate-line-info"] if line_info else []),
            str(ptx), "-o", str(cubin)]
     code, output, _ = run(cmd, capture=True)
+    cubin.with_suffix(".ptxas.txt").write_text(output, encoding="utf-8")
     if code != 0:
         raise RuntimeError(f"ptxas {arch} failed:\n{output}")
-    stats: dict[str, dict[str, int]] = {}
-    entry = current = None
-    for line in output.splitlines():
-        if m := re.search(r"Compiling entry function '(\w+)'", line):
-            entry = m.group(1)
-        elif m := re.search(r"Function properties for (\w+)", line):
-            current = m.group(1)
-        elif current and (m := re.search(r"(\d+) bytes stack frame, (\d+) bytes spill stores, (\d+) bytes spill loads", line)):
-            if current == entry:
-                stats[entry] = {"frame": int(m.group(1)), "st": int(m.group(2)), "ld": int(m.group(3)), "regs": 0}
-            current = None
-        elif entry in stats and (m := re.search(r"Used (\d+) registers", line)):
-            stats[entry]["regs"] = int(m.group(1))
-    return stats, cubin
+    return parse_ptxas_stats(output), cubin
+
+
+def kernel_resource_report(
+    stats: dict[str, dict[str, int]], entries: set[str], calls: dict[str, set[str]],
+) -> dict:
+    """Verify entry coverage and associate reported helpers with their PTX callers.
+
+    ptxas can inline a PTX helper away. Such helpers are listed as unreported, not
+    assigned invented zero resources; their surviving code belongs to the caller.
+    Gates inspect every reported function, including helpers outside a parsed chain.
+    """
+    errors = [f"Missing entry resource report: {name}" for name in sorted(entries - stats.keys())]
+    for name, row in sorted(stats.items()):
+        required = {"frame", "st", "ld"} | ({"regs"} if name in entries else set())
+        if missing := required - row.keys():
+            errors.append(f"Incomplete resource report for {name}: missing {', '.join(sorted(missing))}")
+
+    chains = {}
+    for entry in sorted(entries):
+        reachable: set[str] = set()
+        pending = list(calls.get(entry, ()))
+        while pending:
+            name = pending.pop()
+            if name not in reachable and name != entry:
+                reachable.add(name)
+                pending.extend(calls.get(name, ()))
+        chains[entry] = {
+            "ptx_callees": sorted(reachable),
+            "reported_helpers": sorted(reachable & stats.keys()),
+            "unreported_ptx_helpers": sorted(reachable - stats.keys()),
+        }
+    return {
+        "complete": not errors,
+        "coverage_errors": errors,
+        "entries": chains,
+        "functions": dict(sorted(stats.items())),
+        "spilling_functions": sorted(name for name, row in stats.items() if row.get("st", 0) or row.get("ld", 0)),
+        "local_frame_functions": sorted(name for name, row in stats.items() if row.get("frame", 0)),
+    }
 
 
 def local_memory_sites(cubin: Path) -> dict[str, list[tuple[int, int, str]]]:
@@ -661,10 +742,11 @@ def local_memory_sites(cubin: Path) -> dict[str, list[tuple[int, int, str]]]:
 
 
 def run_kernels(args: argparse.Namespace) -> int:
-    """Per-kernel registers, local-memory frame and spills of the embedded PTX, for each
-    architecture given (default: the release cubin set). `--lines` rebuilds with line tables and
-    attributes every local access to its source line; `--strict` fails when any kernel keeps a
-    local frame or spills."""
+    """Report resources for all entries and helpers; missing entry coverage always fails.
+
+    --no-spills gates compiler register-spill bytes only. --strict also rejects
+    local frames (arrays/call ABI storage), retaining its stronger historical meaning.
+    """
     header("KERNELS")
     archs = args.rest or CUBIN_ARCHS.split(",")
     if args.build or args.lines:
@@ -681,28 +763,52 @@ def run_kernels(args: argparse.Namespace) -> int:
     if not KERNEL_PTX.is_file():
         err(f"{KERNEL_PTX.relative_to(ROOT_DIR)} not found: build first (b, or k --build)")
         return 1
-    offenders: list[str] = []
+    ptx_bytes = KERNEL_PTX.read_bytes()
+    entries, calls = ptx_call_graph(ptx_bytes.decode("utf-8"))
+    coverage_failed = False
+    spills: list[str] = []
+    frames: list[str] = []
     for arch in archs:
         stats, cubin = ptxas_kernel_stats(KERNEL_PTX, arch, args.lines)
-        print(f"\n  {arch}: {'kernel':24} {'regs':>4} {'frame':>6} {'spill st':>8} {'spill ld':>8}")
-        for kernel, s in sorted(stats.items(), key=lambda kv: (-kv[1]["frame"], kv[0])):
-            flag = "" if s["frame"] == 0 and s["st"] == 0 and s["ld"] == 0 else "  <-"
-            print(f"  {'':{len(arch) + 1}} {kernel:24} {s['regs']:4} {s['frame']:6} {s['st']:8} {s['ld']:8}{flag}")
-            if flag:
-                offenders.append(f"{arch}/{kernel}")
+        report = {
+            "schema": 1, "arch": arch, "ptx": str(KERNEL_PTX),
+            "ptx_sha256": hashlib.sha256(ptx_bytes).hexdigest(),
+            "call_graph_source": "PTX before ptxas optimization",
+            **kernel_resource_report(stats, entries, calls),
+        }
+        report_path = KERNEL_REPORT_DIR / f"{arch}-resources.json"
+        report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        print(f"\n  {arch}: {'function (E=entry, H=helper)':56} {'regs':>4} {'frame':>6} {'spill st':>8} {'spill ld':>8}")
+        for name, row in sorted(stats.items(), key=lambda kv: (-kv[1].get("frame", 0), kv[0])):
+            kind = "E" if name in entries else "H"
+            print(f"  {kind} {name:58} {row.get('regs', '-'):>4} {row.get('frame', '-'):>6}"
+                  f" {row.get('st', '-'):>8} {row.get('ld', '-'):>8}")
+        for error in report["coverage_errors"]:
+            err(f"{arch}: {error}")
+        coverage_failed |= not report["complete"]
+        spills.extend(f"{arch}/{name}" for name in report["spilling_functions"])
+        frames.extend(f"{arch}/{name}" for name in report["local_frame_functions"])
+        step(f"resource report: {report_path.relative_to(ROOT_DIR)}")
         if args.lines:
-            report = KERNEL_REPORT_DIR / f"{arch}-local.txt"
+            report_path = KERNEL_REPORT_DIR / f"{arch}-local.txt"
             sites = local_memory_sites(cubin)
-            with report.open("w", encoding="utf-8") as out:
+            with report_path.open("w", encoding="utf-8") as out:
                 for function, rows in sorted(sites.items(), key=lambda kv: -sum(a + b for a, b, _ in kv[1])):
                     out.write(f"\n== {function}: STL={sum(r[0] for r in rows)} LDL={sum(r[1] for r in rows)}\n")
                     out.writelines(f"  STL={st:4} LDL={ld:4}  {w}\n" for st, ld, w in rows)
-            step(f"local loads/stores by source line: {report.relative_to(ROOT_DIR)}")
+            step(f"local loads/stores by source line: {report_path.relative_to(ROOT_DIR)}")
     print()
-    if offenders:
-        (err if args.strict else warn)(f"{len(offenders)} kernel/arch pairs keep local memory or spill")
-        return 1 if args.strict else 0
-    ok("No kernel keeps local memory or spills")
+    spill_gate = args.strict or args.no_spills
+    if spills:
+        (err if spill_gate else warn)(f"{len(spills)} function/arch pairs spill registers")
+    if frames:
+        (err if args.strict else warn)(f"{len(frames)} function/arch pairs keep local frames (separate from register spills)")
+    if coverage_failed or (spill_gate and spills) or (args.strict and frames):
+        return 1
+    if not spills:
+        ok("No reported entry or helper spills registers; all PTX entries covered")
+    if not frames:
+        ok("No reported entry or helper keeps a local frame")
     return 0
 
 
@@ -742,9 +848,10 @@ COMMANDS
   docs    regenerate docs/ (README images, bench table)
   i       install to ~/.local/bin (copies the release binary; -f rebuilds)
   c       cargo fmt --check + cargo clippy --all-targets -D warnings
-  k       kernels: registers, local frame and spills per kernel (ptxas -v):  k [ARCH...]
+  k       entry/helper resources + JSON under target/oxide-ptx/kernels:  k [ARCH...]
             --build   rebuild the PTX first     --lines   attribute local loads/stores to source lines
-            --strict  fail when a kernel keeps local memory or spills
+            --no-spills  fail on register spills     --strict  also fail on local frames
+            Missing entry/resource diagnostics always fail; frames and spills are distinct.
   ci      what hosted CI runs (no GPU): d --fix, c, tests --skip cuda_ gpu_, build, dist/*.zip
   cl      cargo clean (+ *.ll / *.ptx dumps)
   h       help
@@ -801,7 +908,8 @@ def main() -> int:
                         help=f"b / ci: also embed cubins for {CUBIN_ARCHS} (release archives)")
     parser.add_argument("--build", action="store_true", help="k: rebuild the PTX first")
     parser.add_argument("--lines", action="store_true", help="k: map local loads/stores to source lines")
-    parser.add_argument("--strict", action="store_true", help="k: fail on local memory or spills")
+    parser.add_argument("--strict", action="store_true", help="k: fail on entry/helper local frames or register spills")
+    parser.add_argument("--no-spills", action="store_true", help="k: fail on entry/helper register spills; report frames separately")
     parser.add_argument("--fix", action="store_true", help="doctor: install missing user-level tools")
     parser.add_argument("-f", "--force", dest="force_install", action="store_true", help="install: rebuild first")
 

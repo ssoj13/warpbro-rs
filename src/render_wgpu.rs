@@ -573,6 +573,8 @@ struct WgpuShared {
     /// The pick pipeline of each module ([`module_slot`]), compiled on the first pick of a world
     /// of that family (or of mixed families): a session that never picks never compiles one.
     picks: Box<[OnceLock<wgpu::ComputePipeline>]>,
+    #[cfg(test)]
+    probes: Box<[OnceLock<wgpu::ComputePipeline>]>,
 }
 
 /// The cell of `family`'s module (and pick pipeline): the family code, the dynamic module last.
@@ -869,6 +871,8 @@ fn shared_wgpu() -> Result<Arc<WgpuShared>, String> {
                     tonemap: make_pipe(&post_layout, "tonemap"),
                     tonemap_display: make_pipe(&post_layout, "tonemap_display"),
                     picks: (0..=FAMILIES).map(|_| OnceLock::new()).collect(),
+                    #[cfg(test)]
+                    probes: (0..FAMILIES).map(|_| OnceLock::new()).collect(),
                     modules: (0..=FAMILIES)
                         .map(|slot| {
                             if slot == module_slot(None) {
@@ -1772,6 +1776,117 @@ impl WgpuEngine {
                 bytemuck::cast_slice_mut::<u32, u8>(pixels)
                     .copy_from_slice(bytes_at(mapped, out_bytes, sdr_bytes)?);
                 Ok(())
+            },
+        )
+    }
+
+    /// Evaluate the authoritative object-local estimator for numerical backend parity.
+    /// Test-only: the diagnostic pipeline reuses the existing uniform/object/aux layout.
+    #[cfg(test)]
+    pub(crate) fn probe_formula(
+        &self,
+        family: u32,
+        points: &[[f32; 4]],
+    ) -> Result<Vec<[f32; 4]>, RenderError> {
+        if points.is_empty() {
+            return Ok(Vec::new());
+        }
+        let cell = self
+            .shared
+            .probes
+            .get(family as usize)
+            .ok_or_else(|| RenderError::Request(format!("Unknown probe family {family}")))?;
+        let pipe = if let Some(pipe) = cell.get() {
+            pipe
+        } else {
+            let mut source = shader_source(Some(family));
+            source.push_str(&format!(
+                "\n@compute @workgroup_size(128, 1, 1) fn probe_formula(@builtin(global_invocation_id) gid: vec3<u32>, @builtin(num_workgroups) nwg: vec3<u32>) {{\nlet i = linear_id(gid, nwg);\nif i >= arrayLength(&aux_out) {{ return; }}\nlet dt = formula_estimate(false, 0u, {family}u, aux_out[i].xyz, u32(param(P_COLOR_MODE)));\naux_out[i] = vec4<f32>(dt, 0.0, 0.0);\n}}\n"
+            ));
+            let pipe = with_error_scopes(&self.shared.device, || {
+                let module =
+                    self.shared
+                        .device
+                        .create_shader_module(wgpu::ShaderModuleDescriptor {
+                            label: Some("warpbro_formula_probe"),
+                            source: wgpu::ShaderSource::Wgsl(source.into()),
+                        });
+                compile(
+                    &self.shared.device,
+                    &self.shared.info,
+                    &module,
+                    &self.shared.pick_layout,
+                    "probe_formula",
+                )
+            })
+            .map_err(|e| RenderError::Device(format!("WGPU formula probe pipeline: {e}")))?;
+            cell.get_or_init(|| pipe)
+        };
+        let bytes = std::mem::size_of_val(points) as u64;
+        let (buffer, staging, bind_group) = with_error_scopes(&self.shared.device, || {
+            let buffer = self.shared.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("warpbro_formula_probe_points"),
+                size: bytes,
+                usage: wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            let staging = self.shared.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("warpbro_formula_probe_readback"),
+                size: bytes,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bind_group = self
+                .shared
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("warpbro_formula_probe_bg"),
+                    layout: &self.shared.pick_bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: self.params_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: self.objects_buf.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 10,
+                            resource: buffer.as_entire_binding(),
+                        },
+                    ],
+                });
+            (buffer, staging, bind_group)
+        })
+        .map_err(|e| RenderError::Device(format!("WGPU formula probe buffers: {e}")))?;
+        let (x, y) = self.groups(points.len())?;
+        self.run(
+            "warpbro_formula_probe",
+            |encoder| {
+                self.shared
+                    .queue
+                    .write_buffer(&buffer, 0, bytemuck::cast_slice(points));
+                let mut pass = compute(encoder, "warpbro_formula_probe_pass");
+                pass.set_pipeline(pipe);
+                pass.set_bind_group(0, &bind_group, &[]);
+                pass.dispatch_workgroups(x, y, 1);
+            },
+            &staging,
+            &[(&buffer, bytes)],
+            |mapped| {
+                Ok(mapped
+                    .as_chunks::<16>()
+                    .0
+                    .iter()
+                    .map(|pixel| {
+                        std::array::from_fn(|c| {
+                            f32::from_le_bytes(pixel[c * 4..c * 4 + 4].try_into().unwrap())
+                        })
+                    })
+                    .collect())
             },
         )
     }
