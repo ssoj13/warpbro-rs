@@ -1685,7 +1685,9 @@ fn orbit_normal_probe_report(values: &[[f32; 4]]) -> serde_json::Value {
         None
     };
     let endpoint_spans: Vec<f64> = values
-        .chunks_exact(7)
+        .as_chunks::<7>()
+        .0
+        .iter()
         .map(|samples| {
             let low = samples.iter().map(|v| v[0]).fold(f32::INFINITY, f32::min);
             let high = samples
