@@ -2154,7 +2154,8 @@ fn every_attribute_has_a_hover_hint() {
         exponent: 2.0,
     });
     for scene in crate::scene::Formula::PRESETS
-        .into_iter()
+        .iter()
+        .copied()
         .map(Scene::preset)
         .chain([optional])
     {
