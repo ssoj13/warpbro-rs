@@ -4,7 +4,7 @@
 > crate (what it is, how it works, where things live, traps, open TODOs). Update it in place,
 > compress outdated parts into a short changelog, delete what no longer applies. Line anchors are
 > as of commit `4cfa5eb` (2026-10-22); re-check them with grep before trusting a number.
-> Backlog: [PLAN.md](PLAN.md). Current bug hunt and fix plan: [plan1.md](plan1.md).
+> Backlog & active roadmap: [PLAN.md](PLAN.md).
 > Mermaid versions of the diagrams: [DIAGRAMS.md](DIAGRAMS.md).
 
 ## What it is
@@ -202,12 +202,14 @@ IoService thread: settings / scenes / bookmarks (tmp + rename), frame and window
 ## TODO
 
 - [x] Migrate `warpbro-rs` onto `soluwell-studio` with extensible `WorldKind::Custom("Fractal")` (`FractalNodeSpec`) and pluggable `ComputeEngine` (`WarpBroComputeEngine`).
-- [ ] plan2.md: render pacing and the display path (stage 0 measurements first).
-- [ ] oiio-rs plan-cuda-oxide.md: CUDA OCIO on the film (plan2 stage 3 depends on it).
-- [ ] plan1.md leftovers: see its "Audit of the open checkboxes".
+- [ ] CUDA / WGPU parity verification & zero-spill launch bounds tuning across all 28 families (see [PLAN.md](PLAN.md) Section A).
+- [ ] Render pacing and the GPU display path stages 0..4 (two-batch ring, async readbacks, GPU tonemap/OCIO, zero-copy present; see [PLAN.md](PLAN.md) Section B).
+- [ ] oiio-rs CUDA OCIO on the film (`plan-cuda-oxide.md` in `oiio-rs`, feeds into Stage 3).
+- [ ] Complete `.ok()` sweep part 2 (`nodes() -> Result`) & resolve operator decisions Q2 `conn` and Q4 `path_convergence.rs` (see [PLAN.md](PLAN.md) Section C).
 
 ## Changelog
 
+- **2026-10-28**: Consolidated all root plan/handoff/bug documents into `PLAN.md`. Added inline `Backend` (`Auto / CUDA / WGPU`) selector across RenderSettings bindings, synced OIDN `WorkContext`, updated `CUDA_OXIDE_REV`, and locked OxideAV git dependencies in `Cargo.lock`. All 28 families ported to CUDA with 234 specialized kernel entries (`fractal-rs` `5a21813e`).
 - **2026-10-27**: Migrated `warpbro-rs` onto `soluwell-studio` (`egui-widgets-rs` `a8b4e935`). Removed all fractal/formula knowledge from `soluwell-studio`, extracted `"Fractal"` into `src/fractal_node.rs` (`FractalNodeSpec`) and the dual CUDA+WGPU backend into `src/engine.rs` (`WarpBroComputeEngine`), and deleted 45 duplicated UI/scene/render files and `crates/app-control`.
 
 <!-- gitnexus-rs:start -->

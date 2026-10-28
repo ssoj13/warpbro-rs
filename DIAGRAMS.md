@@ -1,67 +1,102 @@
 # WarpBro diagrams
 
-Mermaid views of the main dataflows. ASCII versions with line anchors: [AGENTS.md](AGENTS.md).
-As of commit `4cfa5eb` (2026-10-22). Red edges mark the defects tracked in [plan1.md](plan1.md).
+Mermaid views of the main system dataflows, reflecting the `soluwell-studio` architecture (`5afff8a`).
+Companion architecture notebooks: [PLAN.md](PLAN.md) and [AGENTS.md](AGENTS.md).
 
-## Ownership
+---
+
+## 1. Ownership & Application Shell
 
 ```mermaid
-flowchart LR
-  main[main.rs] --> run[app::run] --> win[window::run / Native]
-  win -->|ctx.run_ui| App
-  subgraph App[App - app.rs]
-    world[WorldEditor<br/>document + undo]
-    scene[Scene<br/>evaluated scratch]
-    colour[ocio::State]
-    export[ExportController]
-    preview[PreviewController]
+flowchart TD
+  main[main.rs] -->|engine::init_warpbro| reg[Register FractalNodeSpec<br/>& WarpBroComputeEngine]
+  main -->|soluwell_studio::run_with| win[soluwell_window::run]
+  win -->|ctx.run_ui| app[soluwell_studio::StudioApp]
+
+  subgraph StudioApp[StudioApp - soluwell-studio]
+    world[WorldEditor<br/>SubnetFile graph + undo/redo]
+    scene[Scene<br/>evaluated scratch snapshot]
+    colour[ocio::State<br/>OCIO display pipeline]
+    bus[Playa EventBus<br/>central typed command bus]
+    preview[PreviewController<br/>RAM timeline preview cache]
+    export[ExportController<br/>multi-format export]
+    thumb[ThumbnailCache<br/>content-addressed disk cache]
   end
-  App --> rs[RenderService<br/>worker thread]
-  App --> io[IoService<br/>file worker]
-  rs --> gpu[Gpu<br/>CUDA + WGPU]
+
+  app --> rs[RenderService<br/>dedicated worker thread]
+  app --> io[IoService<br/>background file worker]
+  rs --> gpu[Gpu<br/>WarpBroComputeEngine]
+
+  subgraph WarpBroComputeEngine[WarpBroComputeEngine - src/engine.rs]
+    cuda[CUDA: 234 specialized kernels<br/>fractal-kernels sm_75..sm_120]
+    wgpu[WGPU: 28 per-family modules<br/>+ dynamic 28-way module]
+  end
+
+  gpu --> cuda
+  gpu --> wgpu
   export --> coord[coordinate_export thread] --> writer[ExportWriter thread]
   coord -->|RenderExport| rs
 ```
 
-## Per-frame edit transaction
+---
+
+## 2. Per-Frame Edit Transaction & Playa EventBus
 
 ```mermaid
 sequenceDiagram
-  participant UI as App::ui
-  participant S as self.scene (scratch)
+  participant UI as UI Panels / Hotkeys / REST
+  participant Bus as Playa EventBus
+  participant App as StudioApp::ui
   participant W as WorldEditor
+  participant S as Scene (Scratch)
   participant R as RenderService
-  UI->>W: snapshot(playhead) if (id, revision, frame) changed
-  W-->>S: Scene
-  UI->>UI: before = snapshot_before.take()
-  UI->>R: poll_events (Frame / Picked / Thumbnail / Error)
-  UI->>S: navigation and settings panels mutate
-  UI->>W: manipulate / AE / timeline: execute_edit(cmd, gesture)
-  UI->>W: diff(S, before): navigate_camera / edit_snapshot
-  UI->>W: finish_edit_unless(held gesture)
-  UI->>R: step_viewport: ViewportRequest
+
+  UI->>Bus: try_emit(app_control::Event<UiCommand>)
+  Note over Bus: Reliable admission: refuses overflow without evicting accepted events
+  App->>Bus: handle_events drains queue at frame boundary
+  App->>App: dispatch_command validates context (doc ID, frame, camera, revision)
+  alt World Action (AE, Outliner, Timeline, Manipulator)
+    App->>W: execute_edit(cmd, gesture)
+    W->>W: apply -> set_attribute -> validate_render_profiles
+    W->>W: record_edit: gesture step or undo.push(before)
+  else App Action / Query
+    App->>App: handle_app_action / control_query
+  end
+  App->>S: refresh_scene: snapshot_with_render_profile if dirty
+  App->>R: step_viewport: ViewportRequest (single-slot mailbox)
+  R-->>App: poll_events: Frame / Picked / Thumbnail / Error
 ```
 
-## World document
+---
+
+## 3. World Document & Scene Evaluation
 
 ```mermaid
 flowchart TD
-  file[(scene .json)] -->|decode_scene| dj[WorldDocument::decode_json]
-  dj --> hy[hydrate_schema<br/>legacy migrations]:::bad
-  hy --> doc[WorldDocument]
+  file[(scene .json)] -->|decode_scene| dj[WorldDocument::decode_json<br/>strict format & shape validation]
+  dj --> doc[WorldDocument]
   new[File > New] -->|from_scene| doc
-  cmd[WorldCommand] --> ex[execute_edit] --> ap[apply_edit] --> sa[set_attribute]
-  sa --> val[validate_render_profiles] -->|Err| rb[rollback]
-  val -->|Ok| rec[record_edit: gesture step or undo.push]
-  rec --> doc
-  doc -->|snapshot_with_render_profile| sc[Scene]
-  doc -->|effective_render| er[EffectiveRender]
-  er --> sc
-  takes[Takes] -->|take_frame / take_trs| sc
-  classDef bad stroke:#d33,stroke-width:2px
+  
+  subgraph Edits[Edit Pipeline]
+    cmd[WorldCommand] --> ex[execute_edit] --> ap[apply_edit] --> sa[set_attribute]
+    sa --> val[validate_render_profiles]
+    val -->|Err: rollback| doc
+    val -->|Ok: record_edit| doc
+  end
+
+  subgraph Evaluation[Evaluation Pipeline]
+    doc -->|snapshot_with_render_profile| sc[Scene]
+    doc -->|effective_render| er[EffectiveRender]
+    er --> sc
+    takes[Takes] -->|take_frame / take_trs| sc
+    fn[FractalNodeSpec::evaluate] -->|pack_object| sc
+    sc --> pack[Scene::pack: P_COUNT 128-float ABI]
+  end
 ```
 
-## Render worker
+---
+
+## 4. Render Worker & Dual Compute Backends
 
 ```mermaid
 flowchart TD
@@ -70,48 +105,77 @@ flowchart TD
   th[Thumbnail] --> mb
   pv[Preview intents] --> mb
   mb --> wk[run_worker]
-  wk --> step[Gpu::step_with_display]
-  step --> rb{resolve_backend}
-  rb -->|Auto, classic| cuda[CUDA kernels<br/>fractal-kernels]
-  rb -->|extended family / no CUDA| wgpu[WgpuEngine<br/>render_wgpu.wgsl]
-  cuda --> film[Target film]
+
+  wk --> prep[PreparationCache::get<br/>WorldUpload: params, objects, masks, lights]
+  prep --> step[Gpu::step_with_display]
+
+  step --> rb{resolve_backend_for_scene<br/>Auto / CUDA / WGPU}
+  rb -->|CUDA| cuda[CUDA Kernels<br/>fractal-kernels: 234 specialized entries<br/>Fast / Full / Direct / Dynamic]
+  rb -->|WGPU| wgpu[WgpuEngine<br/>formulas.wgsl: 28 family modules<br/>+ dynamic 28-way module]
+
+  cuda --> film[Target Film: Film::Cuda / Film::Wgpu]
   wgpu --> film
-  film --> adapt[adapt / tally]
-  film --> dn[process_denoise<br/>OIDN]
-  dn -.->|due called twice on WGPU| skip[denoise skipped]:::bad
-  film --> tm[tonemap] --> cp[ColorPipeline OCIO] --> fr[Frame::snapshot]
-  fr --> ui[UI texture]
+
+  film --> adapt[adapt: active tile flags]
+  film --> tally[tally: unresolved samples]
+  film --> dn[process_denoise: OIDN HostDenoiser<br/>WorkContext, due decided once per step]
+  dn --> tm[tonemap]
+  tm --> cp[ColorPipeline OCIO<br/>cached per Ocio::serial]
+  cp --> stamp[Gpu::stamp: waits for GPU batch<br/>accurate Batch::Budget pacing]
+
+  stamp --> fr[Frame::snapshot]
+  fr --> ui[UI Viewport Texture]
   fr --> xw[ExportWriter]
-  step -.->|error only in colour_error| hang[job waits forever]:::bad
-  classDef bad stroke:#d33,stroke-width:2px
+  step -->|Result<StepOutcome, RenderError>| ev[Typed RenderEvent to Requester]
 ```
 
-## Formula registry (target state after plan1.md)
+---
+
+## 5. Formula Registry & Compute Engine ABI
 
 ```mermaid
 flowchart LR
-  reg[fractal-core params<br/>+ formulas.rs FORMULAS] --> names[Formula::name]
-  reg --> ui[AE sliders / hints]
-  reg --> pack[Scene::pack]
-  reg --> consts[WGSL consts! emit<br/>FAMILY_*, SIGNED_MASK]
-  pack --> cuda[CUDA kernels]
-  pack --> wgsl[WGSL kernels]
-  cuda <-->|parity test| wgsl
+  subgraph SSOT[Single Source of Truth]
+    params[fractal-core::params]
+    reg[formulas.rs: FORMULAS [FormulaMeta; 28]]
+  end
+
+  SSOT --> form[Formula: 28-variant enum]
+  SSOT --> ui[Attribute Editor<br/>ParamMeta sliders, tooltips, validation]
+  SSOT --> pack[FractalNodeSpec::pack_object<br/>P_COUNT 128-float ABI]
+  SSOT --> consts[WGSL consts! macro<br/>FAMILY_*, SIGNED_MASK, ITERATING_MASK]
+
+  pack --> cuda[CUDA: fractal-kernels<br/>234 specialized kernel entries]
+  consts --> wgsl[WGPU: formulas.wgsl<br/>28 distance estimators]
+
+  cuda <-->|parity_tests.rs| wgsl
+  subgraph Parity[Parity Verification]
+    num[Numerical DE / trap / guide oracle]
+    img[Rendered image pixel comparison]
+  end
+  parity -.-> num
+  parity -.-> img
 ```
 
-## Export
+---
+
+## 6. Multi-Threaded Export Pipeline
 
 ```mermaid
 flowchart TD
-  out[OutputSettings node] --> ui[ExportController::ui]
-  ui -.->|to_preset / apply_preset each frame| out
+  out[OutputSettings Node<br/>video_io::job::Preset + WarpBro extras] --> ui[ExportController::ui<br/>edits preset in-place without writeback]
   ui --> start[ExportController::start]
-  start --> q[export_quality + validate + OCIO resolve]
-  q --> co[coordinate_export]
-  co -->|per frame RenderExport| rs[RenderService]
-  rs -->|ExportFrame| co --> w[ExportWriter]
-  w --> exr[EXR ACEScg]
-  w --> png[PNG / JPEG / TIFF]
-  w --> vid[Video sink]
-  w --> seq[PNG seq + ffmpeg]
+  start --> val[export_quality + validation + OCIO view resolution]
+  val --> coord[coordinate_export thread]
+
+  coord -->|per-frame RenderExport| rs[RenderService]
+  rs -->|ExportFrame: radiance / light / pixels| coord
+  coord --> writer[ExportWriter thread]
+
+  subgraph Writers[Writers & Sinks]
+    writer --> exr[exr_io::write_exr<br/>ACEScg radiance OpenEXR]
+    writer --> still[video_io::still::write_still<br/>PNG / JPEG / TIFF]
+    writer --> vid[VideoSink: native encoders<br/>HEVC / ProRes]
+    writer --> seq[PNG sequence + ffmpeg CLI]
+  end
 ```

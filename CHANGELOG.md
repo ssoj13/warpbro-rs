@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased - 2026-10-25
+## Unreleased - 2026-10-28
+
+- **Migration onto `soluwell-studio` (`egui-widgets-rs`)**: extracted shared studio UI, dock panels, Outliner, Timeline, Attribute Editor, Curve Editor, Playa `EventBus` dispatch, loopback REST API (`app-control`), `WorldDocument` graph/undo, `RenderService`, `PreparationCache`, OCIO display pipeline, OIDN denoiser, `PreviewController`, `ThumbnailCache`, and `ExportController` into `egui-widgets-rs/crates/soluwell/studio`. `warpbro-rs` registers `"Fractal"` (`src/fractal_node.rs`, `FractalNodeSpec`), `WarpBroComputeEngine` (`src/engine.rs`, dual CUDA `fractal-kernels` + 28-family WGPU `src/formulas.wgsl`), and built-in templates/gallery (`src/templates.rs`, `src/presets.rs`). Removed 45 duplicated files and `crates/app-control` from `warpbro-rs`.
+- **Inline Compute Backend Selector (`Auto / CUDA / WGPU`)**: added inline `Backend` selector on `RenderSettings` binding rows (`Moving`, `Still`, `Manual`, `Output`) in `Settings -> Render & Viewport`, viewport toolbar profile menu, and `Render / Encode`, backed by `/render/backend` on the `RenderSettings` node via `WorldCommand::SetAttribute` with single-step Undo. Added `PtComputeBackend` selector to `render-egui`.
+- **OIDN `WorkContext` & Toolchain Sync**: updated `soluwell-studio-core` OIDN processor to `pt-denoise-oidn` `HostDenoiser::new(ctx, &work)` (`gpu_info::WorkContext`), synced `CUDA_OXIDE_REV` (`9370f8c91eba499a880a5769ecd11f39fa65ffbb`), `render-rs`, `egui-widgets-rs`, and `ffmpeg-rs` OxideAV git dependencies.
+- **All 28 families on CUDA & WGPU (`fractal-rs` `5a21813e`)**: 20 extended DE families (`8..27`) ported to CUDA with compile-time family specialization (234 kernel entries) and conservative ray-beam bounding-sphere entry (`cone_start`).
+
+## 2026-10-25
 
 - **Shared UI/REST EventBus:** widgets, hotkeys and HTTP publish the same typed
   `app_control::Event<UiCommand>` to App's Playa EventBus. Central deferred dispatch applies
@@ -59,16 +66,16 @@
   contain them (`test_gpu::device_prefixes_only_start_test_names`); five GPU-free tests that
   `--skip gpu_` used to drop are renamed and run again.
 - **Docs:** PLAN.md keeps rules, open work and findings (the dated state sections and the
-  finished BUG1.md, MANDELBULB_PROGRESS.md, RELEASE_PROGRESS.md and plans/ are removed; their
-  history is here and in git); plan2.md plans render pacing and the display path.
+  finished historical bug logs, progress notes and plans/ are removed; their
+  history is here and in git); render pacing and display path planned in PLAN.md.
 
 Final verification passed: 365 CPU tests (7 ignored, 47 filtered), 4 app-control tests, strict
 workspace/all-target Clippy, formatting and the release build. Separate CUDA Play/Scrub tests and
 real EventBus REST/navigation/Undo, scene I/O, rendering and installed HDR-profile checks passed.
 Detailed receipts, timing limits and the user-confirmed manual window closure are recorded in
-[HANDOFF.md](HANDOFF.md).
+the 2026-10-25 verification records.
 
-## 2026-10-23 (bug hunt plan1: waves 1-3)
+## 2026-10-23 (bug hunt: waves 1-3)
 
 - **Render robustness:** typed `RenderError` from every step and launch (no panics on device or
   scene failures), typed thumbnail and command failures, one accumulate loop (`Gpu::advance`)
@@ -127,7 +134,7 @@ Detailed receipts, timing limits and the user-confirmed manual window closure ar
 
 ## 0.1.0 — 2026-10-17
 
-- **Unified `wgpu` / `cuda` compute backend architecture (`BUG1.md`):**
+- **Unified `wgpu` / `cuda` compute backend architecture:**
   - Added `Backend { Auto, Cuda, Wgpu }` to `RenderSettings` (`/render/backend`) and `Scene::render`, exposed in the Attribute Editor (`Render` section), Render Settings profile summary, and viewport status bar (`CUDA · <device>` / `WGPU · <device>`).
   - Extracted backend-agnostic scene preparation, parameter packing, LUT/object/light residency tracking, and tiled readback into `src/render_prep.rs`.
   - Implemented `WgpuEngine` and `WgpuTarget` in `src/render_wgpu.rs` and `src/render_wgpu.wgsl` on `gpu_info::shared_device()` with `OutOfMemory` and `Validation` error scopes, matching the 8×4 tile layout (`accum`, `albedo`, `normal`, `stats`, `active`) and full kernel entry point set (`world`, `world_fast`, `world_fast_bulb`, `world_direct`, `fast_<family>`, `full_<family>`, `direct_<family>`, `tally`, `adapt`, `tonemap`, `pick`).

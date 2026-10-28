@@ -13,7 +13,7 @@ OutputSettings, их каталог (Profile / Template), маршрутизац
 
 | Вид узла | Собственные параметры | Связи |
 | --- | --- | --- |
-| `RenderSettings` | **Sampling:** samples, resolution scale, adaptive sampling и его параметры.<br>**Denoise:** OIDN denoise.<br>**Limits:** max bounces, max steps, hit epsilon, step factor, glass probes.<br>**Render:** метод `Fast / Full`, режим отображения `PathTraced / Direct / Bounds` (`/render/display`), `/render/thinning`.<br>**Direct:** `/render/direct/*` (AO, тени, блики, отражения окружения, Fresnel). | Без ссылок |
+| `RenderSettings` | **Sampling:** samples, resolution scale, adaptive sampling и его параметры.<br>**Denoise:** OIDN denoise.<br>**Limits:** max bounces, max steps, hit epsilon, step factor, glass probes.<br>**Render:** вычислительный бэкенд `Auto / CUDA / WGPU` (`/render/backend`), метод `Fast / Full`, режим отображения `PathTraced / Direct / Bounds` (`/render/display`), `/render/thinning`.<br>**Direct:** `/render/direct/*` (AO, тени, блики, отражения окружения, Fresnel). | Без ссылок |
 | `ViewportSettings` | **Color (Look SSOT):** exposure (`/render/exposure_stops`), saturation (`/render/saturation`), Reinhard (`/render/reinhard`).<br>**Viewport:** `Auto / Locked`, target FPS, settle delay, batch budget, pause, freeze, видимость и выбираемость по видам объектов (`/viewport/show\|select/<kind>`), `/viewport/extras`. | Moving, Still, Manual → RenderSettings |
 | `OutputSettings` | Формат (EXR / PNG / Video), encoder, ширина и высота, QP / CRF, denoise at completion, PNG encoding, HDR peak, видео из PNG, override OCIO display / view | Без ссылок |
 
@@ -28,7 +28,7 @@ viewport (включая единый художественный look: экс�
 Moving/Still/Manual и политика viewport не анимируются по времени.
 Renderer получает временный `EffectiveRender` и снимок сцены; они производны
 от графа и не являются второй сохраняемой конфигурацией. Старый Group
-«World Settings» больше не дублирует сохраняемые render-параметры, а бывшие отдельные узлы `QualitySettings` автоматически вливаются в `RenderSettings` при открытии старых сцен.
+«World Settings» больше не дублирует сохраняемые render-параметры. Устаревшие схемы с отдельными узлами `QualitySettings` отклоняются: строгий `WorldDocument::decode_json` не содержит переходных shim-миграций.
 
 У свежего документа есть два преднастроенных профиля `RenderSettings`: **Moving** и **Still**.
 - **Moving** начинает с `Fast`, 8 samples, полного разрешения (1.0), двух bounce и отключённого адаптивного сэмплинга.
@@ -40,15 +40,14 @@ UUID, вид узла, роль и значения проверяются. Live
 шаблон сначала нужно применить как независимый экземпляр. Ссылка на отсутствующий
 UUID или неподходящий вид узла, недопустимый диапазон и удаление используемых
 настроек дают ошибку. Проверяется и постоянная часть документа, и сохранённые
-значения ссылок. При чтении старых файлов отдельные узлы `QualitySettings` автоматически сливаются со своими `RenderSettings`, а look-поля мигрируют в `ViewportSettings`.
+значения ссылок. При чтении файлов строгий декодер `WorldDocument::decode_json` требует точного соответствия схеме и отклоняет устаревшие файлы с отдельными узлами `QualitySettings` без автоматической миграции.
 
 ## Создание и именованные кнопки
 
 Откройте **Settings → Render & Viewport**. Панель показывает назначение Moving, Still, Manual
-и Output, затем каталог render-настроек. Параметры редактируются
-существующим **Attribute Editor**: те же диапазоны, enums, UUID choices,
-reset и анимация. Кнопка шестерёнки рядом с назначением открывает нужный узел.
-Внутри `RenderSettings` секция **Quality** идёт первой и упорядочена по частоте использования (**Sampling** → **Denoise** → **Limits**), за ней следует секция **Render** (**Render** → **Direct**). Внутри `ViewportSettings` секция **Color** (exposure, saturation, Reinhard) расположена над секцией **Viewport**.
+и Output, затем каталог render-настроек. В каждой строке слота (**Moving**, **Still**, **Manual**, **Output**) рядом с селектором профиля находится инлайн-селектор **Backend** (`Auto / CUDA / WGPU`), привязанный к `/render/backend` на соответствующем узле `RenderSettings`. Смена бэкенда записывается в узел за один шаг Undo.
+
+Параметры редактируются существующим **Attribute Editor**: те же диапазоны, enums, UUID choices, reset и анимация. Кнопка шестерёнки рядом с назначением открывает нужный узел. Внутри `RenderSettings` секция **Quality** идёт первой и упорядочена по частоте использования (**Sampling** → **Denoise** → **Limits**), за ней следует секция **Render** (**Render** с выбором бэкенда `/render/backend`, метода `Fast / Full`, режима отображения `/render/display` и `/render/thinning` → **Direct**). Внутри `ViewportSettings` секция **Color** (exposure, saturation, Reinhard) расположена над секцией **Viewport**.
 
 - **New profile… / New template…** создают узел `RenderSettings` с новым именем
   и UUID. Начальные параметры копируются из текущего Output, а не из отдельного
@@ -80,7 +79,7 @@ reset и анимация. Кнопка шестерёнки рядом с на�
 ## Viewport и переключение при движении
 
 Toolbar viewport использует те же ссылки, что Settings → Render & Viewport. В нём доступны
-**Auto / Locked**, меню профилей, pause и freeze. Ползунок экспозиции в тулбаре напрямую меняет `/render/exposure_stops` на `ViewportSettings`, поэтому экспозиция едина для Moving, Still и Output. Через меню профилей можно
+**Auto / Locked**, меню профилей, pause и freeze. Выпадающее меню **Profiles** в тулбаре дублирует инлайн-селекторы **Backend** (`Auto / CUDA / WGPU`) для слотов Moving, Still и Manual, позволяя переключать вычислительный бэкенд на лету без перехода в Settings. Ползунок экспозиции в тулбаре напрямую меняет `/render/exposure_stops` на `ViewportSettings`, поэтому экспозиция едина для Moving, Still и Output. Через меню профилей можно
 назначить Moving, Still и Manual, открыть профиль в Attribute Editor, создать
 новый или независимую копию и применить шаблон.
 
@@ -141,6 +140,11 @@ resolution scale вычисляются из выбранного `RenderSetting
 в обоих методах определяются тем же профилем `RenderSettings`. Fast — явный выбор
 приближения материалов, а не название отдельного world-raymarch renderer.
 
+Поле `/render/backend` выбирает вычислительный бэкенд профиля:
+- **`Auto`** — автоматический выбор: запускает CUDA для поддерживаемых сцен, либо переключается на WGPU при отсутствии совместимого CUDA-устройства или для расширенных семейств формул.
+- **`CUDA`** — прямой запуск скомпилированных в PTX Rust-ядер `fractal-kernels` на GPU NVIDIA.
+- **`WGPU`** — кроссплатформенный конвейер `soluwell-studio-render` с внедрёнными WGSL-шейдерами `src/formulas.wgsl` на общем WGPU-устройстве.
+
 Поле `/render/display` выбирает режим отображения профиля:
 - **`PathTraced`** — полный трассировщик путей (Fast или Full).
 - **`Direct`** — ядро `world_direct` (или `direct_<family>` для одиночного объекта): один детерминированный проход по квадратной сетке страт до $16\times 16$ (`DirectShading::MAX_GRID`, наибольший квадрат $\le$ `Samples`), собственное затенение каждого объекта мира со всеми направленными источниками света, SH-облучением неба и мипами HDRI, параметры `/render/direct/*` (`ao_strength`, `ao_samples`, `shadows`, `shadow_softness`, `specular`, `spec_roughness`, `env_reflections`, `fresnel`), адаптивный сэмплинг отключён.
@@ -155,6 +159,7 @@ Auto / Locked, pause и freeze viewport не меняют выбранный в�
 
 Панель **Render / Encode** начинается с двух привязок: **Output** (RenderSettings)
 и **Output file** (OutputSettings) — те же строки, что в Settings → Render & Viewport,
+включая инлайн-селектор **Backend** (`Auto / CUDA / WGPU`) для выходного профиля Output,
 с выбором, шестерёнкой Attribute Editor и меню New / Independent copy / шаблоны.
 Форма ниже редактирует копию назначенного OutputSettings; каждое изменение
 записывается обратно в узел командами `/output/*` (одна на изменённое поле,

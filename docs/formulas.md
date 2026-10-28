@@ -129,7 +129,7 @@ Concentric nested gyroscopic gimbal rings (`ring_count` $1\dots 8$, `outer_radiu
 
 ## Raymarching & Normal Stencil Optimizations
 
-WarpBro's raymarcher (`src/render_wgpu.wgsl`) includes several algorithmic optimizations that preserve surface hits while accelerating primary, bounce, shadow, and AO rays:
+WarpBro's dual-backend raymarcher (implemented across CUDA `fractal-kernels` and WGPU `soluwell-studio-render` with `src/formulas.wgsl`) supports all 28 DE families (`0..27`) and includes several algorithmic optimizations that preserve surface hits while accelerating primary, bounce, shadow, and AO rays:
 1. **Multi-object ray–sphere union span culling (`march_span`)**: in world scenes where all objects have finite clip spheres, rays intersect every object's bounding sphere up front to restrict marching to the union interval $[t_{\min}, t_{\max}]$ and immediately reject rays that miss all objects.
 2. **Cached local coordinates & min-reach-first ordering (`march_sample`)**: per-step object-local coordinates `q`, `len_q`, and sphere reach `(len_q - clip_r) * dist_scale` are computed once and cached; the object with minimal reach is evaluated first so its distance estimate prunes remaining objects.
 3. **4-probe tetrahedral finite-difference normals**: `stencil_normal` and `direct_normal` evaluate a symmetric 4-point regular tetrahedron stencil `[1,-1,-1], [-1,-1,1], [-1,1,-1], [1,1,1]` with step scaling $h/\sqrt{3}$, cutting DE evaluations per surface normal from 6 to 4 (a 33% reduction in normal cost).

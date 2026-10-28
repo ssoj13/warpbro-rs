@@ -1,7 +1,7 @@
 # Colour in WarpBro
 
 How colour is represented, rendered and shown in WarpBro, and what the standards behind it mean.
-Code references point at the single place each step lives.
+Code references point at the single place each step lives: the color, display, and export pipeline is provided by `soluwell-studio` (`color`, `ocio`, `window`, `export`, and `render_service` modules in `egui-widgets-rs/crates/soluwell/studio`).
 
 ## 1. Three independent properties of an RGB space
 
@@ -177,7 +177,7 @@ sensitive to steps in the dark.
  └────────────────┬────────────────────────────────────────────────────────┬───────────────────────┘
                   │ scene-linear ACEScg                                     │
                   ▼                                                         ▼
-       EXR sequence (export.rs)                          DISPLAY (color::ColorPipeline::apply)
+       EXR sequence (soluwell-studio export)             DISPLAY (color::ColorPipeline::apply)
        float RGB, AP1 `chromaticities`                   ├─ OCIO on: input = the config's linear AP1
        (scene-referred master for compositing)           │  space (found by its transform to
                                                          │  aces_interchange) -> ACES 2.0 view:
@@ -207,11 +207,11 @@ Rules this keeps:
   value authored in ACEScg (the emissive preset) is stored as its BT.709 equivalent.
 - **Files say what they are:** scene-linear EXR is tagged AP1, display EXR BT.709, an HDR PNG carries
   `cICP` (and is named `.pq.png` / `.hlg.png`), an SDR PNG the `sRGB` chunk.
-- **Display EXR and HDR PNG agree on luminance** (`render_service::write_display_exr`): the display
+- **Display EXR and HDR PNG agree on luminance** (`soluwell-studio` `render_service::write_display_exr`): the display
   EXR's `whiteLuminance` is the nits of 1.0 in the same frame's HDR10 PNG (`hdr_scale(..).unit_nits`):
   100 for an HDR view's absolute light, the SDR white (monitor's on HDR, else BT.2408's 203) for
   relative light.
-- **Window screenshots** (`src/window_shot.rs`) start from the composited egui-display canvas
+- **Window screenshots** (handled by `soluwell-studio`'s `window` and `render_service` modules in `egui-widgets-rs/crates/soluwell/studio`) start from the composited egui-display canvas
   (extended sRGB, 1.0 = SDR reference white), captured as scRGB at 80-nit white, which is exactly the
   canvas decoded to linear BT.709. Reference white = the monitor's SDR white on an HDR output, else
   BT.2408's 203 nits (`Monitor::sdr_white_nits`, shared with viewport snapshots). EXR: that linear light

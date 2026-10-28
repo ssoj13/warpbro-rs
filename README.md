@@ -15,7 +15,7 @@ Documentation: [fractals and procedural shapes](docs/formulas.md), [render and q
 
 - **28 distance-estimated fractal & procedural shape families ([full catalog](docs/formulas.md)):**
   - *8 classic families (`0..8`):* Mandelbulb (keyable Mandelbrot-to-Julia mix and orbit offset, angle scales, phases and per-iteration rotation), Mandelbox, quaternion Julia (rotated 4D slice), KIFS (tetrahedron, octahedron, Menger), Kleinian, pseudo-Kleinian, Apollonian, and Hybrid (up to four bulb / box / KIFS-fold / inversion steps, repeated).
-  - *20 extended fractal & procedural families (`8..28`, driven by declarative metadata in `src/formulas.rs` & `src/formulas.wgsl`):* Amazing Surface (KaliBox), Bristorbrot, Burning Ship 3D, Kaleido Twist IFS (Marble Marcher), Polyhedral KIFS (Icosahedron / Dodecahedron), Harmonic Bulb, Mandelbar 3D (Tricorn), M?bius Sphere IFS, Gyroid / Schwarz TPMS (Gyroid, Schwarz P, Schwarz D, Neovius with multi-octave FBM), Lidinoid / Fischer?Koch TPMS, Strange Attractor Flow (Aizawa, Halvorsen, Thomas), Torus Knot Braid, Hopf Fibration Tori, Dupin Cyclide, 3D Gielis Superformula (Radiolaria), Fibonacci Phyllotaxis (Romanesco), Nautilus / Ammonite Shell, Voronoi Trabecular Foam, Quartz Crystal Cluster (Geode), and Mechanical Astrolabe (Gimbal).
+  - *20 extended fractal & procedural families (`8..28`, driven by declarative metadata in `src/formulas.rs` & `src/formulas.wgsl`):* Amazing Surface (KaliBox), Bristorbrot, Burning Ship 3D, Kaleido Twist IFS (Marble Marcher), Polyhedral KIFS (Icosahedron / Dodecahedron), Harmonic Bulb, Mandelbar 3D (Tricorn), Möbius Sphere IFS, Gyroid / Schwarz TPMS (Gyroid, Schwarz P, Schwarz D, Neovius with multi-octave FBM), Lidinoid / Fischer–Koch TPMS, Strange Attractor Flow (Aizawa, Halvorsen, Thomas), Torus Knot Braid, Hopf Fibration Tori, Dupin Cyclide, 3D Gielis Superformula (Radiolaria), Fibonacci Phyllotaxis (Romanesco), Nautilus / Ammonite Shell, Voronoi Trabecular Foam, Quartz Crystal Cluster (Geode), and Mechanical Astrolabe (Gimbal).
   - Every iterative family supports fractional iteration counts (smooth growth when keyed), and every family supports spherical inversion with strength, radius, and center.
 - **World objects:** Playa UUID nodes for fractals, cameras, directional lights, HDR environments,
   groups, masks and materials, with parent transforms, visibility, layer spans, lock and solo.
@@ -115,21 +115,34 @@ Documentation: [fractals and procedural shapes](docs/formulas.md), [render and q
 
 ![material library](docs/ui-materials.jpg)
 
-## Origin
+## Origin and Architecture
 
-WarpBro is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX plug-ins
-(WGPU/WGSL):
+WarpBro originated as a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX plug-ins (WGPU/WGSL). It is built as a specialized fractal application on top of the shared `soluwell-studio` framework (`egui-widgets-rs/crates/soluwell/studio`).
 
-| ofx-rs / render-rs                                                                 | WarpBro                                                              |
-| ---------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| `fractal3d.wgsl`: estimates, march, normals, palette, sky                          | `fractal-kernels`                                                    |
-| `pathtrace.wgsl` + render-rs `pt-integrator`                                       | `fractal-kernels`, `trace_path`                                      |
-| `fractal3d.rs`: presets, `Frames`, `max_distance`, footprint                       | `src/scene.rs`                                                       |
-| `uniform3d.rs`: the uniform layout                                                 | `fractal_core::params`                                               |
-| `ofx-gen/palette.rs`                                                               | `src/palette.rs`                                                     |
-| render-rs `standard-surface-bsdf`                                                  | SSH crate with opt-in `cuda-math` (`libm::*` → `f32` methods)        |
-| usd-rs `usd-mat-lib` presets, `usd-hd-pt` translator, `pt-material-ext` facing mix | `src/materials.rs`, `fractal-kernels`                                |
-| gitnexus-rs `cam-controls` / `cam-viewport` / `cam-controls-egui`                  | SSH crates (flight rig, horizon lock, shared fly bindings)           |
+The shared `soluwell-studio` framework knows nothing about fractals or fractal formulas. The studio shell, dock panels, Outliner, Timeline, Attribute Editor, Curve Editor, `WorldDocument` graph/undo, `RenderService`, OCIO display pipeline, OIDN denoiser, `ThumbnailCache`, `ExportController`, and loopback REST API all live in `egui-widgets-rs/crates/soluwell/studio`.
+
+`warpbro-rs/src/` contains only the 10 fractal domain files:
+- `main.rs`: CLI entry, `engine::init_warpbro()`, and `soluwell_studio::run_with`
+- `engine.rs`: `WarpBroComputeEngine` (dual CUDA `fractal-kernels` + 28-family WGPU `WgpuEngine`), `init_warpbro()`, shader hook
+- `fractal_node.rs`: `"Fractal"` scene node (`FractalNodeSpec`), 28-variant `Formula`, `FractalSceneExt`, and `pack_object` (`P_COUNT` kernel ABI)
+- `formulas.rs`: Declarative 28-family metadata table (`FORMULAS`), extended parameter structs and packing
+- `formulas.wgsl`: WGSL distance estimators for all 28 families injected into `soluwell-studio-render`
+- `templates.rs`: Built-in templates (`BUILTINS`) registered into `soluwell_studio::templates::register_builtins`
+- `presets.rs`: Five authored 250-frame animated `WorldDocument` builders (`ANIMATED = 0..5`)
+- `render_bench.rs`: Evaluated world/family A/B benchmarks
+- `parity_tests.rs`: CUDA vs WGPU per-pixel and ray-beam parity suite
+- `test_gpu.rs`: `cuda_` / `gpu_` test-prefix guards
+
+External dependencies provide tracing kernels, BSDF evaluation, and camera controls:
+
+| Dependency | Implementation | Role |
+| --- | --- | --- |
+| `fractal-kernels` (`fractal-rs`) | Rust kernels compiled to PTX via `cuda-oxide` | All 28 DE families, NEE + MIS path tracing, BSDF |
+| `fractal-core` (`fractal-rs`) | Rust parameter ABI & sampler | `P_COUNT` packed layout, Sobol / blue noise sampler |
+| `soluwell-studio-render` | WGPU compute pipeline with WGSL hook | WGSL fallback & parity renderer for all 28 families |
+| `standard-surface-bsdf` | SSH crate with opt-in `cuda-math` | Autodesk Standard Surface (MaterialX port) |
+| `fractal-materials` | Renderer-independent material library | 69 curated presets from `usd-mat-lib` |
+| `cam-controls` / `cam-controls-egui` | Gitnexus-rs camera controls | Flight rig, horizon lock, Houdini orbit, fly bindings |
 
 ## Requirements
 
@@ -139,7 +152,7 @@ WarpBro is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX
 - CUDA Toolkit 13.x, LLVM/`llc` 21 or newer, and clang (for bindgen).
 - Rust stable (currently **1.99**), with compiler-internal APIs enabled through `.cargo/config.toml` (see `rust-toolchain.toml`).
 - CUDA crates and the backend come from [our Windows fork](https://github.com/ssoj13/cuda-rust-windows),
-  pinned to `750e60b06d13ce8fe7e6ba3c531bdf5499c9acb1` with the Rust 1.99 fixes and every
+  pinned to `9370f8c91eba499a880a5769ecd11f39fa65ffbb` with the Rust 1.99 fixes and every
   `#[inline]` intent (`noinline` included) carried to LLVM; its cargo-oxide pins release
   codegen in the Cargo profile, so `cargo oxide test -- --release` and `cargo oxide build`
   share every compiled crate. Cargo fetches the
@@ -147,7 +160,7 @@ WarpBro is a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX
 - `cargo-oxide` must come from the same fork and revision:
 
   ```sh
-  cargo +stable install --force --locked --git ssh://git@github.com/ssoj13/cuda-rust-windows.git --rev 750e60b06d13ce8fe7e6ba3c531bdf5499c9acb1 cargo-oxide
+  cargo +stable install --force --locked --git ssh://git@github.com/ssoj13/cuda-rust-windows.git --rev 9370f8c91eba499a880a5769ecd11f39fa65ffbb cargo-oxide
   cargo oxide doctor
   ```
 
@@ -289,18 +302,11 @@ target, not a guarantee under GPU or system load.
 
 ### Render profiles
 
-**Settings → Render & Viewport** contains named render profile and template buttons. Choose **Recall to**
-(Moving, Still, Manual or Output), then left-click a render profile to assign its live UUID.
-Right-click a named button to edit it in the existing Attribute Editor, rename
-it, or **Save as profile… / Save as template…**.
+**Settings → Render & Viewport** contains named render profile and template buttons. Each profile slot row (**Moving**, **Still**, **Manual**, and **Output**) features an inline **Backend** (`Auto / CUDA / WGPU`) selector ComboBox next to the profile dropdown, backed by `/render/backend` on the bound `RenderSettings` node. Selecting a backend updates that node in one Undo step. The same inline **Backend** selector is also available in the viewport toolbar **Profiles** popup and in **Render / Encode**. Choose **Recall to** (Moving, Still, Manual or Output), then left-click a render profile to assign its live UUID. Right-click a named button to edit it in the existing Attribute Editor, rename it, or **Save as profile… / Save as template…**.
 
-Profiles and templates are the same `RenderSettings` nodes with different
-catalog metadata. Each `RenderSettings` node owns both quality parameters (**Sampling**, **Denoise**, **Limits** in its first **Quality** section) and shading/display controls (**Render**, **Direct** in its second **Render** section). Fresh documents seed two render profiles — **Moving** and **Still** (with **Still**, **Manual** and **Output** initially sharing the **Still** node). Applying a render template
-creates an independent `RenderSettings` node with a new UUID and one Undo step; changing the
-template later does not change that node. Legacy scenes with separate `QualitySettings` nodes are migrated automatically on load. The catalog is saved in the World document.
-**File → Templates** remains the separate whole-scene catalog.
+Profiles and templates are the same `RenderSettings` nodes with different catalog metadata. Each `RenderSettings` node owns both quality parameters (**Sampling**, **Denoise**, **Limits** in its first **Quality** section) and shading/display controls (**Render** including `/render/backend`, **Direct** in its second **Render** section). Fresh documents seed two render profiles — **Moving** and **Still** (with **Still**, **Manual** and **Output** initially sharing the **Still** node). Applying a render template creates an independent `RenderSettings` node with a new UUID and one Undo step; changing the template later does not change that node. Strict schema validation (`WorldDocument::decode_json`) rejects legacy `QualitySettings` scenes without migration shims. The catalog is saved in the World document. **File → Templates** remains the separate whole-scene catalog.
 
-The viewport toolbar selects **Auto / Locked** and exposes **Profiles**, pause and freeze.
+The viewport toolbar selects **Auto / Locked** and exposes **Profiles** (with inline **Backend** selectors for Moving, Still, and Manual), pause and freeze.
 Auto uses Moving during scene/camera activity and playback, then Still after the node's settle
 delay; Locked always uses Manual. Both toolbar and Settings edit the same
 `ViewportSettings` references. `ViewportSettings` also serves as the single source of truth for look parameters (**Color**: exposure, saturation, Reinhard) above its **Viewport** policy controls (target FPS, settle delay, batch budget, object filters). Every viewport-policy field is static;
@@ -492,8 +498,7 @@ fractal-kernels' `direct` feature, which WarpBro does not enable; it never dispa
 
 Open convergence work is tracked in [PLAN.md](PLAN.md). The new `--world-bench DIR W H SPP --case fast-metal --seed 0 --batch 4` route retains raw linear RGB f32, PNG and frozen-scene JSON. Other cases are `fast-dielectric`, `chrome-mid`, `diffuse-mid` and `opal-mid`. `tools/convergence.py` compares multiple independent seeds against a common high-SPP reference and reports error and elapsed time. The validated base passed 193 CPU/CUDA tests. On five-seed 256×256/32-SPP paired runs, Fast metal/dielectric throughput improved about 1.61×; Full cases were 1–6% slower after the corrected final environment ray. At 128×128, metal error fell about 11.6% at fixed SPP; MSE×time estimates improved 1.63× for metal and 1.52× for dielectric. These are workload-specific measurements, not a universal convergence guarantee. A Full shading helper experiment was rejected because its paired speed changes were inconclusive.
 
-These numbers are from an RTX 3080 Ti, 1280×720, 6 bounces, at the preset views (`--bench`;
-the full table is in [docs/bench-1280x720.txt](docs/bench-1280x720.txt)):
+These numbers are from an RTX 3080 Ti, 1280×720, 6 bounces, at the preset views (`--bench`):
 
 | preset                                      | ms / spp | Msamples/s |
 | ------------------------------------------- | -------: | ---------: |
@@ -537,47 +542,31 @@ The timings above predate this bridge, the World tracer and OIDN integration.
 
 ## Layout
 
+The architecture cleanly separates the generic studio shell in `soluwell-studio` from the 10 domain-specific fractal files in `warpbro-rs/src/`:
+
 ```text
-fractal-rs        (dependency) fractal-kernels: the #[cuda_module] kernels; fractal-core: parameter ABI, sampler
-src/formulas.rs   declarative metadata catalog (FormulaMeta, ParamMeta) and parameter packing for all 28 families
-src/formulas.wgsl WGSL distance estimators for the 20 extended fractal and procedural families (8..28)
-src/scene.rs      evaluated Scene, legacy serde, formulas, 38-preset gallery and parameter packing
-src/world.rs      Playa World document, canonical settings nodes, evaluator, commands and undo/redo
-src/render_profiles.rs   evaluated render/quality and viewport-policy contracts
-src/render_profiles_ui.rs   named profile/template catalog and shared viewport bindings
-src/world_ui.rs   Outliner, object Attribute Editor and layered component Timeline
-src/presets.rs    five authored 250-frame animated World presets
-src/camera_orbit.rs   deterministic timeline integration of camera orbit speed
-src/render.rs     CUDA / WGPU backends, progressive targets, kernel dispatch, PNG output
-src/app.rs        the egui browser, shared Settings panel and viewport toolbar
-src/events.rs     typed UiCommand / Action protocol for the App-owned Playa EventBus
-src/app_events.rs   shared deferred dispatcher for widget, hotkey and REST intents
-src/app_actions.rs   application action handlers; captured drafts/targets applied centrally
-src/world_events.rs   typed World-panel intents and the WorldEditor application boundary
-src/app_control.rs   REST decoding and queries through the same typed EventBus
-crates/app-control   loopback HTTP transport and one-shot action acknowledgements
-src/dock.rs       dockable panels, named layout manager and viewport toolbar
-src/render_service.rs   render worker, bounded command/event bus and latest-frame mailbox
-src/io_service.rs       asynchronous full-scene open/save, settings, bookmarks and screenshots
-src/export.rs     autonomous render coordinator, EXR sink and ffmpeg-rs HEVC writer
-src/inspector.rs  scene controls from egui-widgets-rs attribute editors
-src/denoise.rs    worker OIDN settings, target cadence and shared-device processor
-src/color.rs      working space (ACEScg) matrices and luma, cached vfx-ocio GPU colour processing
-src/ocio.rs       OCIO controls and background config loader, adapted from exr-view (BSD-3-Clause)
-src/window.rs     winit/wgpu shell + egui-display float canvas and SDR/HDR swapchain
-src/window_shot.rs  whole-window screenshots: request, linear canvas decode, EXR / PQ PNG writers
-src/palette.rs    the 14 palettes
-src/materials.rs  host adapter for the shared fractal-materials catalog
-fractal-rs        (dependency) fractal-materials: renderer-independent material presets
-src/preview.rs    bounded final/draft Playa RAM cache and playback state
-src/hotkeys.rs    global-first, panel-scoped command bindings, keyboard double taps
-src/overlay.rs    viewport extras: wires of masks, groups, cameras, the sun and Bounds cubes; wire picking
-src/takes.rs      camera / transform takes: store, retime, trim, curve effects, clip files
-src/takes_ui.rs   the Takes panel
-src/camera_recorder.rs   navigation gestures recorded as takes
-src/camera_slots.rs      the CamClip camera slots
-standard-surface-bsdf   SSH dependency: Autodesk Standard Surface (MaterialX port, Apache-2.0)
-cam-controls, cam-viewport   SSH dependencies: gitnexus-rs camera rigs (PolyForm-Noncommercial-1.0.0)
+egui-widgets-rs/crates/soluwell/studio:
+  Shared studio shell, dock panels, Outliner, Timeline, Attribute Editor, Curve Editor,
+  Playa EventBus dispatch, WorldDocument graph/undo, RenderService, OCIO display pipeline,
+  OIDN denoiser, PreparationCache, ThumbnailCache, ExportController, and loopback REST API.
+
+warpbro-rs/src/ (10 fractal domain files):
+  src/main.rs           CLI entry & flags, engine::init_warpbro(), and soluwell_studio::run_with
+  src/engine.rs         WarpBroComputeEngine (dual CUDA fractal-kernels + 28-family WGPU WgpuEngine)
+  src/fractal_node.rs   "Fractal" scene node (FractalNodeSpec), 28-variant Formula, FractalSceneExt, pack_object
+  src/formulas.rs       Declarative 28-family metadata table (FORMULAS) and extended parameter packing
+  src/formulas.wgsl     WGSL distance estimators for all 28 families injected into soluwell-studio-render
+  src/templates.rs      14 built-in templates (BUILTINS) registered into soluwell_studio
+  src/presets.rs        Procedural 250-frame animated WorldDocument builders (ANIMATED = 0..5)
+  src/render_bench.rs   Evaluated world/family A/B benchmarks
+  src/parity_tests.rs   CUDA vs WGPU per-pixel and ray-beam parity suite
+  src/test_gpu.rs      cuda_ / gpu_ test-prefix guards
+
+External dependencies:
+  fractal-rs            fractal-kernels: #[cuda_module] PTX kernels; fractal-core: parameter ABI & sampler
+  fractal-materials     Curated material library presets (derived from usd-mat-lib)
+  standard-surface-bsdf Autodesk Standard Surface (MaterialX port with opt-in cuda-math)
+  cam-controls          gitnexus-rs camera rigs, horizon lock, and flight controls
 ```
 
 ## Licences
@@ -588,4 +577,4 @@ and are under PolyForm-Noncommercial-1.0.0. The retained vendor copies are histo
 Cargo uses the pinned SSH dependencies above. The fractal formulas credit their sources in the ofx-rs code they were ported from
 (Knighty's KIFS, Leys' Kleinian, Mandelbulber's pseudo-Kleinian, and others).
 
-The OCIO panel in `src/ocio.rs` is adapted from exr-view. The ACES 2.0 presets follow the [Academy output transform parameters](https://docs.acescentral.com/system-components/output-transforms/parameters/).
+The OCIO panel in soluwell-studio is adapted from exr-view. The ACES 2.0 presets follow the [Academy output transform parameters](https://docs.acescentral.com/system-components/output-transforms/parameters/).
