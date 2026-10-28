@@ -10,11 +10,8 @@ path = "src/main.rs"
 [features]
 default = []
 
-[workspace]
-members = ["crates/app-control"]
-
 [dependencies]
-app-control = { path = "crates/app-control" }
+soluwell-studio = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
 # The fractal path tracer shared with ofx-rs: parameter ABI and sampling, the CUDA kernels
 # (built into this binary through #[cuda_module]) and the material presets.
 fractal-core = { git = "ssh://git@github.com/ssoj13/fractal-rs.git", branch = "main" }

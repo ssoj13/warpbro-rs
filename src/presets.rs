@@ -1,14 +1,15 @@
 //! Portable animated worlds authored through the same commands as the editor. The built-in
 //! template table (`templates::BUILTINS`) names them and is their only entry point; the other
 //! animated showcase scenes there are authored documents (JSON).
-use crate::scene::{
-    Coloring, Facing, Formula, Kifs, KifsKind, MandelBox, MaterialModel, Quat, Scene,
-};
-use crate::world::{
-    CAMERA_ORBIT_PHASE, CAMERA_ORBIT_SPEED, NodeId, WorldCommand, WorldDocument, WorldEditor,
-};
 use curves::Tan;
 use serde_json::{Value, json};
+use soluwell_studio::palette::PaletteScheme;
+use soluwell_studio::scene::{Coloring, Facing, MaterialModel, Scene};
+use soluwell_studio::world::{
+    CAMERA_ORBIT_PHASE, CAMERA_ORBIT_SPEED, NodeId, WorldCommand, WorldDocument, WorldEditor,
+};
+
+use crate::fractal_node::{Formula, FractalSceneExt, Kifs, KifsKind, MandelBox, Quat};
 
 /// The animated worlds this module authors (`templates::BUILTINS` gives their names and
 /// descriptions).
@@ -52,7 +53,7 @@ fn track(commands: &mut Vec<WorldCommand>, id: NodeId, path: &str, values: [Valu
 /// The world `preset` named `name`: 250 frames at 24 fps, the camera orbiting and pulling back
 /// while the fractal unfolds.
 pub fn scene(preset: Animated, name: &str) -> Result<Scene, String> {
-    let mut base = Scene::preset(match preset {
+    let mut base = Scene::preset_fractal(match preset {
         Animated::ChromeCathedral => Formula::Mandelbox(MandelBox::PRESET),
         Animated::OpalJulia => Formula::QuaternionJulia(Quat::PRESET),
         Animated::VerdantFold => Formula::Kifs(Kifs::preset(KifsKind::Tetrahedron)),
@@ -77,22 +78,22 @@ pub fn scene(preset: Animated, name: &str) -> Result<Scene, String> {
         Animated::VerdantFold => (0.3, 0.28),
     };
     base.coloring = Coloring::TrapOrigin;
-    base.trap_scale = 1.25;
+    base.set_trap_scale(1.25);
     let (palette, horizon, zenith, sun) = match preset {
         Animated::ChromeCathedral => (
-            crate::palette::PaletteScheme::Ice,
+            PaletteScheme::Ice,
             [0.12, 0.16, 0.22],
             [0.008, 0.014, 0.025],
             [0.78, 0.88, 1.0],
         ),
         Animated::OpalJulia => (
-            crate::palette::PaletteScheme::Amethyst,
+            PaletteScheme::Amethyst,
             [0.055, 0.025, 0.09],
             [0.045, 0.09, 0.16],
             [1.0, 0.8, 0.95],
         ),
         Animated::VerdantFold => (
-            crate::palette::PaletteScheme::Verdant,
+            PaletteScheme::Verdant,
             [0.014, 0.04, 0.027],
             [0.055, 0.105, 0.09],
             [0.86, 1.0, 0.72],
@@ -114,9 +115,11 @@ pub fn scene(preset: Animated, name: &str) -> Result<Scene, String> {
     base.sky.background = true;
     match preset {
         Animated::ChromeCathedral => {
-            if let Formula::Mandelbox(parameters) = &mut base.formula {
-                parameters.scale = -1.5;
-            }
+            base.modify_formula(|f| {
+                if let Formula::Mandelbox(parameters) = f {
+                    parameters.scale = -1.5;
+                }
+            });
         }
         Animated::OpalJulia => {
             base.material.facing = Some(Facing {
@@ -127,7 +130,9 @@ pub fn scene(preset: Animated, name: &str) -> Result<Scene, String> {
             });
             base.material.thin_film_thickness = 420.0;
         }
-        Animated::VerdantFold => base.formula = Formula::Kifs(Kifs::preset(KifsKind::Octahedron)),
+        Animated::VerdantFold => {
+            base.set_formula(Formula::Kifs(Kifs::preset(KifsKind::Octahedron)));
+        }
     }
     let mut editor = WorldEditor::new(WorldDocument::from_scene(&base));
     let object = editor.active().ok_or("Preset has no fractal")?;
@@ -273,10 +278,11 @@ pub fn scene(preset: Animated, name: &str) -> Result<Scene, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::world::WorldKind;
+    use crate::fractal_node::FRACTAL_KIND;
 
     #[test]
     fn animated_presets_remain_finite_visible_and_authored_for_all_250_frames() {
+        crate::engine::init_warpbro();
         for preset in Animated::ALL {
             let name = format!("{preset:?}");
             let authored = scene(preset, &name).unwrap();
@@ -296,11 +302,11 @@ mod tests {
             let last = document.snapshot(249.0).unwrap();
             assert_ne!(first.camera, last.camera);
             assert_ne!(first.objects[0].object_world, last.objects[0].object_world);
-            assert_ne!(first.formula, last.formula);
+            assert_ne!(first.objects[0].formula(), last.objects[0].formula());
             let object = document
                 .nodes()
                 .into_iter()
-                .find(|n| n.kind == WorldKind::Fractal)
+                .find(|n| n.kind == FRACTAL_KIND)
                 .unwrap()
                 .id;
             assert!(
@@ -336,15 +342,21 @@ mod tests {
 
     #[test]
     fn unfolding_controls_are_monotonic_across_the_whole_work_area() {
+        crate::engine::init_warpbro();
         for preset in Animated::ALL {
             let document = scene(preset, "unfolding").unwrap().document.unwrap();
             let mut previous = document.snapshot(0.0).unwrap();
             for frame in 1..250 {
                 let current = document.snapshot(f64::from(frame)).unwrap();
-                assert!(current.render.iterations >= previous.render.iterations);
+                assert!(
+                    current.objects[0].render.iterations >= previous.objects[0].render.iterations
+                );
                 assert!(current.camera.distance >= previous.camera.distance);
                 assert!(current.camera.pitch_degrees >= previous.camera.pitch_degrees);
-                match (&previous.formula, &current.formula) {
+                match (
+                    &previous.objects[0].formula(),
+                    &current.objects[0].formula(),
+                ) {
                     (Formula::Mandelbox(a), Formula::Mandelbox(b)) => {
                         assert!(b.scale <= a.scale);
                         assert!(b.min_radius_ratio <= a.min_radius_ratio);
@@ -363,6 +375,7 @@ mod tests {
 
     #[test]
     fn preset_documents_roundtrip_and_evaluate_identically_in_reverse_and_at_subframes() {
+        crate::engine::init_warpbro();
         for preset in Animated::ALL {
             let document = scene(preset, "roundtrip").unwrap().document.unwrap();
             let restored: WorldDocument =

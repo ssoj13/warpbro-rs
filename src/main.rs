@@ -1,8 +1,10 @@
 #![recursion_limit = "256"]
-//! WarpBro: a path-traced 3D fractal browser. The render worker drives the fractal-rs CUDA
-//! kernels (cuda-oxide) or their WGSL port: the distance-estimated families of
-//! `formulas::FORMULAS` (all 28 families on CUDA and WGPU), DE
-//! sphere tracing, `pt-integrator` path tracing and `standard-surface-bsdf`. The UI is egui.
+//! WarpBro: a path-traced 3D fractal browser built on top of `soluwell-studio`.
+//!
+//! WarpBro registers its `"Fractal"` scene node type ([`fractal_node::FractalNodeSpec`]),
+//! 28-family WGSL distance estimators (`formulas.wgsl`), built-in animated/static templates,
+//! 38 gallery presets, and dual CUDA (`fractal-kernels` via `cuda-oxide`) + WGPU compute
+//! engine ([`engine::WarpBroComputeEngine`]) into `soluwell-studio`.
 //!
 //!   WarpBro                                          the browser
 //!   WarpBro --gallery DIR [W H SPP] [--hdr] [--display-exr]
@@ -16,58 +18,31 @@
 //!   WarpBro --warmup                                 initialize the embedded CUDA module and
 //!                                                    the WGPU device, module and post pipelines
 
-mod animation;
 // The parameter ABI is shared with the CUDA kernels and with ofx-rs through fractal-rs; host code
 // keeps addressing it as crate::params.
 use fractal_core::params;
-mod app;
-mod camera_orbit;
-mod camera_recorder;
-mod camera_slots;
-mod color;
-mod denoise;
-mod environment;
-mod export;
-mod exr_io;
-mod file_dialogs;
+
+mod engine;
 mod formulas;
-mod fs_name;
-mod hotkeys;
-mod io_service;
-mod material_gallery;
-mod materials;
-mod ocio;
-mod overlay;
-mod palette;
+mod fractal_node;
 #[cfg(test)]
 mod parity_tests;
-// Unwired roulette / clamp policies awaiting a decision (plan1 Q4): no kernel uses them yet.
-mod events;
-#[allow(dead_code)]
-mod path_convergence;
 mod presets;
-mod preview;
-mod render;
 mod render_bench;
-mod render_diagnostics;
-mod render_prep;
-mod render_profiles;
-mod render_profiles_ui;
-mod render_service;
-mod render_wgpu;
-mod scene;
-mod takes;
 mod templates;
 #[cfg(test)]
 mod test_gpu;
-mod thumbnail_cache;
-mod window;
-mod window_shot;
-mod world;
-mod world_events;
-mod world_ui;
 
+use std::sync::Arc;
 use std::time::Instant;
+
+use fractal_node::{Bulb, Formula, FractalSceneExt};
+use soluwell_studio::color::{BT2408_SDR_WHITE_NITS, HDR_VIEW};
+use soluwell_studio::fs_name;
+use soluwell_studio::render::{Batch, Target, validate_size};
+use soluwell_studio::render_service::{Frame, FrameFile, PngEncoding};
+use soluwell_studio::render_wgpu;
+use soluwell_studio::scene::Scene;
 
 /// Optional positional argument `i`: absent, or a `--flag` in its place (`--gallery DIR --hdr`),
 /// takes `default`; anything else must parse, so `--bench 96O` is an error, not 960 silently.
@@ -86,26 +61,17 @@ where
 /// The WarpBro profile, `~/.warpbro` (or `$WARPBRO_HOME`): `settings.json`, `bookmarks/`,
 /// `templates/` and every render / screenshot under `out/`.
 pub fn warpbro_dir() -> std::path::PathBuf {
-    if let Some(root) = std::env::var_os("WARPBRO_HOME") {
-        return std::path::PathBuf::from(root);
-    }
-    // Tests never touch the operator's real profile: each test process gets its own empty one.
-    #[cfg(test)]
-    return std::env::temp_dir().join(format!("warpbro-test-{}", std::process::id()));
-    #[cfg(not(test))]
-    dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".warpbro")
+    soluwell_studio::warpbro_dir()
 }
 
 /// `~/.warpbro/out`: every export and screenshot gets its own timestamped folder here.
 pub fn out_root() -> std::path::PathBuf {
-    warpbro_dir().join("out")
+    soluwell_studio::out_root()
 }
 
 /// A new, unique `<root>/<local timestamp>` folder for one export or screenshot.
 pub fn new_out_dir(root: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    video_io::job::new_out_dir(root).map_err(|e| e.to_string())
+    soluwell_studio::new_out_dir(root)
 }
 
 /// Render (or only time) every gallery preset offscreen.
@@ -117,23 +83,23 @@ fn headless(
     hdr: bool,
     display_exr: bool,
 ) -> anyhow::Result<()> {
-    render::validate_size(w, h, spp)?;
-    let mut gpu = render::Gpu::new()?;
+    validate_size(w, h, spp)?;
+    let mut gpu = engine::new_gpu()?;
     println!("GPU: {}  ·  {w}x{h}, {spp} spp", gpu.name);
     println!(
         "{:<28} {:>16} {:>9} {:>11}",
         "preset", "model", "ms/spp", "Msamples/s"
     );
-    for mut scene in scene::Scene::gallery() {
+    for mut scene in Scene::fractal_gallery() {
         if hdr {
             scene.colour.config = "ocio://studio-config-latest".into();
             scene.colour.display = "Rec.2100-PQ - Display".into();
-            scene.colour.view = color::HDR_VIEW.into();
+            scene.colour.view = HDR_VIEW.into();
         }
-        let mut t = render::Target::new(w, h);
+        let mut t = Target::new(w, h);
         gpu.step(&mut t, &scene, 1, 0, spp <= 1)?; // warm-up
         let t0 = Instant::now();
-        while !gpu.advance(&mut t, &scene, spp, 0, render::Batch::Fixed(8))? {}
+        while !gpu.advance(&mut t, &scene, spp, 0, Batch::Fixed(8))? {}
         let secs = t0.elapsed().as_secs_f64();
         let traced = (spp - 1).max(1) as f64;
         println!(
@@ -144,20 +110,20 @@ fn headless(
             (w * h) as f64 * traced / secs / 1e6
         );
         if let Some(dir) = out {
-            let frame = render_service::Frame::snapshot(&t, 0, false, false, 100.0);
-            let encoding = render_service::PngEncoding::displayed(frame.light_kind.hdr());
+            let frame = Frame::snapshot(&t, 0, false, false, 100.0);
+            let encoding = PngEncoding::displayed(frame.light_kind.hdr());
             let dir = std::path::Path::new(dir);
             let stem = fs_name::stem(&scene.name);
             let path = dir.join(fs_name::frame_file(&stem, None, encoding.suffix()));
             frame
-                .save_png(&path, encoding, color::BT2408_SDR_WHITE_NITS, true)
+                .save_png(&path, encoding, BT2408_SDR_WHITE_NITS, true)
                 .map_err(anyhow::Error::msg)?;
             if display_exr {
-                let exr = render_service::FrameFile::DisplayExr.suffix();
+                let exr = FrameFile::DisplayExr.suffix();
                 frame
                     .save_display_exr(
                         &dir.join(fs_name::frame_file(&stem, None, exr)),
-                        color::BT2408_SDR_WHITE_NITS,
+                        BT2408_SDR_WHITE_NITS,
                     )
                     .map_err(anyhow::Error::msg)?;
             }
@@ -173,9 +139,9 @@ fn animated_fixtures(
     samples: u32,
     all_frames: bool,
 ) -> anyhow::Result<()> {
-    render::validate_size(width, height, samples)?;
+    validate_size(width, height, samples)?;
     std::fs::create_dir_all(dir)?;
-    let mut gpu = render::Gpu::new()?;
+    let mut gpu = engine::new_gpu()?;
     let animated = templates::BUILTINS
         .iter()
         .enumerate()
@@ -212,15 +178,15 @@ fn animated_fixtures(
             let start = Instant::now();
             // A fixed seed keeps regression images repeatable. Every frame gets its own target,
             // so identical consecutive frames never accumulate into one another.
-            let mut target = render::Target::new(width, height);
-            while !gpu.advance(&mut target, &evaluated, samples, 0, render::Batch::Fixed(8))? {}
-            let image = render_service::Frame::snapshot(&target, 0, false, false, 100.0);
-            let encoding = render_service::PngEncoding::displayed(image.light_kind.hdr());
+            let mut target = Target::new(width, height);
+            while !gpu.advance(&mut target, &evaluated, samples, 0, Batch::Fixed(8))? {}
+            let image = Frame::snapshot(&target, 0, false, false, 100.0);
+            let encoding = PngEncoding::displayed(image.light_kind.hdr());
             image
                 .save_png(
                     &output.join(fs_name::frame_file("frame", Some(frame), encoding.suffix())),
                     encoding,
-                    color::BT2408_SDR_WHITE_NITS,
+                    BT2408_SDR_WHITE_NITS,
                     true,
                 )
                 .map_err(anyhow::Error::msg)?;
@@ -238,6 +204,7 @@ fn animated_fixtures(
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
+    engine::init_warpbro();
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         // Build-time warmup, without a window or scene state: the CUDA driver JIT-caches the
@@ -245,7 +212,7 @@ fn main() -> anyhow::Result<()> {
         // (trace pipelines compile per family module on first use, then come from disk).
         Some("--warmup") => {
             let started = std::time::Instant::now();
-            let gpu = render::Gpu::new()?;
+            let gpu = engine::new_gpu()?;
             println!("CUDA ready: {} ({:?})", gpu.name, started.elapsed());
             let started = std::time::Instant::now();
             let backend = render_wgpu::warmup().map_err(anyhow::Error::msg)?;
@@ -281,6 +248,15 @@ fn main() -> anyhow::Result<()> {
             false,
             false,
         ),
-        _ => app::run(),
+        _ => soluwell_studio::run_with(soluwell_studio::StudioConfig {
+            title: "WarpBro".into(),
+            initial_scene: Some(Scene::preset_fractal(Formula::Mandelbulb(Bulb::PRESET))),
+            gallery: Some(Scene::fractal_gallery()),
+            engine_factory: Some(Arc::new(engine::new_gpu)),
+            material_swatch_base: Some(Arc::new(|| {
+                Scene::preset_fractal(Formula::Mandelbulb(Bulb::PRESET))
+            })),
+            gpu_init_label: "Initializing GPU (CUDA / WGPU)…".into(),
+        }),
     }
 }

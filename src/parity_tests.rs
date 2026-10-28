@@ -10,11 +10,16 @@
 //! hit a different fold or miss. The tolerance below is per pixel, plus a small share of pixels
 //! allowed beyond it; the test reports every case's largest errors either way.
 
-use crate::render::{Batch, Gpu, Plane, Target};
-use crate::render_profiles::Backend;
-use crate::scene::{
-    ArrayAxis, ArrayKind, Coloring, Formula, Mask, MaskArray, MaskInstance, MaskShape, Scene,
+use soluwell_studio::render::{Batch, Gpu, Target};
+use soluwell_studio::render_prep::{Plane, WorldUpload, padded_len};
+use soluwell_studio::render_profiles::{Backend, DirectRender, DirectShading};
+use soluwell_studio::scene::{
+    ArrayAxis, ArrayKind, ColorSource, Coloring, Facing, Mask, MaskArray, MaskInstance, MaskShape,
+    Material, MaterialModel, Scene,
 };
+
+use crate::engine::{WarpBroGpuExt, init_warpbro, new_gpu};
+use crate::fractal_node::{Formula, FractalSceneExt};
 
 const WIDTH: usize = 96;
 const HEIGHT: usize = 64;
@@ -111,11 +116,11 @@ fn quiet(mut scene: Scene) -> Scene {
 /// A world of one Mandelbulb at the origin intersected with `mask` (identity placement).
 fn masked_world(mask: Mask) -> Scene {
     let bulb = Formula::PRESETS[crate::params::FAMILY_BULB as usize];
-    let mut world = quiet(Scene::preset(bulb));
+    let mut world = quiet(Scene::preset_fractal(bulb));
     world.world_render = true;
     world.camera.distance = 4.0;
     world.camera.fov_y_degrees = 55.0;
-    let mut object = Scene::preset(bulb);
+    let mut object = Scene::preset_fractal(bulb);
     object.object_world = Some(glam::Mat4::IDENTITY.to_cols_array_2d());
     object.masks = vec![MaskInstance {
         mask,
@@ -133,19 +138,19 @@ fn masked_world(mask: Mask) -> Scene {
 #[test]
 fn cuda_wgpu_primary_guides_agree_per_pixel() {
     let _gpu_test = crate::test_gpu::lock();
-    let mut gpu = Gpu::new().unwrap();
+    let mut gpu = new_gpu().unwrap();
     let classic = crate::params::FAMILY_BULB..=crate::params::FAMILY_HYBRID;
     let mut cases: Vec<(String, Scene)> = classic
         .map(|code| {
             let formula = Formula::PRESETS[code as usize];
             (
                 format!("family {code} {}", formula.name()),
-                quiet(Scene::preset(formula)),
+                quiet(Scene::preset_fractal(formula)),
             )
         })
         .collect();
     for coloring in Coloring::ALL {
-        let mut scene = quiet(Scene::preset(
+        let mut scene = quiet(Scene::preset_fractal(
             Formula::PRESETS[crate::params::FAMILY_BULB as usize],
         ));
         scene.coloring = coloring;
@@ -219,9 +224,9 @@ fn cuda_wgpu_primary_guides_agree_per_pixel() {
 fn gpu_wgpu_frame_past_the_dispatch_limit_covers_every_pixel() {
     let _gpu_test = crate::test_gpu::lock();
     let (width, height) = (4096, 2160);
-    assert!(crate::render_prep::padded_len(width, height) > 65_535 * 128);
-    let mut gpu = Gpu::new().unwrap();
-    let mut scene = quiet(Scene::preset(
+    assert!(padded_len(width, height) > 65_535 * 128);
+    let mut gpu = new_gpu().unwrap();
+    let mut scene = quiet(Scene::preset_fractal(
         Formula::PRESETS[crate::params::FAMILY_BULB as usize],
     ));
     scene.render.backend = Backend::Wgpu;
@@ -363,31 +368,31 @@ fn parameter_probe_formulas(formula: Formula) -> Vec<(String, Formula)> {
 }
 
 fn formula_probe_cases(formula: Formula) -> Vec<(String, Scene)> {
-    let base = quiet(Scene::preset(formula));
+    let base = quiet(Scene::preset_fractal(formula));
     let mut cases = vec![("preset".to_string(), base.clone())];
     for coloring in Coloring::ALL {
         let mut scene = base.clone();
         scene.coloring = coloring;
-        scene.trap_point = [0.13, -0.21, 0.17];
-        scene.trap_axis = 1;
+        scene.set_trap_point([0.13, -0.21, 0.17]);
+        scene.set_trap_axis(1);
         cases.push((format!("trap-{coloring:?}"), scene));
     }
     let mut fractional = base.clone();
     fractional.render.iterations = 7.375;
     cases.push(("fractional-iterations".into(), fractional));
     let mut inverted = base.clone();
-    inverted.inversion_strength = 0.37;
-    inverted.inversion_radius = 1.13;
-    inverted.inversion_center = [0.11, -0.17, 0.23];
-    inverted.julia_mix = 0.35;
-    inverted.julia = [-0.18, 0.27, 0.09];
-    inverted.orbit_offset = [0.03, -0.04, 0.07];
+    inverted.set_inversion_strength(0.37);
+    inverted.set_inversion_radius(1.13);
+    inverted.set_inversion_center([0.11, -0.17, 0.23]);
+    inverted.set_julia_mix(0.35);
+    inverted.set_julia([-0.18, 0.27, 0.09]);
+    inverted.set_orbit_offset([0.03, -0.04, 0.07]);
     cases.push(("inversion-and-orbit".into(), inverted));
     for (name, formula) in parameter_probe_formulas(formula) {
         let mut scene = base.clone();
-        scene.formula = formula;
+        scene.set_formula(formula);
         scene.coloring = Coloring::TrapPoint;
-        scene.trap_point = [0.13, -0.21, 0.17];
+        scene.set_trap_point([0.13, -0.21, 0.17]);
         cases.push((format!("parameter-{name}"), scene));
     }
     cases
@@ -399,10 +404,10 @@ fn formula_probe_cases(formula: Formula) -> Vec<(String, Scene)> {
 /// Negative X pairs k with p-1-k; positive X pairs k with (p-k) mod p. Integer q and
 /// strand count preserve the braid cosine under (qt, pol_angle) -> (-qt, -pol_angle).
 fn knot_axis_minimum_traps(scene: &Scene, point: [f32; 4]) -> Option<Vec<f64>> {
-    let Formula::TorusKnotBraid(f) = scene.formula else {
+    let Formula::TorusKnotBraid(f) = scene.formula() else {
         return None;
     };
-    if scene.inversion_strength != 0.0
+    if scene.inversion_strength() != 0.0
         || point[0] == 0.0
         || point[1] != 0.0
         || point[2] != 0.0
@@ -471,17 +476,19 @@ fn knot_axis_minimum_traps(scene: &Scene, point: [f32; 4]) -> Option<Vec<f64>> {
             }
         }
     }
+    let trap_point = scene.trap_point();
+    let trap_axis = scene.trap_axis();
     Some(
         vectors
             .into_iter()
             .map(|vector| match scene.coloring {
                 Coloring::TrapOrigin => vector.iter().map(|v| v * v).sum::<f64>().sqrt(),
                 Coloring::TrapPlane => {
-                    let axis = scene.trap_axis.min(2) as usize;
-                    (vector[axis] - f64::from(scene.trap_point[axis])).abs()
+                    let axis = trap_axis.min(2) as usize;
+                    (vector[axis] - f64::from(trap_point[axis])).abs()
                 }
                 Coloring::TrapPoint => (0..3)
-                    .map(|axis| (vector[axis] - f64::from(scene.trap_point[axis])).powi(2))
+                    .map(|axis| (vector[axis] - f64::from(trap_point[axis])).powi(2))
                     .sum::<f64>()
                     .sqrt(),
                 Coloring::Radius => unreachable!(),
@@ -497,7 +504,7 @@ fn knot_axis_minimum_traps(scene: &Scene, point: [f32; 4]) -> Option<Vec<f64>> {
 #[test]
 fn cuda_extended_full_de_short_orbits_and_noniterating_traps_match_wgpu() {
     let _gpu_test = crate::test_gpu::lock();
-    let mut gpu = Gpu::new().unwrap();
+    let mut gpu = new_gpu().unwrap();
     let mut failures = Vec::new();
     for meta in crate::formulas::FORMULAS
         .iter()
@@ -599,7 +606,7 @@ fn cuda_extended_full_de_short_orbits_and_noniterating_traps_match_wgpu() {
 #[ignore = "Full-orbit precision diagnostic; long iterative traps are ill-conditioned. Run explicitly with --ignored --nocapture"]
 fn cuda_extended_formula_estimates_and_traps_match_wgpu() {
     let _gpu_test = crate::test_gpu::lock();
-    let mut gpu = Gpu::new().unwrap();
+    let mut gpu = new_gpu().unwrap();
     let mut failures = Vec::new();
     for code in 8..Formula::COUNT {
         let formula = Formula::PRESETS[code as usize];
@@ -658,7 +665,7 @@ fn cuda_extended_formula_estimates_and_traps_match_wgpu() {
 #[test]
 fn cuda_noniterating_formulas_ignore_iteration_count_on_both_backends() {
     let _gpu_test = crate::test_gpu::lock();
-    let mut gpu = Gpu::new().unwrap();
+    let mut gpu = new_gpu().unwrap();
     for meta in &crate::formulas::FORMULAS {
         if meta.code < 8 || meta.iterates {
             continue;
@@ -666,7 +673,7 @@ fn cuda_noniterating_formulas_ignore_iteration_count_on_both_backends() {
         let formula = Formula::PRESETS[meta.code as usize];
         let points = formula_probe_points(formula.framing_radius());
         for backend in [Backend::Cuda, Backend::Wgpu] {
-            let mut scene = quiet(Scene::preset(formula));
+            let mut scene = quiet(Scene::preset_fractal(formula));
             scene.render.backend = backend;
             scene.render.iterations = 3.0;
             let reference = gpu.probe_formula(&scene, &points).unwrap();
@@ -688,15 +695,15 @@ fn cuda_noniterating_formulas_ignore_iteration_count_on_both_backends() {
 #[test]
 fn cuda_extended_primary_guides_match_wgpu_with_fractional_iterations_and_inversion() {
     let _gpu_test = crate::test_gpu::lock();
-    let mut gpu = Gpu::new().unwrap();
+    let mut gpu = new_gpu().unwrap();
     let mut failures = Vec::new();
     for code in 8..Formula::COUNT {
         for modified in [false, true] {
-            let mut scene = quiet(Scene::preset(Formula::PRESETS[code as usize]));
+            let mut scene = quiet(Scene::preset_fractal(Formula::PRESETS[code as usize]));
             if modified {
                 scene.render.iterations = 7.375;
-                scene.inversion_strength = 0.12;
-                scene.inversion_center = [0.07, -0.03, 0.05];
+                scene.set_inversion_strength(0.12);
+                scene.set_inversion_center([0.07, -0.03, 0.05]);
             }
             let cuda = guides(&mut gpu, &scene, Backend::Cuda);
             let wgpu = guides(&mut gpu, &scene, Backend::Wgpu);
@@ -809,7 +816,7 @@ fn observed_pick(
             // Four projected footprints cover both contact bands and final refinement.
             let slope = selected.pack(width as u32, height as u32)[crate::params::P_FOOTPRINT];
             let tolerance = 4.0 * slope * depth.max(reference)
-                + 32.0 * f32::EPSILON * selected.formula.framing_radius();
+                + 32.0 * f32::EPSILON * selected.formula().framing_radius();
             if (depth - reference).abs() > tolerance {
                 return Err(format!(
                     "{backend:?} dynamic={force_dynamic} object={object} depth={depth}, reference={reference}, footprint tolerance={tolerance}"
@@ -915,14 +922,12 @@ fn compare_oracle_plane(
 /// progressive guides for two same-family objects, including mixed Fast/Full materials.
 #[test]
 fn cuda_extended_specialized_worlds_match_dynamic_dispatch() {
-    use crate::render_profiles::{DirectRender, DirectShading};
-    use crate::scene::{ColorSource, Facing, Material, MaterialModel};
     let _gpu_test = crate::test_gpu::lock();
-    let mut gpu = Gpu::new().unwrap();
+    let mut gpu = new_gpu().unwrap();
     let mut failures = Vec::new();
     for code in 8..Formula::COUNT {
         for shade in ["fast", "full", "mixed", "direct"] {
-            let mut scene = quiet(Scene::preset(Formula::PRESETS[code as usize]));
+            let mut scene = quiet(Scene::preset_fractal(Formula::PRESETS[code as usize]));
             scene.render.backend = Backend::Cuda;
             scene.render.max_bounces = 2;
             scene.camera.f_number = 0.0;
@@ -934,7 +939,7 @@ fn cuda_extended_specialized_worlds_match_dynamic_dispatch() {
             } else {
                 MaterialModel::Fast
             };
-            let radius = scene.formula.framing_radius();
+            let radius = scene.formula().framing_radius();
             let mut objects = Vec::new();
             for object_index in 0..2 {
                 let mut object = scene.clone();
@@ -1065,13 +1070,12 @@ fn cuda_extended_specialized_worlds_match_dynamic_dispatch() {
 /// extended code as the old world sentinel or silently substituting Hybrid.
 #[test]
 fn cuda_extended_mixed_world_guides_match_wgpu() {
-    use crate::scene::{ColorSource, Material, MaterialModel};
     let _gpu_test = crate::test_gpu::lock();
-    let mut gpu = Gpu::new().unwrap();
+    let mut gpu = new_gpu().unwrap();
     let mut failures = Vec::new();
     for code in 8..Formula::COUNT {
-        let mut scene = quiet(Scene::preset(Formula::PRESETS[code as usize]));
-        let radius = scene.formula.framing_radius();
+        let mut scene = quiet(Scene::preset_fractal(Formula::PRESETS[code as usize]));
+        let radius = scene.formula().framing_radius();
         let mut extended = scene.clone();
         extended.material = Material {
             model: MaterialModel::Fast,
@@ -1083,7 +1087,7 @@ fn cuda_extended_mixed_world_guides_match_wgpu() {
         matrix.w_axis.x = -0.6 * radius;
         extended.object_world = Some(matrix.to_cols_array_2d());
         let mut classic = extended.clone();
-        classic.formula = Formula::PRESETS[0];
+        classic.set_formula(Formula::PRESETS[0]);
         classic.material.base_color = [0.05, 0.1, 0.8];
         matrix.w_axis.x = 0.6 * radius;
         classic.object_world = Some(matrix.to_cols_array_2d());
@@ -1137,9 +1141,9 @@ fn cuda_extended_mixed_world_guides_match_wgpu() {
 fn cuda_extended_rounding_matches_wgpu_at_positive_and_negative_half_cells() {
     use crate::formulas::{AstrolabeGimbal, HopfFibration, MobiusIfs, PhyllotaxisShell};
     let _gpu_test = crate::test_gpu::lock();
-    let mut gpu = Gpu::new().unwrap();
+    let mut gpu = new_gpu().unwrap();
     let trap_point = [0.13f32, -0.21, 0.17];
-    let mut scene = quiet(Scene::preset(Formula::MobiusIfs(MobiusIfs {
+    let mut scene = quiet(Scene::preset_fractal(Formula::MobiusIfs(MobiusIfs {
         scale: 1.0,
         min_radius: 0.25,
         fixed_radius: 1.0,
@@ -1150,7 +1154,7 @@ fn cuda_extended_rounding_matches_wgpu_at_positive_and_negative_half_cells() {
     })));
     scene.render.iterations = 1.0;
     scene.coloring = Coloring::TrapPoint;
-    scene.trap_point = trap_point;
+    scene.set_trap_point(trap_point);
     let mut points = Vec::new();
     for axis in 0..3 {
         for value in [-2.5, -1.5, -0.5, 0.5, 1.5, 2.5] {
@@ -1186,28 +1190,34 @@ fn cuda_extended_rounding_matches_wgpu_at_positive_and_negative_half_cells() {
 
     let mut cases = Vec::new();
     for half_count in [8.5, 10.5, 12.5] {
-        cases.push(Scene::preset(Formula::PhyllotaxisShell(PhyllotaxisShell {
-            count: half_count,
-            ..PhyllotaxisShell::PRESET
-        })));
-        cases.push(Scene::preset(Formula::AstrolabeGimbal(AstrolabeGimbal {
-            gear_teeth: half_count,
-            ..AstrolabeGimbal::PRESET
-        })));
+        cases.push(Scene::preset_fractal(Formula::PhyllotaxisShell(
+            PhyllotaxisShell {
+                count: half_count,
+                ..PhyllotaxisShell::PRESET
+            },
+        )));
+        cases.push(Scene::preset_fractal(Formula::AstrolabeGimbal(
+            AstrolabeGimbal {
+                gear_teeth: half_count,
+                ..AstrolabeGimbal::PRESET
+            },
+        )));
     }
-    cases.push(Scene::preset(Formula::HopfFibration(HopfFibration {
-        fibers: 2,
-        shells: 1,
-        twist: 0.0,
-        scale: 1.0,
-        ..HopfFibration::PRESET
-    })));
+    cases.push(Scene::preset_fractal(Formula::HopfFibration(
+        HopfFibration {
+            fibers: 2,
+            shells: 1,
+            twist: 0.0,
+            scale: 1.0,
+            ..HopfFibration::PRESET
+        },
+    )));
     for mut scene in cases {
-        let mut points = formula_probe_points(scene.formula.framing_radius());
+        let mut points = formula_probe_points(scene.formula().framing_radius());
         // xi1=±pi/2 with two fibers gives an exact ±half-sector phase in Hopf's field.
         points.extend([[0.0, 1.0, 0.3, 0.0], [0.0, -1.0, 0.3, 0.0]]);
         scene.coloring = Coloring::TrapPoint;
-        scene.trap_point = trap_point;
+        scene.set_trap_point(trap_point);
         scene.render.backend = Backend::Cuda;
         let cuda = gpu.probe_formula(&scene, &points).unwrap();
         scene.render.backend = Backend::Wgpu;
@@ -1223,7 +1233,7 @@ fn cuda_extended_rounding_matches_wgpu_at_positive_and_negative_half_cells() {
                         && b[channel].is_finite()
                         && (a[channel] - b[channel]).abs() <= tolerance,
                     "half-count/sector family={} point={:?} channel={channel} cuda={a:?} wgpu={b:?}",
-                    scene.formula.code(),
+                    scene.formula().code(),
                     points[index],
                 );
             }
@@ -1248,7 +1258,7 @@ fn cuda_extended_orbit_rounding_diagnostic() {
     use crate::params::*;
 
     let _gpu_test = crate::test_gpu::lock();
-    let mut gpu = Gpu::new().unwrap();
+    let mut gpu = new_gpu().unwrap();
     let mut nonfinite = Vec::new();
     for (family, anchor) in [
         (
@@ -1260,7 +1270,7 @@ fn cuda_extended_orbit_rounding_diagnostic() {
             [0x3de5_d19d, 0xbe3e_a14c, 0xbeca_40fb, 0].map(f32::from_bits),
         ),
     ] {
-        let base = quiet(Scene::preset(Formula::PRESETS[family as usize]));
+        let base = quiet(Scene::preset_fractal(Formula::PRESETS[family as usize]));
         let points = orbit_probe_ulp_neighbours(anchor);
         let ablations: &[(&str, bool, bool)] = if family == FAMILY_MOBIUS_IFS {
             &[
@@ -1275,7 +1285,7 @@ fn cuda_extended_orbit_rounding_diagnostic() {
         for &(case, rotation_zero, twist_zero) in ablations {
             let mut scene = base.clone();
             scene.coloring = Coloring::TrapOrigin;
-            match &mut scene.formula {
+            scene.modify_formula(|f| match f {
                 Formula::MobiusIfs(formula) => {
                     if rotation_zero {
                         formula.rotation_degrees = [0.0; 3];
@@ -1290,7 +1300,7 @@ fn cuda_extended_orbit_rounding_diagnostic() {
                     }
                 }
                 _ => unreachable!(),
-            }
+            });
             let packed = scene.pack(1, 1);
             eprintln!(
                 "{}",
@@ -1372,7 +1382,7 @@ fn cuda_extended_orbit_rounding_diagnostic() {
 fn cuda_extended_axis_and_nearest_branch_diagnostic() {
     use crate::formulas::{HarmonicBulb, PolyhedralKifs, Superformula3D};
     let _gpu_test = crate::test_gpu::lock();
-    let mut gpu = Gpu::new().unwrap();
+    let mut gpu = new_gpu().unwrap();
     let harmonic_q: [f32; 4] = [0.0, 0.0, -0.69, 0.0];
     let mut harmonic_points = vec![harmonic_q];
     for axis in 0..3 {
@@ -1387,12 +1397,14 @@ fn cuda_extended_axis_and_nearest_branch_diagnostic() {
         }
     }
     for iterations in 1..=14 {
-        let mut scene = quiet(Scene::preset(Formula::HarmonicBulb(HarmonicBulb::PRESET)));
+        let mut scene = quiet(Scene::preset_fractal(Formula::HarmonicBulb(
+            HarmonicBulb::PRESET,
+        )));
         scene.render.iterations = iterations as f32;
         for axis in 0..3 {
             scene.coloring = Coloring::TrapPlane;
-            scene.trap_axis = axis;
-            scene.trap_point = [1.0; 3];
+            scene.set_trap_axis(axis);
+            scene.set_trap_point([1.0; 3]);
             for backend in [Backend::Cuda, Backend::Wgpu] {
                 scene.render.backend = backend;
                 let values = gpu.probe_formula(&scene, &harmonic_points).unwrap();
@@ -1408,10 +1420,12 @@ fn cuda_extended_axis_and_nearest_branch_diagnostic() {
             }
         }
     }
-    let mut superformula = quiet(Scene::preset(Formula::Superformula3D(Superformula3D {
-        pore_frequency: 7.4,
-        ..Superformula3D::PRESET
-    })));
+    let mut superformula = quiet(Scene::preset_fractal(Formula::Superformula3D(
+        Superformula3D {
+            pore_frequency: 7.4,
+            ..Superformula3D::PRESET
+        },
+    )));
     let super_points = [[0.0, 0.0, -0.99, 0.0], [0.0, 0.0, 0.99, 0.0]];
     let frequency = f64::from(7.4f32);
     let exact_pole_pore = ((frequency * std::f64::consts::FRAC_PI_2).cos() - 0.45) / frequency;
@@ -1426,9 +1440,9 @@ fn cuda_extended_axis_and_nearest_branch_diagnostic() {
             })
         );
     }
-    let mut knot = quiet(Scene::preset(Formula::PRESETS[19]));
+    let mut knot = quiet(Scene::preset_fractal(Formula::PRESETS[19]));
     knot.coloring = Coloring::TrapPoint;
-    knot.trap_point = [0.13, -0.21, 0.17];
+    knot.set_trap_point([0.13, -0.21, 0.17]);
     let knot_points: [[f32; 4]; 6] = [
         [-0.87000006, 0.0, 0.0, 0.0],
         [-0.87000006, -0.0, 0.0, 0.0],
@@ -1449,10 +1463,12 @@ fn cuda_extended_axis_and_nearest_branch_diagnostic() {
         );
     }
     for offset in [[0.8506508, 0.5257311, 0.0], [0.5257311, 0.0, 0.8506508]] {
-        let scene = quiet(Scene::preset(Formula::PolyhedralKifs(PolyhedralKifs {
-            offset,
-            ..PolyhedralKifs::PRESET
-        })));
+        let scene = quiet(Scene::preset_fractal(Formula::PolyhedralKifs(
+            PolyhedralKifs {
+                offset,
+                ..PolyhedralKifs::PRESET
+            },
+        )));
         for backend in [Backend::Cuda, Backend::Wgpu] {
             let rendered = guides(&mut gpu, &scene, backend);
             eprintln!(
@@ -1504,7 +1520,7 @@ fn fibonacci_nearest_reference(point: [f32; 4], seeds: &[[f64; 3]]) -> (usize, f
 fn cuda_phyllotaxis_nearest_seed_matches_brute_force_on_both_backends() {
     use crate::formulas::PhyllotaxisShell;
     let _gpu_test = crate::test_gpu::lock();
-    let mut gpu = Gpu::new().unwrap();
+    let mut gpu = new_gpu().unwrap();
     let mut failures = Vec::new();
     for count in [
         8.0f32, 12.0, 34.0, 132.0, 144.0, 300.0, 600.0, 8.5, 10.5, 132.5,
@@ -1548,17 +1564,19 @@ fn cuda_phyllotaxis_nearest_seed_matches_brute_force_on_both_backends() {
             assert!(nearest.2 > nearest.1);
         }
         for backend in [Backend::Cuda, Backend::Wgpu] {
-            let mut scene = quiet(Scene::preset(Formula::PhyllotaxisShell(PhyllotaxisShell {
-                count,
-                sub_florets: 0.0,
-                ..PhyllotaxisShell::PRESET
-            })));
+            let mut scene = quiet(Scene::preset_fractal(Formula::PhyllotaxisShell(
+                PhyllotaxisShell {
+                    count,
+                    sub_florets: 0.0,
+                    ..PhyllotaxisShell::PRESET
+                },
+            )));
             scene.render.backend = backend;
             scene.coloring = Coloring::TrapPlane;
-            scene.trap_point = [3.0; 3];
+            scene.set_trap_point([3.0; 3]);
             let mut observed = vec![[0.0f64; 3]; points.len()];
             for axis in 0..3 {
-                scene.trap_axis = axis;
+                scene.set_trap_axis(axis);
                 let values = gpu.probe_formula(&scene, &points).unwrap();
                 for (selected, value) in observed.iter_mut().zip(values) {
                     assert!(value.iter().all(|v| v.is_finite()));
@@ -1606,11 +1624,11 @@ fn cuda_phyllotaxis_nearest_seed_matches_brute_force_on_both_backends() {
 fn cuda_extended_pole_estimates_match_analytic_geometry_on_both_backends() {
     use crate::formulas::{HarmonicBulb, Superformula3D};
     let _gpu_test = crate::test_gpu::lock();
-    let mut gpu = Gpu::new().unwrap();
+    let mut gpu = new_gpu().unwrap();
     for backend in [Backend::Cuda, Backend::Wgpu] {
         let harmonic = HarmonicBulb::PRESET;
         let points = [[0.0, 0.0, -0.69, 0.0], [0.0, 0.0, 0.69, 0.0]];
-        let mut scene = quiet(Scene::preset(Formula::HarmonicBulb(harmonic)));
+        let mut scene = quiet(Scene::preset_fractal(Formula::HarmonicBulb(harmonic)));
         scene.render.backend = backend;
         scene.render.iterations = 1.0;
         scene.coloring = Coloring::TrapOrigin;
@@ -1629,10 +1647,12 @@ fn cuda_extended_pole_estimates_match_analytic_geometry_on_both_backends() {
             );
         }
         for frequency in [7.4f32, 9.25, 11.5] {
-            let mut scene = quiet(Scene::preset(Formula::Superformula3D(Superformula3D {
-                pore_frequency: frequency,
-                ..Superformula3D::PRESET
-            })));
+            let mut scene = quiet(Scene::preset_fractal(Formula::Superformula3D(
+                Superformula3D {
+                    pore_frequency: frequency,
+                    ..Superformula3D::PRESET
+                },
+            )));
             scene.render.backend = backend;
             let points = [[0.0, 0.0, -0.99, 0.0], [0.0, 0.0, 0.99, 0.0]];
             let values = gpu.probe_formula(&scene, &points).unwrap();
@@ -1658,8 +1678,8 @@ fn cuda_extended_pole_estimates_match_analytic_geometry_on_both_backends() {
 #[test]
 fn cuda_polyhedral_preset_has_visible_surface_on_both_backends() {
     let _gpu_test = crate::test_gpu::lock();
-    let mut gpu = Gpu::new().unwrap();
-    let scene = quiet(Scene::preset(Formula::PRESETS[12]));
+    let mut gpu = new_gpu().unwrap();
+    let scene = quiet(Scene::preset_fractal(Formula::PRESETS[12]));
     for backend in [Backend::Cuda, Backend::Wgpu] {
         let value = coverage(&guides(&mut gpu, &scene, backend));
         // The corrected folded vertex measured .103841 coverage on both backends;
@@ -1724,14 +1744,16 @@ fn orbit_normal_probe_report(values: &[[f32; 4]]) -> serde_json::Value {
 fn cuda_mobius_primary_normal_conditioning_diagnostic() {
     use crate::params::*;
     let _gpu_test = crate::test_gpu::lock();
-    let mut gpu = Gpu::new().unwrap();
-    let scene = quiet(Scene::preset(Formula::PRESETS[FAMILY_MOBIUS_IFS as usize]));
+    let mut gpu = new_gpu().unwrap();
+    let scene = quiet(Scene::preset_fractal(
+        Formula::PRESETS[FAMILY_MOBIUS_IFS as usize],
+    ));
     // The object-local probe contract has no authored/world transform.
     assert_eq!(scene.object.offset, [0.0; 3]);
     assert_eq!(scene.object.rotation_degrees, [0.0; 3]);
     assert_eq!(scene.object.scale, 1.0);
     assert!(scene.masks.is_empty());
-    assert_eq!(scene.inversion_strength, 0.0);
+    assert_eq!(scene.inversion_strength(), 0.0);
     let packed = scene.pack(WIDTH as u32, HEIGHT as u32);
     assert_eq!(packed[P_APERTURE], 0.0);
     let cuda = guides(&mut gpu, &scene, Backend::Cuda);
@@ -1773,8 +1795,7 @@ fn cuda_mobius_primary_normal_conditioning_diagnostic() {
     let mut pick_scene = scene.clone();
     pick_scene.world_render = true;
     pick_scene.objects = vec![scene.clone()];
-    let upload =
-        crate::render_prep::WorldUpload::new(&pick_scene, WIDTH as u32, HEIGHT as u32).unwrap();
+    let upload = WorldUpload::new(&pick_scene, WIDTH as u32, HEIGHT as u32).unwrap();
     assert_eq!(upload.objects[O_DISTANCE_SCALE], 1.0);
     assert_eq!(
         &upload.objects[O_INVERSE..O_INVERSE + 12],
@@ -1888,9 +1909,10 @@ fn beam_entry_reference(
 
 #[test]
 fn pixel_beam_start_fixes_recorded_mobius_surface_skip() {
+    init_warpbro();
     use fractal_core::ray_bounds::beam_sphere_entry;
     // The actual 96x64, seed7, pixel(62,6) Mobius camera, packed by the host.
-    let scene = Scene::preset(Formula::PRESETS[crate::params::FAMILY_MOBIUS_IFS as usize]);
+    let scene = Scene::preset_fractal(Formula::PRESETS[crate::params::FAMILY_MOBIUS_IFS as usize]);
     let p = scene.pack(WIDTH as u32, HEIGHT as u32);
     use crate::params::*;
     let origin = [p[P_CAM_ORIGIN], p[P_CAM_ORIGIN + 1], p[P_CAM_ORIGIN + 2]];
@@ -2034,12 +2056,13 @@ fn pixel_beam_lower_root_covers_tangency_inside_wide_beams_and_extreme_scales() 
 
 #[test]
 fn pixel_beam_slope_encloses_float_camera_corner_directions() {
+    init_warpbro();
     use crate::params::*;
     use fractal_core::ray_bounds::pixel_beam_slope;
     for fov in [0.01, 1.0, 38.0, 120.0, 179.0] {
         for (width, height) in [(3, 3), (96, 64), (16_384, 8_192)] {
             for [yaw, pitch, roll] in [[0.0, 0.0, 0.0], [35.0, 20.0, 0.0], [179.0, 89.0, 172.0]] {
-                let mut scene = Scene::preset(Formula::PRESETS[FAMILY_MOBIUS_IFS as usize]);
+                let mut scene = Scene::preset_fractal(Formula::PRESETS[FAMILY_MOBIUS_IFS as usize]);
                 scene.camera.fov_y_degrees = fov;
                 scene.camera.yaw_degrees = yaw;
                 scene.camera.pitch_degrees = pitch;

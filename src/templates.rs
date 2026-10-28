@@ -1,230 +1,171 @@
 //! Scene templates: built into the binary, overridable by files in `~/.warpbro/templates`.
-//! All disk work runs on the existing I/O worker; the UI retains the catalog and refreshes
-//! it only on request or after a save.
-use std::path::{Path, PathBuf};
-pub fn directory() -> PathBuf {
-    crate::warpbro_dir().join("templates")
+//! Registered into `soluwell-studio` via [`register_warpbro_templates`].
+
+use soluwell_studio::scene::Scene;
+pub use soluwell_studio::templates::{BuiltinTemplate, builtin_scene};
+use soluwell_studio::world::WorldDocument;
+
+pub fn decode_scene(text: &str) -> Result<Scene, String> {
+    let document = WorldDocument::decode_json(text).map_err(|e| format!("Invalid scene: {e}"))?;
+    let mut scene = document.snapshot(f64::from(document.first))?;
+    scene.animation.first = document.first;
+    scene.animation.last = document.last;
+    scene.animation.fps = document.fps;
+    scene.document = Some(Box::new(document));
+    Ok(scene)
 }
-/// Where a catalog template comes from.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum Source {
-    /// Built into the binary: `templates::builtin_scene(index)`.
-    Builtin(usize),
-    /// A scene file in the templates directory.
-    File(PathBuf),
+
+fn decode_named_json(text: &'static str, name: &'static str) -> Result<Scene, String> {
+    let mut scene = decode_scene(text)?;
+    scene.name = name.to_owned();
+    Ok(scene)
 }
-/// What a built-in template is made of: one payload per template, whatever opens it (the
-/// Templates menu, the gallery fixtures, the world benchmark).
-#[derive(Clone, Copy)]
-enum BuiltinPayload {
-    /// Authored by code (`presets::scene`).
-    Generated(crate::presets::Animated),
-    /// An authored document.
-    Json(&'static str),
+
+fn build_ember_bloom(name: &'static str) -> Result<Scene, String> {
+    decode_named_json(include_str!("../templates/ember-bloom.frac.json"), name)
 }
-/// One built-in template: the only table of their names, descriptions and payloads.
-pub struct BuiltinTemplate {
-    pub name: &'static str,
-    pub description: &'static str,
-    payload: BuiltinPayload,
+fn build_chrome_cathedral(name: &'static str) -> Result<Scene, String> {
+    crate::presets::scene(crate::presets::Animated::ChromeCathedral, name)
 }
+fn build_opal_julia(name: &'static str) -> Result<Scene, String> {
+    crate::presets::scene(crate::presets::Animated::OpalJulia, name)
+}
+fn build_verdant_fold(name: &'static str) -> Result<Scene, String> {
+    crate::presets::scene(crate::presets::Animated::VerdantFold, name)
+}
+fn build_luminous_web(name: &'static str) -> Result<Scene, String> {
+    decode_named_json(include_str!("../templates/luminous-web.frac.json"), name)
+}
+fn build_amethyst(name: &'static str) -> Result<Scene, String> {
+    decode_named_json(include_str!("../templates/amethyst.json"), name)
+}
+fn build_box(name: &'static str) -> Result<Scene, String> {
+    decode_named_json(include_str!("../templates/box.json"), name)
+}
+fn build_mandelbulb(name: &'static str) -> Result<Scene, String> {
+    decode_named_json(include_str!("../templates/mandelbulb.frac.json"), name)
+}
+fn build_mandelwhit(name: &'static str) -> Result<Scene, String> {
+    decode_named_json(include_str!("../templates/mandelwhit.json"), name)
+}
+fn build_metal_frac(name: &'static str) -> Result<Scene, String> {
+    decode_named_json(include_str!("../templates/metal_frac.json"), name)
+}
+fn build_metal_frac2(name: &'static str) -> Result<Scene, String> {
+    decode_named_json(include_str!("../templates/metal_frac2.json"), name)
+}
+fn build_pinky(name: &'static str) -> Result<Scene, String> {
+    decode_named_json(include_str!("../templates/pinky.json"), name)
+}
+fn build_q_julia1(name: &'static str) -> Result<Scene, String> {
+    decode_named_json(include_str!("../templates/q-julia1.json"), name)
+}
+fn build_q_julia2(name: &'static str) -> Result<Scene, String> {
+    decode_named_json(include_str!("../templates/q-julia2.json"), name)
+}
+
 /// The animated showcase scenes among [`BUILTINS`] (its first entries): what the gallery
 /// fixtures (`--animated-fixtures`) and the world benchmark render.
 pub const ANIMATED: std::ops::Range<usize> = 0..5;
+
 pub const BUILTINS: [BuiltinTemplate; 14] = [
     BuiltinTemplate {
         name: "Ember Bloom",
         description: "A copper Mandelbulb opens and twists under warm light.",
-        payload: BuiltinPayload::Json(include_str!("../templates/ember-bloom.frac.json")),
+        builder: build_ember_bloom,
     },
     BuiltinTemplate {
         name: "Chrome Cathedral",
         description: "Cool metallic Mandelbox folds breathe through a slow camera arc.",
-        payload: BuiltinPayload::Generated(crate::presets::Animated::ChromeCathedral),
+        builder: build_chrome_cathedral,
     },
     BuiltinTemplate {
         name: "Opal Julia",
         description: "A pearlescent quaternion Julia shifts through violet and blue.",
-        payload: BuiltinPayload::Generated(crate::presets::Animated::OpalJulia),
+        builder: build_opal_julia,
     },
     BuiltinTemplate {
         name: "Verdant Fold",
         description: "A jade octahedral KIFS unfolds against a deep green sky.",
-        payload: BuiltinPayload::Generated(crate::presets::Animated::VerdantFold),
+        builder: build_verdant_fold,
     },
     BuiltinTemplate {
         name: "Luminous Web",
         description: "Golden Apollonian filaments change density under a dusk gradient.",
-        payload: BuiltinPayload::Json(include_str!("../templates/luminous-web.frac.json")),
+        builder: build_luminous_web,
     },
     BuiltinTemplate {
         name: "amethyst",
         description: "Authored Mandelbulb scene template.",
-        payload: BuiltinPayload::Json(include_str!("../templates/amethyst.json")),
+        builder: build_amethyst,
     },
     BuiltinTemplate {
         name: "box",
         description: "Authored Mandelbox scene template.",
-        payload: BuiltinPayload::Json(include_str!("../templates/box.json")),
+        builder: build_box,
     },
     BuiltinTemplate {
         name: "mandelbulb",
         description: "Multi-object Mandelbulb scene template.",
-        payload: BuiltinPayload::Json(include_str!("../templates/mandelbulb.frac.json")),
+        builder: build_mandelbulb,
     },
     BuiltinTemplate {
         name: "mandelwhit",
         description: "Authored Mandelbulb scene template.",
-        payload: BuiltinPayload::Json(include_str!("../templates/mandelwhit.json")),
+        builder: build_mandelwhit,
     },
     BuiltinTemplate {
         name: "metal_frac",
         description: "Metallic Quaternion Julia scene template.",
-        payload: BuiltinPayload::Json(include_str!("../templates/metal_frac.json")),
+        builder: build_metal_frac,
     },
     BuiltinTemplate {
         name: "metal_frac2",
         description: "Metallic Quaternion Julia variation template.",
-        payload: BuiltinPayload::Json(include_str!("../templates/metal_frac2.json")),
+        builder: build_metal_frac2,
     },
     BuiltinTemplate {
         name: "pinky",
         description: "Authored Mandelbulb scene template.",
-        payload: BuiltinPayload::Json(include_str!("../templates/pinky.json")),
+        builder: build_pinky,
     },
     BuiltinTemplate {
         name: "q-julia1",
         description: "Quaternion Julia animated scene template.",
-        payload: BuiltinPayload::Json(include_str!("../templates/q-julia1.json")),
+        builder: build_q_julia1,
     },
     BuiltinTemplate {
         name: "q-julia2",
         description: "Quaternion Julia animated variation template.",
-        payload: BuiltinPayload::Json(include_str!("../templates/q-julia2.json")),
+        builder: build_q_julia2,
     },
 ];
-/// The scene of built-in template `index`, named as the table names it.
-pub fn builtin_scene(index: usize) -> Result<crate::scene::Scene, String> {
-    let entry = BUILTINS.get(index).ok_or("Unknown built-in template")?;
-    match entry.payload {
-        BuiltinPayload::Generated(preset) => crate::presets::scene(preset, entry.name),
-        BuiltinPayload::Json(text) => {
-            let mut scene = crate::io_service::decode_scene(text)?;
-            scene.name = entry.name.to_owned();
-            Ok(scene)
-        }
-    }
+
+/// Register WarpBro's 14 built-in templates and animated showcase range with `soluwell-studio`.
+pub fn register_warpbro_templates() {
+    soluwell_studio::templates::register_builtins(&BUILTINS, ANIMATED);
 }
-/// One entry of the Templates menu.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Entry {
-    pub name: String,
-    /// The built-in's description, also kept when a file overrides it.
-    pub description: Option<&'static str>,
-    pub source: Source,
-    /// A file replacing the built-in of the same name.
-    pub overrides: bool,
-}
-/// The built-in templates, then the templates directory on top: a file whose name (slug)
-/// matches a built-in replaces it, any other file is added. The binary needs no files; a
-/// missing directory is simply empty and is never created here. Scene decoding is identical
-/// to ordinary project files.
-pub fn catalog(directory: &Path) -> Result<Vec<Entry>, String> {
-    let mut entries: Vec<Entry> = BUILTINS
-        .iter()
-        .enumerate()
-        .map(|(index, preset)| Entry {
-            name: preset.name.to_owned(),
-            description: Some(preset.description),
-            source: Source::Builtin(index),
-            overrides: false,
-        })
-        .collect();
-    let builtins = entries.len();
-    let read = match std::fs::read_dir(directory) {
-        Ok(read) => read,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(entries),
-        Err(e) => return Err(format!("{}: {e}", directory.display())),
-    };
-    let mut files = Vec::new();
-    for entry in read {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path();
-        // A name that is not Unicode cannot be matched against the scene suffixes or shown.
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            log::warn!("Template file name is not Unicode: {}", path.display());
-            continue;
-        };
-        let scene = format!(".{}", crate::fs_name::SCENE_SUFFIX);
-        let Some(stem) = name
-            .strip_suffix(scene.as_str())
-            .or_else(|| name.strip_suffix(".json"))
-        else {
-            continue;
-        };
-        if entry.file_type().map_err(|e| e.to_string())?.is_file() {
-            files.push((stem.to_owned(), path));
-        }
-    }
-    files.sort();
-    for (stem, path) in files {
-        let key = crate::fs_name::slug(&stem);
-        match entries[..builtins]
-            .iter_mut()
-            .find(|e| crate::fs_name::slug(&e.name) == key)
-        {
-            Some(builtin) => {
-                builtin.source = Source::File(path);
-                builtin.overrides = true;
-            }
-            None => entries.push(Entry {
-                name: stem,
-                description: None,
-                source: Source::File(path),
-                overrides: false,
-            }),
-        }
-    }
-    Ok(entries)
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FileAction {
-    Open,
-    Save,
-    OpenTemplate,
-    SaveTemplate,
-}
-impl FileAction {
-    pub fn save(self) -> bool {
-        matches!(self, Self::Save | Self::SaveTemplate)
-    }
-    pub fn template(self) -> bool {
-        matches!(self, Self::OpenTemplate | Self::SaveTemplate)
-    }
-    pub fn history_key(self) -> &'static str {
-        match self {
-            Self::Open => crate::file_dialogs::SCENE_OPEN,
-            Self::Save => crate::file_dialogs::SCENE_SAVE,
-            Self::OpenTemplate => "template.open",
-            Self::SaveTemplate => "template.save",
-        }
-    }
-}
+
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
+    use soluwell_studio::templates::{Source, catalog};
+
     use super::*;
+
     #[test]
     #[ignore = "reads operator templates from WARPBRO_TEMPLATE_PROBE_DIR"]
     fn operator_templates_decode_with_current_scene_schema() {
+        crate::engine::init_warpbro();
         let path =
             std::env::var_os("WARPBRO_TEMPLATE_PROBE_DIR").expect("set WARPBRO_TEMPLATE_PROBE_DIR");
         let entries = catalog(Path::new(&path)).unwrap();
         let mut files = 0;
         for entry in entries {
             if let Source::File(path) = entry.source {
-                let scene =
-                    crate::io_service::decode_scene(&std::fs::read_to_string(&path).unwrap())
-                        .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
+                let scene = decode_scene(&std::fs::read_to_string(&path).unwrap())
+                    .unwrap_or_else(|error| panic!("{}: {error}", path.display()));
                 assert!(scene.render.iterations.is_finite());
                 eprintln!("loaded {}", path.display());
                 files += 1;
@@ -232,8 +173,10 @@ mod tests {
         }
         assert!(files > 0, "the probe must exercise real templates");
     }
+
     #[test]
     fn builtins_need_no_directory_and_files_override_by_name() {
+        crate::engine::init_warpbro();
         let dir =
             std::env::temp_dir().join(format!("warpbro-templates-test-{}", std::process::id()));
         let builtin = catalog(&dir).unwrap();
@@ -252,10 +195,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let first = BUILTINS[0].name;
         let text = serde_json::to_string(&builtin_scene(1).unwrap().document).unwrap();
-        let replaced = dir.join(crate::fs_name::frame_file(
-            &crate::fs_name::stem(first),
+        let replaced = dir.join(soluwell_studio::fs_name::frame_file(
+            &soluwell_studio::fs_name::stem(first),
             None,
-            crate::fs_name::SCENE_SUFFIX,
+            soluwell_studio::fs_name::SCENE_SUFFIX,
         ));
         let user = dir.join("user-scene.json");
         std::fs::write(&replaced, &text).unwrap();
@@ -271,18 +214,19 @@ mod tests {
             (added.name.as_str(), &added.source),
             ("user-scene", &Source::File(user.clone()))
         );
-        let scene =
-            crate::io_service::decode_scene(&std::fs::read_to_string(&user).unwrap()).unwrap();
+        let scene = decode_scene(&std::fs::read_to_string(&user).unwrap()).unwrap();
         assert_eq!(scene.document.unwrap().last, 249);
         std::fs::remove_dir_all(dir).unwrap();
     }
+
     /// One table: every built-in has its own name (a file overrides by it), and each animated
     /// showcase scene is an animated document of that name.
     #[test]
     fn builtin_names_are_unique_and_the_animated_scenes_animate() {
+        crate::engine::init_warpbro();
         let mut names: Vec<_> = BUILTINS
             .iter()
-            .map(|b| crate::fs_name::slug(b.name))
+            .map(|b| soluwell_studio::fs_name::slug(b.name))
             .collect();
         names.sort();
         names.dedup();

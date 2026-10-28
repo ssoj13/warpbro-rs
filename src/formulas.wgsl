@@ -1,9 +1,9 @@
 // =============================================================================
-// Extended 3D Fractals & Procedural Distance Estimators (Families 8..27), WGPU only.
+// 3D Fractal & Procedural Distance Estimators (All 28 Families: 0..27).
 // Parameters are read from the per-object formula slot block starting at P_BULB_POWER: offsets
 // 0..EXT_SLOTS of `formulas::pack_extended_formula` (const-asserted to end before
 // P_COLOR_MODE). The FAMILY_* codes, SIGNED_MASK and ITERATING_MASK are emitted from
-// `formulas::FORMULAS` by `render_wgpu::shader_source`.
+// `formulas::FORMULAS` by `engine::warpbro_shader_hook`.
 // =============================================================================
 
 fn ext_slot(is_world: bool, obj: u32, offset: u32) -> f32 {
@@ -1218,3 +1218,662 @@ fn astrolabe_distance(
     }
     return vec2<f32>(best_d * 0.8, trap);
 }
+
+// =============================================================================
+// Classic 3D Fractal Distance Estimators (Families 0..7)
+// =============================================================================
+
+fn bulb_estimate(r: f32, dr: f32, bailout: f32) -> f32 {
+    if r <= bailout || dr <= 0.0 {
+        return 0.0;
+    }
+    return 0.5 * log(r) * r / dr;
+}
+
+struct BulbConfig {
+    fast8: bool,
+    power: f32,
+    growth_scale: f32,
+    theta_power: f32,
+    theta_phase: f32,
+    phi_power: f32,
+    phi_phase: f32,
+}
+
+fn load_bulb_config(is_world: bool, obj: u32) -> BulbConfig {
+    let fast8 = pr(is_world, obj, P_BULB_FAST8) != 0.0;
+    if fast8 {
+        return BulbConfig(true, 8.0, 1.0, 8.0, 0.0, 8.0, 0.0);
+    }
+    return BulbConfig(
+        false,
+        pr(is_world, obj, P_BULB_POWER),
+        pr(is_world, obj, P_BULB_GROWTH),
+        pr(is_world, obj, P_BULB_THETA_POWER),
+        pr(is_world, obj, P_BULB_THETA_PHASE),
+        pr(is_world, obj, P_BULB_PHI_POWER),
+        pr(is_world, obj, P_BULB_PHI_PHASE),
+    );
+}
+
+fn bulb_step_cfg(
+    cfg: BulbConfig,
+    rot: IterRot,
+    z: ptr<function, vec3<f32>>,
+    dr: ptr<function, f32>,
+    r: f32,
+    c: vec3<f32>,
+    dr_constant: f32,
+) -> bool {
+    if cfg.fast8 {
+        // Power 8, unit angle scales, no phase, no rotation (fractal-kernels `bulb_step`): z^8
+        // from the double angles 2θ / 2φ and two more doublings instead of acos / atan2 / pow.
+        let r2 = r * r;
+        let r4 = r2 * r2;
+        let growth = 8.0 * r4 * r2 * r;
+        if *dr > DERIVATIVE_LIMIT / growth {
+            return false;
+        }
+        *dr = growth * (*dr) + dr_constant;
+        let x = (*z).x;
+        let y = (*z).y;
+        let w = (*z).z;
+        let rxy2 = x * x + y * y;
+        let r8 = r4 * r4;
+        if rxy2 < 1.0e-20 {
+            *z = vec3<f32>(0.0, 0.0, r8) + c;
+            return true;
+        }
+        let inv_r2 = 1.0 / r2;
+        var ct = 2.0 * w * w * inv_r2 - 1.0;
+        var st = 2.0 * w * sqrt(rxy2) * inv_r2;
+        let inv_rxy2 = 1.0 / rxy2;
+        var cp = (x * x - y * y) * inv_rxy2;
+        var sp = 2.0 * x * y * inv_rxy2;
+        for (var k = 0u; k < 2u; k = k + 1u) {
+            let nct = ct * ct - st * st;
+            st = 2.0 * st * ct;
+            ct = nct;
+            let ncp = cp * cp - sp * sp;
+            sp = 2.0 * sp * cp;
+            cp = ncp;
+        }
+        *z = vec3<f32>(st * cp * r8, st * sp * r8, ct * r8) + c;
+        return true;
+    }
+    let turned = apply_iter_rot(rot, *z);
+    let theta = acos(clamp(turned.z / r, -1.0, 1.0));
+    let phi = atan2(turned.y, turned.x);
+    let r_pow_m1 = pow(r, cfg.power - 1.0);
+    let growth = cfg.power * r_pow_m1 * cfg.growth_scale;
+    if *dr > DERIVATIVE_LIMIT / growth {
+        return false;
+    }
+    let magnitude = r_pow_m1 * r;
+    *dr = growth * (*dr) + dr_constant;
+    let a = theta * cfg.theta_power + cfg.theta_phase;
+    let b = phi * cfg.phi_power + cfg.phi_phase;
+    let sa = sin(a);
+    let ca = cos(a);
+    let sb = sin(b);
+    let cb = cos(b);
+    *z = vec3<f32>(sa * cb, sa * sb, ca) * magnitude + c;
+    return true;
+}
+
+fn bulb_distance(
+    is_world: bool,
+    obj: u32,
+    q: vec3<f32>,
+    trap_mode: u32,
+) -> vec2<f32> {
+    let oc = orbit_constant(is_world, obj, q);
+    let c = oc.xyz;
+    let dr_constant = oc.w;
+    var z = q;
+    var dr = 1.0;
+    var r = length(z);
+    var trap = TRAP_START;
+    let bailout = pr(is_world, obj, P_BAILOUT);
+    let cfg = load_bulb_config(is_world, obj);
+    let rot = load_iter_rot(is_world, obj);
+    let trap_cfg = load_trap3(is_world, obj, trap_mode);
+    var frac = fraction_new(is_world, obj);
+    for (var i = 0u; i < frac.run; i = i + 1u) {
+        if fraction_due(frac, i) {
+            fraction_save(&frac, bulb_estimate(r, dr, bailout), trap);
+        }
+        if r > bailout {
+            break;
+        }
+        if r < 1.0e-8 {
+            return vec2<f32>(0.0, trap);
+        }
+        if !bulb_step_cfg(cfg, rot, &z, &dr, r, c, dr_constant) {
+            break;
+        }
+        r = length(z);
+        if trap_mode != 0u {
+            trap = min(trap, eval_trap3(trap_cfg, z));
+        }
+    }
+    return fraction_blend(frac, bulb_estimate(r, dr, bailout), trap);
+}
+
+// The Mandelbulb estimates at object point `q` after `run - 1` and `run` iterations, without a
+// trap (fractal-kernels `bulb_distance_endpoints`): the two endpoints of a fractional count.
+fn bulb_distance_endpoints(is_world: bool, obj: u32, q: vec3<f32>, run: u32) -> vec2<f32> {
+    let oc = orbit_constant(is_world, obj, q);
+    let c = oc.xyz;
+    let dr_constant = oc.w;
+    var z = q;
+    var dr = 1.0;
+    var r = length(z);
+    let bailout = pr(is_world, obj, P_BAILOUT);
+    let cfg = load_bulb_config(is_world, obj);
+    let rot = load_iter_rot(is_world, obj);
+    var d0 = 0.0;
+    var has_d0 = false;
+    for (var i = 0u; i < run; i = i + 1u) {
+        if i + 1u == run {
+            d0 = bulb_estimate(r, dr, bailout);
+            has_d0 = true;
+        }
+        if r > bailout {
+            break;
+        }
+        if r < 1.0e-8 {
+            return vec2<f32>(0.0, 0.0);
+        }
+        if !bulb_step_cfg(cfg, rot, &z, &dr, r, c, dr_constant) {
+            break;
+        }
+        r = length(z);
+    }
+    let d1 = bulb_estimate(r, dr, bailout);
+    return vec2<f32>(select(d1, d0, has_d0), d1);
+}
+
+fn box_fold(v: vec3<f32>, fold: f32) -> vec3<f32> {
+    return clamp(v, vec3<f32>(-fold), vec3<f32>(fold)) * 2.0 - v;
+}
+
+struct BoxConfig {
+    scale: f32,
+    fold: f32,
+    min_r2: f32,
+    fixed_r2: f32,
+}
+
+fn load_box_config(is_world: bool, obj: u32) -> BoxConfig {
+    return BoxConfig(
+        pr(is_world, obj, P_BOX_SCALE),
+        pr(is_world, obj, P_BOX_FOLD),
+        pr(is_world, obj, P_BOX_MIN_R2),
+        pr(is_world, obj, P_BOX_FIXED_R2),
+    );
+}
+
+fn box_step_cfg(
+    cfg: BoxConfig,
+    rot: IterRot,
+    z: ptr<function, vec3<f32>>,
+    dr: ptr<function, f32>,
+    c: vec3<f32>,
+    dr_constant: f32,
+) -> bool {
+    var t = apply_iter_rot(rot, *z);
+    t = box_fold(t, cfg.fold);
+    let r2 = dot(t, t);
+    var factor: f32;
+    if r2 < cfg.min_r2 {
+        factor = cfg.fixed_r2 / cfg.min_r2;
+    } else if r2 < cfg.fixed_r2 {
+        factor = cfg.fixed_r2 / r2;
+    } else {
+        factor = 1.0;
+    }
+    let step_scale = factor * cfg.scale;
+    let abs_step = abs(step_scale);
+    if *dr > DERIVATIVE_LIMIT / abs_step {
+        return false;
+    }
+    *z = t * step_scale + c;
+    *dr = (*dr) * abs_step + dr_constant;
+    return true;
+}
+
+fn box_distance(
+    is_world: bool,
+    obj: u32,
+    q: vec3<f32>,
+    trap_mode: u32,
+) -> vec2<f32> {
+    let oc = orbit_constant(is_world, obj, q);
+    let c = oc.xyz;
+    let dr_constant = oc.w;
+    var z = q;
+    var dr = 1.0;
+    var trap = TRAP_START;
+    let cfg = load_box_config(is_world, obj);
+    let rot = load_iter_rot(is_world, obj);
+    let trap_cfg = load_trap3(is_world, obj, trap_mode);
+    var frac = fraction_new(is_world, obj);
+    for (var i = 0u; i < frac.run; i = i + 1u) {
+        if fraction_due(frac, i) {
+            fraction_save(&frac, length(z) / dr, trap);
+        }
+        if !box_step_cfg(cfg, rot, &z, &dr, c, dr_constant) {
+            break;
+        }
+        if trap_mode != 0u {
+            trap = min(trap, eval_trap3(trap_cfg, z));
+        }
+    }
+    return fraction_blend(frac, length(z) / dr, trap);
+}
+
+fn quat_distance(
+    is_world: bool,
+    obj: u32,
+    p: vec3<f32>,
+    trap_mode: u32,
+) -> vec2<f32> {
+    var q = vec4<f32>(
+        dot(pr3(is_world, obj, P_QUAT_ROWS), p) + pr(is_world, obj, P_QUAT_OFFSET),
+        dot(pr3(is_world, obj, P_QUAT_ROWS + 3u), p) + pr(is_world, obj, P_QUAT_OFFSET + 1u),
+        dot(pr3(is_world, obj, P_QUAT_ROWS + 6u), p) + pr(is_world, obj, P_QUAT_OFFSET + 2u),
+        dot(pr3(is_world, obj, P_QUAT_ROWS + 9u), p) + pr(is_world, obj, P_QUAT_OFFSET + 3u),
+    );
+    let c = vec4<f32>(
+        pr(is_world, obj, P_QUAT_C),
+        pr(is_world, obj, P_QUAT_C + 1u),
+        pr(is_world, obj, P_QUAT_C + 2u),
+        pr(is_world, obj, P_QUAT_C + 3u),
+    );
+    var dr = 1.0;
+    var r = length(q);
+    var trap = TRAP_START;
+    let bailout = pr(is_world, obj, P_BAILOUT);
+    let trap_cfg = load_trap3(is_world, obj, trap_mode);
+    var frac = fraction_new(is_world, obj);
+    for (var i = 0u; i < frac.run; i = i + 1u) {
+        if fraction_due(frac, i) {
+            fraction_save(&frac, bulb_estimate(r, dr, bailout), trap);
+        }
+        if r > bailout {
+            break;
+        }
+        if r < 1.0e-8 {
+            return vec2<f32>(0.0, trap);
+        }
+        let growth = 2.0 * r;
+        if dr > DERIVATIVE_LIMIT / growth {
+            break;
+        }
+        dr = dr * growth;
+        let v = q.yzw;
+        let two_x = 2.0 * q.x;
+        q = vec4<f32>(
+            q.x * q.x - dot(v, v) + c.x,
+            two_x * v.x + c.y,
+            two_x * v.y + c.z,
+            two_x * v.z + c.w,
+        );
+        r = length(q);
+        if trap_mode != 0u {
+            trap = min(trap, eval_trap4(trap_cfg, q));
+        }
+    }
+    return fraction_blend(frac, bulb_estimate(r, dr, bailout), trap);
+}
+
+struct KifsConfig {
+    kind: u32,
+    fold_height: f32,
+    scale: f32,
+    bound: f32,
+    shift: vec3<f32>,
+}
+
+fn load_kifs_config(is_world: bool, obj: u32) -> KifsConfig {
+    return KifsConfig(
+        u32(pr(is_world, obj, P_KIFS_KIND)),
+        pr(is_world, obj, P_KIFS_FOLD_HEIGHT),
+        pr(is_world, obj, P_KIFS_SCALE),
+        pr(is_world, obj, P_KIFS_BOUND),
+        pr3(is_world, obj, P_KIFS_SHIFT),
+    );
+}
+
+fn kifs_fold_cfg(cfg: KifsConfig, v: vec3<f32>) -> vec3<f32> {
+    var x = v.x;
+    var y = v.y;
+    var z = v.z;
+    if cfg.kind == 0u {
+        if x + y < 0.0 {
+            let nx = -y;
+            let ny = -x;
+            x = nx;
+            y = ny;
+        }
+        if x + z < 0.0 {
+            let nx = -z;
+            let nz = -x;
+            x = nx;
+            z = nz;
+        }
+        if y + z < 0.0 {
+            let ny = -z;
+            let nz = -y;
+            y = ny;
+            z = nz;
+        }
+        return vec3<f32>(x, y, z);
+    }
+    x = abs(x);
+    y = abs(y);
+    z = abs(z);
+    if x < y {
+        let t = x;
+        x = y;
+        y = t;
+    }
+    if x < z {
+        let t = x;
+        x = z;
+        z = t;
+    }
+    if y < z {
+        let t = y;
+        y = z;
+        z = t;
+    }
+    if cfg.kind == 2u {
+        z = cfg.fold_height - abs(z - cfg.fold_height);
+    }
+    return vec3<f32>(x, y, z);
+}
+
+fn unit_box_distance(p: vec3<f32>) -> f32 {
+    let q = abs(p) - vec3<f32>(1.0);
+    let outside = vec3<f32>(max(q.x, 0.0), max(q.y, 0.0), max(q.z, 0.0));
+    let inside = min(max(q.x, max(q.y, q.z)), 0.0);
+    return length(outside) + inside;
+}
+
+fn kifs_step_cfg(
+    cfg: KifsConfig,
+    rot: IterRot,
+    z: ptr<function, vec3<f32>>,
+    dr: ptr<function, f32>,
+) -> bool {
+    if *dr > DERIVATIVE_LIMIT / cfg.scale {
+        return false;
+    }
+    var t = apply_iter_rot(rot, *z);
+    t = kifs_fold_cfg(cfg, t);
+    *z = t * cfg.scale - cfg.shift;
+    *dr = (*dr) * cfg.scale;
+    return true;
+}
+
+fn kifs_estimate_cfg(cfg: KifsConfig, z: vec3<f32>, dr: f32) -> f32 {
+    if cfg.kind == 2u {
+        return unit_box_distance(z) / dr;
+    }
+    return (length(z) - cfg.bound) / dr;
+}
+
+fn kifs_distance(
+    is_world: bool,
+    obj: u32,
+    q: vec3<f32>,
+    trap_mode: u32,
+) -> vec2<f32> {
+    var z = q;
+    var dr = 1.0;
+    var trap = TRAP_START;
+    let cfg = load_kifs_config(is_world, obj);
+    let rot = load_iter_rot(is_world, obj);
+    let trap_cfg = load_trap3(is_world, obj, trap_mode);
+    var frac = fraction_new(is_world, obj);
+    for (var i = 0u; i < frac.run; i = i + 1u) {
+        if fraction_due(frac, i) {
+            fraction_save(&frac, kifs_estimate_cfg(cfg, z, dr), trap);
+        }
+        if !kifs_step_cfg(cfg, rot, &z, &dr) {
+            break;
+        }
+        if trap_mode != 0u {
+            trap = min(trap, eval_trap3(trap_cfg, z));
+        }
+    }
+    return fraction_blend(frac, kifs_estimate_cfg(cfg, z, dr), trap);
+}
+
+// `x` wrapped into [left, left + width).
+fn kleinian_wrap(x: f32, width: f32, left: f32) -> f32 {
+    let shifted = x - left;
+    return shifted - width * floor(shifted / width) + left;
+}
+
+fn exact_sign(x: f32) -> f32 {
+    if x < 0.0 {
+        return -1.0;
+    }
+    if x > 0.0 {
+        return 1.0;
+    }
+    return 0.0;
+}
+
+fn kleinian_distance(
+    is_world: bool,
+    obj: u32,
+    q: vec3<f32>,
+    trap_mode: u32,
+) -> vec2<f32> {
+    // fractal-kernels `kleinian_distance`: the Maskit slice wrapped into its strip, reflected
+    // across the separation line, then inverted; it stops on escape or on a 2-cycle.
+    let a = pr(is_world, obj, P_KLEIN_A);
+    let b = pr(is_world, obj, P_KLEIN_B);
+    let skew = pr(is_world, obj, P_KLEIN_SKEW);
+    let line_amp = pr(is_world, obj, P_KLEIN_LINE_AMP);
+    let line_rate = pr(is_world, obj, P_KLEIN_LINE_RATE);
+    let trap_cfg = load_trap3(is_world, obj, trap_mode);
+    var frac = fraction_new(is_world, obj);
+    let half_a = 0.5 * a;
+    let half_b = 0.5 * b;
+    let sign_b = exact_sign(b);
+    // face_camera: (x, z, -y), then half a cell up.
+    var z = vec3<f32>(q.x, q.z + half_a, -q.y);
+    var dr = 1.0;
+    var previous = z;
+    var before = z;
+    var trap = TRAP_START;
+    for (var n = 0u; n < frac.run; n = n + 1u) {
+        if fraction_due(frac, n) {
+            fraction_save(&frac, min(z.y, 0.05) / max(dr, 1.0), trap);
+        }
+        var x = z.x;
+        var y = z.y;
+        var w = z.z;
+        let s = skew * y;
+        x = kleinian_wrap(x + s, 2.0, -1.0) - s;
+        w = kleinian_wrap(w, 2.0, -1.0);
+        let u = x + half_b;
+        let line = half_a + sign_b * line_amp * exact_sign(u) * (1.0 - exp(-line_rate * abs(u)));
+        if y >= line {
+            x = -b - x;
+            y = a - y;
+            w = -w;
+        }
+        let r2 = x * x + y * y + w * w;
+        if r2 < 1.0e-30 {
+            break;
+        }
+        let inverse = 1.0 / r2;
+        if inverse > 1.0 && dr > DERIVATIVE_LIMIT / inverse {
+            break;
+        }
+        z = vec3<f32>(x * inverse - b, a - y * inverse, -w * inverse);
+        dr = dr * inverse;
+        if trap_mode != 0u {
+            trap = min(trap, eval_trap3(trap_cfg, z));
+        }
+        if dot(z, z) > 100.0 {
+            break;
+        }
+        if n >= 1u {
+            let gap = z - before;
+            if dot(gap, gap) < 1.0e-12 {
+                break;
+            }
+        }
+        before = previous;
+        previous = z;
+    }
+    return fraction_blend(frac, min(z.y, 0.05) / max(dr, 1.0), trap);
+}
+
+fn pseudo_kleinian_estimate(z: vec3<f32>, dr: f32, offset: vec3<f32>, thickness: f32) -> f32 {
+    let o = z - offset;
+    let thingy = abs(sqrt(o.x * o.x + o.y * o.y) * o.z) - thickness;
+    return 0.5 * thingy / max(sqrt(dot(o, o) + abs(thickness)), 1.0e-30) / dr;
+}
+
+fn pseudo_kleinian_distance(
+    is_world: bool,
+    obj: u32,
+    q: vec3<f32>,
+    trap_mode: u32,
+) -> vec2<f32> {
+    let csize = pr3(is_world, obj, P_PK_BOX);
+    let size = pr(is_world, obj, P_PK_SIZE);
+    let c = pr3(is_world, obj, P_PK_C);
+    let offset = pr3(is_world, obj, P_PK_OFFSET);
+    let thickness = pr(is_world, obj, P_PK_THICKNESS);
+    let trap_cfg = load_trap3(is_world, obj, trap_mode);
+    var p = q;
+    var dr = 1.0;
+    var trap = TRAP_START;
+    var frac = fraction_new(is_world, obj);
+    for (var i = 0u; i < frac.run; i = i + 1u) {
+        if fraction_due(frac, i) {
+            fraction_save(&frac, pseudo_kleinian_estimate(p, dr, offset, thickness), trap);
+        }
+        p = clamp(p, -csize, csize) * 2.0 - p;
+        let r2 = dot(p, p);
+        if r2 < 1.0e-30 {
+            break;
+        }
+        let k = max(size / r2, 1.0);
+        if dr > DERIVATIVE_LIMIT / k {
+            break;
+        }
+        p = p * k + c;
+        dr = dr * k;
+        if trap_mode != 0u {
+            trap = min(trap, eval_trap3(trap_cfg, p));
+        }
+    }
+    return fraction_blend(frac, pseudo_kleinian_estimate(p, dr, offset, thickness), trap);
+}
+
+// fractal-kernels `apollonian_step`: the lattice wrap into [-1, 1)^3, then the inversion
+// k = max(scale / r2, 0.1). No per-iteration rotation, also inside a Hybrid. Returns false to stop.
+fn apollonian_step_cfg(scale: f32, z: ptr<function, vec3<f32>>, dr: ptr<function, f32>) -> bool {
+    let h = (*z) * 0.5 + vec3<f32>(0.5);
+    let w = vec3<f32>(-1.0) + (h - floor(h)) * 2.0;
+    let r2 = dot(w, w);
+    if r2 < 1.0e-30 {
+        return false;
+    }
+    let k = max(scale / r2, 0.1);
+    if *dr > DERIVATIVE_LIMIT / k {
+        return false;
+    }
+    *z = w * k;
+    *dr = (*dr) * k;
+    return true;
+}
+
+fn apollonian_distance(
+    is_world: bool,
+    obj: u32,
+    q: vec3<f32>,
+    trap_mode: u32,
+) -> vec2<f32> {
+    var z = q + vec3<f32>(0.0, 1.0, 0.0);
+    var dr = 1.0;
+    var trap = TRAP_START;
+    let scale = pr(is_world, obj, P_APOLLO_SCALE);
+    let trap_cfg = load_trap3(is_world, obj, trap_mode);
+    var frac = fraction_new(is_world, obj);
+    for (var i = 0u; i < frac.run; i = i + 1u) {
+        if fraction_due(frac, i) {
+            fraction_save(&frac, 0.25 * abs(z.y) / dr, trap);
+        }
+        if !apollonian_step_cfg(scale, &z, &dr) {
+            break;
+        }
+        if trap_mode != 0u {
+            trap = min(trap, eval_trap3(trap_cfg, z));
+        }
+    }
+    return fraction_blend(frac, 0.25 * abs(z.y) / dr, trap);
+}
+
+// fractal-kernels `hybrid_distance`: up to four step slots (3 bits each, 1 bulb, 2 box, 3 KIFS
+// fold, 4 Apollonian inversion, any other code a no-op) cycled per iteration, estimate
+// 0.5 r / dr with no logarithm (a Hybrid's bailout may be below 1).
+fn hybrid_distance(
+    is_world: bool,
+    obj: u32,
+    q: vec3<f32>,
+    trap_mode: u32,
+) -> vec2<f32> {
+    var z = q;
+    let c = q;
+    var dr = 1.0;
+    var trap = TRAP_START;
+    let bailout = pr(is_world, obj, P_BAILOUT);
+    let count = max(u32(pr(is_world, obj, P_HYBRID_COUNT)), 1u);
+    let steps = u32(pr(is_world, obj, P_HYBRID_STEPS));
+    let bulb_cfg = load_bulb_config(is_world, obj);
+    let box_cfg = load_box_config(is_world, obj);
+    let kifs_cfg = load_kifs_config(is_world, obj);
+    let apollo_scale = pr(is_world, obj, P_APOLLO_SCALE);
+    let rot = load_iter_rot(is_world, obj);
+    let trap_cfg = load_trap3(is_world, obj, trap_mode);
+    var frac = fraction_new(is_world, obj);
+    for (var i = 0u; i < frac.run; i = i + 1u) {
+        let r = length(z);
+        if fraction_due(frac, i) {
+            fraction_save(&frac, 0.5 * r / dr, trap);
+        }
+        if r > bailout {
+            break;
+        }
+        let step = (steps >> (3u * (i % count))) & 7u;
+        var ok = true;
+        if step == 1u {
+            ok = r >= 1.0e-8 && bulb_step_cfg(bulb_cfg, rot, &z, &dr, r, c, 1.0);
+        } else if step == 2u {
+            ok = box_step_cfg(box_cfg, rot, &z, &dr, c, 1.0);
+        } else if step == 3u {
+            ok = kifs_step_cfg(kifs_cfg, rot, &z, &dr);
+        } else if step == 4u {
+            ok = apollonian_step_cfg(apollo_scale, &z, &dr);
+        }
+        if !ok {
+            break;
+        }
+        if trap_mode != 0u {
+            trap = min(trap, eval_trap3(trap_cfg, z));
+        }
+    }
+    return fraction_blend(frac, 0.5 * length(z) / dr, trap);
+}
+

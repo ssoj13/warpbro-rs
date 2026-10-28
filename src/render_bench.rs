@@ -10,9 +10,12 @@ use std::time::Instant;
 
 use anyhow::{Context, ensure};
 use serde_json::json;
+use soluwell_studio::render::{Batch, Target, validate_size};
+use soluwell_studio::render_profiles::{Backend, DirectRender, DirectShading};
+use soluwell_studio::scene::{Material, MaterialModel, Scene};
 
-use crate::render::{Batch, Gpu, Target};
-use crate::scene::{Material, MaterialModel};
+use crate::engine::{WarpBroGpuExt, init_warpbro, new_gpu};
+use crate::fractal_node::{Formula, FractalSceneExt};
 
 const CASES: [(&str, usize, u32, bool); 10] = [
     ("ember-early", 0, 0, false),
@@ -33,6 +36,7 @@ const CASES: [(&str, usize, u32, bool); 10] = [
 /// preparation from the timed samples. Every measured sample uses the same seed/dimension
 /// sequence as normal world rendering, and each output records its exact evaluated inputs.
 pub fn run(args: &[String]) -> anyhow::Result<()> {
+    init_warpbro();
     if args.iter().any(|argument| argument == "--families") {
         return run_families(args);
     }
@@ -64,7 +68,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     // budget). Off by default so estimator comparisons get exactly `samples` per pixel.
     let mut adaptive_threshold: Option<f32> = None;
     // `--backend cuda|wgpu`: which tracer the cases run on (default: the profile's Auto choice).
-    let mut backend = crate::render_profiles::Backend::Auto;
+    let mut backend = Backend::Auto;
     while position < args.len() {
         let flag = &args[position];
         let value = args
@@ -76,9 +80,9 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             "--batch" => batch = value.parse().context("Invalid benchmark batch")?,
             "--backend" => {
                 backend = match value.as_str() {
-                    "auto" => crate::render_profiles::Backend::Auto,
-                    "cuda" => crate::render_profiles::Backend::Cuda,
-                    "wgpu" => crate::render_profiles::Backend::Wgpu,
+                    "auto" => Backend::Auto,
+                    "cuda" => Backend::Cuda,
+                    "wgpu" => Backend::Wgpu,
                     _ => anyhow::bail!("Benchmark backend must be auto, cuda or wgpu"),
                 }
             }
@@ -91,7 +95,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     }
     let [width, height, samples] = dimensions;
     let samples = u32::try_from(samples).context("Invalid benchmark samples")?;
-    crate::render::validate_size(width, height, samples)?;
+    validate_size(width, height, samples)?;
     ensure!(batch == 4 || batch == 8, "Benchmark batch must be 4 or 8");
     ensure!(
         seed <= 16_777_216,
@@ -102,7 +106,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         "Unknown benchmark case"
     );
     std::fs::create_dir_all(directory)?;
-    let mut gpu = Gpu::new()?;
+    let mut gpu = new_gpu()?;
     println!(
         "World benchmark GPU: {} · {width}x{height} · {samples} spp · seed {seed} · batch {batch}",
         gpu.name
@@ -214,12 +218,18 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             }
         }
         raw.flush()?;
-        let shot = crate::render_service::Frame::snapshot(&target, 0, false, false, 100.0);
-        let encoding = crate::render_service::PngEncoding::displayed(shot.light_kind.hdr());
+        let shot =
+            soluwell_studio::render_service::Frame::snapshot(&target, 0, false, false, 100.0);
+        let encoding =
+            soluwell_studio::render_service::PngEncoding::displayed(shot.light_kind.hdr());
         shot.save_png(
-            &base.join(crate::fs_name::frame_file(&stem, None, encoding.suffix())),
+            &base.join(soluwell_studio::fs_name::frame_file(
+                &stem,
+                None,
+                encoding.suffix(),
+            )),
             encoding,
-            crate::color::BT2408_SDR_WHITE_NITS,
+            soluwell_studio::color::BT2408_SDR_WHITE_NITS,
             true,
         )
         .map_err(anyhow::Error::msg)?;
@@ -261,10 +271,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
 
 /// Build a controlled standalone, homogeneous editor world or genuinely mixed-family world.
 /// Family benchmarks share geometry and materials between backends; only the requested engine differs.
-fn family_scene(code: u32, scope: &str, shade: &str, samples: u32) -> crate::scene::Scene {
-    use crate::render_profiles::{DirectRender, DirectShading};
-    use crate::scene::{Formula, Scene};
-    let mut scene = Scene::preset(Formula::PRESETS[code as usize]);
+fn family_scene(code: u32, scope: &str, shade: &str, samples: u32) -> Scene {
+    let mut scene = Scene::preset_fractal(Formula::PRESETS[code as usize]);
     scene.render.denoise.enabled = false;
     scene.render.adaptive.enabled = false;
     scene.render.max_bounces = 2;
@@ -284,7 +292,7 @@ fn family_scene(code: u32, scope: &str, shade: &str, samples: u32) -> crate::sce
         });
     }
     if scope != "single" {
-        let radius = scene.formula.framing_radius();
+        let radius = scene.formula().framing_radius();
         let mut first = scene.clone();
         first.direct = None;
         let mut matrix = glam::Mat4::from_scale(glam::Vec3::new(0.65, 0.7, 0.6));
@@ -295,7 +303,7 @@ fn family_scene(code: u32, scope: &str, shade: &str, samples: u32) -> crate::sce
         matrix.w_axis.x = 0.38 * radius;
         second.object_world = Some(matrix.to_cols_array_2d());
         if scope == "mixed" {
-            second.formula = Formula::PRESETS[0];
+            second.set_formula(Formula::PRESETS[0]);
         }
         scene.world_render = true;
         scene.objects = vec![first, second];
@@ -319,7 +327,6 @@ fn write_raw_rgb(path: &Path, pixels: &[[f32; 4]]) -> anyhow::Result<()> {
 /// or clock drift; five or more odd repetitions produce an observed median rather than a best run.
 /// Allocation, preparation, warm-up, final raw readback and artifact I/O are outside the timed steps.
 fn run_families(args: &[String]) -> anyhow::Result<()> {
-    use crate::render_profiles::Backend;
     let directory = args
         .get(2)
         .filter(|value| !value.starts_with("--"))
@@ -339,7 +346,7 @@ fn run_families(args: &[String]) -> anyhow::Result<()> {
             position += 1;
         }
     }
-    let mut families: Vec<u32> = (8..crate::scene::Formula::COUNT).collect();
+    let mut families: Vec<u32> = (8..Formula::COUNT).collect();
     let mut scopes = vec!["world"];
     let mut shades = vec!["fast"];
     let mut backends = vec![Backend::Cuda, Backend::Wgpu];
@@ -395,12 +402,10 @@ fn run_families(args: &[String]) -> anyhow::Result<()> {
     }
     let [width, height, samples] = dimensions;
     let samples = u32::try_from(samples).context("Invalid family sample count")?;
-    crate::render::validate_size(width, height, samples)?;
+    validate_size(width, height, samples)?;
     ensure!(!families.is_empty(), "Select at least one family");
     ensure!(
-        families
-            .iter()
-            .all(|&family| family < crate::scene::Formula::COUNT),
+        families.iter().all(|&family| family < Formula::COUNT),
         "Family code must be in 0..28"
     );
     families.sort_unstable();
@@ -420,7 +425,7 @@ fn run_families(args: &[String]) -> anyhow::Result<()> {
     );
     std::fs::create_dir_all(directory)?;
     let directory = Path::new(directory);
-    let mut gpu = Gpu::new()?;
+    let mut gpu = new_gpu()?;
     let mut summaries = Vec::new();
     for code in families {
         for &scope in &scopes {
@@ -571,7 +576,7 @@ fn run_families(args: &[String]) -> anyhow::Result<()> {
                     serde_json::Value::Null
                 };
                 let report = json!({
-                    "schema": 1, "case": stem, "family": code, "formula": scene.formula.name(),
+                    "schema": 1, "case": stem, "family": code, "formula": scene.formula().name(),
                     "scope": scope, "shade": shade, "width": width, "height": height,
                     "samples": samples, "seed": seed, "batch": batch, "repeats": repeats,
                     "gpu": gpu.name, "round_backend_order": order,

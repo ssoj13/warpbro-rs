@@ -33,16 +33,7 @@ pub use fractal_core::params::{
 // Declarative Metadata Types
 // =============================================================================
 
-/// The interactive slider span of a numeric attribute: soft limits for dragging (the hard
-/// limits are the attribute's range). The formula registry fills it per parameter; `world.rs`
-/// attaches it to every numeric `WorldAttribute`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Slider {
-    pub min: f64,
-    pub max: f64,
-    /// Logarithmic for values spanning orders of magnitude.
-    pub log: bool,
-}
+pub use soluwell_studio::world::Slider;
 
 /// A linear slider span, for the [`FORMULAS`] table.
 const fn lin(min: f64, max: f64) -> Option<Slider> {
@@ -2790,11 +2781,11 @@ fn put_rot(p: &mut [f32], degrees: [f32; 3], euler_matrix: fn([f32; 3]) -> [[f32
 
 pub fn pack_extended_formula(
     p: &mut [f32],
-    formula: &crate::scene::Formula,
+    formula: &crate::fractal_node::Formula,
     bulb_escape: f32,
     euler_matrix: fn([f32; 3]) -> [[f32; 3]; 3],
 ) {
-    use crate::scene::Formula;
+    use crate::fractal_node::Formula;
     // Offsets b..b + EXT_SLOTS (see `EXT_SLOTS`).
     let b = P_BULB_POWER;
     match formula {
@@ -2987,7 +2978,7 @@ pub fn pack_extended_formula(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::scene::Formula;
+    use crate::fractal_node::Formula;
 
     #[test]
     fn every_family_has_one_registry_row_at_its_code() {
