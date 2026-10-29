@@ -1,0 +1,10 @@
+# Mastermind Index — `animation-rs` Ecosystem Unification (`/sysgo` + `/mastermind`)
+
+## Architecture & Domain Partition (`Tier 0 -> Tier 1 -> Tier 2`)
+
+| Domain ID | Target Repository | Sub-Orchestrator Scope (`<= 2,500 LOC`) | `ALLOWED_WRITE_FILES` | Status |
+|---|---|---|---|---|
+| **`D01`** | `animation-rs` (`607e380`) & `playa` (`818a26f`) | Doc hygiene in `animation-rs` + SSOT deduplication of `bar_span`/`conform`/`rescale` in `playa-engine::entities::timing` + unused dep pruning in `playa-time` & `playa-engine` | `animation-rs/src/{time/mod.rs, attrs.rs, keys.rs}`, `playa/crates/playa-time/Cargo.toml`, `playa/crates/playa-engine/{Cargo.toml, src/entities/timing.rs}`, [D01_playa_anim.md](domains/D01_playa_anim.md) | `[x] VERIFIED` |
+| **`D02`** | `openvdb-rs` (`crates/vdb-view`, `3765fca`) | Migrate `vdb-view` from `playa-engine::entities`/`playa-time` to `animation-rs` + port camera animation fix (`POSE_PATHS`, `seed_frames`, 3-pose hold keys, `camera_pose`) & regression test | `openvdb-rs/crates/vdb-view/{Cargo.toml, src/world.rs, src/camera_orbit.rs, src/camera_recorder.rs, src/world_tests.rs}`, [D02_openvdb_vdb_view.md](domains/D02_openvdb_vdb_view.md) | `[x] VERIFIED` |
+| **`D03`** | `rv-rs` (`crates/rv-app`, `c875447`) | Prune dead `playa-engine`, `playa-ui`, `curves` from `rv-rs/Cargo.toml` + migrate `playa-time` (`playback.rs:2465`) to `animation::time::Fps` | `rv-rs/{Cargo.toml, crates/rv-app/Cargo.toml, crates/rv-app/src/playback.rs}`, [D03_rv_rs.md](domains/D03_rv_rs.md) | `[x] VERIFIED` |
+| **`D04`** | `skelly-rs` (`skelly`, `skelly-rig`, `skelly-nodes`) | Wire `animation-rs` into `skelly-rs` workspace + upgrade `Host` playback timing in `crates/skelly/src/app.rs` to `animation::time::Fps` + unit tests | `skelly-rs/{Cargo.toml, crates/skelly/Cargo.toml, crates/skelly/src/app.rs, crates/skelly/src/main.rs, crates/skelly-rig/Cargo.toml, crates/skelly-rig/src/lib.rs, crates/skelly-nodes/Cargo.toml, crates/skelly-nodes/src/lib.rs}`, [D04_skelly_rs.md](domains/D04_skelly_rs.md) | `[x] VERIFIED` |
