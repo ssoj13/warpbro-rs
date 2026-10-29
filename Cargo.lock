@@ -211,6 +211,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "animation"
+version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/animation-rs.git?branch=main#12802c9bb4ebd9649dfe556b603e887b791e12f3"
+dependencies = [
+ "bitflags 2.13.2",
+ "curves",
+ "glam",
+ "log",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2004,7 +2018,7 @@ dependencies = [
 [[package]]
 name = "cam-controls"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
  "cam-viewport",
  "glam",
@@ -2014,7 +2028,7 @@ dependencies = [
 [[package]]
 name = "cam-controls-egui"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
  "cam-controls",
  "cam-viewport",
@@ -2024,7 +2038,7 @@ dependencies = [
 [[package]]
 name = "cam-viewport"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
  "glam",
 ]
@@ -7200,7 +7214,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 [[package]]
 name = "playa-coord"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#b581c555a222a0b815e971539874c5d8fc2c7b1e"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#9b6038397edf03ed62f2abe97e236e66447595e7"
 dependencies = [
  "glam",
 ]
@@ -7208,9 +7222,10 @@ dependencies = [
 [[package]]
 name = "playa-engine"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#b581c555a222a0b815e971539874c5d8fc2c7b1e"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#9b6038397edf03ed62f2abe97e236e66447595e7"
 dependencies = [
  "alembic-rs",
+ "animation",
  "anyhow",
  "av-hwaccel-vulkan",
  "av-player",
@@ -7258,7 +7273,7 @@ dependencies = [
 [[package]]
 name = "playa-events"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#b581c555a222a0b815e971539874c5d8fc2c7b1e"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#9b6038397edf03ed62f2abe97e236e66447595e7"
 dependencies = [
  "log",
  "serde",
@@ -7269,7 +7284,7 @@ dependencies = [
 [[package]]
 name = "playa-graph"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#b581c555a222a0b815e971539874c5d8fc2c7b1e"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#9b6038397edf03ed62f2abe97e236e66447595e7"
 dependencies = [
  "box-rs",
  "flex-geom",
@@ -7286,7 +7301,7 @@ dependencies = [
 [[package]]
 name = "playa-io"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#b581c555a222a0b815e971539874c5d8fc2c7b1e"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#9b6038397edf03ed62f2abe97e236e66447595e7"
 dependencies = [
  "audio-decode",
  "av-format-core",
@@ -7312,7 +7327,7 @@ dependencies = [
 [[package]]
 name = "playa-player"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#b581c555a222a0b815e971539874c5d8fc2c7b1e"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#9b6038397edf03ed62f2abe97e236e66447595e7"
 dependencies = [
  "log",
  "lru",
@@ -7323,7 +7338,7 @@ dependencies = [
 [[package]]
 name = "playa-templates"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#b581c555a222a0b815e971539874c5d8fc2c7b1e"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#9b6038397edf03ed62f2abe97e236e66447595e7"
 dependencies = [
  "serde",
  "serde_json",
@@ -7332,8 +7347,9 @@ dependencies = [
 [[package]]
 name = "playa-time"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#b581c555a222a0b815e971539874c5d8fc2c7b1e"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#9b6038397edf03ed62f2abe97e236e66447595e7"
 dependencies = [
+ "animation",
  "glam",
  "serde",
 ]
@@ -8755,7 +8771,7 @@ checksum = "c4fdfe13e1c42e45f497416afb8dc4e783bf0e25b7be9077c1c77c5fb14cb998"
 [[package]]
 name = "soluwell-chrome"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
  "egui",
  "indexmap",
@@ -8769,7 +8785,7 @@ dependencies = [
 [[package]]
 name = "soluwell-config"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
  "egui",
  "serde",
@@ -8779,7 +8795,7 @@ dependencies = [
 [[package]]
 name = "soluwell-controls"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
  "curves",
  "egui",
@@ -8790,7 +8806,7 @@ dependencies = [
 [[package]]
 name = "soluwell-panels"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
  "box-rs",
  "egui",
@@ -8803,8 +8819,9 @@ dependencies = [
 [[package]]
 name = "soluwell-studio"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
+ "animation",
  "anyhow",
  "av-util-core",
  "bytemuck",
@@ -8823,12 +8840,8 @@ dependencies = [
  "image",
  "imath-rs",
  "log",
- "playa-coord",
- "playa-engine",
  "playa-events",
  "playa-graph",
- "playa-player",
- "playa-time",
  "png",
  "rayon",
  "serde",
@@ -8867,7 +8880,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-browser"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
  "egui",
  "playa-events",
@@ -8877,8 +8890,9 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
+ "animation",
  "anyhow",
  "av-util-core",
  "bytemuck",
@@ -8896,7 +8910,6 @@ dependencies = [
  "image",
  "imath-rs",
  "log",
- "playa-engine",
  "playa-events",
  "pt-denoise-oidn",
  "pt-integrator",
@@ -8921,7 +8934,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-export"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
  "av-util-core",
  "bytemuck",
@@ -8946,7 +8959,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-inspector"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
  "egui",
  "playa-events",
@@ -8957,7 +8970,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-jobs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
  "egui",
  "playa-events",
@@ -8968,7 +8981,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-materials"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
  "egui",
  "playa-events",
@@ -8982,7 +8995,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-node-editor"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
  "egui",
  "playa-events",
@@ -8996,7 +9009,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-outliner"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
  "egui",
  "playa-events",
@@ -9007,7 +9020,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-profiler"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
  "egui",
  "soluwell-studio-core",
@@ -9016,7 +9029,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-project"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
  "egui",
  "playa-events",
@@ -9029,7 +9042,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-render"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
  "bytemuck",
  "egui",
@@ -9056,19 +9069,17 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-scene"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
+ "animation",
  "cam-viewport",
  "curves",
  "egui",
  "egui-file-dialog",
  "glam",
  "log",
- "playa-coord",
- "playa-engine",
  "playa-events",
  "playa-graph",
- "playa-time",
  "serde",
  "serde_json",
  "soluwell-chrome",
@@ -9084,7 +9095,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-settings"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
  "egui",
  "serde",
@@ -9094,7 +9105,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-takes"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
  "egui",
  "egui-file-dialog",
@@ -9109,7 +9120,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-timeline"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
  "egui",
  "playa-events",
@@ -9120,7 +9131,7 @@ dependencies = [
 [[package]]
 name = "soluwell-timeline"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
  "egui",
  "exr-core",
@@ -9138,7 +9149,7 @@ dependencies = [
 [[package]]
 name = "soluwell-viewport"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
  "bytemuck",
  "cam-controls",
@@ -9163,7 +9174,7 @@ dependencies = [
 [[package]]
 name = "soluwell-window"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
  "egui",
  "egui-wgpu",
@@ -10732,7 +10743,7 @@ dependencies = [
 [[package]]
 name = "video-io-egui"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ea3e0c27cc7a1b1a64079323db37ffe43b159993"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#6bf088fd6646e62def9e55367e7a3f8232ec11a1"
 dependencies = [
  "egui",
  "serde",
@@ -10762,59 +10773,25 @@ dependencies = [
 name = "warpbro"
 version = "0.1.0"
 dependencies = [
+ "animation",
  "anyhow",
- "av-codec",
- "av-codec-core",
- "av-format-mov",
- "av-util-core",
- "av-util-frame",
- "av-util-pixfmt",
- "bytemuck",
  "cuda-core",
  "cuda-device",
  "cuda-host",
  "curves",
- "dirs 7.0.0",
  "egui",
- "egui-file-dialog",
- "egui-wgpu",
  "env_logger",
- "exr-core",
  "fractal-core",
- "fractal-env",
  "fractal-kernels",
- "fractal-materials",
  "glam",
  "gpu-info-rs",
- "half",
- "image",
- "imath-rs",
  "log",
- "naga",
- "playa-coord",
- "playa-engine",
- "playa-events",
- "playa-graph",
- "playa-player",
- "playa-time",
- "png",
- "pt-denoise-oidn",
- "rayon",
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "soluwell-chrome",
  "soluwell-config",
- "soluwell-controls",
- "soluwell-panels",
  "soluwell-studio",
- "soluwell-timeline",
- "soluwell-viewport",
- "soluwell-window",
  "standard-surface-bsdf",
- "vfx-ocio",
- "video-io",
- "video-io-egui",
  "wgpu",
 ]
 

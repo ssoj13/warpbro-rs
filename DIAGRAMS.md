@@ -5,37 +5,53 @@ Companion architecture notebooks: [PLAN.md](PLAN.md) and [AGENTS.md](AGENTS.md).
 
 ---
 
-## 1. Ownership & Application Shell
+## 1. Ownership & Crate Dependency Architecture
 
 ```mermaid
 flowchart TD
-  main[main.rs] -->|engine::init_warpbro| reg[Register FractalNodeSpec<br/>& WarpBroComputeEngine]
-  main -->|soluwell_studio::run_with| win[soluwell_window::run]
-  win -->|ctx.run_ui| app[soluwell_studio::StudioApp]
-
-  subgraph StudioApp[StudioApp - soluwell-studio]
-    world[WorldEditor<br/>SubnetFile graph + undo/redo]
-    scene[Scene<br/>evaluated scratch snapshot]
-    colour[ocio::State<br/>OCIO display pipeline]
-    bus[Playa EventBus<br/>central typed command bus]
-    preview[PreviewController<br/>RAM timeline preview cache]
-    export[ExportController<br/>multi-format export]
-    thumb[ThumbnailCache<br/>content-addressed disk cache]
+  subgraph AnimationRs["animation-rs (animation crate)"]
+    anim_mods["curves / keys / time / anim / attrs (AttrValue, Attrs) / transform"]
   end
 
-  app --> rs[RenderService<br/>dedicated worker thread]
-  app --> io[IoService<br/>background file worker]
-  rs --> gpu[Gpu<br/>WarpBroComputeEngine]
+  subgraph SoluwellStudioCrates["soluwell-studio workspace crates"]
+    ss_core["soluwell-studio-core (time, attrs, node_spec, params)"]
+    ss_scene["soluwell-studio-scene (WorldDocument, Scene, takes, presets)"]
+    ss_render["soluwell-studio-render (Gpu, RenderService, WgpuEngine, OCIO, OIDN)"]
+    ss_ui["soluwell-studio (StudioApp, dock panels, EventBus, ExportController)"]
+  end
 
-  subgraph WarpBroComputeEngine[WarpBroComputeEngine - src/engine.rs]
-    cuda[CUDA: 234 specialized kernels<br/>fractal-kernels sm_75..sm_120]
-    wgpu[WGPU: 28 per-family modules<br/>+ dynamic 28-way module]
+  anim_mods --> ss_core
+  anim_mods --> ss_scene
+  ss_core --> ss_scene --> ss_render --> ss_ui
+
+  main["warpbro-rs (main.rs)"] -->|"engine::init_warpbro"| reg["Register FractalNodeSpec & WarpBroComputeEngine"]
+  ss_ui -->|"soluwell_studio::world re-exports animation-rs"| main
+  main -->|"soluwell_studio::run_with"| win["soluwell_window::run"]
+  win -->|"ctx.run_ui"| app["soluwell_studio::StudioApp"]
+
+  subgraph StudioApp["StudioApp (soluwell-studio)"]
+    world["WorldEditor (SubnetFile graph + undo/redo)"]
+    scene["Scene (evaluated scratch snapshot)"]
+    colour["ocio::State (OCIO display pipeline)"]
+    bus["Playa EventBus (central typed command bus)"]
+    preview["PreviewController (RAM timeline preview cache)"]
+    export["ExportController (multi-format export)"]
+    thumb["ThumbnailCache (content-addressed disk cache)"]
+  end
+
+  app --> rs["RenderService (dedicated worker thread)"]
+  app --> io["IoService (background file worker)"]
+  rs --> gpu["Gpu (WarpBroComputeEngine)"]
+
+  subgraph WarpBroComputeEngine["WarpBroComputeEngine (src/engine.rs)"]
+    cuda["CUDA: 234 specialized kernels (fractal-kernels sm_75..sm_120)"]
+    wgpu["WGPU: 28 per-family modules + dynamic 28-way module"]
   end
 
   gpu --> cuda
   gpu --> wgpu
-  export --> coord[coordinate_export thread] --> writer[ExportWriter thread]
-  coord -->|RenderExport| rs
+  export --> coord["coordinate_export thread"] --> writer["ExportWriter thread"]
+  coord -->|"RenderExport"| rs
 ```
 
 ---
@@ -73,24 +89,30 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-  file[(scene .json)] -->|decode_scene| dj[WorldDocument::decode_json<br/>strict format & shape validation]
-  dj --> doc[WorldDocument]
-  new[File > New] -->|from_scene| doc
-  
-  subgraph Edits[Edit Pipeline]
-    cmd[WorldCommand] --> ex[execute_edit] --> ap[apply_edit] --> sa[set_attribute]
-    sa --> val[validate_render_profiles]
-    val -->|Err: rollback| doc
-    val -->|Ok: record_edit| doc
+  file[("scene .json")] -->|"decode_scene"| dj["WorldDocument::decode_json (strict format & shape validation)"]
+  dj --> doc["WorldDocument"]
+  new["File > New"] -->|"from_scene"| doc
+
+  subgraph AnimSubstrate["animation-rs (re-exported via soluwell_studio::world)"]
+    anim_types["time / anim / attrs (AttrValue, Attrs) / transform / keys / curves"]
+  end
+  anim_types -->|"host Attrs & keyframe curves"| doc
+
+  subgraph Edits["Edit Pipeline"]
+    cmd["WorldCommand"] --> ex["execute_edit"] --> ap["apply_edit"] --> sa["set_attribute"]
+    sa --> val["validate_render_profiles"]
+    val -->|"Err: rollback"| doc
+    val -->|"Ok: record_edit"| doc
   end
 
-  subgraph Evaluation[Evaluation Pipeline]
-    doc -->|snapshot_with_render_profile| sc[Scene]
-    doc -->|effective_render| er[EffectiveRender]
+  subgraph Evaluation["Evaluation Pipeline (soluwell-studio-core -> soluwell-studio-scene -> warpbro-rs)"]
+    doc -->|"snapshot_with_render_profile"| sc["Scene"]
+    doc -->|"effective_render"| er["EffectiveRender"]
     er --> sc
-    takes[Takes] -->|take_frame / take_trs| sc
-    fn[FractalNodeSpec::evaluate] -->|pack_object| sc
-    sc --> pack[Scene::pack: P_COUNT 128-float ABI]
+    anim_types -->|"curve evaluation & TRS composition"| sc
+    takes["Takes"] -->|"take_frame / take_trs"| sc
+    fn["FractalNodeSpec::evaluate"] -->|"pack_object"| sc
+    sc --> pack["Scene::pack (P_COUNT 128-float ABI)"]
   end
 ```
 

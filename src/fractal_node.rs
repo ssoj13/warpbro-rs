@@ -12,7 +12,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{LazyLock, RwLock};
 
 use fractal_core::params::*;
-use playa_engine::entities::{AttrValue, Attrs};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use soluwell_studio::node_spec::NodeTypeSpec;
@@ -22,7 +21,7 @@ use soluwell_studio::scene::{
     Adaptive, Camera, Coloring, DEFAULT_GLASS_PROBES, DEFAULT_MAX_STEPS, Material, MaterialModel,
     ObjectTransform, Render, Scene, Sky, Sun, length,
 };
-use soluwell_studio::world::{Slider, WorldAttribute};
+use soluwell_studio::world::{AttrValue, Attrs, Slider, WorldAttribute};
 
 use crate::formulas::*;
 

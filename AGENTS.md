@@ -10,7 +10,9 @@
 ## What it is
 
 WarpBro is an egui desktop browser / animator for path-traced 3D fractals (28 DE families) built on
-top of the shared `soluwell-studio` widget (`egui-widgets-rs/crates/soluwell/studio`).
+top of the shared `soluwell-studio` widget (`egui-widgets-rs/crates/soluwell/studio`) and the
+shared `animation-rs` animation/attribute substrate (`animation` crate: `time`, `anim`, `attrs`
+(`AttrValue`, `Attrs`), `transform`, `keys`, `curves`, re-exported via `soluwell_studio::world`).
 
 `soluwell-studio` knows nothing about fractals or fractal formulas. WarpBro registers:
 - **`"Fractal"` scene node (`src/fractal_node.rs`, `FractalNodeSpec`)**: registered via
@@ -42,8 +44,14 @@ backend check for clippy / rust-analyzer). Tests need `--release` (debug device 
 All shared studio UI, dock panels, Outliner/Timeline/Attribute Editor/Curve Editor, Playa EventBus
 dispatch, loopback HTTP control, `WorldDocument` graph/undo, `RenderService`, `PreparationCache`,
 OCIO display pipeline, OIDN denoiser, `PreviewController`, `ThumbnailCache`, and `ExportController`
-live in `egui-widgets-rs/crates/soluwell/studio`. `warpbro-rs/src/` contains only the 10 fractal
-domain files:
+live in `egui-widgets-rs/crates/soluwell/studio` (`soluwell-studio`, `soluwell-studio-core`,
+`soluwell-studio-scene`, `soluwell-studio-render`), backed by `animation-rs` (`animation` crate:
+`time`, `anim`, `attrs`, `transform`, `keys`, `curves`). `warpbro-rs` keeps a clean direct
+dependency graph (`soluwell-studio`, `animation`, `fractal-core`, `fractal-kernels`,
+`cuda-core`/`cuda-host`/`cuda-device`, `curves`, `egui`, `soluwell-config`, `glam`, `log`,
+`anyhow`, `env_logger`, `serde`, `serde_json`, `sha2`) after dropping unused direct `playa-*`,
+`video-io`, `vfx-ocio`, `exr-core`, `wgpu`, `bytemuck`, `gpu-info`, etc. dependencies.
+`warpbro-rs/src/` contains only the 10 fractal domain files:
 
 | Area | Files | Role |
 |---|---|---|
@@ -114,6 +122,9 @@ NEW  --WorldDocument::from_scene--> seed settings nodes + Fractal, Camera, Sun, 
 WorldDocument: graph (playa_graph::SubnetFile: nodes{uuid -> type, parent, host: Attrs, gpu: JSON template,
                discrete, material, take}), bus_slots{world, layer_order, output_render, viewport/output settings},
                active_camera / active_environment, first/last/fps, marks; takes + camera_slots outside undo.
+               Animation & attribute primitives (`time`, `anim`, `attrs` (`AttrValue`, `Attrs`), `transform`,
+               `keys`, `curves`) come from `animation-rs` (`animation` crate) and are re-exported via
+               `soluwell_studio::world`.
 
 EDIT: WorldCommand (world.rs:188) -> WorldEditor::execute_edit(cmd, gesture) (415) -> apply_edit (471)
       -> apply (812) -> set_attribute (4550) -> validate_render_profiles (3361, Err = rollback)
@@ -209,6 +220,7 @@ IoService thread: settings / scenes / bookmarks (tmp + rename), frame and window
 
 ## Changelog
 
+- **2026-10-29**: Documented `animation-rs` (`animation` crate: `time`, `anim`, `attrs` (`AttrValue`, `Attrs`), `transform`, `keys`, `curves` re-exported via `soluwell_studio::world`) across `soluwell-studio` and cleaned up the `warpbro-rs` dependency graph by dropping unused direct `playa-*`, `video-io`, `vfx-ocio`, `exr-core`, `wgpu`, etc. dependencies.
 - **2026-10-28**: Consolidated all root plan/handoff/bug documents into `PLAN.md`. Added inline `Backend` (`Auto / CUDA / WGPU`) selector across RenderSettings bindings, synced OIDN `WorkContext`, updated `CUDA_OXIDE_REV`, and locked OxideAV git dependencies in `Cargo.lock`. All 28 families ported to CUDA with 234 specialized kernel entries (`fractal-rs` `5a21813e`).
 - **2026-10-27**: Migrated `warpbro-rs` onto `soluwell-studio` (`egui-widgets-rs` `a8b4e935`). Removed all fractal/formula knowledge from `soluwell-studio`, extracted `"Fractal"` into `src/fractal_node.rs` (`FractalNodeSpec`) and the dual CUDA+WGPU backend into `src/engine.rs` (`WarpBroComputeEngine`), and deleted 45 duplicated UI/scene/render files and `crates/app-control`.
 

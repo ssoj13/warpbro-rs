@@ -12,76 +12,29 @@ default = []
 
 [dependencies]
 soluwell-studio = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
-# The fractal path tracer shared with ofx-rs: parameter ABI and sampling, the CUDA kernels
-# (built into this binary through #[cuda_module]) and the material presets.
+animation = { git = "ssh://git@github.com/ssoj13/animation-rs.git", branch = "main" }
+# The fractal path tracer shared with ofx-rs: parameter ABI and sampling, and the CUDA kernels
+# (built into this binary through #[cuda_module]).
 fractal-core = { git = "ssh://git@github.com/ssoj13/fractal-rs.git", branch = "main" }
 # `direct`: the Direct display's deterministic shading kernels (`world_direct`, `direct_<family>`).
 fractal-kernels = { git = "ssh://git@github.com/ssoj13/fractal-rs.git", branch = "main", features = ["direct"] }
-fractal-env = { git = "ssh://git@github.com/ssoj13/fractal-rs.git", branch = "main" }
-fractal-materials = { git = "ssh://git@github.com/ssoj13/fractal-rs.git", branch = "main" }
-playa-player = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "main", default-features = false }
-# OIDN for ACEScg input (AP1 autoexposure + firefly clamp).
-pt-denoise-oidn = { git = "ssh://git@github.com/ssoj13/render-rs.git", branch = "main" }
-playa-graph = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "main" }
-playa-engine = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "main", default-features = false }
-playa-time = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "main" }
-playa-coord = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "main" }
-playa-events = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "main" }
-soluwell-panels = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
-soluwell-chrome = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
 # Our Windows fork includes the Rust 1.99 backend fixes.
 cuda-device = { git = "ssh://git@github.com/ssoj13/cuda-rust-windows.git", branch = "main" }
 cuda-host = { git = "ssh://git@github.com/ssoj13/cuda-rust-windows.git", branch = "main" }
 # The monorepo ships cuda-core next to cuda-host; one source keeps a single cuda-core in the graph.
 cuda-core = { git = "ssh://git@github.com/ssoj13/cuda-rust-windows.git", branch = "main" }
+curves = { git = "ssh://git@github.com/ssoj13/curves-rs.git", branch = "main", features = ["serde"] }
 egui = "0.36"
-soluwell-viewport = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
-# The native window host (winit + wgpu + egui-winit, HDR present), shared with av-graph-gui and colmap-ui.
-soluwell-window = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
-# Viewport transform manipulator (Q / W / E / R tools, as in Playa).
-egui-wgpu = "0.36"
-wgpu = "30"
-bytemuck = "1"
+soluwell-config = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
+glam = "0.33.6"
+log = "0.4"
 anyhow = "1"
-vfx-ocio = { git = "ssh://git@github.com/ssoj13/oiio-rs.git", branch = "main", features = ["gpu", "parallel"] }
-# Display-referred colour maths, the HDR PNG encoder, the PNG-sequence video export (`cli`)
-# and the in-process native / Vulkan Video encoder (`native`, `vulkan`).
-video-io = { git = "ssh://git@github.com/ssoj13/video-io-rs.git", branch = "main", features = ["cli", "native", "vulkan", "host-exr"] }
-video-io-egui = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
-gpu-info = { package = "gpu-info-rs", git = "ssh://git@github.com/ssoj13/gpu-info-rs.git", branch = "main", default-features = false, features = ["wgpu"] }
-# OpenEXR = our own 1:1 port (exr-rs), never crates.io `exr`; same source as vfx-io so it unifies.
-exr-core = { git = "ssh://git@github.com/ssoj13/exr-rs.git", branch = "main" }
-imath-rs = { git = "ssh://git@github.com/ssoj13/exr-rs.git", branch = "main" }
-av-util-core = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
-
-standard-surface-bsdf = { git = "ssh://git@github.com/ssoj13/render-rs.git", branch = "main", features = ["cuda-math"] }
+env_logger = "0.11"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.10.9"
-png = "0.18.1"
-dirs = "7.0.0"
-glam = "0.33.6"
-
-log = "0.4"
-rayon = "1"
-egui-file-dialog = { git = "ssh://git@github.com/ssoj13/egui-file-dialog.git", branch = "main" }
-soluwell-controls = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
-soluwell-config = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
-
-env_logger = "0.11"
-
-# The HDR colour picker (timeline colour lanes; the AE gets it through egui-attr-grid).
-soluwell-timeline = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
-curves = { git = "ssh://git@github.com/ssoj13/curves-rs.git", branch = "main", features = ["serde"] }
-# Radiance .hdr only: EXR environments are read by `exr_io` (exr-core); the `exr` feature would pull crates.io exrs.
-image = { version = "0.25", default-features = false, features = ["hdr"] }
 
 [dev-dependencies]
-# Half-float pixels of synthetic window captures (`window_shot` tests; egui-display's `Pixels::RgbaF16`).
-half = "2.7"
-naga = { version = "30", default-features = false, features = ["wgsl-in"] }
-av-codec = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main", default-features = false }
-av-codec-core = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
-av-format-mov = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
-av-util-frame = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
-av-util-pixfmt = { git = "ssh://git@github.com/ssoj13/ffmpeg-rs.git", branch = "main" }
+standard-surface-bsdf = { git = "ssh://git@github.com/ssoj13/render-rs.git", branch = "main", features = ["cuda-math"] }
+gpu-info = { package = "gpu-info-rs", git = "ssh://git@github.com/ssoj13/gpu-info-rs.git", branch = "main", default-features = false, features = ["wgpu"] }
+wgpu = "30"
