@@ -4,7 +4,12 @@
 
 The Outliner, Materials gallery, Timeline, and Attribute Editor share UUID-based node selection. Fractals, cameras, lights, environments, groups, and materials belong to the same World document. Material edits use the same Attribute Editor as other node types.
 
-Translate, Rotate, and Scale edit the node's authored transform. Viewport flight edits the active Camera node; navigation records keys only when Auto Key is enabled. Numeric dragging updates the preview during the gesture and creates one Undo transaction when the gesture completes.
+By default, the dock workspace is arranged into three columns:
+- **Left (`390 px`)**: **Outliner** on top and **Materials** (`582 px`) below.
+- **Center**: **Viewport** on top and a bottom strip (`216 px`) split horizontally into **Timeline** and **Takes** (`490 px`).
+- **Right (`437 px`)**: **Attribute Editor** on top and a tabbed pane (`415 px`) below containing **Gallery**, **Material Library**, **Settings**, and **Render / Encode** (active by default).
+
+Translate, Rotate, and Scale edit the node's authored transform. Viewport navigation edits the active Camera node: when the camera has no keyframes and Auto Key is off, navigation updates its static pose; once the camera has keyframes on its spatial pose (`/transform/position`, `/transform/rotation_degrees`, `/camera/distance`) or Auto Key is enabled, navigating at another frame keys the new pose (including orbit distance) at that frame. Numeric dragging updates the preview during the gesture and creates one Undo transaction when the gesture completes.
 
 The Attribute Editor retains Playa-style collapsible sections and the existing shared attribute grid. Settings → Controls owns compact row, icon, and numeric-field metrics. The shared layout aligns value columns and preserves the saved label divider when a panel narrows.
 
