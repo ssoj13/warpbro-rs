@@ -10,15 +10,15 @@ use fractal_kernels::kernels;
 use sha2::{Digest, Sha256};
 use soluwell_studio::palette::build_lut;
 use soluwell_studio::render::{
-    BackendFilm, ComputeEngine, Gpu, RenderError, StepOutcome, Target, denoise_due, film_mismatch,
-    fused_display,
+    BackendFilm, ComputeEngine, Gpu, RenderError, StepOutcome, StepSpec, Target, denoise_due,
+    film_mismatch, fused_display,
 };
 use soluwell_studio::render_prep::{
     BLOCK, LightResidentKey, LutResidentKey, ObjectResidentKey, Plane, PreparationStats,
     PreparedScene, Resident, TALLY_THREADS, WorldMaterial, padded_len, untile_into,
 };
 use soluwell_studio::render_profiles::Backend;
-use soluwell_studio::render_wgpu::{WgpuEngine, WgpuTarget};
+use soluwell_studio::render_wgpu::{TraceDispatch, WgpuEngine, WgpuTarget};
 use soluwell_studio::scene::{MaterialModel, Scene};
 
 use crate::formulas::{FORMULAS, ITERATING_MASK, SIGNED_MASK};
@@ -669,16 +669,17 @@ impl ComputeEngine for WarpBroComputeEngine {
         &mut self,
         backend: Backend,
         target: &mut Target,
-        scene: &Scene,
-        prepared: &PreparedScene,
-        params: &[f32; P_COUNT],
-        spp: u32,
-        final_pass: bool,
-        force_mixed_world: bool,
+        trace: TraceDispatch<'_>,
+        step: StepSpec,
         display: &mut dyn FnMut(&Target) -> bool,
     ) -> Result<StepOutcome, RenderError> {
+        let scene = trace.scene;
+        let prepared = trace.prepared;
+        let full = trace.full_material;
+        let force_mixed_world = trace.force_mixed_world;
+        let spp = step.spp;
+        let final_pass = step.final_pass;
         if backend == Backend::Wgpu {
-            let full = params[P_MATERIAL_MODEL] != 0.0;
             let adaptive = scene.render.adaptive;
             let next_samples = target.samples + spp;
             let run_adapt = adaptive.enabled && next_samples >= adaptive.min();
@@ -705,10 +706,7 @@ impl ComputeEngine for WarpBroComputeEngine {
                         .ok_or_else(film_mismatch)?;
                     target.unresolved = wgpu.launch_fused_step_display(
                         wt,
-                        scene,
-                        prepared,
-                        full,
-                        force_mixed_world,
+                        trace,
                         target.width,
                         target.height,
                         &mut target.light,
@@ -722,15 +720,8 @@ impl ComputeEngine for WarpBroComputeEngine {
                     .as_ref()
                     .and_then(|(_, f)| f.downcast_ref::<WgpuTarget>())
                     .ok_or_else(film_mismatch)?;
-                let (unresolved, _, _) = wgpu.launch_trace_and_tally(
-                    wt,
-                    scene,
-                    prepared,
-                    full,
-                    force_mixed_world,
-                    false,
-                    total_tiles,
-                )?;
+                let (unresolved, _, _) =
+                    wgpu.launch_trace_and_tally(wt, trace, false, total_tiles)?;
                 target.unresolved = unresolved;
                 target.tally_dirty = false;
                 Ok(StepOutcome::NeedsDisplay {
@@ -742,15 +733,8 @@ impl ComputeEngine for WarpBroComputeEngine {
                     .as_ref()
                     .and_then(|(_, f)| f.downcast_ref::<WgpuTarget>())
                     .ok_or_else(film_mismatch)?;
-                let (unresolved, active, converged) = wgpu.launch_trace_and_tally(
-                    wt,
-                    scene,
-                    prepared,
-                    full,
-                    force_mixed_world,
-                    true,
-                    total_tiles,
-                )?;
+                let (unresolved, active, converged) =
+                    wgpu.launch_trace_and_tally(wt, trace, true, total_tiles)?;
                 target.unresolved = unresolved;
                 target.tally_dirty = false;
                 target.active_tiles = (active, total_tiles);
@@ -926,7 +910,6 @@ impl ComputeEngine for WarpBroComputeEngine {
 
     fn read_film(
         &self,
-        backend: Backend,
         film: &BackendFilm,
         plane: Plane,
         dims: (usize, usize),
@@ -934,10 +917,7 @@ impl ComputeEngine for WarpBroComputeEngine {
         tiled: &mut Vec<[f32; 4]>,
         output: &mut Vec<[f32; 4]>,
     ) -> Result<(), RenderError> {
-        if backend == Backend::Wgpu {
-            let wt = film
-                .downcast_ref::<WgpuTarget>()
-                .ok_or_else(film_mismatch)?;
+        if let Some(wt) = film.downcast_ref::<WgpuTarget>() {
             self.wgpu()?
                 .read_tiled_into(wt, plane, dims, normalize, tiled, output)
         } else {
@@ -959,12 +939,10 @@ impl ComputeEngine for WarpBroComputeEngine {
     fn pick(
         &mut self,
         backend: Backend,
-        _scene: &Scene,
         prepared: &Arc<PreparedScene>,
         env: Option<&soluwell_studio::environment::Map>,
         params: &[f32; P_COUNT],
-        ndc: [f32; 2],
-        family: Option<u32>,
+        (ndc, family): ([f32; 2], Option<u32>),
         stats: &mut PreparationStats,
     ) -> Result<Option<(usize, f32)>, RenderError> {
         if backend == Backend::Wgpu {
