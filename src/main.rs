@@ -203,6 +203,7 @@ fn animated_fixtures(
 }
 
 fn main() -> anyhow::Result<()> {
+    let _crash_guard = crashdump::init!();
     env_logger::init();
     engine::init_warpbro();
     let args: Vec<String> = std::env::args().collect();
