@@ -24,6 +24,33 @@ use soluwell_studio::scene::{MaterialModel, Scene};
 use crate::formulas::{FORMULAS, ITERATING_MASK, SIGNED_MASK};
 use crate::fractal_node::{FractalNodeSpec, FractalSceneExt};
 
+/// Hot-pluggable [`soluwell_studio::StudioModule`] ("organ") registering WarpBro's `"Fractal"`
+/// SDF scene node (`FractalNodeSpec`), 28-family WGSL shader hook, thumbnail fingerprint, and
+/// built-in scene templates into `soluwell-studio`.
+pub struct WarpBroFractalModule;
+
+impl soluwell_studio::StudioModule for WarpBroFractalModule {
+    fn id(&self) -> &'static str {
+        "warpbro.fractals"
+    }
+
+    fn title(&self) -> &'static str {
+        "WarpBro 3D Fractals"
+    }
+
+    fn node_specs(&self) -> Vec<std::sync::Arc<dyn soluwell_studio::node_spec::NodeTypeSpec>> {
+        vec![std::sync::Arc::new(crate::fractal_node::FractalNodeSpec)]
+    }
+
+    fn on_register(
+        &self,
+        _bus: &soluwell_studio::app_control::appbus::EventBus,
+        _hotkeys: &mut soluwell_studio::HotkeyRegistry,
+    ) {
+        init_warpbro();
+    }
+}
+
 /// Register WarpBro's `"Fractal"` node spec, 28-family WGSL shader hook, extra thumbnail
 /// cache fingerprint, and built-in scene templates into `soluwell-studio`.
 /// Safe and idempotent to call from `main`, CLI subcommands, and tests.

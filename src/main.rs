@@ -258,6 +258,7 @@ fn main() -> anyhow::Result<()> {
                 Scene::preset_fractal(Formula::Mandelbulb(Bulb::PRESET))
             })),
             gpu_init_label: "Initializing GPU (CUDA / WGPU)…".into(),
+            modules: vec![Arc::new(engine::WarpBroFractalModule)],
         }),
     }
 }

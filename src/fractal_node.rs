@@ -1763,6 +1763,10 @@ impl NodeTypeSpec for FractalNodeSpec {
         put3(p, P_TRAP_NORMAL, axis);
         p[P_TRAP_SCALE] = trap_scale;
     }
+
+    fn payload_kind(&self) -> soluwell_studio::NodePayloadKind {
+        soluwell_studio::NodePayloadKind::SdfField
+    }
 }
 
 fn put3(p: &mut [f32], i: usize, v: [f32; 3]) {
@@ -1819,7 +1823,18 @@ mod tests {
 
     #[test]
     fn fractal_node_lifecycle_and_parameter_roundtrip() {
+        use soluwell_studio::StudioModule;
         crate::engine::init_warpbro();
+        assert_eq!(
+            FractalNodeSpec.payload_kind(),
+            soluwell_studio::NodePayloadKind::SdfField
+        );
+        assert_eq!(crate::engine::WarpBroFractalModule.id(), "warpbro.fractals");
+        assert_eq!(
+            crate::engine::WarpBroFractalModule.title(),
+            "WarpBro 3D Fractals"
+        );
+        assert_eq!(crate::engine::WarpBroFractalModule.node_specs().len(), 1);
         let mut scene = Scene::preset_fractal(Formula::Mandelbulb(Bulb::PRESET));
         scene.set_orbit_offset([0.1, -0.2, 0.3]);
         scene.set_inversion_strength(0.5);
