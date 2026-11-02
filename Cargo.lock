@@ -332,7 +332,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "parking_lot",
  "percent-encoding",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
  "x11rb",
 ]
 
@@ -1450,7 +1450,7 @@ dependencies = [
 [[package]]
 name = "blosc-rs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/openvdb-rs.git?branch=main#2707ffaffd278521a9d71e6e998a648d7eb65f11"
+source = "git+ssh://git@github.com/ssoj13/openvdb-rs.git?branch=main#819a3e52d7bb562a615373a4d18d3d7b930d4935"
 dependencies = [
  "lz4-rs",
 ]
@@ -2240,7 +2240,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2405,7 +2405,7 @@ dependencies = [
 [[package]]
 name = "crashdump-rs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/crashdump-rs.git?branch=main#95fdefacd6560b679f285d1d40d46934b258deb9"
+source = "git+ssh://git@github.com/ssoj13/crashdump-rs.git?branch=main#9ae33dca9ea5c9a4bba9ea9562eff2d1a1c534a5"
 dependencies = [
  "backtrace",
  "libc",
@@ -3567,7 +3567,7 @@ dependencies = [
  "libc",
  "option-ext",
  "redox_users",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -4035,7 +4035,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6017,7 +6017,7 @@ dependencies = [
 [[package]]
 name = "lz4-rs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/openvdb-rs.git?branch=main#2707ffaffd278521a9d71e6e998a648d7eb65f11"
+source = "git+ssh://git@github.com/ssoj13/openvdb-rs.git?branch=main#819a3e52d7bb562a615373a4d18d3d7b930d4935"
 
 [[package]]
 name = "lzma-rust2"
@@ -6389,7 +6389,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -6946,7 +6946,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 [[package]]
 name = "openvdb"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/openvdb-rs.git?branch=main#2707ffaffd278521a9d71e6e998a648d7eb65f11"
+source = "git+ssh://git@github.com/ssoj13/openvdb-rs.git?branch=main#819a3e52d7bb562a615373a4d18d3d7b930d4935"
 dependencies = [
  "blosc-rs",
  "bytemuck",
@@ -7361,7 +7361,7 @@ dependencies = [
  "combine",
  "downcast-rs 2.0.2",
  "dyn-clone",
- "hashbrown 0.17.1",
+ "hashbrown 0.13.2",
  "hi_sparse_bitset 0.10.0",
  "indexmap",
  "inventory",
@@ -8285,7 +8285,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys 0.12.1",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -9422,10 +9422,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix 1.1.6",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -10209,7 +10209,7 @@ dependencies = [
 [[package]]
 name = "usd-ar"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#54745cf22079413d34c2c6e18078a10b8dfd545e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#ce5f37b47d4361011566dc2eb630e17b0b046144"
 dependencies = [
  "log",
  "once_cell",
@@ -10223,23 +10223,12 @@ dependencies = [
 [[package]]
 name = "usd-arch"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#54745cf22079413d34c2c6e18078a10b8dfd545e"
-dependencies = [
- "backtrace",
- "bitflags 2.13.2",
- "libc",
- "libloading 0.8.9",
- "memmap2",
- "once_cell",
- "regex",
- "rustc-demangle",
- "windows-sys 0.61.2",
-]
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#ce5f37b47d4361011566dc2eb630e17b0b046144"
 
 [[package]]
 name = "usd-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#54745cf22079413d34c2c6e18078a10b8dfd545e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#ce5f37b47d4361011566dc2eb630e17b0b046144"
 dependencies = [
  "once_cell",
  "ordered-float",
@@ -10249,18 +10238,21 @@ dependencies = [
  "usd-ar",
  "usd-derive-macros",
  "usd-gf",
+ "usd-js",
  "usd-kind",
  "usd-pcp",
+ "usd-plug",
  "usd-sdf",
  "usd-tf",
  "usd-trace",
+ "usd-ts",
  "usd-vt",
 ]
 
 [[package]]
 name = "usd-derive-macros"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#54745cf22079413d34c2c6e18078a10b8dfd545e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#ce5f37b47d4361011566dc2eb630e17b0b046144"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -10270,7 +10262,7 @@ dependencies = [
 [[package]]
 name = "usd-geom"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#54745cf22079413d34c2c6e18078a10b8dfd545e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#ce5f37b47d4361011566dc2eb630e17b0b046144"
 dependencies = [
  "log",
  "once_cell",
@@ -10285,7 +10277,7 @@ dependencies = [
 [[package]]
 name = "usd-gf"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#54745cf22079413d34c2c6e18078a10b8dfd545e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#ce5f37b47d4361011566dc2eb630e17b0b046144"
 dependencies = [
  "half",
  "num-traits",
@@ -10295,7 +10287,7 @@ dependencies = [
 [[package]]
 name = "usd-js"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#54745cf22079413d34c2c6e18078a10b8dfd545e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#ce5f37b47d4361011566dc2eb630e17b0b046144"
 dependencies = [
  "serde_json",
 ]
@@ -10303,7 +10295,7 @@ dependencies = [
 [[package]]
 name = "usd-kind"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#54745cf22079413d34c2c6e18078a10b8dfd545e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#ce5f37b47d4361011566dc2eb630e17b0b046144"
 dependencies = [
  "log",
  "usd-plug",
@@ -10313,7 +10305,7 @@ dependencies = [
 [[package]]
 name = "usd-pcp"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#54745cf22079413d34c2c6e18078a10b8dfd545e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#ce5f37b47d4361011566dc2eb630e17b0b046144"
 dependencies = [
  "bitflags 2.13.2",
  "log",
@@ -10331,7 +10323,7 @@ dependencies = [
 [[package]]
 name = "usd-plug"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#54745cf22079413d34c2c6e18078a10b8dfd545e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#ce5f37b47d4361011566dc2eb630e17b0b046144"
 dependencies = [
  "glob",
  "libloading 0.8.9",
@@ -10344,7 +10336,7 @@ dependencies = [
 [[package]]
 name = "usd-sdf"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#54745cf22079413d34c2c6e18078a10b8dfd545e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#ce5f37b47d4361011566dc2eb630e17b0b046144"
 dependencies = [
  "alembic-rs",
  "bitflags 2.13.2",
@@ -10368,13 +10360,14 @@ dependencies = [
  "usd-plug",
  "usd-tf",
  "usd-trace",
+ "usd-ts",
  "usd-vt",
 ]
 
 [[package]]
 name = "usd-tf"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#54745cf22079413d34c2c6e18078a10b8dfd545e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#ce5f37b47d4361011566dc2eb630e17b0b046144"
 dependencies = [
  "crashdump-rs",
  "glob",
@@ -10390,7 +10383,7 @@ dependencies = [
 [[package]]
 name = "usd-trace"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#54745cf22079413d34c2c6e18078a10b8dfd545e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#ce5f37b47d4361011566dc2eb630e17b0b046144"
 dependencies = [
  "once_cell",
  "parking_lot",
@@ -10400,9 +10393,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "usd-ts"
+version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#ce5f37b47d4361011566dc2eb630e17b0b046144"
+dependencies = [
+ "num-traits",
+ "usd-gf",
+ "usd-tf",
+ "usd-vt",
+]
+
+[[package]]
 name = "usd-vt"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#54745cf22079413d34c2c6e18078a10b8dfd545e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#ce5f37b47d4361011566dc2eb630e17b0b046144"
 dependencies = [
  "ordered-float",
  "usd-gf",
@@ -11285,7 +11289,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
