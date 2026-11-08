@@ -158,7 +158,7 @@ run_worker (render_service.rs; line anchors above predate the compiler/cache add
     PreparationCache::get (render_prep.rs:374) -> PreparedScene (WorldUpload: params, objects, masks, lights)
     trace: CUDA kernels (world / world_fast / world_direct / per family) | WgpuEngine launch_* (render_wgpu.rs:
            trace_entry -> TraceEntry {world, shade, family} -> the family's module, compiled on first use)
-    adapt (active tiles) / tally (unresolved) / process_denoise (OIDN, denoise::State::due cadence)
+    adapt (active tiles) / tally (unresolved) / process_denoise (OIDN: GpuDenoiser on WGPU, HostDenoiser on CUDA, denoise::State::due cadence)
     display: tonemap -> ColorPipeline::apply_into (OCIO) -> Target.light / Target.pixels
              (skipped while Target.display_key matches: exposure, saturation, reinhard, Sel and
              the config load Ocio::serial; transforms cached per selection + load)
@@ -207,8 +207,9 @@ IoService thread: settings / scenes / bookmarks (tmp + rename), frame and window
   the diagnostics wake mutex.
 - A pending shader ticket must not consume the render worker with an inline driver compile; failures
   remain terminal for that ticket. The compiler is separate from the sole owner of render targets.
-- Pipeline-cache persistence is driver-specific. The gpu-info dependency is pinned to the guard fix
-  `f845ac889738e159191eb9f71cfabc8831ce134f`, which corrects cache persistence after pipeline creation.
+- Pipeline-cache persistence is driver-specific. The gpu-info dependency (`bb476cdc`, `>= f845ac88`)
+  retains the cache-persistence guard fix and provides `gpu_info::create_compute_pipeline` /
+  `create_render_pipeline` used across `soluwell-studio-render` and `examples/pipeline_cache_probe.rs`.
   Verify accepted cache contents and reuse across restart; a large old disk file alone proves neither.
 - UI/REST admission must use reliable Playa EventBus `try_emit` (upstream `72ed08b`); do not add a
   parallel application queue or fall back to an emitter that evicts accepted actions on overflow.
@@ -228,6 +229,7 @@ IoService thread: settings / scenes / bookmarks (tmp + rename), frame and window
 
 ## Changelog
 
+- **2026-11-08**: Upgraded ecosystem lock to `render-rs@23c01af`, `fractal-rs@21c3f4e`, and `egui-widgets-rs@1a621308` (`gpu-info-rs@bb476cdc`): adopted `ThinFilmEnergy::Conserving` default for non-OFX renders across CUDA (`fractal-kernels`) and WGPU (`soluwell-studio-render`), GPU-native OIDN `GpuDenoiser` on `WgpuTarget` tiled planes (with `HostDenoiser` fallback for CUDA), shared `gpu_info::create_compute_pipeline` shader caching, 69 curated `standard_surface_bsdf::presets` SSOT, and aligned `parity_tests::pixel_beam_start_fixes_recorded_mobius_surface_skip` with the paired 8-D Bayer-shuffled Sobol sampler.
 - **2026-10-30**: Synchronized `warpbro-rs` with `soluwell-studio` (`NodeTypeSpec v2`, `StudioModule`, `appbus` two-layer nervous system) and `render-rs` shared studio SSOT (`pt_integrator::studio_abi`, `render_env::studio`, `standard_surface_bsdf::presets`): added `WarpBroFractalModule` (`StudioModule`) in `src/engine.rs`, wired `StudioConfig::modules` in `src/main.rs`, and implemented `FractalNodeSpec::payload_kind() -> NodePayloadKind::SdfField` in `src/fractal_node.rs`.
 - **2026-10-29**: Documented `animation-rs` (`animation` crate: `time`, `anim`, `attrs` (`AttrValue`, `Attrs`), `transform`, `keys`, `curves` re-exported via `soluwell_studio::world`) across `soluwell-studio` and cleaned up the `warpbro-rs` dependency graph by dropping unused direct `playa-*`, `video-io`, `vfx-ocio`, `exr-core`, `wgpu`, etc. dependencies.
 - **2026-10-28**: Consolidated all root plan/handoff/bug documents into `PLAN.md`. Added inline `Backend` (`Auto / CUDA / WGPU`) selector across RenderSettings bindings, synced OIDN `WorkContext`, updated `CUDA_OXIDE_REV`, and locked OxideAV git dependencies in `Cargo.lock`. All 28 families ported to CUDA with 234 specialized kernel entries (`fractal-rs` `5a21813e`).

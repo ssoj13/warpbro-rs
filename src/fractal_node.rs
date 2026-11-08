@@ -1817,6 +1817,7 @@ fn rotation_matrix4(degrees: [f32; 3]) -> [[f32; 4]; 4] {
 
 #[cfg(test)]
 mod tests {
+    use soluwell_studio::render_prep::WorldUpload;
     use soluwell_studio::world::{WorldCommand, WorldDocument, WorldEditor};
 
     use super::*;
@@ -1865,8 +1866,9 @@ mod tests {
         assert_eq!(snap.trap_point(), [1.0, 2.0, 3.0]);
         assert_eq!(snap.trap_axis(), 2);
         assert_eq!(snap.trap_scale(), 2.5);
-        let packed = snap.pack(64, 64);
-        assert_eq!(packed[P_OBJECT_COUNT], 1.0);
+        let upload = WorldUpload::new(&snap, 64, 64).expect("world upload with Fractal node");
+        assert_eq!(upload.params[P_OBJECT_COUNT], 1.0);
+        assert!(!upload.objects.is_empty());
 
         editor
             .execute_edit(
@@ -1884,7 +1886,10 @@ mod tests {
             .snapshot(0.0)
             .expect("snapshot with hidden Fractal");
         assert!(hidden_snap.objects.is_empty());
-        assert_eq!(hidden_snap.pack(64, 64)[P_OBJECT_COUNT], 0.0);
+        let hidden_upload =
+            WorldUpload::new(&hidden_snap, 64, 64).expect("world upload with hidden Fractal");
+        assert_eq!(hidden_upload.params[P_OBJECT_COUNT], 0.0);
+        assert!(hidden_upload.objects.is_empty());
 
         editor
             .execute_edit(WorldCommand::Delete(fractal_id), None)
@@ -1894,6 +1899,9 @@ mod tests {
             .snapshot(0.0)
             .expect("snapshot without Fractal");
         assert!(empty_snap.objects.is_empty());
-        assert_eq!(empty_snap.pack(64, 64)[P_OBJECT_COUNT], 0.0);
+        let empty_upload =
+            WorldUpload::new(&empty_snap, 64, 64).expect("world upload without Fractal");
+        assert_eq!(empty_upload.params[P_OBJECT_COUNT], 0.0);
+        assert!(empty_upload.objects.is_empty());
     }
 }

@@ -1,6 +1,13 @@
 # Changelog
 
-## Unreleased - 2026-10-28
+## Unreleased - 2026-11-08
+
+- **Ecosystem Upgrade (`render-rs@23c01af`, `fractal-rs@21c3f4e`, `egui-widgets-rs@1a621308`)**:
+  - Enabled `ThinFilmEnergy::Conserving` by default for non-OFX scenes across both `fractal-kernels` (CUDA) and `soluwell-studio-render` (WGPU), backed by the 69 curated `standard_surface_bsdf::presets` SSOT and `pt_integrator::studio_abi` / `render_env::studio`.
+  - Enabled GPU-native OIDN `GpuDenoiser` directly on `WgpuTarget` tiled accumulation/guide planes via `soluwell-studio`, retaining `HostDenoiser` fallback for CUDA targets, plus persistent `gpu-info` (`bb476cdc`) pipeline caching (`gpu_info::create_compute_pipeline`).
+  - Updated `parity_tests::pixel_beam_start_fixes_recorded_mobius_surface_skip` sample index for the paired 8-D Bayer-shuffled Sobol sequence in `standard_surface_bsdf::sampling::sobol`.
+
+## 2026-10-28
 
 - **Migration onto `soluwell-studio` (`egui-widgets-rs`)**: extracted shared studio UI, dock panels, Outliner, Timeline, Attribute Editor, Curve Editor, Playa `EventBus` dispatch, loopback REST API (`app-control`), `WorldDocument` graph/undo, `RenderService`, `PreparationCache`, OCIO display pipeline, OIDN denoiser, `PreviewController`, `ThumbnailCache`, and `ExportController` into `egui-widgets-rs/crates/soluwell/studio`. `warpbro-rs` registers `"Fractal"` (`src/fractal_node.rs`, `FractalNodeSpec`), `WarpBroComputeEngine` (`src/engine.rs`, dual CUDA `fractal-kernels` + 28-family WGPU `src/formulas.wgsl`), and built-in templates/gallery (`src/templates.rs`, `src/presets.rs`). Removed 45 duplicated files and `crates/app-control` from `warpbro-rs`.
 - **Inline Compute Backend Selector (`Auto / CUDA / WGPU`)**: added inline `Backend` selector on `RenderSettings` binding rows (`Moving`, `Still`, `Manual`, `Output`) in `Settings -> Render & Viewport`, viewport toolbar profile menu, and `Render / Encode`, backed by `/render/backend` on the `RenderSettings` node via `WorldCommand::SetAttribute` with single-step Undo. Added `PtComputeBackend` selector to `render-egui`.

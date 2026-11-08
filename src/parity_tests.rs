@@ -1929,8 +1929,9 @@ fn pixel_beam_start_fixes_recorded_mobius_surface_skip() {
         2.0 * 62.5 / WIDTH as f32 - 1.0,
         1.0 - 2.0 * 6.5 / HEIGHT as f32,
     ]);
+    // Sample 31 of the 8-D Bayer-shuffled Sobol net hits the sphere-facing corner (~[0.070, 0.914]).
     let jitter: [f32; 2] = std::array::from_fn(|dim| {
-        standard_surface_bsdf::sampling::sobol(62 ^ SEED, 6, 0, dim as u32)
+        standard_surface_bsdf::sampling::sobol(62 ^ SEED, 6, 31, dim as u32)
     });
     let sample = ray([
         2.0 * (62.0 + jitter[0]) / WIDTH as f32 - 1.0,
