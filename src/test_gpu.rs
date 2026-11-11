@@ -174,12 +174,13 @@ fn parse_fn_name(mut line: &str) -> Option<&str> {
     (!name.is_empty()).then_some(name)
 }
 
-const GPU_MARKERS: [&str; 10] = [
+const GPU_MARKERS: [&str; 11] = [
     "new_gpu(",
     "RenderService::spawn(",
     "Gpu::new(",
     "Gpu::with_engine(",
     "WarpBroComputeEngine::new(",
+    "WgpuComputeEngine::new(",
     "WgpuEngine::new(",
     "render_wgpu::warmup(",
     "render_bench::run(",

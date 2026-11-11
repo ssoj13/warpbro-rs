@@ -218,6 +218,22 @@ IoService thread: settings / scenes / bookmarks (tmp + rename), frame and window
 - Many sources are CRLF; scripted replacements must match `\r\n`.
 - Tests: `cuda_*` need a CUDA device, `gpu_*` another GPU API, and no other test name contains
   them (`test_gpu::device_prefixes_only_start_test_names`); hosted CI skips both.
+- Fractal custom branches are validated, never defaulted: `FractalNodeSpec::validate_node`
+  (`validate_fractal_branches`) runs on decode, after every edit (rollback) and per shown node in
+  every snapshot (soluwell `NodeTypeSpec::validate_node`, egui-widgets-rs `13d6f8d`). The
+  infallible accessors (`formula()`, `julia()`, ...) therefore only log an error if a scene was
+  built around that validation. Add a new custom key to `validate_fractal_branches` too.
+- Integer formula leaves (`u32` fields: `octaves`, `fibers`, ...) are found from the presets'
+  JSON (`integer_formula_leaf`), validated as whole numbers and keyed discretely: a float there
+  (even `3.0`) fails `Formula::deserialize`.
+- Enum choices come from the enums' `ALL` arrays (`formulas::enum_choices!`): a new variant goes
+  into `ALL`, never into a string table.
+- The WGPU backend is soluwell's `WgpuComputeEngine` (delegated); WarpBro adds only the shader
+  hook. Unknown family codes are a miss in WGSL and CUDA alike.
+- `--warmup` loads CUDA directly (`engine::warmup_cuda`) and reports it unavailable instead of
+  falling back; unknown `--options` are errors, not the GUI.
+- `cargo` shares `target/` with other agent sessions on this repo; a build may block on the
+  directory lock for minutes. Check for a running `cargo` before assuming a hang.
 
 ## TODO
 
@@ -229,6 +245,7 @@ IoService thread: settings / scenes / bookmarks (tmp + rename), frame and window
 
 ## Changelog
 
+- **2026-11-11**: `/bughunt` audit at `a5ee386` ([plan1.md](plan1.md)), then waves A-C: node validation hook upstream (egui-widgets-rs `13d6f8d`: `validate_node`, `WgpuComputeEngine::wgpu_mut`, `tile_count`), strict custom-branch readers, integer leaves, enum-derived choices, classic labels/hints from `FORMULAS`, WGPU delegated to soluwell, WGSL unknown-family miss, honest `--warmup`, strict CLI, build.rs rerun keys, xtask VS-fallback warning.
 - **2026-11-08**: Upgraded ecosystem lock to `render-rs@23c01af`, `fractal-rs@21c3f4e`, and `egui-widgets-rs@1a621308` (`gpu-info-rs@bb476cdc`): adopted `ThinFilmEnergy::Conserving` default for non-OFX renders across CUDA (`fractal-kernels`) and WGPU (`soluwell-studio-render`), GPU-native OIDN `GpuDenoiser` on `WgpuTarget` tiled planes (with `HostDenoiser` fallback for CUDA), shared `gpu_info::create_compute_pipeline` shader caching, 69 curated `standard_surface_bsdf::presets` SSOT, and aligned `parity_tests::pixel_beam_start_fixes_recorded_mobius_surface_skip` with the paired 8-D Bayer-shuffled Sobol sampler.
 - **2026-10-30**: Synchronized `warpbro-rs` with `soluwell-studio` (`NodeTypeSpec v2`, `StudioModule`, `appbus` two-layer nervous system) and `render-rs` shared studio SSOT (`pt_integrator::studio_abi`, `render_env::studio`, `standard_surface_bsdf::presets`): added `WarpBroFractalModule` (`StudioModule`) in `src/engine.rs`, wired `StudioConfig::modules` in `src/main.rs`, and implemented `FractalNodeSpec::payload_kind() -> NodePayloadKind::SdfField` in `src/fractal_node.rs`.
 - **2026-10-29**: Documented `animation-rs` (`animation` crate: `time`, `anim`, `attrs` (`AttrValue`, `Attrs`), `transform`, `keys`, `curves` re-exported via `soluwell_studio::world`) across `soluwell-studio` and cleaned up the `warpbro-rs` dependency graph by dropping unused direct `playa-*`, `video-io`, `vfx-ocio`, `exr-core`, `wgpu`, etc. dependencies.

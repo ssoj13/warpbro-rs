@@ -4,7 +4,11 @@
 
 fn main() {
     println!("cargo::rerun-if-env-changed=CARGO_ENCODED_RUSTFLAGS");
+    // Every variable the early return reads: otherwise a result cached under clippy (or
+    // rust-analyzer) is reused by a later plain build with the same flags, skipping the guard.
     println!("cargo::rerun-if-env-changed=FRAC_ALLOW_PLAIN_CARGO");
+    println!("cargo::rerun-if-env-changed=CLIPPY_ARGS");
+    println!("cargo::rerun-if-env-changed=RA_RUSTC_WRAPPER");
     // Type-checking front ends never link, so they need no backend: clippy, rust-analyzer, and
     // an explicit opt-out for plain `cargo check`.
     if ["CLIPPY_ARGS", "RA_RUSTC_WRAPPER", "FRAC_ALLOW_PLAIN_CARGO"]

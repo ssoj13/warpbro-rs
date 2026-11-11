@@ -17,6 +17,8 @@
 //!                                                    render the animated presets' frames
 //!   WarpBro --warmup                                 initialize the embedded CUDA module and
 //!                                                    the WGPU device, module and post pipelines
+//!
+//! Any other `--option` is an error (a typo must not open the GUI from a script).
 
 // The parameter ABI is shared with the CUDA kernels and with ofx-rs through fractal-rs; host code
 // keeps addressing it as crate::params.
@@ -58,6 +60,33 @@ where
     }
 }
 
+/// Optional directory positional `i` with the same `--flag` rule as [`arg`]: `--gallery --hdr`
+/// writes to `default`, not to a directory named `--hdr`.
+fn dir_arg<'a>(args: &'a [String], i: usize, default: &'a str) -> &'a str {
+    args.get(i)
+        .filter(|v| !v.starts_with("--"))
+        .map_or(default, String::as_str)
+}
+
+/// Reject what a mode does not read: an unknown `--flag`, or more than `positional` plain
+/// arguments after the mode, so a typo fails instead of being ignored.
+fn check_args(args: &[String], positional: usize, flags: &[&str]) -> anyhow::Result<()> {
+    let mode = &args[1];
+    let mut plain = 0;
+    for a in &args[2..] {
+        if a.starts_with("--") {
+            anyhow::ensure!(flags.contains(&a.as_str()), "{mode}: unknown option {a}");
+        } else {
+            plain += 1;
+        }
+    }
+    anyhow::ensure!(
+        plain <= positional,
+        "{mode}: expected at most {positional} positional arguments, got {plain}"
+    );
+    Ok(())
+}
+
 /// Render (or only time) every gallery preset offscreen.
 fn headless(
     out: Option<&str>,
@@ -68,6 +97,15 @@ fn headless(
     display_exr: bool,
 ) -> anyhow::Result<()> {
     validate_size(w, h, spp)?;
+    // The first sample is an untimed warm-up step: with one sample nothing is left to time.
+    anyhow::ensure!(
+        out.is_some() || spp >= 2,
+        "--bench needs at least 2 spp (the first sample is the untimed warm-up)"
+    );
+    if let Some(dir) = out {
+        // Fail before rendering anything, not after the first preset.
+        std::fs::create_dir_all(dir)?;
+    }
     let mut gpu = engine::new_gpu()?;
     println!("GPU: {}  ·  {w}x{h}, {spp} spp", gpu.name);
     println!(
@@ -149,11 +187,15 @@ fn animated_fixtures(
         let frames: Vec<u32> = if all_frames {
             (document.first..=document.last).collect()
         } else {
-            vec![
+            let mut picks = vec![
                 document.first,
                 document.first.midpoint(document.last),
                 document.last,
-            ]
+            ];
+            // Sorted (`first <= last` is a document invariant): a one- or two-frame range
+            // renders each frame once.
+            picks.dedup();
+            picks
         };
         for frame in frames {
             let evaluated = document
@@ -195,29 +237,35 @@ fn main() -> anyhow::Result<()> {
         // Build-time warmup, without a window or scene state: the CUDA driver JIT-caches the
         // embedded module, and the WGPU device opens with its dynamic module and post pipelines
         // (trace pipelines compile per family module on first use, then come from disk).
+        // A machine without CUDA (another vendor's GPU) still warms WGPU, so a missing CUDA
+        // is reported, not fatal; it is never reported as ready.
         Some("--warmup") => {
+            check_args(&args, 0, &[])?;
             let started = std::time::Instant::now();
-            let gpu = engine::new_gpu()?;
-            println!("CUDA ready: {} ({:?})", gpu.name, started.elapsed());
+            match engine::warmup_cuda() {
+                Ok(name) => println!("CUDA ready: {name} ({:?})", started.elapsed()),
+                Err(error) => println!("CUDA unavailable, not warmed: {error}"),
+            }
             let started = std::time::Instant::now();
             let backend = render_wgpu::warmup().map_err(anyhow::Error::msg)?;
             println!("WGPU ready on {backend:?} ({:?})", started.elapsed());
             Ok(())
         }
         Some("--world-bench") => render_bench::run(&args),
-        Some("--animated-fixtures") => animated_fixtures(
-            args.get(2)
-                .map(String::as_str)
-                .unwrap_or("animated-fixtures"),
-            arg(&args, 3, 640)?,
-            arg(&args, 4, 360)?,
-            arg(&args, 5, 32)?,
-            args.iter().any(|a| a == "--all-frames"),
-        ),
+        Some("--animated-fixtures") => {
+            check_args(&args, 4, &["--all-frames"])?;
+            animated_fixtures(
+                dir_arg(&args, 2, "animated-fixtures"),
+                arg(&args, 3, 640)?,
+                arg(&args, 4, 360)?,
+                arg(&args, 5, 32)?,
+                args.iter().any(|a| a == "--all-frames"),
+            )
+        }
         Some("--gallery") => {
-            let dir = args.get(2).cloned().unwrap_or_else(|| "gallery".into());
+            check_args(&args, 4, &["--hdr", "--display-exr"])?;
             headless(
-                Some(&dir),
+                Some(dir_arg(&args, 2, "gallery")),
                 arg(&args, 3, 960)?,
                 arg(&args, 4, 540)?,
                 arg(&args, 5, 64)?,
@@ -225,13 +273,20 @@ fn main() -> anyhow::Result<()> {
                 args.iter().any(|a| a == "--display-exr"),
             )
         }
-        Some("--bench") => headless(
-            None,
-            arg(&args, 2, 960)?,
-            arg(&args, 3, 540)?,
-            arg(&args, 4, 32)?,
-            false,
-            false,
+        Some("--bench") => {
+            check_args(&args, 3, &[])?;
+            headless(
+                None,
+                arg(&args, 2, 960)?,
+                arg(&args, 3, 540)?,
+                arg(&args, 4, 32)?,
+                false,
+                false,
+            )
+        }
+        Some(option) if option.starts_with("--") => anyhow::bail!(
+            "unknown option {option}; modes: --gallery, --bench, --world-bench, \
+             --animated-fixtures, --warmup (see the header of src/main.rs)"
         ),
         _ => soluwell_studio::run_with(soluwell_studio::StudioConfig {
             title: "WarpBro".into(),
@@ -244,5 +299,28 @@ fn main() -> anyhow::Result<()> {
             gpu_init_label: "Initializing GPU (CUDA / WGPU)…".into(),
             modules: vec![Arc::new(engine::WarpBroFractalModule)],
         }),
+    }
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    fn argv(rest: &[&str]) -> Vec<String> {
+        std::iter::once("WarpBro")
+            .chain(rest.iter().copied())
+            .map(String::from)
+            .collect()
+    }
+
+    /// plan1 L1/L6: a flag is never taken for a directory, and a typo fails.
+    #[test]
+    fn cli_flags_never_become_paths_and_typos_fail() {
+        let args = argv(&["--gallery", "--hdr"]);
+        assert_eq!(dir_arg(&args, 2, "gallery"), "gallery");
+        assert_eq!(dir_arg(&argv(&["--gallery", "out"]), 2, "gallery"), "out");
+        assert!(check_args(&args, 4, &["--hdr", "--display-exr"]).is_ok());
+        assert!(check_args(&argv(&["--gallery", "--hrd"]), 4, &["--hdr"]).is_err());
+        assert!(check_args(&argv(&["--bench", "1", "2", "3", "4"]), 3, &[]).is_err());
     }
 }

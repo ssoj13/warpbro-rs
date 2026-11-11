@@ -15,7 +15,7 @@
 //! - framing/bounding radii (`scene::Formula::framing_radius` / `bound_radius`).
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::params::*;
 
@@ -65,8 +65,8 @@ pub struct ParamMeta {
     pub range: Option<(f64, f64)>,
     /// Soft slider span for interactive dragging.
     pub slider: Option<Slider>,
-    /// Enum choices (if this parameter is a discrete enum).
-    pub choices: &'static [&'static str],
+    /// Enum choices (if this parameter is a discrete enum), from the enum's own variants.
+    pub choices: Option<fn() -> &'static [Value]>,
     /// Relative sort order of the row within the Fractal section: Hybrid's step list first
     /// (12), then the family parameters from 20 up.
     pub order: u16,
@@ -232,6 +232,8 @@ pub enum PolyhedralSymmetry {
 }
 
 impl PolyhedralSymmetry {
+    pub const ALL: [Self; 2] = [Self::Icosahedron, Self::Dodecahedron];
+
     pub const fn code(self) -> u32 {
         match self {
             Self::Icosahedron => 0,
@@ -340,6 +342,8 @@ pub enum TpmsKind {
 }
 
 impl TpmsKind {
+    pub const ALL: [Self; 4] = [Self::Gyroid, Self::SchwarzP, Self::SchwarzD, Self::Neovius];
+
     pub const fn code(self) -> u32 {
         match self {
             Self::Gyroid => 0,
@@ -386,6 +390,8 @@ pub enum ComplexTpmsKind {
 }
 
 impl ComplexTpmsKind {
+    pub const ALL: [Self; 3] = [Self::Lidinoid, Self::FischerKochS, Self::SplitP];
+
     pub const fn code(self) -> u32 {
         match self {
             Self::Lidinoid => 0,
@@ -427,6 +433,8 @@ pub enum AttractorKind {
 }
 
 impl AttractorKind {
+    pub const ALL: [Self; 3] = [Self::Aizawa, Self::Halvorsen, Self::Thomas];
+
     pub const fn code(self) -> u32 {
         match self {
             Self::Aizawa => 0,
@@ -700,12 +708,31 @@ impl AstrolabeGimbal {
 // Declarative Metadata Catalog for All 28 Formulas
 // =============================================================================
 
-const KIFS_KIND_CHOICES: &[&str] = &["Tetrahedron", "Octahedron", "Menger"];
-const HYBRID_STEP_CHOICES: &[&str] = &["Off", "Mandelbulb", "Mandelbox", "KifsFold", "Inversion"];
-const POLY_SYM_CHOICES: &[&str] = &["Icosahedron", "Dodecahedron"];
-const TPMS_KIND_CHOICES: &[&str] = &["Gyroid", "SchwarzP", "SchwarzD", "Neovius"];
-const COMPLEX_TPMS_CHOICES: &[&str] = &["Lidinoid", "FischerKochS", "SplitP"];
-const ATTRACTOR_CHOICES: &[&str] = &["Aizawa", "Halvorsen", "Thomas"];
+/// Choice lists derived from the enums themselves (their `ALL` arrays, serialized by serde),
+/// so a renamed or added variant can never offer a value `Formula::deserialize` rejects.
+/// Each list is built once and borrowed: the Attribute Editor asks every frame.
+macro_rules! enum_choices {
+    ($($name:ident: $ty:ty),* $(,)?) => {$(
+        pub fn $name() -> &'static [Value] {
+            static CHOICES: std::sync::LazyLock<Vec<Value>> = std::sync::LazyLock::new(|| {
+                <$ty>::ALL
+                    .iter()
+                    // A unit variant always serializes to its name.
+                    .map(|v| serde_json::to_value(v).expect("unit enum variant serializes"))
+                    .collect()
+            });
+            &CHOICES
+        }
+    )*};
+}
+enum_choices!(
+    kifs_kind_choices: crate::fractal_node::KifsKind,
+    hybrid_step_choices: crate::fractal_node::HybridStep,
+    polyhedral_symmetry_choices: PolyhedralSymmetry,
+    tpms_kind_choices: TpmsKind,
+    complex_tpms_kind_choices: ComplexTpmsKind,
+    attractor_kind_choices: AttractorKind,
+);
 
 pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
     // 0..8: Classic 8 families
@@ -722,46 +749,46 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
             ParamMeta {
                 name: "power",
                 label: "Power",
-                hint: "Triplex radial/angular power exponent",
+                hint: "Mandelbulb exponent: z -> z^power in spherical coordinates. 8 is the classic bulb; higher gives more, finer lobes.",
                 range: None,
                 slider: lin(1.0, 64.0),
-                choices: &[],
+                choices: None,
                 order: 20,
             },
             ParamMeta {
                 name: "bailout",
                 label: "Bailout",
-                hint: "Escape radius threshold",
+                hint: "Escape radius: an orbit farther than this is outside. Larger is more exact near the surface and slower.",
                 range: None,
                 slider: log(1.0, 64.0),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
                 name: "rotation_degrees",
                 label: "Rotation (°)",
-                hint: "Per-iteration Euler rotation in degrees",
+                hint: "Rotation applied to the point every iteration: folds the structure into spirals. 0 keeps the formula symmetric.",
                 range: None,
                 slider: lin(-720.0, 720.0),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
                 name: "angle_scale",
                 label: "Angle scale",
-                hint: "Theta and phi angle multipliers",
+                hint: "Multiplies the power for the polar (theta) and azimuth (phi) angles separately; 1, 1 is the plain bulb. Stretches the lobes along one angle.",
                 range: None,
                 slider: lin(-8.0, 8.0),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
             ParamMeta {
                 name: "angle_phase_degrees",
                 label: "Angle phase (°)",
-                hint: "Theta and phi phase offsets in degrees",
+                hint: "Offsets added to the polar and azimuth angles every iteration: twists the bulb.",
                 range: None,
                 slider: lin(-720.0, 720.0),
-                choices: &[],
+                choices: None,
                 order: 24,
             },
         ],
@@ -779,46 +806,46 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
             ParamMeta {
                 name: "scale",
                 label: "Scale",
-                hint: "Mandelbox linear scale factor",
+                hint: "Mandelbox scale per iteration, typically 2 to 3; negative values give the inverted box.",
                 range: None,
                 slider: lin(-16.0, 16.0),
-                choices: &[],
+                choices: None,
                 order: 20,
             },
             ParamMeta {
                 name: "min_radius_ratio",
                 label: "Min radius ratio",
-                hint: "Inner sphere fold radius as a fraction of fixed radius",
+                hint: "Inner radius of the sphere fold as a fraction of the fixed radius: points inside it are scaled up by the largest factor.",
                 range: None,
                 slider: lin(0.0, 1.0),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
                 name: "fixed_radius",
                 label: "Fixed radius",
-                hint: "Outer sphere fold radius",
+                hint: "Radius of the sphere fold: points between the inner radius and this are inverted.",
                 range: None,
                 slider: log(0.001, 32.0),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
                 name: "fold_limit",
                 label: "Fold limit",
-                hint: "Axis-aligned box fold half-extent",
+                hint: "Box fold: coordinates beyond +/- this are reflected back.",
                 range: None,
                 slider: log(0.001, 32.0),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
             ParamMeta {
                 name: "rotation_degrees",
                 label: "Rotation (°)",
-                hint: "Per-iteration Euler rotation in degrees",
+                hint: "Rotation applied to the point every iteration: folds the structure into spirals. 0 keeps the formula symmetric.",
                 range: None,
                 slider: lin(-720.0, 720.0),
-                choices: &[],
+                choices: None,
                 order: 24,
             },
         ],
@@ -836,37 +863,37 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
             ParamMeta {
                 name: "constant",
                 label: "Constant",
-                hint: "4D quaternion Julia constant (x, y, z, w)",
+                hint: "The Julia constant c (x, y, z, w) of z -> z^2 + c: the shape of the set.",
                 range: None,
                 slider: lin(-8.0, 8.0),
-                choices: &[],
+                choices: None,
                 order: 20,
             },
             ParamMeta {
                 name: "slice_w",
                 label: "Slice W",
-                hint: "4th-dimension W coordinate of the 3D slice hyperplane",
+                hint: "The 4D set is cut by a 3D slice at this w.",
                 range: None,
                 slider: lin(-8.0, 8.0),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
                 name: "rotation_degrees",
                 label: "Rotation (°)",
-                hint: "4D XW/YW/ZW slice rotation angles in degrees",
+                hint: "Turns the 3D slice through the 4D set.",
                 range: None,
                 slider: lin(-720.0, 720.0),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
                 name: "bailout",
                 label: "Bailout",
-                hint: "Escape radius threshold",
+                hint: "Escape radius: an orbit farther than this is outside. Larger is more exact near the surface and slower.",
                 range: None,
                 slider: log(1.0, 64.0),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
         ],
@@ -884,37 +911,37 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
             ParamMeta {
                 name: "kind",
                 label: "Kind",
-                hint: "Polyhedral reflection symmetry group",
+                hint: "The polyhedron whose symmetry planes fold space: tetrahedron, octahedron or Menger sponge.",
                 range: None,
                 slider: None,
-                choices: KIFS_KIND_CHOICES,
+                choices: Some(kifs_kind_choices),
                 order: 20,
             },
             ParamMeta {
                 name: "scale",
                 label: "Scale",
-                hint: "Homothety scale per fold step",
+                hint: "KIFS scale per iteration (above 1): how much smaller each copy is.",
                 range: None,
                 slider: lin(1.0, 16.0),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
                 name: "offset",
                 label: "Offset",
-                hint: "Fold center offset vector",
+                hint: "Shifts the fold centre: the copies move apart or together.",
                 range: None,
                 slider: lin(-16.0, 16.0),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
                 name: "rotation_degrees",
                 label: "Rotation (°)",
-                hint: "Per-iteration Euler rotation in degrees",
+                hint: "Rotation applied to the point every iteration: folds the structure into spirals. 0 keeps the formula symmetric.",
                 range: None,
                 slider: lin(-720.0, 720.0),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
         ],
@@ -932,28 +959,28 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
             ParamMeta {
                 name: "a",
                 label: "A",
-                hint: "Maskit parameter Re(mu) (vertical period)",
+                hint: "Kleinian group parameter a: the generator's translation, the size of the circle-packing cells.",
                 range: None,
                 slider: lin(1.0, 8.0),
-                choices: &[],
+                choices: None,
                 order: 20,
             },
             ParamMeta {
                 name: "b",
                 label: "B",
-                hint: "Maskit parameter Im(mu) (horizontal skew)",
+                hint: "Kleinian group parameter b: the generator's shear; 0 is the symmetric limit set.",
                 range: None,
                 slider: lin(-8.0, 8.0),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
                 name: "bound_radius",
                 label: "Bound radius",
-                hint: "Spherical clip bound (0 = unbounded)",
+                hint: "Radius of the sphere that holds the whole set: rays only march inside it. Too small cuts the fractal off.",
                 range: None,
                 slider: lin(0.0, 32.0),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
         ],
@@ -971,55 +998,55 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
             ParamMeta {
                 name: "box_size",
                 label: "Box size",
-                hint: "3D box fold half-size per axis",
+                hint: "Half sizes of the box the point is folded into every iteration.",
                 range: None,
                 slider: lin(0.0, 16.0),
-                choices: &[],
+                choices: None,
                 order: 20,
             },
             ParamMeta {
                 name: "size",
                 label: "Size",
-                hint: "Inversion sphere squared radius",
+                hint: "Sphere inversion radius squared: larger opens bigger holes.",
                 range: None,
                 slider: log(0.001, 32.0),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
                 name: "c",
                 label: "C",
-                hint: "Translation shift vector per iteration",
+                hint: "Offset added after every inversion.",
                 range: None,
                 slider: lin(-8.0, 8.0),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
                 name: "thickness",
                 label: "Thickness",
-                hint: "Surface shell thickness offset",
+                hint: "Thickness of the final shape: thicker fills the holes.",
                 range: None,
                 slider: log(0.000001, 1.0),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
             ParamMeta {
                 name: "offset",
                 label: "Offset",
-                hint: "Thingy estimator origin offset",
+                hint: "Centre of the final shape test.",
                 range: None,
                 slider: lin(-16.0, 16.0),
-                choices: &[],
+                choices: None,
                 order: 24,
             },
             ParamMeta {
                 name: "bound_radius",
                 label: "Bound radius",
-                hint: "Spherical clip bound (0 = unbounded)",
+                hint: "Radius of the sphere that holds the whole set: rays only march inside it. Too small cuts the fractal off.",
                 range: None,
                 slider: lin(0.0, 32.0),
-                choices: &[],
+                choices: None,
                 order: 25,
             },
         ],
@@ -1037,19 +1064,19 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
             ParamMeta {
                 name: "scale",
                 label: "Scale",
-                hint: "Apollonian sphere inversion numerator",
+                hint: "Apollonian inversion strength: larger packs more, smaller spheres.",
                 range: None,
                 slider: log(0.01, 32.0),
-                choices: &[],
+                choices: None,
                 order: 20,
             },
             ParamMeta {
                 name: "bound_radius",
                 label: "Bound radius",
-                hint: "Spherical clip bound (0 = unbounded)",
+                hint: "Radius of the sphere that holds the whole set: rays only march inside it. Too small cuts the fractal off.",
                 range: None,
                 slider: lin(0.0, 32.0),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
         ],
@@ -1067,28 +1094,28 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
             ParamMeta {
                 name: "steps",
                 label: "Steps",
-                hint: "Sequence of 4 operator slots cycled per iteration",
+                hint: "The formulas applied in turn every iteration (Off skips a slot); their parameters are the Mandelbulb / Mandelbox / KIFS sub-sections.",
                 range: None,
                 slider: None,
-                choices: HYBRID_STEP_CHOICES,
+                choices: Some(hybrid_step_choices),
                 order: 12,
             },
             ParamMeta {
                 name: "apollonian_scale",
                 label: "Apollonian scale",
-                hint: "Scale for Inversion slots",
+                hint: "Apollonian inversion strength: larger packs more, smaller spheres.",
                 range: None,
                 slider: log(0.01, 32.0),
-                choices: &[],
+                choices: None,
                 order: 20,
             },
             ParamMeta {
                 name: "bailout",
                 label: "Bailout",
-                hint: "Escape radius threshold",
+                hint: "Escape radius: an orbit farther than this is outside. Larger is more exact near the surface and slower.",
                 range: None,
                 slider: log(0.01, 64.0),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
         ],
@@ -1110,7 +1137,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Conformal scale factor (negative values invert orientation each step)",
                 range: Some((-4.0, 4.0)),
                 slider: lin(-2.5, 2.5),
-                choices: &[],
+                choices: None,
                 order: 20,
             },
             ParamMeta {
@@ -1119,7 +1146,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Inner sphere fold clamping radius",
                 range: Some((0.01, 2.0)),
                 slider: lin(0.05, 1.0),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
@@ -1128,7 +1155,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Outer sphere fold inversion radius",
                 range: Some((0.1, 4.0)),
                 slider: lin(0.4, 2.0),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
@@ -1137,7 +1164,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Per-axis box fold limit (set Z=0 to disable Z folding for planar KaliSurface)",
                 range: Some((0.0, 4.0)),
                 slider: lin(0.0, 2.0),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
             ParamMeta {
@@ -1146,7 +1173,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Translation applied between box fold and sphere fold",
                 range: Some((-3.0, 3.0)),
                 slider: lin(-1.5, 1.5),
-                choices: &[],
+                choices: None,
                 order: 24,
             },
             ParamMeta {
@@ -1155,7 +1182,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Per-iteration Euler rotation in degrees",
                 range: Some((-360.0, 360.0)),
                 slider: lin(-180.0, 180.0),
-                choices: &[],
+                choices: None,
                 order: 25,
             },
             ParamMeta {
@@ -1164,7 +1191,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Outer bounding sphere radius",
                 range: Some((0.2, 20.0)),
                 slider: lin(0.8, 5.0),
-                choices: &[],
+                choices: None,
                 order: 26,
             },
         ],
@@ -1185,7 +1212,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Quadratic step multiplier",
                 range: Some((0.2, 3.0)),
                 slider: lin(0.5, 1.8),
-                choices: &[],
+                choices: None,
                 order: 20,
             },
             ParamMeta {
@@ -1194,7 +1221,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Escape radius threshold",
                 range: Some((1.5, 64.0)),
                 slider: lin(2.0, 12.0),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
@@ -1203,7 +1230,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Cross-term sign on Y (2xy - yz*sign)",
                 range: Some((-2.0, 2.0)),
                 slider: lin(-1.5, 1.5),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
@@ -1212,7 +1239,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Cross-term sign on Z (2xz + yz*sign)",
                 range: Some((-2.0, 2.0)),
                 slider: lin(-1.5, 1.5),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
             ParamMeta {
@@ -1221,7 +1248,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Helical twist around the X axis per iteration",
                 range: Some((-3.0, 3.0)),
                 slider: lin(-1.0, 1.0),
-                choices: &[],
+                choices: None,
                 order: 24,
             },
             ParamMeta {
@@ -1230,7 +1257,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Per-iteration Euler rotation in degrees",
                 range: Some((-360.0, 360.0)),
                 slider: lin(-180.0, 180.0),
-                choices: &[],
+                choices: None,
                 order: 25,
             },
         ],
@@ -1251,7 +1278,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Spherical exponentiation power",
                 range: Some((1.5, 24.0)),
                 slider: lin(2.0, 12.0),
-                choices: &[],
+                choices: None,
                 order: 20,
             },
             ParamMeta {
@@ -1260,7 +1287,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Escape radius threshold",
                 range: Some((1.5, 64.0)),
                 slider: lin(2.0, 12.0),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
@@ -1269,7 +1296,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Blend between raw z (0) and |z| (1) per axis before raising to power",
                 range: Some((0.0, 1.0)),
                 slider: lin(0.0, 1.0),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
@@ -1278,7 +1305,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Offset applied after absolute-value fold",
                 range: Some((-2.0, 2.0)),
                 slider: lin(-0.8, 0.8),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
             ParamMeta {
@@ -1287,7 +1314,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Per-iteration Euler rotation in degrees",
                 range: Some((-360.0, 360.0)),
                 slider: lin(-180.0, 180.0),
-                choices: &[],
+                choices: None,
                 order: 24,
             },
         ],
@@ -1308,7 +1335,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Homothety scale per fold iteration",
                 range: Some((1.1, 4.0)),
                 slider: lin(1.35, 2.8),
-                choices: &[],
+                choices: None,
                 order: 20,
             },
             ParamMeta {
@@ -1317,7 +1344,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Translation vector subtracted after scaling",
                 range: Some((-6.0, 6.0)),
                 slider: lin(0.0, 4.0),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
@@ -1326,7 +1353,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Euler rotation applied before the Menger sorting fold",
                 range: Some((-360.0, 360.0)),
                 slider: lin(-90.0, 90.0),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
@@ -1335,7 +1362,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Second Euler rotation applied after scaling and shifting",
                 range: Some((-360.0, 360.0)),
                 slider: lin(-90.0, 90.0),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
             ParamMeta {
@@ -1344,7 +1371,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Half-space Z fold limit (Marble Marcher Z-clamp)",
                 range: Some((0.0, 4.0)),
                 slider: lin(0.0, 2.0),
-                choices: &[],
+                choices: None,
                 order: 24,
             },
             ParamMeta {
@@ -1353,7 +1380,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Outer bounding sphere radius",
                 range: Some((0.2, 20.0)),
                 slider: lin(1.0, 5.0),
-                choices: &[],
+                choices: None,
                 order: 25,
             },
         ],
@@ -1374,7 +1401,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Icosahedral or Dodecahedral reflection group",
                 range: None,
                 slider: None,
-                choices: POLY_SYM_CHOICES,
+                choices: Some(polyhedral_symmetry_choices),
                 order: 20,
             },
             ParamMeta {
@@ -1383,7 +1410,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Scale factor per polyhedral fold step",
                 range: Some((1.1, 4.0)),
                 slider: lin(1.4, 2.8),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
@@ -1392,7 +1419,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Polyhedral fold vertex direction/offset",
                 range: Some((-3.0, 3.0)),
                 slider: lin(-1.5, 1.5),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
@@ -1401,7 +1428,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Polyhedral strut/shell thickness",
                 range: Some((0.01, 1.0)),
                 slider: lin(0.02, 0.4),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
             ParamMeta {
@@ -1410,7 +1437,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Per-iteration Euler rotation in degrees",
                 range: Some((-360.0, 360.0)),
                 slider: lin(-90.0, 90.0),
-                choices: &[],
+                choices: None,
                 order: 24,
             },
             ParamMeta {
@@ -1419,7 +1446,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Outer bounding sphere radius",
                 range: Some((0.2, 20.0)),
                 slider: lin(0.8, 4.0),
-                choices: &[],
+                choices: None,
                 order: 25,
             },
         ],
@@ -1440,7 +1467,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Base radial/angular bulb power",
                 range: Some((1.5, 24.0)),
                 slider: lin(2.0, 12.0),
-                choices: &[],
+                choices: None,
                 order: 20,
             },
             ParamMeta {
@@ -1449,7 +1476,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Escape radius threshold",
                 range: Some((1.5, 64.0)),
                 slider: lin(2.0, 10.0),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
@@ -1458,7 +1485,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Latitude spherical harmonic degree L",
                 range: Some((0.0, 24.0)),
                 slider: lin(1.0, 12.0),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
@@ -1467,7 +1494,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Longitude spherical harmonic order M",
                 range: Some((0.0, 24.0)),
                 slider: lin(1.0, 12.0),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
             ParamMeta {
@@ -1476,7 +1503,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Modulation depth of the spherical harmonic perturbation",
                 range: Some((-1.0, 1.0)),
                 slider: lin(-0.6, 0.6),
-                choices: &[],
+                choices: None,
                 order: 24,
             },
             ParamMeta {
@@ -1485,7 +1512,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Per-iteration Euler rotation in degrees",
                 range: Some((-360.0, 360.0)),
                 slider: lin(-180.0, 180.0),
-                choices: &[],
+                choices: None,
                 order: 25,
             },
         ],
@@ -1506,7 +1533,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Triplex exponentiation power",
                 range: Some((1.5, 24.0)),
                 slider: lin(2.0, 12.0),
-                choices: &[],
+                choices: None,
                 order: 20,
             },
             ParamMeta {
@@ -1515,7 +1542,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Escape radius threshold",
                 range: Some((1.5, 64.0)),
                 slider: lin(2.0, 10.0),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
@@ -1524,7 +1551,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Azimuthal conjugation multiplier (-1 = full Tricorn conjugation)",
                 range: Some((-2.0, 2.0)),
                 slider: lin(-1.5, 1.5),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
@@ -1533,7 +1560,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Polar elevation conjugation multiplier",
                 range: Some((-2.0, 2.0)),
                 slider: lin(-1.5, 1.5),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
             ParamMeta {
@@ -1542,7 +1569,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Azimuthal twist per iteration (radians)",
                 range: Some((-std::f64::consts::PI, std::f64::consts::PI)),
                 slider: lin(-1.5, 1.5),
-                choices: &[],
+                choices: None,
                 order: 24,
             },
             ParamMeta {
@@ -1551,7 +1578,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Per-iteration Euler rotation in degrees",
                 range: Some((-360.0, 360.0)),
                 slider: lin(-180.0, 180.0),
-                choices: &[],
+                choices: None,
                 order: 25,
             },
         ],
@@ -1572,7 +1599,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Conformal scale multiplier per step",
                 range: Some((0.5, 4.0)),
                 slider: lin(1.0, 2.5),
-                choices: &[],
+                choices: None,
                 order: 20,
             },
             ParamMeta {
@@ -1581,7 +1608,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Inner sphere clamping radius",
                 range: Some((0.01, 1.5)),
                 slider: lin(0.05, 0.8),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
@@ -1590,7 +1617,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Inversion sphere radius",
                 range: Some((0.1, 3.0)),
                 slider: lin(0.5, 1.8),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
@@ -1599,7 +1626,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "3D periodic cell wrap dimensions",
                 range: Some((0.2, 4.0)),
                 slider: lin(0.5, 2.5),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
             ParamMeta {
@@ -1608,7 +1635,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Helical twist angle per unit Z",
                 range: Some((-2.0, 2.0)),
                 slider: lin(-0.8, 0.8),
-                choices: &[],
+                choices: None,
                 order: 24,
             },
             ParamMeta {
@@ -1617,7 +1644,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Per-iteration Euler rotation in degrees",
                 range: Some((-360.0, 360.0)),
                 slider: lin(-90.0, 90.0),
-                choices: &[],
+                choices: None,
                 order: 25,
             },
             ParamMeta {
@@ -1626,7 +1653,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Outer bounding sphere radius",
                 range: Some((0.2, 20.0)),
                 slider: lin(0.8, 4.0),
-                choices: &[],
+                choices: None,
                 order: 26,
             },
         ],
@@ -1647,7 +1674,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Minimal surface topology (Gyroid, Schwarz P, Schwarz D, Neovius)",
                 range: None,
                 slider: None,
-                choices: TPMS_KIND_CHOICES,
+                choices: Some(tpms_kind_choices),
                 order: 20,
             },
             ParamMeta {
@@ -1656,7 +1683,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Base spatial wave frequency",
                 range: Some((0.2, 24.0)),
                 slider: lin(1.0, 10.0),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
@@ -1665,7 +1692,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Minimal surface shell half-thickness",
                 range: Some((0.002, 0.8)),
                 slider: lin(0.01, 0.3),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
@@ -1674,7 +1701,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Iso-level shift (-1..1 pinches or swells channels)",
                 range: Some((-1.5, 1.5)),
                 slider: lin(-0.8, 0.8),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
             ParamMeta {
@@ -1683,7 +1710,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Number of recursive TPMS detail octaves (1..6)",
                 range: Some((1.0, 6.0)),
                 slider: lin(1.0, 5.0),
-                choices: &[],
+                choices: None,
                 order: 24,
             },
             ParamMeta {
@@ -1692,7 +1719,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Frequency multiplier per octave",
                 range: Some((1.1, 4.0)),
                 slider: lin(1.5, 3.0),
-                choices: &[],
+                choices: None,
                 order: 25,
             },
             ParamMeta {
@@ -1701,7 +1728,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Amplitude persistence per octave",
                 range: Some((0.0, 0.8)),
                 slider: lin(0.1, 0.6),
-                choices: &[],
+                choices: None,
                 order: 26,
             },
             ParamMeta {
@@ -1710,7 +1737,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Helical coordinate twist along Y",
                 range: Some((-3.0, 3.0)),
                 slider: lin(-1.2, 1.2),
-                choices: &[],
+                choices: None,
                 order: 27,
             },
             ParamMeta {
@@ -1719,7 +1746,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Outer bounding sphere radius",
                 range: Some((0.2, 20.0)),
                 slider: lin(0.5, 4.0),
-                choices: &[],
+                choices: None,
                 order: 28,
             },
         ],
@@ -1740,7 +1767,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Higher-order TPMS family (Lidinoid, FischerKochS, SplitP)",
                 range: None,
                 slider: None,
-                choices: COMPLEX_TPMS_CHOICES,
+                choices: Some(complex_tpms_kind_choices),
                 order: 20,
             },
             ParamMeta {
@@ -1749,7 +1776,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Spatial wave frequency",
                 range: Some((0.2, 20.0)),
                 slider: lin(1.0, 8.0),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
@@ -1758,7 +1785,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Minimal surface shell thickness",
                 range: Some((0.002, 0.8)),
                 slider: lin(0.01, 0.3),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
@@ -1767,7 +1794,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Iso-value level shift",
                 range: Some((-1.5, 1.5)),
                 slider: lin(-0.8, 0.8),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
             ParamMeta {
@@ -1776,7 +1803,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Balance between primary and secondary harmonic terms",
                 range: Some((0.0, 2.0)),
                 slider: lin(0.1, 1.2),
-                choices: &[],
+                choices: None,
                 order: 24,
             },
             ParamMeta {
@@ -1785,7 +1812,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Spherical radial frequency modulation",
                 range: Some((-2.0, 2.0)),
                 slider: lin(-0.8, 0.8),
-                choices: &[],
+                choices: None,
                 order: 25,
             },
             ParamMeta {
@@ -1794,7 +1821,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Outer bounding sphere radius",
                 range: Some((0.2, 20.0)),
                 slider: lin(0.5, 4.0),
-                choices: &[],
+                choices: None,
                 order: 26,
             },
         ],
@@ -1815,7 +1842,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Chaotic ODE system (Aizawa, Halvorsen, Thomas)",
                 range: None,
                 slider: None,
-                choices: ATTRACTOR_CHOICES,
+                choices: Some(attractor_kind_choices),
                 order: 20,
             },
             ParamMeta {
@@ -1824,7 +1851,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "ODE integration time step per iteration",
                 range: Some((0.005, 0.2)),
                 slider: lin(0.01, 0.1),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
@@ -1833,7 +1860,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Stream-ribbon / filament thickness",
                 range: Some((0.005, 0.4)),
                 slider: lin(0.02, 0.18),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
@@ -1842,7 +1869,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Rotational velocity multiplier",
                 range: Some((0.1, 4.0)),
                 slider: lin(0.4, 2.5),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
             ParamMeta {
@@ -1851,7 +1878,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Primary attractor bifurcation constant",
                 range: Some((0.05, 3.0)),
                 slider: lin(0.2, 2.0),
-                choices: &[],
+                choices: None,
                 order: 24,
             },
             ParamMeta {
@@ -1860,7 +1887,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Secondary attractor damping/folding constant",
                 range: Some((0.05, 3.0)),
                 slider: lin(0.2, 2.0),
-                choices: &[],
+                choices: None,
                 order: 25,
             },
             ParamMeta {
@@ -1869,7 +1896,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Outer bounding sphere radius",
                 range: Some((0.2, 20.0)),
                 slider: lin(0.8, 4.0),
-                choices: &[],
+                choices: None,
                 order: 26,
             },
         ],
@@ -1890,7 +1917,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Longitudinal windings around the torus",
                 range: Some((1.0, 16.0)),
                 slider: lin(1.0, 9.0),
-                choices: &[],
+                choices: None,
                 order: 20,
             },
             ParamMeta {
@@ -1899,7 +1926,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Meridional windings through the torus hole",
                 range: Some((1.0, 24.0)),
                 slider: lin(1.0, 13.0),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
@@ -1908,7 +1935,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Main torus ring radius",
                 range: Some((0.2, 3.0)),
                 slider: lin(0.4, 1.5),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
@@ -1917,7 +1944,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Poloidal knot excursion radius",
                 range: Some((0.05, 1.5)),
                 slider: lin(0.1, 0.7),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
             ParamMeta {
@@ -1926,7 +1953,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Cross-sectional radius of the braided strand",
                 range: Some((0.01, 0.5)),
                 slider: lin(0.02, 0.2),
-                choices: &[],
+                choices: None,
                 order: 24,
             },
             ParamMeta {
@@ -1935,7 +1962,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Number of braided sub-cables twisted around the core (1..12)",
                 range: Some((1.0, 12.0)),
                 slider: lin(1.0, 8.0),
-                choices: &[],
+                choices: None,
                 order: 25,
             },
             ParamMeta {
@@ -1944,7 +1971,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Radial depth of the sub-strand cable twist",
                 range: Some((0.0, 0.25)),
                 slider: lin(0.0, 0.12),
-                choices: &[],
+                choices: None,
                 order: 26,
             },
             ParamMeta {
@@ -1953,7 +1980,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Outer bounding sphere radius",
                 range: Some((0.2, 20.0)),
                 slider: lin(0.8, 4.0),
-                choices: &[],
+                choices: None,
                 order: 27,
             },
         ],
@@ -1974,7 +2001,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Number of linked Villarceau fiber rings per torus shell (2..24)",
                 range: Some((2.0, 24.0)),
                 slider: lin(3.0, 16.0),
-                choices: &[],
+                choices: None,
                 order: 20,
             },
             ParamMeta {
@@ -1983,7 +2010,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Number of nested latitude torus shells (1..6)",
                 range: Some((1.0, 6.0)),
                 slider: lin(1.0, 5.0),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
@@ -1992,7 +2019,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "S^2 polar angle controlling torus aspect ratio",
                 range: Some((0.15, 1.45)),
                 slider: lin(0.3, 1.25),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
@@ -2001,7 +2028,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Cross-sectional radius of each Hopf circle",
                 range: Some((0.01, 0.35)),
                 slider: lin(0.02, 0.15),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
             ParamMeta {
@@ -2010,7 +2037,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Fiber helicity / twist multiplier",
                 range: Some((-3.0, 3.0)),
                 slider: lin(-1.5, 1.5),
-                choices: &[],
+                choices: None,
                 order: 24,
             },
             ParamMeta {
@@ -2019,7 +2046,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Stereographic projection scale",
                 range: Some((0.2, 2.5)),
                 slider: lin(0.4, 1.5),
-                choices: &[],
+                choices: None,
                 order: 25,
             },
             ParamMeta {
@@ -2028,7 +2055,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Outer bounding sphere radius",
                 range: Some((0.2, 20.0)),
                 slider: lin(0.8, 4.0),
-                choices: &[],
+                choices: None,
                 order: 26,
             },
         ],
@@ -2049,7 +2076,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Focal ellipse semi-major axis a",
                 range: Some((0.2, 3.0)),
                 slider: lin(0.5, 1.8),
-                choices: &[],
+                choices: None,
                 order: 20,
             },
             ParamMeta {
@@ -2058,7 +2085,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Focal ellipse semi-minor axis b",
                 range: Some((0.2, 3.0)),
                 slider: lin(0.4, 1.8),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
@@ -2067,7 +2094,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Focal linear eccentricity c (controls horn pinch)",
                 range: Some((0.0, 2.0)),
                 slider: lin(0.0, 1.0),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
@@ -2076,7 +2103,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Cyclide mean tube radius parameter d",
                 range: Some((0.05, 2.0)),
                 slider: lin(0.15, 1.0),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
             ParamMeta {
@@ -2085,7 +2112,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Wall thickness (0 = solid cyclide interior)",
                 range: Some((0.0, 0.5)),
                 slider: lin(0.0, 0.2),
-                choices: &[],
+                choices: None,
                 order: 24,
             },
             ParamMeta {
@@ -2094,7 +2121,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Number of conformal ribs along the cyclide lines of curvature",
                 range: Some((0.0, 48.0)),
                 slider: lin(0.0, 24.0),
-                choices: &[],
+                choices: None,
                 order: 25,
             },
             ParamMeta {
@@ -2103,7 +2130,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Amplitude of curvature-aligned fluting",
                 range: Some((-0.2, 0.2)),
                 slider: lin(-0.08, 0.08),
-                choices: &[],
+                choices: None,
                 order: 26,
             },
             ParamMeta {
@@ -2112,7 +2139,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Outer bounding sphere radius",
                 range: Some((0.2, 20.0)),
                 slider: lin(0.8, 4.0),
-                choices: &[],
+                choices: None,
                 order: 27,
             },
         ],
@@ -2133,7 +2160,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Longitudinal rotational symmetry lobes m1",
                 range: Some((0.0, 32.0)),
                 slider: lin(1.0, 16.0),
-                choices: &[],
+                choices: None,
                 order: 20,
             },
             ParamMeta {
@@ -2142,7 +2169,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Longitudinal outer exponent n1",
                 range: Some((0.15, 20.0)),
                 slider: lin(0.3, 6.0),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
@@ -2151,7 +2178,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Longitudinal cosine exponent n2",
                 range: Some((0.15, 20.0)),
                 slider: lin(0.3, 6.0),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
@@ -2160,7 +2187,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Longitudinal sine exponent n3",
                 range: Some((0.15, 20.0)),
                 slider: lin(0.3, 6.0),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
             ParamMeta {
@@ -2169,7 +2196,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Latitudinal rotational symmetry lobes m2",
                 range: Some((0.0, 32.0)),
                 slider: lin(1.0, 16.0),
-                choices: &[],
+                choices: None,
                 order: 24,
             },
             ParamMeta {
@@ -2178,7 +2205,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Latitudinal outer exponent n1",
                 range: Some((0.15, 20.0)),
                 slider: lin(0.3, 6.0),
-                choices: &[],
+                choices: None,
                 order: 25,
             },
             ParamMeta {
@@ -2187,7 +2214,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Latitudinal cosine exponent n2",
                 range: Some((0.15, 20.0)),
                 slider: lin(0.3, 6.0),
-                choices: &[],
+                choices: None,
                 order: 26,
             },
             ParamMeta {
@@ -2196,7 +2223,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Latitudinal sine exponent n3",
                 range: Some((0.15, 20.0)),
                 slider: lin(0.3, 6.0),
-                choices: &[],
+                choices: None,
                 order: 27,
             },
             ParamMeta {
@@ -2205,7 +2232,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Hollow radiolaria shell thickness (0 = solid)",
                 range: Some((0.0, 0.5)),
                 slider: lin(0.0, 0.2),
-                choices: &[],
+                choices: None,
                 order: 28,
             },
             ParamMeta {
@@ -2214,7 +2241,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Radiolaria lattice pore frequency (0 = smooth shell)",
                 range: Some((0.0, 32.0)),
                 slider: lin(0.0, 20.0),
-                choices: &[],
+                choices: None,
                 order: 29,
             },
             ParamMeta {
@@ -2223,7 +2250,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Outer bounding sphere radius",
                 range: Some((0.2, 20.0)),
                 slider: lin(0.8, 4.0),
-                choices: &[],
+                choices: None,
                 order: 30,
             },
         ],
@@ -2244,7 +2271,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Number of primary golden-angle spiral florets on the sphere",
                 range: Some((12.0, 600.0)),
                 slider: lin(34.0, 300.0),
-                choices: &[],
+                choices: None,
                 order: 20,
             },
             ParamMeta {
@@ -2253,7 +2280,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Radial height of each Romanesco bud",
                 range: Some((0.0, 0.8)),
                 slider: lin(0.05, 0.45),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
@@ -2262,7 +2289,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Profile exponent of the conical buds (1 = cone, 0.5 = dome, 2 = pagoda)",
                 range: Some((0.3, 4.0)),
                 slider: lin(0.5, 2.5),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
@@ -2271,7 +2298,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Helical twist inside each bud",
                 range: Some((-4.0, 4.0)),
                 slider: lin(-2.0, 2.0),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
             ParamMeta {
@@ -2280,7 +2307,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Secondary Fibonacci spiral ribs on each bud",
                 range: Some((0.0, 21.0)),
                 slider: lin(0.0, 13.0),
-                choices: &[],
+                choices: None,
                 order: 24,
             },
             ParamMeta {
@@ -2289,7 +2316,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Inner sphere radius supporting the florets",
                 range: Some((0.2, 2.0)),
                 slider: lin(0.5, 1.3),
-                choices: &[],
+                choices: None,
                 order: 25,
             },
             ParamMeta {
@@ -2298,7 +2325,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Outer bounding sphere radius",
                 range: Some((0.2, 20.0)),
                 slider: lin(0.8, 4.0),
-                choices: &[],
+                choices: None,
                 order: 26,
             },
         ],
@@ -2319,7 +2346,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Logarithmic growth rate b in r = exp(b * theta)",
                 range: Some((0.05, 0.45)),
                 slider: lin(0.1, 0.3),
-                choices: &[],
+                choices: None,
                 order: 20,
             },
             ParamMeta {
@@ -2328,7 +2355,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Tube radius relative to whorl radius",
                 range: Some((0.4, 2.0)),
                 slider: lin(0.7, 1.5),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
@@ -2337,7 +2364,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Conispiral translation along Z (0 = planispiral Nautilus, >0 = Turritella)",
                 range: Some((0.0, 2.0)),
                 slider: lin(0.0, 1.0),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
@@ -2346,7 +2373,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Shell and internal septum wall thickness",
                 range: Some((0.01, 0.2)),
                 slider: lin(0.02, 0.1),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
             ParamMeta {
@@ -2355,7 +2382,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Chambers and external ribs per full turn",
                 range: Some((0.0, 48.0)),
                 slider: lin(4.0, 32.0),
-                choices: &[],
+                choices: None,
                 order: 24,
             },
             ParamMeta {
@@ -2364,7 +2391,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "External ammonite rib corrugation amplitude",
                 range: Some((0.0, 0.15)),
                 slider: lin(0.0, 0.06),
-                choices: &[],
+                choices: None,
                 order: 25,
             },
             ParamMeta {
@@ -2373,7 +2400,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Total number of spiral revolutions",
                 range: Some((0.5, 5.0)),
                 slider: lin(1.5, 4.0),
-                choices: &[],
+                choices: None,
                 order: 26,
             },
             ParamMeta {
@@ -2382,7 +2409,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Outer bounding sphere radius",
                 range: Some((0.2, 20.0)),
                 slider: lin(0.8, 4.0),
-                choices: &[],
+                choices: None,
                 order: 27,
             },
         ],
@@ -2403,7 +2430,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Voronoi cells per unit length",
                 range: Some((0.5, 10.0)),
                 slider: lin(1.0, 5.0),
-                choices: &[],
+                choices: None,
                 order: 20,
             },
             ParamMeta {
@@ -2412,7 +2439,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Cell edge/wall thickness",
                 range: Some((0.005, 0.4)),
                 slider: lin(0.02, 0.18),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
@@ -2421,7 +2448,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Randomness of Voronoi seed positions (0 = regular BCC/cubic grid, 1 = organic foam)",
                 range: Some((0.0, 1.0)),
                 slider: lin(0.0, 1.0),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
@@ -2430,7 +2457,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Number of nested hierarchical Voronoi scales (1..3)",
                 range: Some((1.0, 3.0)),
                 slider: lin(1.0, 3.0),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
             ParamMeta {
@@ -2439,7 +2466,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Cell density multiplier for sub-foam octaves",
                 range: Some((1.5, 4.0)),
                 slider: lin(1.8, 3.0),
-                choices: &[],
+                choices: None,
                 order: 24,
             },
             ParamMeta {
@@ -2448,7 +2475,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Hollow core radius fraction (0 = full ball of foam)",
                 range: Some((0.0, 0.9)),
                 slider: lin(0.0, 0.75),
-                choices: &[],
+                choices: None,
                 order: 25,
             },
             ParamMeta {
@@ -2457,7 +2484,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Outer bounding sphere radius",
                 range: Some((0.2, 20.0)),
                 slider: lin(0.6, 3.5),
-                choices: &[],
+                choices: None,
                 order: 26,
             },
         ],
@@ -2478,7 +2505,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Number of radiating quartz crystals in the cluster (1..24)",
                 range: Some((1.0, 24.0)),
                 slider: lin(3.0, 20.0),
-                choices: &[],
+                choices: None,
                 order: 20,
             },
             ParamMeta {
@@ -2487,7 +2514,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Length of the primary hexagonal crystal shafts",
                 range: Some((0.2, 2.5)),
                 slider: lin(0.4, 1.6),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
@@ -2496,7 +2523,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Cross-sectional hexagonal radius of the crystals",
                 range: Some((0.04, 0.8)),
                 slider: lin(0.08, 0.4),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
@@ -2505,7 +2532,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Termination pyramid facet slope (tan of termination angle)",
                 range: Some((0.3, 3.0)),
                 slider: lin(0.6, 2.0),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
             ParamMeta {
@@ -2514,7 +2541,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Angular spread of the radiating crystal shafts",
                 range: Some((0.0, 1.5)),
                 slider: lin(0.1, 1.1),
-                choices: &[],
+                choices: None,
                 order: 24,
             },
             ParamMeta {
@@ -2523,7 +2550,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Carve an inner geode druzy cavity (>0)",
                 range: Some((0.0, 1.0)),
                 slider: lin(0.0, 0.7),
-                choices: &[],
+                choices: None,
                 order: 25,
             },
             ParamMeta {
@@ -2532,7 +2559,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Outer bounding sphere radius",
                 range: Some((0.2, 20.0)),
                 slider: lin(0.8, 3.5),
-                choices: &[],
+                choices: None,
                 order: 26,
             },
         ],
@@ -2553,7 +2580,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Number of nested concentric gimbal rings (1..8)",
                 range: Some((1.0, 8.0)),
                 slider: lin(2.0, 7.0),
-                choices: &[],
+                choices: None,
                 order: 20,
             },
             ParamMeta {
@@ -2562,7 +2589,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Radius of the outermost gimbal ring",
                 range: Some((0.3, 3.0)),
                 slider: lin(0.6, 1.8),
-                choices: &[],
+                choices: None,
                 order: 21,
             },
             ParamMeta {
@@ -2571,7 +2598,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Radial step between consecutive inner rings",
                 range: Some((0.05, 0.5)),
                 slider: lin(0.08, 0.28),
-                choices: &[],
+                choices: None,
                 order: 22,
             },
             ParamMeta {
@@ -2580,7 +2607,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Axial height of each gimbal ring band",
                 range: Some((0.02, 0.5)),
                 slider: lin(0.04, 0.25),
-                choices: &[],
+                choices: None,
                 order: 23,
             },
             ParamMeta {
@@ -2589,7 +2616,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Radial wall thickness of each gimbal ring",
                 range: Some((0.01, 0.25)),
                 slider: lin(0.02, 0.12),
-                choices: &[],
+                choices: None,
                 order: 24,
             },
             ParamMeta {
@@ -2598,7 +2625,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Number of gear teeth around each ring (0 = smooth rings)",
                 range: Some((0.0, 64.0)),
                 slider: lin(0.0, 36.0),
-                choices: &[],
+                choices: None,
                 order: 25,
             },
             ParamMeta {
@@ -2607,7 +2634,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Radial height of the gear teeth",
                 range: Some((0.0, 0.1)),
                 slider: lin(0.0, 0.05),
-                choices: &[],
+                choices: None,
                 order: 26,
             },
             ParamMeta {
@@ -2616,7 +2643,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Incremental inclination angle per ring in degrees",
                 range: Some((-180.0, 180.0)),
                 slider: lin(-60.0, 60.0),
-                choices: &[],
+                choices: None,
                 order: 27,
             },
             ParamMeta {
@@ -2625,7 +2652,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Azimuthal spin offset per ring in degrees",
                 range: Some((-360.0, 360.0)),
                 slider: lin(-180.0, 180.0),
-                choices: &[],
+                choices: None,
                 order: 28,
             },
             ParamMeta {
@@ -2634,7 +2661,7 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 hint: "Outer bounding sphere radius",
                 range: Some((0.2, 20.0)),
                 slider: lin(0.8, 3.5),
-                choices: &[],
+                choices: None,
                 order: 29,
             },
         ],
@@ -2679,13 +2706,8 @@ pub fn formula_param_slider(path: &str) -> Option<Slider> {
     find_param_meta(path).and_then(|p| p.slider)
 }
 
-pub fn formula_param_choices(path: &str) -> Option<Vec<Value>> {
-    let pm = find_param_meta(path)?;
-    if pm.choices.is_empty() {
-        None
-    } else {
-        Some(pm.choices.iter().map(|&c| json!(c)).collect())
-    }
+pub fn formula_param_choices(path: &str) -> Option<&'static [Value]> {
+    find_param_meta(path)?.choices.map(|choices| choices())
 }
 
 pub fn formula_param_order(path: &str) -> Option<u16> {

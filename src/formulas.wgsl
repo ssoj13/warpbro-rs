@@ -2,8 +2,8 @@
 // 3D Fractal & Procedural Distance Estimators (All 28 Families: 0..27).
 // Parameters are read from the per-object formula slot block starting at P_BULB_POWER: offsets
 // 0..EXT_SLOTS of `formulas::pack_extended_formula` (const-asserted to end before
-// P_COLOR_MODE). The FAMILY_* codes, SIGNED_MASK and ITERATING_MASK are emitted from
-// `formulas::FORMULAS` by `engine::warpbro_shader_hook`.
+// P_COLOR_MODE). SIGNED_MASK, ITERATING_MASK and the `family_distance` dispatch over
+// `formulas::FORMULAS` are emitted by `engine::warpbro_shader_hook`.
 // =============================================================================
 
 fn ext_slot(is_world: bool, obj: u32, offset: u32) -> f32 {

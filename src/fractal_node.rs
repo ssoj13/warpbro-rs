@@ -8,7 +8,7 @@
 //! `"Fractal"` node is present and visible in the graph, it is evaluated into `scene.objects`
 //! and rendered; when absent or hidden, `soluwell-studio` renders the 3D studio environment.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{HashMap, HashSet};
 use std::sync::LazyLock;
 
 use fractal_core::params::*;
@@ -533,29 +533,106 @@ pub trait FractalSceneExt {
     fn set_trap_scale(&mut self, v: f32);
 }
 
-fn get_f32(custom: &BTreeMap<String, Value>, key: &str, default: f32) -> f32 {
-    custom
-        .get(key)
-        .and_then(Value::as_f64)
-        .map(|v| v as f32)
-        .unwrap_or(default)
+// Strict readers of the fractal's custom branches: a missing key or a value of the wrong type
+// is an error, never a default (no legacy-data compatibility). `FractalNodeSpec::validate_node`
+// runs them on every document load, edit and snapshot, so the infallible accessors below only
+// ever meet values they accept.
+
+fn custom_f32(key: &str, value: Option<&Value>) -> Result<f32, String> {
+    let v = value.ok_or_else(|| format!("/{key} is missing"))?;
+    let f = v
+        .as_f64()
+        .ok_or_else(|| format!("/{key} must be a number, got {v}"))? as f32;
+    if f.is_finite() {
+        Ok(f)
+    } else {
+        Err(format!("/{key} must be a finite f32, got {v}"))
+    }
 }
 
-fn get_u32(custom: &BTreeMap<String, Value>, key: &str, default: u32) -> u32 {
-    custom
-        .get(key)
-        .and_then(|v| v.as_u64().or_else(|| v.as_f64().map(|f| f as u64)))
-        .map(|v| v as u32)
-        .unwrap_or(default)
+fn custom_u32(key: &str, value: Option<&Value>) -> Result<u32, String> {
+    let v = value.ok_or_else(|| format!("/{key} is missing"))?;
+    v.as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .ok_or_else(|| format!("/{key} must be a whole number, got {v}"))
 }
 
-fn get_vec3(custom: &BTreeMap<String, Value>, key: &str, default: [f32; 3]) -> [f32; 3] {
-    custom
-        .get(key)
-        .and_then(Value::as_array)
+fn custom_vec3(key: &str, value: Option<&Value>) -> Result<[f32; 3], String> {
+    let v = value.ok_or_else(|| format!("/{key} is missing"))?;
+    let a = v
+        .as_array()
         .filter(|a| a.len() == 3)
-        .map(|a| std::array::from_fn(|i| a[i].as_f64().unwrap_or(0.0) as f32))
-        .unwrap_or(default)
+        .ok_or_else(|| format!("/{key} must be 3 numbers, got {v}"))?;
+    let mut out = [0.0; 3];
+    for (slot, item) in out.iter_mut().zip(a) {
+        *slot = custom_f32(key, Some(item))?;
+    }
+    Ok(out)
+}
+
+fn custom_formula(value: Option<&Value>) -> Result<Formula, String> {
+    let v = value.ok_or("/formula is missing")?;
+    Formula::deserialize(v).map_err(|e| format!("Invalid /formula: {e}"))
+}
+
+/// Every custom branch of a fractal, checked with the readers the render path uses, plus the
+/// two ranges the packing relies on (`trap_axis` indexes an axis, `inversion_radius` divides).
+fn validate_fractal_branches<'v>(get: impl Fn(&str) -> Option<&'v Value>) -> Result<(), String> {
+    custom_formula(get("formula"))?;
+    for key in ["julia", "orbit_offset", "inversion_center", "trap_point"] {
+        custom_vec3(key, get(key))?;
+    }
+    for key in ["julia_mix", "inversion_strength", "trap_scale"] {
+        custom_f32(key, get(key))?;
+    }
+    if custom_f32("inversion_radius", get("inversion_radius"))? <= 0.0 {
+        return Err("/inversion_radius must be positive".into());
+    }
+    if custom_u32("trap_axis", get("trap_axis"))? > 2 {
+        return Err("/trap_axis must be 0, 1 or 2".into());
+    }
+    Ok(())
+}
+
+/// The accessors read branches [`validate_fractal_branches`] accepted. An error here means a
+/// scene that bypassed it (built in code without the custom branches): it is logged as the
+/// bug it is and the type's zero is used, since the render-side trait methods cannot fail.
+fn checked<T: Default>(read: Result<T, String>) -> T {
+    read.unwrap_or_else(|e| {
+        log::error!("Unvalidated fractal scene: {e}");
+        T::default()
+    })
+}
+
+/// Formula leaves whose model type is an integer (`u32` counts such as
+/// `/formula/GyroidTpms/octaves`). Read from the presets' JSON, where serde writes an integer
+/// field as an integer number and an `f32` as a float, so the model types stay the one source.
+/// Such a leaf must stay whole: it is validated as one and keyed discretely (interpolating
+/// `3 -> 4` would produce `3.5`, which the `u32` field cannot deserialize).
+fn integer_formula_leaf(path: &str) -> bool {
+    fn collect(value: &Value, path: &str, out: &mut HashSet<String>) {
+        match value {
+            Value::Object(map) => {
+                for (k, v) in map {
+                    collect(v, &format!("{path}/{k}"), out);
+                }
+            }
+            Value::Number(n) if n.is_u64() => {
+                out.insert(path.to_owned());
+            }
+            _ => {}
+        }
+    }
+    static LEAVES: LazyLock<HashSet<String>> = LazyLock::new(|| {
+        let mut out = HashSet::new();
+        for formula in Formula::PRESETS {
+            // A preset is plain finite data: serializing it cannot fail.
+            let value = serde_json::to_value(formula).expect("Formula serializes to JSON");
+            collect(&value, "/formula", &mut out);
+        }
+        out
+    });
+    LEAVES.contains(path)
 }
 
 impl FractalSceneExt for Scene {
@@ -756,18 +833,11 @@ impl FractalSceneExt for Scene {
     }
 
     fn formula(&self) -> Formula {
-        match self.custom.get("formula") {
-            Some(v) => match Formula::deserialize(v) {
-                Ok(f) => f,
-                Err(err) => {
-                    log::warn!(
-                        "Invalid /formula in Scene::custom ({err}); falling back to Mandelbulb preset"
-                    );
-                    Formula::Mandelbulb(Bulb::PRESET)
-                }
-            },
-            None => Formula::Mandelbulb(Bulb::PRESET),
-        }
+        // Validated on load, edit and snapshot (`validate_fractal_branches`); see `checked`.
+        custom_formula(self.custom.get("formula")).unwrap_or_else(|e| {
+            log::error!("Unvalidated fractal scene: {e}");
+            Formula::Mandelbulb(Bulb::PRESET)
+        })
     }
 
     fn set_formula(&mut self, f: Formula) {
@@ -784,7 +854,7 @@ impl FractalSceneExt for Scene {
     }
 
     fn julia(&self) -> [f32; 3] {
-        get_vec3(&self.custom, "julia", [0.0; 3])
+        checked(custom_vec3("julia", self.custom.get("julia")))
     }
 
     fn set_julia(&mut self, v: [f32; 3]) {
@@ -792,7 +862,7 @@ impl FractalSceneExt for Scene {
     }
 
     fn julia_mix(&self) -> f32 {
-        get_f32(&self.custom, "julia_mix", 0.0)
+        checked(custom_f32("julia_mix", self.custom.get("julia_mix")))
     }
 
     fn set_julia_mix(&mut self, v: f32) {
@@ -800,7 +870,7 @@ impl FractalSceneExt for Scene {
     }
 
     fn orbit_offset(&self) -> [f32; 3] {
-        get_vec3(&self.custom, "orbit_offset", [0.0; 3])
+        checked(custom_vec3("orbit_offset", self.custom.get("orbit_offset")))
     }
 
     #[cfg(test)]
@@ -809,7 +879,10 @@ impl FractalSceneExt for Scene {
     }
 
     fn inversion_strength(&self) -> f32 {
-        get_f32(&self.custom, "inversion_strength", 0.0)
+        checked(custom_f32(
+            "inversion_strength",
+            self.custom.get("inversion_strength"),
+        ))
     }
 
     #[cfg(test)]
@@ -818,7 +891,10 @@ impl FractalSceneExt for Scene {
     }
 
     fn inversion_center(&self) -> [f32; 3] {
-        get_vec3(&self.custom, "inversion_center", [0.0; 3])
+        checked(custom_vec3(
+            "inversion_center",
+            self.custom.get("inversion_center"),
+        ))
     }
 
     #[cfg(test)]
@@ -827,7 +903,10 @@ impl FractalSceneExt for Scene {
     }
 
     fn inversion_radius(&self) -> f32 {
-        get_f32(&self.custom, "inversion_radius", 1.0)
+        checked(custom_f32(
+            "inversion_radius",
+            self.custom.get("inversion_radius"),
+        ))
     }
 
     #[cfg(test)]
@@ -836,7 +915,7 @@ impl FractalSceneExt for Scene {
     }
 
     fn trap_point(&self) -> [f32; 3] {
-        get_vec3(&self.custom, "trap_point", [0.0; 3])
+        checked(custom_vec3("trap_point", self.custom.get("trap_point")))
     }
 
     #[cfg(test)]
@@ -845,7 +924,7 @@ impl FractalSceneExt for Scene {
     }
 
     fn trap_axis(&self) -> u32 {
-        get_u32(&self.custom, "trap_axis", 1)
+        checked(custom_u32("trap_axis", self.custom.get("trap_axis")))
     }
 
     #[cfg(test)]
@@ -854,7 +933,7 @@ impl FractalSceneExt for Scene {
     }
 
     fn trap_scale(&self) -> f32 {
-        get_f32(&self.custom, "trap_scale", 1.5)
+        checked(custom_f32("trap_scale", self.custom.get("trap_scale")))
     }
 
     fn set_trap_scale(&mut self, v: f32) {
@@ -874,77 +953,12 @@ fn variants<T: Serialize>(all: impl IntoIterator<Item = T>) -> Result<Vec<Value>
         .collect()
 }
 
-fn hybrid_step_choices() -> Result<Vec<Value>, String> {
-    static CHOICES: LazyLock<Result<Vec<Value>, String>> =
-        LazyLock::new(|| variants(HybridStep::ALL));
-    CHOICES.clone()
-}
-
+/// A formula parameter's tooltip: the `FORMULAS` table is the one source for every family
+/// (Hybrid's sub-sections are mapped to their own families by the caller).
 fn formula_hint(family: &str, field: &str) -> Option<&'static str> {
-    Some(match (family, field) {
-        ("Mandelbulb", "power") => {
-            "Mandelbulb exponent: z -> z^power in spherical coordinates. 8 is the classic bulb; higher gives more, finer lobes."
-        }
-        ("Mandelbulb", "angle_scale") => {
-            "Multiplies the power for the polar (theta) and azimuth (phi) angles separately; 1, 1 is the plain bulb. Stretches the lobes along one angle."
-        }
-        ("Mandelbulb", "angle_phase_degrees") => {
-            "Offsets added to the polar and azimuth angles every iteration: twists the bulb."
-        }
-        ("Mandelbulb" | "QuaternionJulia" | "Hybrid", "bailout") => {
-            "Escape radius: an orbit farther than this is outside. Larger is more exact near the surface and slower."
-        }
-        ("Mandelbulb" | "Mandelbox" | "Kifs", "rotation_degrees") => {
-            "Rotation applied to the point every iteration: folds the structure into spirals. 0 keeps the formula symmetric."
-        }
-        ("Mandelbox", "scale") => {
-            "Mandelbox scale per iteration, typically 2 to 3; negative values give the inverted box."
-        }
-        ("Mandelbox", "min_radius_ratio") => {
-            "Inner radius of the sphere fold as a fraction of the fixed radius: points inside it are scaled up by the largest factor."
-        }
-        ("Mandelbox", "fixed_radius") => {
-            "Radius of the sphere fold: points between the inner radius and this are inverted."
-        }
-        ("Mandelbox", "fold_limit") => "Box fold: coordinates beyond +/- this are reflected back.",
-        ("Kifs", "kind") => {
-            "The polyhedron whose symmetry planes fold space: tetrahedron, octahedron or Menger sponge."
-        }
-        ("Kifs", "scale") => "KIFS scale per iteration (above 1): how much smaller each copy is.",
-        ("Kifs", "offset") => "Shifts the fold centre: the copies move apart or together.",
-        ("QuaternionJulia", "constant") => {
-            "The Julia constant c (x, y, z, w) of z -> z^2 + c: the shape of the set."
-        }
-        ("QuaternionJulia", "slice_w") => "The 4D set is cut by a 3D slice at this w.",
-        ("QuaternionJulia", "rotation_degrees") => "Turns the 3D slice through the 4D set.",
-        ("Kleinian", "a") => {
-            "Kleinian group parameter a: the generator's translation, the size of the circle-packing cells."
-        }
-        ("Kleinian", "b") => {
-            "Kleinian group parameter b: the generator's shear; 0 is the symmetric limit set."
-        }
-        ("PseudoKleinian", "box_size") => {
-            "Half sizes of the box the point is folded into every iteration."
-        }
-        ("PseudoKleinian", "size") => "Sphere inversion radius squared: larger opens bigger holes.",
-        ("PseudoKleinian", "c") => "Offset added after every inversion.",
-        ("PseudoKleinian", "offset") => "Centre of the final shape test.",
-        ("PseudoKleinian", "thickness") => "Thickness of the final shape: thicker fills the holes.",
-        ("Apollonian", "scale") | ("Hybrid", "apollonian_scale") => {
-            "Apollonian inversion strength: larger packs more, smaller spheres."
-        }
-        ("Kleinian" | "PseudoKleinian" | "Apollonian", "bound_radius") => {
-            "Radius of the sphere that holds the whole set: rays only march inside it. Too small cuts the fractal off."
-        }
-        ("Hybrid", "steps") => {
-            "The formulas applied in turn every iteration (Off skips a slot); their parameters are the Mandelbulb / Mandelbox / KIFS sub-sections."
-        }
-        _ => {
-            return crate::formulas::find_formula_meta_by_variant(family)
-                .and_then(|fm| fm.params.iter().find(|p| p.name == field))
-                .map(|p| p.hint);
-        }
-    })
+    crate::formulas::find_formula_meta_by_variant(family)
+        .and_then(|fm| fm.params.iter().find(|p| p.name == field))
+        .map(|p| p.hint)
 }
 
 fn to_attr(v: &Value) -> AttrValue {
@@ -1066,7 +1080,8 @@ impl NodeTypeSpec for FractalNodeSpec {
     }
 
     fn is_discrete_path(&self, path: &str) -> bool {
-        path == "/formula"
+        // Whole-number values hold between keys instead of interpolating to fractions.
+        path == "/formula" || path == "/trap_axis" || integer_formula_leaf(path)
     }
 
     fn is_hidden_attribute(&self, path: &str) -> bool {
@@ -1112,7 +1127,20 @@ impl NodeTypeSpec for FractalNodeSpec {
                     .map_err(|e| format!("Invalid denoise quality: {e}"))?;
                 return Ok(());
             }
+            "/trap_axis" => {
+                return custom_u32("trap_axis", Some(value)).and_then(|axis| {
+                    (axis <= 2)
+                        .then_some(())
+                        .ok_or_else(|| "/trap_axis must be 0, 1 or 2".into())
+                });
+            }
             _ => {}
+        }
+        if integer_formula_leaf(path) {
+            value
+                .as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| format!("{path} must be a whole number, got {value}"))?;
         }
         if let Some(choices) = self.attribute_choices(path) {
             let choices = choices?;
@@ -1123,25 +1151,26 @@ impl NodeTypeSpec for FractalNodeSpec {
         Ok(())
     }
 
+    fn validate_node(&self, evaluated: &Value) -> Result<(), String> {
+        validate_fractal_branches(|key| evaluated.get(key))
+    }
+
     fn attribute_choices(&self, path: &str) -> Option<Result<Vec<Value>, String>> {
         static FORMULA_CHOICES: LazyLock<Result<Vec<Value>, String>> =
             LazyLock::new(|| variants(Formula::PRESETS));
-        static KIFS_CHOICES: LazyLock<Result<Vec<Value>, String>> =
-            LazyLock::new(|| variants(KifsKind::ALL));
         if path == "/formula" {
             return Some(FORMULA_CHOICES.clone());
         }
         if path == "/formula/Hybrid/steps" {
             return None;
         }
+        // Covers every family's enum leaves and `/formula/Hybrid/steps/<slot>`.
         if let Some(choices) = crate::formulas::formula_param_choices(path) {
-            return Some(Ok(choices));
+            return Some(Ok(choices.to_vec()));
         }
-        match path {
-            p if p.ends_with("/kind") && p.starts_with("/formula") => Some(KIFS_CHOICES.clone()),
-            p if p.starts_with("/formula/Hybrid/steps/") => Some(hybrid_step_choices()),
-            _ => None,
-        }
+        // Hybrid's nested KIFS sub-section is not a `/formula/<Variant>/<field>` path.
+        (path == "/formula/Hybrid/kifs/kind")
+            .then(|| Ok(crate::formulas::kifs_kind_choices().to_vec()))
     }
 
     fn choice_label(&self, path: &str, value: &Value) -> Option<String> {
@@ -1306,7 +1335,6 @@ impl NodeTypeSpec for FractalNodeSpec {
         }
         if let Some((variant, _)) = crate::formulas::parse_formula_attr_path(path)
             && variant != "Hybrid"
-            && crate::formulas::find_formula_meta_by_variant(variant).is_some_and(|m| m.code >= 8)
             && let Some(label) = crate::formulas::formula_param_label(path)
         {
             if let Some((_, comp)) = path.rsplit_once('/')
@@ -1430,14 +1458,11 @@ impl NodeTypeSpec for FractalNodeSpec {
         if under("/julia") || under("/julia_mix") || under("/orbit_offset") {
             let formula = get("/formula")?;
             let family = formula.as_object()?.keys().next()?.as_str();
-            match crate::formulas::find_formula_meta_by_variant(family) {
-                Some(meta) if !meta.has_orbit_constant => {
-                    return Some(Some(NO_ORBIT_REASON[meta.code as usize]));
-                }
-                None if !matches!(family, "Mandelbulb" | "Mandelbox") => {
-                    return Some(Some("This formula has no orbit constant"));
-                }
-                _ => {}
+            // Every `Formula` variant has a `FORMULAS` row, and a validated node holds one.
+            if let Some(meta) = crate::formulas::find_formula_meta_by_variant(family)
+                && !meta.has_orbit_constant
+            {
+                return Some(Some(NO_ORBIT_REASON[meta.code as usize]));
             }
             if under("/julia") && get("/julia_mix")?.as_f64()? == 0.0 {
                 return Some(Some("Julia mix is 0"));
@@ -1556,7 +1581,7 @@ impl NodeTypeSpec for FractalNodeSpec {
             .map(|a| a.value.clone())
             .and_then(|v| v.as_array().cloned())
         {
-            let choices = hybrid_step_choices()?;
+            let choices = crate::formulas::hybrid_step_choices().to_vec();
             for (slot, value) in steps.iter().enumerate() {
                 let path = format!("/formula/Hybrid/steps/{slot}");
                 let label = self
@@ -1586,19 +1611,29 @@ impl NodeTypeSpec for FractalNodeSpec {
         if parent != "/formula/Hybrid/steps" {
             return;
         }
+        // The trait cannot fail: a mismatch is logged (an edit that leaves the formula invalid
+        // is then rejected and rolled back by `validate_node`).
         let Some(mut formula) = attrs.get("/formula").cloned().map(attr_json) else {
+            log::warn!("Hybrid step edit without a /formula attribute; formula not synced");
             return;
         };
         let Some(slots) = formula
             .pointer_mut("/Hybrid/steps")
             .and_then(Value::as_array_mut)
         else {
+            log::warn!("Hybrid step edit on a non-Hybrid formula; formula not synced");
             return;
         };
         let Some(fresh) = vector.as_array() else {
+            log::warn!("Hybrid steps edit is not an array: {vector}");
             return;
         };
         if slots.len() != fresh.len() {
+            log::warn!(
+                "Hybrid steps edit has {} slots, the formula has {}",
+                fresh.len(),
+                slots.len()
+            );
             return;
         }
         slots.clone_from_slice(fresh);
@@ -1928,6 +1963,137 @@ mod tests {
 
     use super::*;
 
+    /// plan1 F1/F2: a broken formula or a mistyped branch is a typed error at every boundary
+    /// (rejected by `validate_node`, an edit rolled back), never a silent Mandelbulb or default.
+    #[test]
+    fn invalid_fractal_branches_are_rejected_not_defaulted() {
+        crate::engine::init_warpbro();
+        let defaults = default_fractal_custom_branches(Formula::Mandelbulb(Bulb::PRESET));
+        FractalNodeSpec
+            .validate_node(&Value::Object(defaults.clone()))
+            .expect("default branches are valid");
+        for (key, bad) in [
+            ("formula", json!({"NotAFormula": {}})),
+            ("julia", json!([0.0, "x", 0.0])),
+            ("julia_mix", json!("0.5")),
+            ("inversion_radius", json!(0.0)),
+            ("trap_axis", json!(1.0)),
+            ("trap_axis", json!(3)),
+        ] {
+            let mut broken = defaults.clone();
+            broken.insert(key.into(), bad.clone());
+            assert!(
+                FractalNodeSpec
+                    .validate_node(&Value::Object(broken))
+                    .is_err(),
+                "{key} = {bad} must be rejected"
+            );
+        }
+        let mut missing = defaults;
+        missing.remove("trap_scale");
+        assert!(
+            FractalNodeSpec
+                .validate_node(&Value::Object(missing))
+                .is_err()
+        );
+
+        let scene = Scene::preset_fractal(Formula::Mandelbulb(Bulb::PRESET));
+        let mut editor = WorldEditor::new(WorldDocument::from_scene(&scene));
+        let id = editor
+            .document
+            .nodes()
+            .into_iter()
+            .find(|n| n.kind == FRACTAL_KIND)
+            .expect("Fractal node")
+            .id;
+        // A string passes the leaf check (no range, no choices) but breaks the node: only
+        // `validate_node` can reject it. (A numeric value out of range would just be clamped
+        // to `attribute_range` by the editor.)
+        let edit = editor.execute_edit(
+            WorldCommand::SetAttribute {
+                id,
+                path: "/julia_mix".into(),
+                value: json!("half"),
+                frame: 0.0,
+            },
+            None,
+        );
+        assert!(edit.unwrap_err().contains("julia_mix"));
+        let snap = editor
+            .document
+            .snapshot(0.0)
+            .expect("snapshot after rollback");
+        assert_eq!(snap.objects[0].julia_mix(), 0.0);
+    }
+
+    /// plan1 F3: integer formula leaves accept whole numbers only and hold between keys.
+    #[test]
+    fn integer_formula_leaves_stay_whole() {
+        let path = "/formula/GyroidTpms/octaves";
+        assert!(integer_formula_leaf(path));
+        assert!(!integer_formula_leaf("/formula/GyroidTpms/frequency"));
+        assert!(FractalNodeSpec.is_discrete_path(path));
+        assert!(FractalNodeSpec.validate_attribute(path, &json!(4)).is_ok());
+        assert!(
+            FractalNodeSpec
+                .validate_attribute(path, &json!(2.5))
+                .is_err()
+        );
+        // A float, even a whole one, is what the `u32` field fails to deserialize.
+        assert!(
+            FractalNodeSpec
+                .validate_attribute(path, &json!(3.0))
+                .is_err()
+        );
+    }
+
+    /// plan1 S5: every choice the Attribute Editor offers deserializes in its family.
+    #[test]
+    fn every_formula_choice_deserializes() {
+        for meta in &FORMULAS {
+            let preset = serde_json::to_value(Formula::PRESETS[meta.code as usize])
+                .expect("preset serializes");
+            for param in meta.params {
+                let Some(choices) = param.choices else {
+                    continue;
+                };
+                for choice in choices() {
+                    let mut formula = preset.clone();
+                    let slot = formula
+                        .pointer_mut(&format!("/{}/{}", meta.variant, param.name))
+                        .expect("choice parameter exists in the preset");
+                    match slot {
+                        Value::Array(slots) => slots.fill(choice.clone()),
+                        other => *other = choice.clone(),
+                    }
+                    Formula::deserialize(&formula).unwrap_or_else(|e| {
+                        panic!("{}/{} = {choice}: {e}", meta.variant, param.name)
+                    });
+                }
+            }
+        }
+        let kifs = FractalNodeSpec
+            .attribute_choices("/formula/Hybrid/kifs/kind")
+            .expect("Hybrid KIFS kind has choices")
+            .expect("choices build");
+        assert_eq!(kifs.len(), KifsKind::ALL.len());
+    }
+
+    /// plan1 S6: labels and hints of the classic families come from `FORMULAS` too.
+    #[test]
+    fn classic_family_labels_and_hints_come_from_the_table() {
+        assert_eq!(
+            FractalNodeSpec
+                .attribute_label("/formula/Mandelbulb/rotation_degrees")
+                .as_deref(),
+            Some("Rotation (°)")
+        );
+        assert_eq!(
+            FractalNodeSpec.attribute_hint("/formula/Hybrid/bulb/power"),
+            find_param_meta("/formula/Mandelbulb/power").map(|p| p.hint)
+        );
+    }
+
     #[test]
     fn fractal_node_lifecycle_and_parameter_roundtrip() {
         use soluwell_studio::StudioModule;
@@ -2138,11 +2304,14 @@ mod tests {
                 "Gyroid / Schwarz TPMS is analytical (no iteration loop)"
             ))
         );
+        // An unknown variant never reaches the inspector (`validate_node` rejects it), so it
+        // gets no guessed "no orbit constant" reason: the check falls through to the Julia mix,
+        // which this probe does not provide.
         assert_eq!(
             FractalNodeSpec.inactive_reason("/julia", &|p| {
                 (p == "/formula").then(|| json!({ "UnknownCustomVariant": {} }))
             }),
-            Some(Some("This formula has no orbit constant"))
+            None
         );
     }
 

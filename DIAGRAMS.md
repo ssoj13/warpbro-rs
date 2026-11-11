@@ -165,7 +165,7 @@ flowchart LR
   SSOT --> form[Formula: 28-variant enum]
   SSOT --> ui[Attribute Editor<br/>ParamMeta sliders, tooltips, validation]
   SSOT --> pack[FractalNodeSpec::pack_object<br/>P_COUNT 128-float ABI]
-  SSOT --> consts[WGSL consts! macro<br/>FAMILY_*, SIGNED_MASK, ITERATING_MASK]
+  SSOT --> consts["engine.rs warpbro_shader_hook<br/>SIGNED_MASK, ITERATING_MASK + family_distance switch"]
 
   pack --> cuda[CUDA: fractal-kernels<br/>234 specialized kernel entries]
   consts --> wgsl[WGPU: formulas.wgsl<br/>28 distance estimators]
@@ -181,7 +181,41 @@ flowchart LR
 
 ---
 
-## 6. Multi-Threaded Export Pipeline
+## 6. Backend Resolution, Shader Hook & Fractal Validation (after plan1 waves A-C)
+
+Real codepaths in `src/engine.rs` / `src/fractal_node.rs` and soluwell `world.rs`
+(egui-widgets-rs `13d6f8d`). See [plan1.md](plan1.md) for why each path is shaped this way.
+
+```mermaid
+flowchart TD
+  ng[engine::new_gpu] --> wce[WarpBroComputeEngine::new]
+  wce -->|CudaEngine::new ok| cu[CUDA available]
+  wce -->|CUDA fails: log::warn| wonly[WGPU only]
+  warm[main --warmup] -->|engine::warmup_cuda| wc{CUDA loads?}
+  wc -->|yes| ready[CUDA ready: device]
+  wc -->|no| unav[CUDA unavailable, not warmed]
+
+  step[execute_step scene] --> rb{resolve_backend}
+  rb -->|Auto with CUDA, or explicit Cuda| cuk["CUDA kernels<br/>unknown family gives RenderError::Scene"]
+  rb -->|Auto without CUDA, or explicit Wgpu| wg["soluwell WgpuComputeEngine<br/>(delegated, one implementation)"]
+  rb -->|explicit Cuda, no device| err[typed error, no downgrade]
+
+  wg --> hook[warpbro_shader_hook family]
+  hook -->|Some code in FORMULAS| spec[specialized module: one estimator call]
+  hook -->|Some unknown code| miss1["return miss (F32_MAX, TRAP_START)"]
+  hook -->|None| dyn["dynamic switch: 28 cases + default miss"]
+
+  load[WorldDocument::decode_json] --> vcn[validate_custom_nodes at first frame]
+  edit[WorldEditor::apply_edit] --> vcn
+  snap[snapshot_with_render_profile] -->|each shown node, at the frame| vn
+  vcn --> vn["FractalNodeSpec::validate_node<br/>validate_fractal_branches"]
+  vn -->|Err| rej["decode fails / edit rolled back / snapshot Err"]
+  vn -->|Ok| pack["Scene::pack: accessors read validated branches"]
+```
+
+---
+
+## 7. Multi-Threaded Export Pipeline
 
 ```mermaid
 flowchart TD
