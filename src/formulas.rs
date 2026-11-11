@@ -2697,51 +2697,51 @@ pub fn formula_param_order(path: &str) -> Option<u16> {
 pub fn formula_param_inactive_reason<'a>(
     path: &str,
     value: impl Fn(&str) -> Option<&'a Value>,
-) -> Option<String> {
+) -> Option<&'static str> {
     let (variant, field) = parse_formula_attr_path(path)?;
     match (variant, field) {
         ("GyroidTpms", "lacunarity" | "gain") => {
             (value("/formula/GyroidTpms/octaves")?.as_f64()? <= 1.0)
-                .then(|| "Fractal octaves is 1".into())
+                .then_some("Fractal octaves is 1")
         }
-        ("VoronoiFoam", "lacunarity") => (value("/formula/VoronoiFoam/octaves")?.as_f64()? <= 1.0)
-            .then(|| "Foam octaves is 1".into()),
+        ("VoronoiFoam", "lacunarity") => {
+            (value("/formula/VoronoiFoam/octaves")?.as_f64()? <= 1.0).then_some("Foam octaves is 1")
+        }
         ("TorusKnotBraid", "sub_strands") => {
             (value("/formula/TorusKnotBraid/braid_depth")?.as_f64()? == 0.0)
-                .then(|| "Braid relief is 0".into())
+                .then_some("Braid relief is 0")
         }
         ("DupinCyclide", "rib_depth") => {
             (value("/formula/DupinCyclide/rib_frequency")?.as_f64()? == 0.0)
-                .then(|| "Rib count is 0".into())
+                .then_some("Rib count is 0")
         }
         ("DupinCyclide", "rib_frequency") => {
-            (value("/formula/DupinCyclide/rib_depth")?.as_f64()? == 0.0)
-                .then(|| "Rib depth is 0".into())
+            (value("/formula/DupinCyclide/rib_depth")?.as_f64()? == 0.0).then_some("Rib depth is 0")
         }
         ("PhyllotaxisShell", "cone_sharpness" | "sub_florets") => {
             (value("/formula/PhyllotaxisShell/cone_height")?.as_f64()? == 0.0)
-                .then(|| "Cone height is 0".into())
+                .then_some("Cone height is 0")
         }
         ("PhyllotaxisShell", "spiral_twist") => {
             if value("/formula/PhyllotaxisShell/cone_height")?.as_f64()? == 0.0 {
-                Some("Cone height is 0".into())
+                Some("Cone height is 0")
             } else if value("/formula/PhyllotaxisShell/sub_florets")?.as_f64()? == 0.0 {
-                Some("Sub-floret spirals is 0".into())
+                Some("Sub-floret spirals is 0")
             } else {
                 None
             }
         }
         ("NautilusShell", "rib_amplitude") => {
             (value("/formula/NautilusShell/rib_frequency")?.as_f64()? == 0.0)
-                .then(|| "Septa / Rib count is 0".into())
+                .then_some("Septa / Rib count is 0")
         }
         ("AstrolabeGimbal", "tooth_depth") => {
             (value("/formula/AstrolabeGimbal/gear_teeth")?.as_f64()? < 1.0)
-                .then(|| "Gear teeth is 0".into())
+                .then_some("Gear teeth is 0")
         }
         ("AstrolabeGimbal", "gear_teeth") => {
             (value("/formula/AstrolabeGimbal/tooth_depth")?.as_f64()? == 0.0)
-                .then(|| "Tooth depth is 0".into())
+                .then_some("Tooth depth is 0")
         }
         _ => None,
     }

@@ -8,8 +8,8 @@
 //! `"Fractal"` node is present and visible in the graph, it is evaluated into `scene.objects`
 //! and rendered; when absent or hidden, `soluwell-studio` renders the 3D studio environment.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::sync::{LazyLock, RwLock};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::LazyLock;
 
 use fractal_core::params::*;
 use serde::{Deserialize, Serialize};
@@ -756,10 +756,18 @@ impl FractalSceneExt for Scene {
     }
 
     fn formula(&self) -> Formula {
-        self.custom
-            .get("formula")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or(Formula::Mandelbulb(Bulb::PRESET))
+        match self.custom.get("formula") {
+            Some(v) => match Formula::deserialize(v) {
+                Ok(f) => f,
+                Err(err) => {
+                    log::warn!(
+                        "Invalid /formula in Scene::custom ({err}); falling back to Mandelbulb preset"
+                    );
+                    Formula::Mandelbulb(Bulb::PRESET)
+                }
+            },
+            None => Formula::Mandelbulb(Bulb::PRESET),
+        }
     }
 
     fn set_formula(&mut self, f: Formula) {
@@ -864,6 +872,12 @@ fn variants<T: Serialize>(all: impl IntoIterator<Item = T>) -> Result<Vec<Value>
     all.into_iter()
         .map(|v| serde_json::to_value(v).map_err(|e| e.to_string()))
         .collect()
+}
+
+fn hybrid_step_choices() -> Result<Vec<Value>, String> {
+    static CHOICES: LazyLock<Result<Vec<Value>, String>> =
+        LazyLock::new(|| variants(HybridStep::ALL));
+    CHOICES.clone()
 }
 
 fn formula_hint(family: &str, field: &str) -> Option<&'static str> {
@@ -984,25 +998,6 @@ fn discover_formula(value: &Value, path: &str, attrs: &mut Attrs) {
     }
 }
 
-/// Interns the bounded set of dynamic inactive-reason messages (at most ~35 distinct strings over
-/// the process lifetime: 28 formula names, 4 colouring modes, 4 hybrid step names).
-fn intern_static_reason(s: String) -> &'static str {
-    static INTERNED: LazyLock<RwLock<BTreeSet<&'static str>>> =
-        LazyLock::new(|| RwLock::new(BTreeSet::new()));
-    if let Ok(read) = INTERNED.read()
-        && let Some(&existing) = read.get(s.as_str())
-    {
-        return existing;
-    }
-    let mut write = INTERNED.write().expect("Interned reason lock poisoned");
-    if let Some(&existing) = write.get(s.as_str()) {
-        return existing;
-    }
-    let leaked: &'static str = Box::leak(s.into_boxed_str());
-    write.insert(leaked);
-    leaked
-}
-
 impl NodeTypeSpec for FractalNodeSpec {
     fn type_name(&self) -> &'static str {
         "Fractal"
@@ -1085,10 +1080,39 @@ impl NodeTypeSpec for FractalNodeSpec {
     }
 
     fn validate_attribute(&self, path: &str, value: &Value) -> Result<(), String> {
-        if path == "/formula" {
-            serde_json::from_value::<Formula>(value.clone())
-                .map_err(|e| format!("Invalid formula: {e}"))?;
-            return Ok(());
+        match path {
+            "/formula" => {
+                Formula::deserialize(value).map_err(|e| format!("Invalid formula: {e}"))?;
+                return Ok(());
+            }
+            "/formula/Hybrid/steps" => {
+                <[HybridStep; 4]>::deserialize(value)
+                    .map_err(|e| format!("Invalid hybrid steps: {e}"))?;
+                return Ok(());
+            }
+            "/coloring" => {
+                Coloring::deserialize(value).map_err(|e| format!("Invalid coloring: {e}"))?;
+                return Ok(());
+            }
+            "/palette" => {
+                PaletteScheme::deserialize(value).map_err(|e| format!("Invalid palette: {e}"))?;
+                return Ok(());
+            }
+            "/render/backend" => {
+                Backend::deserialize(value).map_err(|e| format!("Invalid render backend: {e}"))?;
+                return Ok(());
+            }
+            "/render/denoise/mode" => {
+                soluwell_studio::denoise::Mode::deserialize(value)
+                    .map_err(|e| format!("Invalid denoise mode: {e}"))?;
+                return Ok(());
+            }
+            "/render/denoise/quality" => {
+                soluwell_studio::denoise::Quality::deserialize(value)
+                    .map_err(|e| format!("Invalid denoise quality: {e}"))?;
+                return Ok(());
+            }
+            _ => {}
         }
         if let Some(choices) = self.attribute_choices(path) {
             let choices = choices?;
@@ -1100,22 +1124,29 @@ impl NodeTypeSpec for FractalNodeSpec {
     }
 
     fn attribute_choices(&self, path: &str) -> Option<Result<Vec<Value>, String>> {
+        static FORMULA_CHOICES: LazyLock<Result<Vec<Value>, String>> =
+            LazyLock::new(|| variants(Formula::PRESETS));
+        static KIFS_CHOICES: LazyLock<Result<Vec<Value>, String>> =
+            LazyLock::new(|| variants(KifsKind::ALL));
         if path == "/formula" {
-            return Some(variants(Formula::PRESETS));
+            return Some(FORMULA_CHOICES.clone());
+        }
+        if path == "/formula/Hybrid/steps" {
+            return None;
         }
         if let Some(choices) = crate::formulas::formula_param_choices(path) {
             return Some(Ok(choices));
         }
         match path {
-            p if p.ends_with("/kind") && p.starts_with("/formula") => Some(variants(KifsKind::ALL)),
-            p if p.starts_with("/formula/Hybrid/steps/") => Some(variants(HybridStep::ALL)),
+            p if p.ends_with("/kind") && p.starts_with("/formula") => Some(KIFS_CHOICES.clone()),
+            p if p.starts_with("/formula/Hybrid/steps/") => Some(hybrid_step_choices()),
             _ => None,
         }
     }
 
     fn choice_label(&self, path: &str, value: &Value) -> Option<String> {
         if path == "/formula" {
-            return serde_json::from_value::<Formula>(value.clone())
+            return Formula::deserialize(value)
                 .map(|f| f.name().to_owned())
                 .ok()
                 .or_else(|| value.as_object()?.keys().next().cloned());
@@ -1125,7 +1156,7 @@ impl NodeTypeSpec for FractalNodeSpec {
 
     fn choice_hover(&self, path: &str, value: &Value) -> Option<String> {
         if path == "/formula" {
-            let f: Formula = serde_json::from_value(value.clone()).ok()?;
+            let f = Formula::deserialize(value).ok()?;
             return Some(format!("{}: {}", f.name(), f.hint()));
         }
         None
@@ -1161,13 +1192,18 @@ impl NodeTypeSpec for FractalNodeSpec {
         };
         if let Some(rest) = path.strip_prefix("/formula/") {
             let (family, param) = rest.split_once('/')?;
-            let (family, param) = match (family, param.split_once('/')) {
-                ("Hybrid", Some(("bulb", p))) => ("Mandelbulb", p),
-                ("Hybrid", Some(("mandelbox", p))) => ("Mandelbox", p),
-                ("Hybrid", Some(("kifs", p))) => ("Kifs", p),
-                _ => (family, param),
+            return match (family, param.split_once('/')) {
+                ("Hybrid", Some(("bulb", p))) => {
+                    crate::formulas::formula_param_slider(&format!("/formula/Mandelbulb/{p}"))
+                }
+                ("Hybrid", Some(("mandelbox", p))) => {
+                    crate::formulas::formula_param_slider(&format!("/formula/Mandelbox/{p}"))
+                }
+                ("Hybrid", Some(("kifs", p))) => {
+                    crate::formulas::formula_param_slider(&format!("/formula/Kifs/{p}"))
+                }
+                _ => crate::formulas::formula_param_slider(path),
             };
-            return crate::formulas::formula_param_slider(&format!("/formula/{family}/{param}"));
         }
         match path {
             "/julia" => lin(-8.0, 8.0),
@@ -1199,13 +1235,13 @@ impl NodeTypeSpec for FractalNodeSpec {
         match path {
             "/formula" => Some("The fractal family and its parameters."),
             "/julia" => Some(
-                "Julia constant J (Mandelbulb, Mandelbox): the orbit constant the Julia mix blends towards.",
+                "Julia constant J (formulas with an orbit constant): the orbit constant the Julia mix blends towards.",
             ),
             "/julia_mix" => Some(
-                "Mandelbrot to Julia (Mandelbulb, Mandelbox): every iteration adds mix(point, Julia constant, this). 0 is the Mandelbrot form, 1 the Julia form; keys morph between them.",
+                "Mandelbrot to Julia (formulas with an orbit constant): every iteration adds mix(point, Julia constant, this). 0 is the Mandelbrot form, 1 the Julia form; keys morph between them.",
             ),
             "/orbit_offset" => Some(
-                "Constant added every iteration on top of the orbit constant (Mandelbulb, Mandelbox): z -> z^p + c + offset. Shifts and reshapes the set.",
+                "Constant added every iteration on top of the orbit constant (formulas with an orbit constant): z -> f(z) + c + offset. Shifts and reshapes the set.",
             ),
             "/inversion_strength" => Some(
                 "Spherical inversion of space before iterating (every formula): 0 off, 1 the full inversion in the sphere below, which turns the set inside out; between them a continuous blend.",
@@ -1273,6 +1309,11 @@ impl NodeTypeSpec for FractalNodeSpec {
             && crate::formulas::find_formula_meta_by_variant(variant).is_some_and(|m| m.code >= 8)
             && let Some(label) = crate::formulas::formula_param_label(path)
         {
+            if let Some((_, comp)) = path.rsplit_once('/')
+                && comp.parse::<usize>().is_ok()
+            {
+                return Some(format!("{label} · {comp}"));
+            }
             return Some(label);
         }
         if !path.starts_with("/formula/") {
@@ -1321,6 +1362,11 @@ impl NodeTypeSpec for FractalNodeSpec {
                     }
                 }
             }
+            for (slot, step) in Hybrid::PRESET.steps.into_iter().enumerate() {
+                if let Ok(v) = serde_json::to_value(step) {
+                    defaults.insert(format!("/formula/Hybrid/steps/{slot}"), v);
+                }
+            }
             defaults
         });
         DEFAULTS.get(path).cloned()
@@ -1355,20 +1401,43 @@ impl NodeTypeSpec for FractalNodeSpec {
         path: &str,
         get: &dyn Fn(&str) -> Option<Value>,
     ) -> Option<Option<&'static str>> {
+        static NO_ORBIT_REASON: LazyLock<[&'static str; TOTAL_FORMULA_COUNT as usize]> =
+            LazyLock::new(|| {
+                std::array::from_fn(|i| {
+                    Box::leak(
+                        format!("The {} formula has no orbit constant", FORMULAS[i].variant)
+                            .into_boxed_str(),
+                    ) as &'static str
+                })
+            });
+        static ANALYTICAL_REASON: LazyLock<[&'static str; TOTAL_FORMULA_COUNT as usize]> =
+            LazyLock::new(|| {
+                std::array::from_fn(|i| {
+                    Box::leak(
+                        format!(
+                            "{} is analytical (no iteration loop)",
+                            FORMULAS[i].display_name
+                        )
+                        .into_boxed_str(),
+                    ) as &'static str
+                })
+            });
+
         let under = |prefix: &str| {
             path.strip_prefix(prefix)
                 .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
         };
         if under("/julia") || under("/julia_mix") || under("/orbit_offset") {
             let formula = get("/formula")?;
-            let family = formula.as_object()?.keys().next()?.clone();
-            let has_orbit = crate::formulas::find_formula_meta_by_variant(&family)
-                .map(|m| m.has_orbit_constant)
-                .unwrap_or_else(|| matches!(family.as_str(), "Mandelbulb" | "Mandelbox"));
-            if !has_orbit {
-                return Some(Some(intern_static_reason(format!(
-                    "The {family} formula has no orbit constant"
-                ))));
+            let family = formula.as_object()?.keys().next()?.as_str();
+            match crate::formulas::find_formula_meta_by_variant(family) {
+                Some(meta) if !meta.has_orbit_constant => {
+                    return Some(Some(NO_ORBIT_REASON[meta.code as usize]));
+                }
+                None if !matches!(family, "Mandelbulb" | "Mandelbox") => {
+                    return Some(Some("This formula has no orbit constant"));
+                }
+                _ => {}
             }
             if under("/julia") && get("/julia_mix")?.as_f64()? == 0.0 {
                 return Some(Some("Julia mix is 0"));
@@ -1384,18 +1453,15 @@ impl NodeTypeSpec for FractalNodeSpec {
         if under("/trap_point") || under("/trap_axis") || under("/trap_scale") {
             let coloring_val = get("/coloring")?;
             let coloring = coloring_val.as_str()?;
-            let used = match coloring {
-                "Radius" => false,
-                "TrapOrigin" => under("/trap_scale"),
-                "TrapPoint" => !under("/trap_axis"),
-                _ => true,
+            let reason = match coloring {
+                "Radius" => Some("Not used by the Radius colouring"),
+                "TrapOrigin" if !under("/trap_scale") => {
+                    Some("Not used by the TrapOrigin colouring")
+                }
+                "TrapPoint" if under("/trap_axis") => Some("Not used by the TrapPoint colouring"),
+                _ => None,
             };
-            if !used {
-                return Some(Some(intern_static_reason(format!(
-                    "Not used by the {coloring} colouring"
-                ))));
-            }
-            return Some(None);
+            return Some(reason);
         }
         if path == "/render/iterations" {
             let formula = get("/formula")?;
@@ -1403,33 +1469,12 @@ impl NodeTypeSpec for FractalNodeSpec {
             if let Some(meta) = crate::formulas::find_formula_meta_by_variant(family)
                 && !meta.iterates
             {
-                return Some(Some(intern_static_reason(format!(
-                    "{} is analytical (no iteration loop)",
-                    meta.display_name
-                ))));
+                return Some(Some(ANALYTICAL_REASON[meta.code as usize]));
             }
             return Some(None);
         }
-        let mut cache: HashMap<String, Value> = HashMap::new();
-        for key in [
-            "/formula/GyroidTpms/octaves",
-            "/formula/VoronoiFoam/octaves",
-            "/formula/TorusKnotBraid/braid_depth",
-            "/formula/DupinCyclide/rib_frequency",
-            "/formula/DupinCyclide/rib_depth",
-            "/formula/PhyllotaxisShell/cone_height",
-            "/formula/PhyllotaxisShell/sub_florets",
-            "/formula/NautilusShell/rib_frequency",
-            "/formula/AstrolabeGimbal/gear_teeth",
-            "/formula/AstrolabeGimbal/tooth_depth",
-        ] {
-            if let Some(val) = get(key) {
-                cache.insert(key.to_owned(), val);
-            }
-        }
-        if let Some(reason) = crate::formulas::formula_param_inactive_reason(path, |k| cache.get(k))
-        {
-            return Some(Some(intern_static_reason(reason)));
+        if !path.starts_with("/formula/") {
+            return None;
         }
         if let Some(rest) = path.strip_prefix("/formula/Hybrid/") {
             let hybrid_own = |p: &str| {
@@ -1442,26 +1487,66 @@ impl NodeTypeSpec for FractalNodeSpec {
             if hybrid_own("bulb/bailout") {
                 return Some(Some("A hybrid uses its own bailout"));
             }
-            let step = match rest.split('/').next()? {
+            let (step, missing_reason) = match rest.split('/').next()? {
                 "bulb" if hybrid_own("bulb/rotation_degrees") => return Some(None),
-                "bulb" => "Mandelbulb",
-                "mandelbox" => "Mandelbox",
-                "kifs" => "KifsFold",
-                "apollonian_scale" => "Inversion",
+                "bulb" => ("Mandelbulb", "No hybrid step is Mandelbulb"),
+                "mandelbox" => ("Mandelbox", "No hybrid step is Mandelbox"),
+                "kifs" => ("KifsFold", "No hybrid step is KifsFold"),
+                "apollonian_scale" => ("Inversion", "No hybrid step is Inversion"),
                 _ => return Some(None),
             };
-            let formula = get("/formula")?;
-            let steps = formula.get("Hybrid")?.get("steps")?.as_array()?;
+            let evaluated_steps = get("/formula/Hybrid/steps");
+            let formula_fallback = if evaluated_steps.as_ref().is_some_and(Value::is_array) {
+                None
+            } else {
+                Some(get("/formula")?)
+            };
+            let steps = match evaluated_steps.as_ref().and_then(Value::as_array) {
+                Some(arr) => arr,
+                None => formula_fallback
+                    .as_ref()?
+                    .get("Hybrid")?
+                    .get("steps")?
+                    .as_array()?,
+            };
             let runs = steps.iter().any(|s| s.as_str() == Some(step))
                 || (step == "Mandelbulb" && steps.iter().all(|s| s.as_str() == Some("Off")));
             if !runs {
-                return Some(Some(intern_static_reason(format!(
-                    "No hybrid step is {step}"
-                ))));
+                return Some(Some(missing_reason));
             }
             return Some(None);
         }
-        None
+        let (variant, _) = crate::formulas::parse_formula_attr_path(path)?;
+        let control_keys: [&str; 2] = match variant {
+            "GyroidTpms" => ["/formula/GyroidTpms/octaves", ""],
+            "VoronoiFoam" => ["/formula/VoronoiFoam/octaves", ""],
+            "TorusKnotBraid" => ["/formula/TorusKnotBraid/braid_depth", ""],
+            "DupinCyclide" => [
+                "/formula/DupinCyclide/rib_frequency",
+                "/formula/DupinCyclide/rib_depth",
+            ],
+            "PhyllotaxisShell" => [
+                "/formula/PhyllotaxisShell/cone_height",
+                "/formula/PhyllotaxisShell/sub_florets",
+            ],
+            "NautilusShell" => ["/formula/NautilusShell/rib_frequency", ""],
+            "AstrolabeGimbal" => [
+                "/formula/AstrolabeGimbal/gear_teeth",
+                "/formula/AstrolabeGimbal/tooth_depth",
+            ],
+            _ => return None,
+        };
+        let slots = control_keys.map(|k| (!k.is_empty()).then(|| get(k)).flatten());
+        let reason = crate::formulas::formula_param_inactive_reason(path, |k| {
+            if k == control_keys[0] {
+                slots[0].as_ref()
+            } else if k == control_keys[1] {
+                slots[1].as_ref()
+            } else {
+                None
+            }
+        })?;
+        Some(Some(reason))
     }
 
     fn expand_attributes(&self, out: &mut Vec<WorldAttribute>) -> Result<(), String> {
@@ -1471,12 +1556,13 @@ impl NodeTypeSpec for FractalNodeSpec {
             .map(|a| a.value.clone())
             .and_then(|v| v.as_array().cloned())
         {
-            let choices = variants(HybridStep::ALL)?;
+            let choices = hybrid_step_choices()?;
             for (slot, value) in steps.iter().enumerate() {
                 let path = format!("/formula/Hybrid/steps/{slot}");
                 let label = self
                     .attribute_label(&path)
                     .unwrap_or_else(|| format!("Step {}", slot + 1));
+                let default = self.attribute_default(&path);
                 out.push(WorldAttribute {
                     path,
                     label,
@@ -1489,7 +1575,7 @@ impl NodeTypeSpec for FractalNodeSpec {
                     range: None,
                     slider: None,
                     color: false,
-                    default: None,
+                    default,
                 });
             }
         }
@@ -1529,13 +1615,10 @@ impl NodeTypeSpec for FractalNodeSpec {
 
     fn local_pick_radius(&self, scene: &Scene) -> f32 {
         if scene.inversion_strength() != 0.0 {
-            let mut local = scene.clone();
-            local.object = ObjectTransform {
-                offset: [0.0; 3],
-                rotation_degrees: [0.0; 3],
-                scale: 1.0,
-            };
-            local.pack(1, 1)[P_CLIP_RADIUS]
+            let mut p = [0.0f32; P_COUNT];
+            p[P_BAILOUT] = 2.0;
+            pack_object_with_transform(scene, 1.0, [0.0; 3], &mut p, 0.0);
+            p[P_CLIP_RADIUS]
         } else {
             scene.formula().framing_radius()
         }
@@ -1554,219 +1637,242 @@ impl NodeTypeSpec for FractalNodeSpec {
     }
 
     fn pack_object(&self, scene: &Scene, p: &mut [f32], camera_dist: f32) {
-        let formula = scene.formula();
-        let radius = formula.framing_radius();
-        let julia = scene.julia();
-        let julia_mix = scene.julia_mix();
-        let orbit_offset = scene.orbit_offset();
-        let inversion_strength = scene.inversion_strength();
-        let inversion_center = scene.inversion_center();
-        let inversion_radius = scene.inversion_radius();
-        let trap_point = scene.trap_point();
-        let trap_axis = scene.trap_axis();
-        let trap_scale = scene.trap_scale();
-
-        let bulb_escape = |b: &Bulb| -> f32 {
-            b.bailout
-                .max(julia_mix * length(julia) + length(orbit_offset))
-        };
-
-        let mut object_radius =
-            (REACH_MARGIN_FRAMES * radius).max(formula.bound_radius()) * scene.object.scale;
-        if let Formula::Mandelbulb(b) = &formula
-            && (julia_mix != 0.0 || orbit_offset != [0.0; 3])
-        {
-            object_radius = object_radius.max(bulb_escape(b) * scene.object.scale);
-        }
-
-        let clip_object = match &formula {
-            Formula::Mandelbulb(_)
-            | Formula::QuaternionJulia(_)
-            | Formula::Hybrid(_)
-            | Formula::Bristorbrot(_)
-            | Formula::BurningShip(_)
-            | Formula::HarmonicBulb(_)
-            | Formula::Mandelbar3D(_) => None,
-            _ if formula.bound_radius() > 0.0 => Some(formula.bound_radius()),
-            _ => Some(REACH_MARGIN_FRAMES * radius),
-        };
-
-        p[P_FAMILY] = formula.code() as f32;
-        p[P_ITERATIONS] = scene.render.iterations;
-        let orbit = formula.has_orbit_constant();
-        p[P_JULIA] = if orbit { julia_mix } else { 0.0 };
-        put3(p, P_JULIA_C, julia);
-        put3(
+        pack_object_with_transform(
+            scene,
+            scene.object.scale,
+            scene.object.offset,
             p,
-            P_ORBIT_OFFSET,
-            if orbit { orbit_offset } else { [0.0; 3] },
+            camera_dist,
         );
-        p[P_INVERT_STRENGTH] = inversion_strength;
-        put3(p, P_INVERT_CENTER, inversion_center);
-        p[P_INVERT_RADIUS] = inversion_radius;
-        p[P_BOUND_RADIUS] = formula.bound_radius();
-
-        let set_rotation = |p: &mut [f32], degrees: [f32; 3]| {
-            let reduced = degrees.map(|a| a % 360.0);
-            if reduced.iter().all(|&a| a == 0.0) {
-                p[P_ITER_ROTATE] = 0.0;
-            } else {
-                p[P_ITER_ROTATE] = 1.0;
-                put9(p, P_ITER_ROT, euler_matrix(reduced));
-            }
-        };
-        let pack_bulb = |p: &mut [f32], b: &Bulb| {
-            p[P_BULB_POWER] = b.power;
-            p[P_BULB_THETA_POWER] = b.angle_scale[0] * b.power;
-            p[P_BULB_PHI_POWER] = b.angle_scale[1] * b.power;
-            p[P_BULB_THETA_PHASE] = b.angle_phase_degrees[0].to_radians();
-            p[P_BULB_PHI_PHASE] = b.angle_phase_degrees[1].to_radians();
-            p[P_BULB_GROWTH] = 1.0f32
-                .max(b.angle_scale[0].abs())
-                .max(b.angle_scale[1].abs());
-        };
-        let pack_box = |p: &mut [f32], b: &MandelBox| {
-            let min_r = b.min_radius_ratio * b.fixed_radius;
-            p[P_BOX_SCALE] = b.scale;
-            p[P_BOX_FOLD] = b.fold_limit;
-            p[P_BOX_MIN_R2] = min_r * min_r;
-            p[P_BOX_FIXED_R2] = b.fixed_radius * b.fixed_radius;
-        };
-        let pack_kifs = |p: &mut [f32], k: &Kifs| {
-            let s = k.scale;
-            let base = k.kind.centre();
-            let cc = [
-                base[0] + k.offset[0],
-                base[1] + k.offset[1],
-                base[2] + k.offset[2],
-            ];
-            let (shift_z, fold_height) = match k.kind {
-                KifsKind::Menger => (0.0, 0.5 * cc[2] * (s - 1.0) / s),
-                _ => ((s - 1.0) * cc[2], 0.0),
-            };
-            p[P_KIFS_KIND] = k.kind.code() as f32;
-            p[P_KIFS_SCALE] = s;
-            put3(
-                p,
-                P_KIFS_SHIFT,
-                [(s - 1.0) * cc[0], (s - 1.0) * cc[1], shift_z],
-            );
-            p[P_KIFS_FOLD_HEIGHT] = fold_height;
-            p[P_KIFS_BOUND] = k.kind.bounding_radius();
-        };
-
-        match &formula {
-            Formula::Mandelbulb(b) => {
-                pack_bulb(p, b);
-                set_rotation(p, b.rotation_degrees);
-                p[P_BAILOUT] = bulb_escape(b);
-                p[P_BULB_FAST8] = (b.power == 8.0
-                    && b.angle_scale == [1.0, 1.0]
-                    && b.angle_phase_degrees == [0.0, 0.0]
-                    && p[P_ITER_ROTATE] == 0.0) as u32 as f32;
-            }
-            Formula::Mandelbox(b) => {
-                pack_box(p, b);
-                set_rotation(p, b.rotation_degrees);
-            }
-            Formula::QuaternionJulia(q) => {
-                let m = rotation_matrix4(q.rotation_degrees);
-                for row in 0..4 {
-                    for col in 0..3 {
-                        p[P_QUAT_ROWS + 3 * row + col] = m[row][col];
-                    }
-                    p[P_QUAT_OFFSET + row] = m[row][3] * q.slice_w;
-                }
-                p[P_QUAT_C..P_QUAT_C + 4].copy_from_slice(&q.constant);
-                let cl = q.constant.iter().map(|v| v * v).sum::<f32>().sqrt();
-                p[P_BAILOUT] = q.bailout.max(cl);
-            }
-            Formula::Kifs(k) => {
-                pack_kifs(p, k);
-                set_rotation(p, k.rotation_degrees);
-            }
-            Formula::Kleinian(k) => {
-                let (a, b) = (k.a as f64, k.b as f64);
-                p[P_KLEIN_A] = k.a;
-                p[P_KLEIN_B] = k.b;
-                p[P_KLEIN_SKEW] = (b.abs() / a) as f32;
-                p[P_KLEIN_LINE_AMP] = ((2.0 * a - 1.95) / 4.0) as f32;
-                p[P_KLEIN_LINE_RATE] = (7.2 - (1.95 - a) * 15.0) as f32;
-            }
-            Formula::PseudoKleinian(k) => {
-                put3(p, P_PK_BOX, k.box_size);
-                p[P_PK_SIZE] = k.size;
-                put3(p, P_PK_C, k.c);
-                put3(p, P_PK_OFFSET, k.offset);
-                p[P_PK_THICKNESS] = k.thickness;
-            }
-            Formula::Apollonian(a) => {
-                p[P_APOLLO_SCALE] = a.scale;
-            }
-            Formula::Hybrid(h) => {
-                pack_bulb(p, &h.bulb);
-                pack_box(p, &h.mandelbox);
-                pack_kifs(p, &h.kifs);
-                p[P_APOLLO_SCALE] = h.apollonian_scale;
-                p[P_BAILOUT] = h.bailout;
-                set_rotation(p, h.bulb.rotation_degrees);
-                let active: Vec<u32> = h
-                    .steps
-                    .iter()
-                    .filter(|s| **s != HybridStep::Off)
-                    .map(|s| match s {
-                        HybridStep::Mandelbulb => 1,
-                        HybridStep::Mandelbox => 2,
-                        HybridStep::KifsFold => 3,
-                        HybridStep::Inversion => 4,
-                        HybridStep::Off => 0,
-                    })
-                    .collect();
-                let active = if active.is_empty() { vec![1] } else { active };
-                p[P_HYBRID_STEPS] = active
-                    .iter()
-                    .enumerate()
-                    .fold(0u32, |acc, (i, c)| acc | (c << (3 * i)))
-                    as f32;
-                p[P_HYBRID_COUNT] = active.len() as f32;
-            }
-            other => {
-                let orbit_escape = julia_mix * length(julia) + length(orbit_offset);
-                crate::formulas::pack_extended_formula(p, other, orbit_escape, euler_matrix);
-            }
-        }
-
-        let clip = match clip_object {
-            Some(r) => r,
-            None => p[P_BAILOUT] * 1.001,
-        };
-        let (clip, object_radius) = if inversion_strength == 0.0 {
-            (clip, object_radius)
-        } else {
-            let clip = fractal_core::inversion::reach(
-                inversion_center,
-                inversion_radius,
-                inversion_strength,
-                clip,
-            )
-            .unwrap_or(INVERSION_FAR_REACH);
-            (clip, object_radius.max(clip * scene.object.scale))
-        };
-        p[P_CLIP_RADIUS] = clip * scene.object.scale;
-        p[P_MAX_DISTANCE] =
-            camera_dist + length(scene.camera.target) + length(scene.object.offset) + object_radius;
-
-        p[P_COLOR_MODE] = scene.coloring as u32 as f32;
-        put3(p, P_TRAP_POINT, trap_point);
-        let mut axis = [0.0; 3];
-        axis[trap_axis.min(2) as usize] = 1.0;
-        put3(p, P_TRAP_NORMAL, axis);
-        p[P_TRAP_SCALE] = trap_scale;
     }
 
     fn payload_kind(&self) -> soluwell_studio::NodePayloadKind {
         soluwell_studio::NodePayloadKind::SdfField
     }
+}
+
+fn pack_object_with_transform(
+    scene: &Scene,
+    object_scale: f32,
+    object_offset: [f32; 3],
+    p: &mut [f32],
+    camera_dist: f32,
+) {
+    debug_assert!(p.len() >= P_COUNT);
+    if p.len() < P_COUNT {
+        return;
+    }
+    let formula = scene.formula();
+    let radius = formula.framing_radius();
+    let julia = scene.julia();
+    let julia_mix = scene.julia_mix();
+    let orbit_offset = scene.orbit_offset();
+    let inversion_strength = scene.inversion_strength();
+    let inversion_center = scene.inversion_center();
+    let inversion_radius = scene.inversion_radius();
+    let trap_point = scene.trap_point();
+    let trap_axis = scene.trap_axis();
+    let trap_scale = scene.trap_scale();
+
+    let bulb_escape = |b: &Bulb| -> f32 {
+        b.bailout
+            .max(julia_mix * length(julia) + length(orbit_offset))
+    };
+
+    let abs_scale = object_scale.abs();
+    let mut object_radius = (REACH_MARGIN_FRAMES * radius).max(formula.bound_radius()) * abs_scale;
+    if let Formula::Mandelbulb(b) = &formula
+        && (julia_mix != 0.0 || orbit_offset != [0.0; 3])
+    {
+        object_radius = object_radius.max(bulb_escape(b) * abs_scale);
+    }
+
+    let clip_object = match &formula {
+        Formula::Mandelbulb(_)
+        | Formula::QuaternionJulia(_)
+        | Formula::Hybrid(_)
+        | Formula::Bristorbrot(_)
+        | Formula::BurningShip(_)
+        | Formula::HarmonicBulb(_)
+        | Formula::Mandelbar3D(_) => None,
+        _ if formula.bound_radius() > 0.0 => Some(formula.bound_radius()),
+        _ => Some(REACH_MARGIN_FRAMES * radius),
+    };
+
+    p[P_FAMILY] = formula.code() as f32;
+    p[P_ITERATIONS] = scene.render.iterations;
+    let orbit = formula.has_orbit_constant();
+    p[P_JULIA] = if orbit { julia_mix } else { 0.0 };
+    put3(p, P_JULIA_C, julia);
+    put3(
+        p,
+        P_ORBIT_OFFSET,
+        if orbit { orbit_offset } else { [0.0; 3] },
+    );
+    p[P_INVERT_STRENGTH] = inversion_strength;
+    put3(p, P_INVERT_CENTER, inversion_center);
+    p[P_INVERT_RADIUS] = inversion_radius;
+    p[P_BOUND_RADIUS] = formula.bound_radius();
+
+    let set_rotation = |p: &mut [f32], degrees: [f32; 3]| {
+        let reduced = degrees.map(|a| a % 360.0);
+        if reduced.iter().all(|&a| a == 0.0) {
+            p[P_ITER_ROTATE] = 0.0;
+        } else {
+            p[P_ITER_ROTATE] = 1.0;
+            put9(p, P_ITER_ROT, euler_matrix(reduced));
+        }
+    };
+    let pack_bulb = |p: &mut [f32], b: &Bulb| {
+        p[P_BULB_POWER] = b.power;
+        p[P_BULB_THETA_POWER] = b.angle_scale[0] * b.power;
+        p[P_BULB_PHI_POWER] = b.angle_scale[1] * b.power;
+        p[P_BULB_THETA_PHASE] = b.angle_phase_degrees[0].to_radians();
+        p[P_BULB_PHI_PHASE] = b.angle_phase_degrees[1].to_radians();
+        p[P_BULB_GROWTH] = 1.0f32
+            .max(b.angle_scale[0].abs())
+            .max(b.angle_scale[1].abs());
+    };
+    let pack_box = |p: &mut [f32], b: &MandelBox| {
+        let min_r = b.min_radius_ratio * b.fixed_radius;
+        p[P_BOX_SCALE] = b.scale;
+        p[P_BOX_FOLD] = b.fold_limit;
+        p[P_BOX_MIN_R2] = min_r * min_r;
+        p[P_BOX_FIXED_R2] = b.fixed_radius * b.fixed_radius;
+    };
+    let pack_kifs = |p: &mut [f32], k: &Kifs| {
+        let s = k.scale;
+        let base = k.kind.centre();
+        let cc = [
+            base[0] + k.offset[0],
+            base[1] + k.offset[1],
+            base[2] + k.offset[2],
+        ];
+        let (shift_z, fold_height) = match k.kind {
+            KifsKind::Menger => (
+                0.0,
+                if s != 0.0 {
+                    0.5 * cc[2] * (s - 1.0) / s
+                } else {
+                    0.0
+                },
+            ),
+            _ => ((s - 1.0) * cc[2], 0.0),
+        };
+        p[P_KIFS_KIND] = k.kind.code() as f32;
+        p[P_KIFS_SCALE] = s;
+        put3(
+            p,
+            P_KIFS_SHIFT,
+            [(s - 1.0) * cc[0], (s - 1.0) * cc[1], shift_z],
+        );
+        p[P_KIFS_FOLD_HEIGHT] = fold_height;
+        p[P_KIFS_BOUND] = k.kind.bounding_radius();
+    };
+
+    match &formula {
+        Formula::Mandelbulb(b) => {
+            pack_bulb(p, b);
+            set_rotation(p, b.rotation_degrees);
+            p[P_BAILOUT] = bulb_escape(b);
+            p[P_BULB_FAST8] = (b.power == 8.0
+                && b.angle_scale == [1.0, 1.0]
+                && b.angle_phase_degrees == [0.0, 0.0]
+                && p[P_ITER_ROTATE] == 0.0) as u32 as f32;
+        }
+        Formula::Mandelbox(b) => {
+            pack_box(p, b);
+            set_rotation(p, b.rotation_degrees);
+        }
+        Formula::QuaternionJulia(q) => {
+            let m = rotation_matrix4(q.rotation_degrees);
+            for row in 0..4 {
+                for col in 0..3 {
+                    p[P_QUAT_ROWS + 3 * row + col] = m[row][col];
+                }
+                p[P_QUAT_OFFSET + row] = m[row][3] * q.slice_w;
+            }
+            p[P_QUAT_C..P_QUAT_C + 4].copy_from_slice(&q.constant);
+            let cl = q.constant.iter().map(|v| v * v).sum::<f32>().sqrt();
+            p[P_BAILOUT] = q.bailout.max(cl);
+        }
+        Formula::Kifs(k) => {
+            pack_kifs(p, k);
+            set_rotation(p, k.rotation_degrees);
+        }
+        Formula::Kleinian(k) => {
+            let (a, b) = (k.a as f64, k.b as f64);
+            p[P_KLEIN_A] = k.a;
+            p[P_KLEIN_B] = k.b;
+            p[P_KLEIN_SKEW] = if a != 0.0 { (b.abs() / a) as f32 } else { 0.0 };
+            p[P_KLEIN_LINE_AMP] = ((2.0 * a - 1.95) / 4.0) as f32;
+            p[P_KLEIN_LINE_RATE] = (7.2 - (1.95 - a) * 15.0) as f32;
+        }
+        Formula::PseudoKleinian(k) => {
+            put3(p, P_PK_BOX, k.box_size);
+            p[P_PK_SIZE] = k.size;
+            put3(p, P_PK_C, k.c);
+            put3(p, P_PK_OFFSET, k.offset);
+            p[P_PK_THICKNESS] = k.thickness;
+        }
+        Formula::Apollonian(a) => {
+            p[P_APOLLO_SCALE] = a.scale;
+        }
+        Formula::Hybrid(h) => {
+            pack_bulb(p, &h.bulb);
+            pack_box(p, &h.mandelbox);
+            pack_kifs(p, &h.kifs);
+            p[P_APOLLO_SCALE] = h.apollonian_scale;
+            p[P_BAILOUT] = h.bailout.max(0.0);
+            set_rotation(p, h.bulb.rotation_degrees);
+            let mut packed_steps = 0u32;
+            let mut active_count = 0u32;
+            for step in h.steps {
+                let code = match step {
+                    HybridStep::Off => continue,
+                    HybridStep::Mandelbulb => 1u32,
+                    HybridStep::Mandelbox => 2u32,
+                    HybridStep::KifsFold => 3u32,
+                    HybridStep::Inversion => 4u32,
+                };
+                packed_steps |= code << (3 * active_count);
+                active_count += 1;
+            }
+            if active_count == 0 {
+                packed_steps = 1;
+                active_count = 1;
+            }
+            p[P_HYBRID_STEPS] = packed_steps as f32;
+            p[P_HYBRID_COUNT] = active_count as f32;
+        }
+        other => {
+            let orbit_escape = julia_mix * length(julia) + length(orbit_offset);
+            crate::formulas::pack_extended_formula(p, other, orbit_escape, euler_matrix);
+        }
+    }
+
+    let clip = match clip_object {
+        Some(r) => r,
+        None => p[P_BAILOUT].max(0.0) * 1.001,
+    };
+    let clip = if inversion_strength == 0.0 {
+        clip
+    } else {
+        fractal_core::inversion::reach(inversion_center, inversion_radius, inversion_strength, clip)
+            .unwrap_or(INVERSION_FAR_REACH)
+    };
+    let clip_scaled = clip * abs_scale;
+    object_radius = object_radius.max(clip_scaled);
+    p[P_CLIP_RADIUS] = clip_scaled;
+    p[P_MAX_DISTANCE] =
+        camera_dist + length(scene.camera.target) + length(object_offset) + object_radius;
+
+    p[P_COLOR_MODE] = scene.coloring as u32 as f32;
+    put3(p, P_TRAP_POINT, trap_point);
+    let mut axis = [0.0; 3];
+    axis[trap_axis.min(2) as usize] = 1.0;
+    put3(p, P_TRAP_NORMAL, axis);
+    p[P_TRAP_SCALE] = trap_scale;
 }
 
 fn put3(p: &mut [f32], i: usize, v: [f32; 3]) {
@@ -1903,5 +2009,203 @@ mod tests {
             WorldUpload::new(&empty_snap, 64, 64).expect("world upload without Fractal");
         assert_eq!(empty_upload.params[P_OBJECT_COUNT], 0.0);
         assert!(empty_upload.objects.is_empty());
+    }
+
+    #[test]
+    fn hybrid_steps_validation_defaults_and_inactive_reasons() {
+        crate::engine::init_warpbro();
+        assert!(
+            FractalNodeSpec
+                .attribute_choices("/formula/Hybrid/steps")
+                .is_none()
+        );
+        assert_eq!(
+            FractalNodeSpec
+                .attribute_choices("/formula/Hybrid/steps/0")
+                .expect("slot choices")
+                .expect("valid choices")
+                .len(),
+            HybridStep::ALL.len()
+        );
+        assert!(
+            FractalNodeSpec
+                .validate_attribute(
+                    "/formula/Hybrid/steps",
+                    &json!(["Mandelbulb", "KifsFold", "Off", "Off"]),
+                )
+                .is_ok()
+        );
+        assert!(
+            FractalNodeSpec
+                .validate_attribute("/formula/Hybrid/steps", &json!("Mandelbulb"))
+                .is_err()
+        );
+        assert!(
+            FractalNodeSpec
+                .validate_attribute("/coloring", &json!("TrapPoint"))
+                .is_ok()
+        );
+        assert!(
+            FractalNodeSpec
+                .validate_attribute("/coloring", &json!("InvalidColoring"))
+                .is_err()
+        );
+        assert!(
+            FractalNodeSpec
+                .validate_attribute("/palette", &json!(PaletteScheme::Fire))
+                .is_ok()
+        );
+        assert!(
+            FractalNodeSpec
+                .validate_attribute("/palette", &json!("InvalidPalette"))
+                .is_err()
+        );
+        assert!(
+            FractalNodeSpec
+                .validate_attribute("/render/backend", &json!("InvalidBackend"))
+                .is_err()
+        );
+        let mut editor = WorldEditor::new(WorldDocument::from_scene(&Scene::preset_fractal(
+            Formula::Mandelbulb(Bulb::PRESET),
+        )));
+        let fractal_id = editor
+            .document
+            .nodes()
+            .into_iter()
+            .find(|n| n.kind == FRACTAL_KIND)
+            .expect("Fractal node")
+            .id;
+        assert!(
+            editor
+                .execute_edit(
+                    WorldCommand::SetAttribute {
+                        id: fractal_id,
+                        path: "/coloring".into(),
+                        value: json!("NotAColoring"),
+                        frame: 0.0,
+                    },
+                    None,
+                )
+                .is_err()
+        );
+        assert!(
+            editor
+                .execute_edit(
+                    WorldCommand::SetAttribute {
+                        id: fractal_id,
+                        path: "/palette".into(),
+                        value: json!("NotAPalette"),
+                        frame: 0.0,
+                    },
+                    None,
+                )
+                .is_err()
+        );
+        for (slot, expected) in Hybrid::PRESET.steps.into_iter().enumerate() {
+            assert_eq!(
+                FractalNodeSpec.attribute_default(&format!("/formula/Hybrid/steps/{slot}")),
+                Some(json!(expected))
+            );
+        }
+
+        let static_formula = serde_json::to_value(Formula::Hybrid(Hybrid::PRESET)).unwrap();
+        let animated_steps = json!(["KifsFold", "Off", "Off", "Off"]);
+        let kifs_reason =
+            FractalNodeSpec.inactive_reason("/formula/Hybrid/kifs/scale", &|p| match p {
+                "/formula/Hybrid/steps" => Some(animated_steps.clone()),
+                "/formula" => Some(static_formula.clone()),
+                _ => None,
+            });
+        assert_eq!(kifs_reason, Some(None));
+        let box_reason =
+            FractalNodeSpec.inactive_reason("/formula/Hybrid/mandelbox/scale", &|p| match p {
+                "/formula/Hybrid/steps" => Some(animated_steps.clone()),
+                "/formula" => Some(static_formula.clone()),
+                _ => None,
+            });
+        assert_eq!(box_reason, Some(Some("No hybrid step is Mandelbox")));
+        assert_eq!(
+            FractalNodeSpec.inactive_reason("/julia", &|p| {
+                (p == "/formula").then(|| json!({ "Kifs": {} }))
+            }),
+            Some(Some("The Kifs formula has no orbit constant"))
+        );
+        assert_eq!(
+            FractalNodeSpec.inactive_reason("/render/iterations", &|p| {
+                (p == "/formula").then(|| json!({ "GyroidTpms": {} }))
+            }),
+            Some(Some(
+                "Gyroid / Schwarz TPMS is analytical (no iteration loop)"
+            ))
+        );
+        assert_eq!(
+            FractalNodeSpec.inactive_reason("/julia", &|p| {
+                (p == "/formula").then(|| json!({ "UnknownCustomVariant": {} }))
+            }),
+            Some(Some("This formula has no orbit constant"))
+        );
+    }
+
+    #[test]
+    fn packed_max_distance_covers_clip_sphere_across_gallery_and_scales() {
+        crate::engine::init_warpbro();
+        for mut scene in Scene::fractal_gallery() {
+            let (_, _, dist) = scene.camera_eye();
+            let p = scene.pack(64, 64);
+            assert!(
+                p.iter().all(|v| v.is_finite()),
+                "non-finite pack in {}",
+                scene.name
+            );
+            assert!(p[P_CLIP_RADIUS] >= 0.0);
+            let min_max_dist =
+                dist + length(scene.camera.target) + length(scene.object.offset) + p[P_CLIP_RADIUS];
+            assert!(
+                p[P_MAX_DISTANCE] + 1.0e-4 >= min_max_dist,
+                "{}: P_MAX_DISTANCE {} < {}",
+                scene.name,
+                p[P_MAX_DISTANCE],
+                min_max_dist
+            );
+
+            scene.object.scale = -1.5;
+            let p_neg = scene.pack(64, 64);
+            assert!(p_neg.iter().all(|v| v.is_finite()));
+            assert!(p_neg[P_CLIP_RADIUS] >= 0.0);
+            let min_neg = dist
+                + length(scene.camera.target)
+                + length(scene.object.offset)
+                + p_neg[P_CLIP_RADIUS];
+            assert!(p_neg[P_MAX_DISTANCE] + 1.0e-4 >= min_neg);
+        }
+
+        let mut klein = Scene::preset_fractal(Formula::Kleinian(Kleinian {
+            a: 0.0,
+            b: 0.0,
+            bound_radius: 0.0,
+        }));
+        assert!(klein.pack(32, 32).iter().all(|v| v.is_finite()));
+        klein.set_formula(Formula::Kleinian(Kleinian {
+            a: 0.0,
+            b: 0.0,
+            ..Kleinian::PRESET
+        }));
+        assert!(klein.pack(32, 32).iter().all(|v| v.is_finite()));
+        klein.set_formula(Formula::Kifs(Kifs {
+            kind: KifsKind::Menger,
+            scale: 0.0,
+            offset: [0.0, 0.0, -1.0],
+            rotation_degrees: [0.0; 3],
+        }));
+        assert!(klein.pack(32, 32).iter().all(|v| v.is_finite()));
+
+        let neg_hybrid = Scene::preset_fractal(Formula::Hybrid(Hybrid {
+            bailout: -5.0,
+            ..Hybrid::PRESET
+        }));
+        let p_hybrid = neg_hybrid.pack(32, 32);
+        assert!(p_hybrid.iter().all(|v| v.is_finite()));
+        assert_eq!(p_hybrid[P_BAILOUT], 0.0);
+        assert!(p_hybrid[P_CLIP_RADIUS] >= 0.0);
     }
 }

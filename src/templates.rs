@@ -186,10 +186,23 @@ mod tests {
                 .iter()
                 .all(|e| matches!(e.source, Source::Builtin(_)) && e.description.is_some())
         );
+        let mut checked_envs = std::collections::BTreeSet::new();
         for (index, entry) in BUILTINS.iter().enumerate() {
             let scene = builtin_scene(index).unwrap();
             assert_eq!(scene.name, entry.name);
             assert!(scene.document.is_some());
+            if scene.environment.enabled && !scene.environment.path.is_empty() {
+                assert!(
+                    scene.environment.path.starts_with("builtin:"),
+                    "built-in template {:?} must not embed host-specific environment path {:?}",
+                    entry.name,
+                    scene.environment.path
+                );
+                if checked_envs.insert(scene.environment.path.clone()) {
+                    soluwell_studio::environment::Map::load(&scene.environment.path)
+                        .unwrap_or_else(|e| panic!("{}: {e}", entry.name));
+                }
+            }
         }
         assert!(!dir.exists(), "the catalog never creates the directory");
         std::fs::create_dir_all(&dir).unwrap();

@@ -3,14 +3,17 @@
 //! Raw RGB artifacts deliberately bypass denoising, exposure and display transforms. Comparing
 //! independent seeds against a high-sample reference measures convergence as well as throughput;
 //! a faster image alone is insufficient evidence that a sampling change is an improvement.
+
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Context, ensure};
+use serde::Serialize;
 use serde_json::json;
-use soluwell_studio::render::{Batch, Target, validate_size};
+use soluwell_studio::render::{Batch, Plane, Target, validate_size};
 use soluwell_studio::render_profiles::{Backend, DirectRender, DirectShading};
 use soluwell_studio::scene::{Material, MaterialModel, Scene};
 
@@ -32,35 +35,64 @@ const CASES: [(&str, usize, u32, bool); 10] = [
     ("cavity", 1, 124, false),
 ];
 
+fn has_families_flag(args: &[String]) -> bool {
+    let mut idx = 2usize;
+    while idx < args.len() && !args[idx].starts_with("--") {
+        idx += 1;
+    }
+    while idx < args.len() {
+        match args[idx].as_str() {
+            "--families" => return true,
+            "--case" | "--seed" | "--batch" | "--backend" | "--adaptive" => idx += 2,
+            "--scope" | "--shade" | "--repeats" => idx += 2,
+            _ => idx += 1,
+        }
+    }
+    false
+}
+
+fn parse_bench_prefix<'a>(
+    args: &'a [String],
+    default_dir: &'a str,
+    mut dimensions: [usize; 3],
+) -> anyhow::Result<(&'a str, [usize; 3], usize)> {
+    let mut position = 2usize;
+    let directory = match args.get(position).filter(|s| !s.starts_with("--")) {
+        Some(dir) => {
+            position += 1;
+            dir.as_str()
+        }
+        None => default_dir,
+    };
+    for slot in &mut dimensions {
+        let Some(text) = args.get(position).filter(|s| !s.starts_with("--")) else {
+            break;
+        };
+        *slot = text
+            .parse()
+            .with_context(|| format!("Invalid benchmark number: {text}"))?;
+        position += 1;
+    }
+    Ok((directory, dimensions, position))
+}
+
+fn take_flag_value<'a>(args: &'a [String], pos: usize, flag: &str) -> anyhow::Result<&'a str> {
+    args.get(pos + 1)
+        .filter(|value| !value.starts_with("--"))
+        .map(String::as_str)
+        .with_context(|| format!("Missing value for {flag}"))
+}
+
 /// Run a bounded world benchmark. A separate warm-up target removes driver compilation and
 /// preparation from the timed samples. Every measured sample uses the same seed/dimension
 /// sequence as normal world rendering, and each output records its exact evaluated inputs.
 pub fn run(args: &[String]) -> anyhow::Result<()> {
     init_warpbro();
-    if args.iter().any(|argument| argument == "--families") {
+    if has_families_flag(args) {
         return run_families(args);
     }
-    let directory = args
-        .get(2)
-        .filter(|s| !s.starts_with("--"))
-        .map(String::as_str)
-        .unwrap_or("world-bench");
-    let mut dimensions = [256usize, 256, 32];
-    let mut position = if args.get(2).is_some_and(|s| !s.starts_with("--")) {
-        3usize
-    } else {
-        2usize
-    };
-    for value in &mut dimensions {
-        if let Some(text) = args.get(position).filter(|s| !s.starts_with("--")) {
-            *value = text
-                .parse()
-                .with_context(|| format!("Invalid benchmark number: {text}"))?;
-            position += 1;
-        } else {
-            break;
-        }
-    }
+    let (directory, dimensions, mut position) =
+        parse_bench_prefix(args, "world-bench", [256, 256, 32])?;
     let mut case = None;
     let mut seed = 0u32;
     let mut batch = 4u32;
@@ -71,23 +103,27 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let mut backend = Backend::Auto;
     while position < args.len() {
         let flag = &args[position];
-        let value = args
-            .get(position + 1)
-            .with_context(|| format!("Missing value for {flag}"))?;
         match flag.as_str() {
-            "--case" => case = Some(value.as_str()),
-            "--seed" => seed = value.parse().context("Invalid benchmark seed")?,
-            "--batch" => batch = value.parse().context("Invalid benchmark batch")?,
+            "--case" => case = Some(take_flag_value(args, position, flag)?),
+            "--seed" => {
+                let value = take_flag_value(args, position, flag)?;
+                seed = value.parse().context("Invalid benchmark seed")?;
+            }
+            "--batch" => {
+                let value = take_flag_value(args, position, flag)?;
+                batch = value.parse().context("Invalid benchmark batch")?;
+            }
             "--backend" => {
-                backend = match value.as_str() {
+                backend = match take_flag_value(args, position, flag)? {
                     "auto" => Backend::Auto,
                     "cuda" => Backend::Cuda,
                     "wgpu" => Backend::Wgpu,
                     _ => anyhow::bail!("Benchmark backend must be auto, cuda or wgpu"),
-                }
+                };
             }
             "--adaptive" => {
-                adaptive_threshold = Some(value.parse().context("Invalid adaptive threshold")?)
+                let value = take_flag_value(args, position, flag)?;
+                adaptive_threshold = Some(value.parse().context("Invalid adaptive threshold")?);
             }
             _ => anyhow::bail!("Unknown world benchmark option: {flag}"),
         }
@@ -105,12 +141,26 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         case.is_none_or(|name| CASES.iter().any(|c| c.0 == name)),
         "Unknown benchmark case"
     );
+    if let Some(threshold) = adaptive_threshold {
+        ensure!(
+            threshold.is_finite() && (0.0005..=1.0).contains(&threshold),
+            "Adaptive threshold must be finite and in 0.0005..=1.0"
+        );
+    }
     std::fs::create_dir_all(directory)?;
+    let base = Path::new(directory);
     let mut gpu = new_gpu()?;
     println!(
         "World benchmark GPU: {} · {width}x{height} · {samples} spp · seed {seed} · batch {batch}",
         gpu.name
     );
+    // Hoist warmup/measured targets and readback scratch outside the case loop so repeated
+    // benchmarks reuse GPU film allocations and warm host pages across cases.
+    let mut warmup = Target::new(width, height);
+    let mut target = Target::new(width, height);
+    let mut batches = Vec::with_capacity(samples.div_ceil(batch) as usize);
+    let mut tiled = Vec::new();
+    let mut pixels = Vec::new();
     for (name, preset, frame, diffuse) in CASES {
         if case.is_some_and(|chosen| chosen != name) {
             continue;
@@ -173,19 +223,22 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             _ => {}
         }
         gpu.prepare_scene(&scene, width, height)?;
-        {
-            let mut warmup = Target::new(width, height);
-            gpu.step(&mut warmup, &scene, 1, seed, false)?;
-            ensure!(
-                warmup.colour_error.is_none(),
-                "Warm-up display error: {:?}",
-                warmup.colour_error
-            );
-        }
-        // The film is allocated outside the timed steps.
-        let mut target = Target::new(width, height);
+        warmup.requested_backend = None;
+        warmup.colour_error = None;
+        gpu.step(&mut warmup, &scene, 1, seed, false)?;
+        ensure!(
+            warmup.colour_error.is_none(),
+            "Warm-up display error: {:?}",
+            warmup.colour_error
+        );
+        // Reset and clear the measured film outside the timed steps, synchronizing async clears
+        // before starting the stopwatch.
+        target.requested_backend = None;
+        target.colour_error = None;
         gpu.prepare(&mut target, &scene)?;
-        let mut batches = Vec::with_capacity(samples.div_ceil(batch) as usize);
+        gpu.step(&mut target, &scene, 0, seed, false)?;
+        ensure!(target.samples == 0, "Preparation consumed traced samples");
+        batches.clear();
         let start = Instant::now();
         loop {
             let complete = gpu.advance(&mut target, &scene, samples, seed, Batch::Fixed(batch))?;
@@ -195,29 +248,23 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             }
         }
         let elapsed = start.elapsed().as_secs_f64();
+        let safe_elapsed = elapsed.max(1.0e-12);
         ensure!(
             target.colour_error.is_none(),
             "Display error: {:?}",
             target.colour_error
         );
         let readback_start = Instant::now();
-        let pixels = gpu.raw_scene_linear(&target)?;
+        gpu.read_film(&target, Plane::Accum, true, &mut tiled, &mut pixels)?;
         let readback_seconds = readback_start.elapsed().as_secs_f64();
         ensure!(
             pixels.iter().all(|p| p[..3].iter().all(|c| c.is_finite())),
             "Nonfinite raw radiance in {name}"
         );
         let stem = format!("{name}.seed-{seed}.spp-{samples}");
-        let base = Path::new(directory);
         let raw_name = format!("{stem}.rgb.f32");
         let raw_path = base.join(&raw_name);
-        let mut raw = BufWriter::new(File::create(&raw_path)?);
-        for pixel in &pixels {
-            for channel in &pixel[..3] {
-                raw.write_all(&channel.to_le_bytes())?;
-            }
-        }
-        raw.flush()?;
+        write_raw_rgb(&raw_path, &pixels)?;
         let shot =
             soluwell_studio::render_service::Frame::snapshot(&target, 0, false, false, 100.0);
         let encoding =
@@ -233,17 +280,23 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             true,
         )
         .map_err(anyhow::Error::msg)?;
+        let pixel_count = (width * height) as f64;
+        let pixel_samples = traced_pixel_samples(&tiled, width, height);
+        let mean_spp = pixel_samples / pixel_count;
+        let ms_per_sample = elapsed * 1000.0 / mean_spp.max(1.0e-12);
+        let msamples_per_s = pixel_samples / safe_elapsed / 1.0e6;
         let metadata = json!({
             "schema": 1,
             "case": name, "preset": template.name, "frame": frame,
             "gpu": &gpu.name, "width": width, "height": height, "samples": samples,
             "seed": seed, "batch": batch, "world_render": true,
             "adaptive_threshold": adaptive_threshold, "samples_taken": target.samples,
+            "pixel_samples_taken": pixel_samples, "mean_spp": mean_spp,
             "active_tiles": [target.active_tiles.0, target.active_tiles.1],
             "denoise_enabled": false, "exposure_multiplier": 1.0, "saturation": 1.0,
             "elapsed_seconds": elapsed, "raw_readback_seconds": readback_seconds,
-            "ms_per_sample": elapsed * 1000.0 / f64::from(samples),
-            "million_samples_per_second": (width * height) as f64 * f64::from(samples) / elapsed / 1e6,
+            "ms_per_sample": ms_per_sample,
+            "million_samples_per_second": msamples_per_s,
             "timing_scope": "Gpu::advance batches, display/readback on the completing batch only; excludes warmup, target allocation, artifact writes and final raw readback",
             "raw": {"file": raw_name,
                 "format": "little-endian f32 RGB, row-major top-to-bottom, scene-linear ACEScg, no header"},
@@ -256,21 +309,16 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
             "evaluated_lights": &scene.lights,
             "diffuse_override": diffuse
         });
-        let mut report = BufWriter::new(File::create(base.join(format!("{stem}.json")))?);
-        serde_json::to_writer_pretty(&mut report, &metadata)?;
-        report.flush()?;
+        write_json(&base.join(format!("{stem}.json")), &metadata)?;
         println!(
-            "{name}: {:.3}s · {:.2} ms/spp · {:.2} Msamples/s",
-            elapsed,
-            elapsed * 1000.0 / f64::from(samples),
-            (width * height) as f64 * f64::from(samples) / elapsed / 1e6
+            "{name}: {elapsed:.3}s · {ms_per_sample:.2} ms/spp · {msamples_per_s:.2} Msamples/s"
         );
     }
     Ok(())
 }
 
 /// Build a controlled standalone, homogeneous editor world or genuinely mixed-family world.
-/// Family benchmarks share geometry and materials between backends; only the requested engine differs.
+/// Family benchmarks share geometry and materials across backends; only the engine differs.
 fn family_scene(code: u32, scope: &str, shade: &str, samples: u32) -> Scene {
     let mut scene = Scene::preset_fractal(Formula::PRESETS[code as usize]);
     scene.render.denoise.enabled = false;
@@ -303,7 +351,8 @@ fn family_scene(code: u32, scope: &str, shade: &str, samples: u32) -> Scene {
         matrix.w_axis.x = 0.38 * radius;
         second.object_world = Some(matrix.to_cols_array_2d());
         if scope == "mixed" {
-            second.set_formula(Formula::PRESETS[0]);
+            let partner = if code == 0 { 1 } else { 0 };
+            second.set_formula(Formula::PRESETS[partner]);
         }
         scene.world_render = true;
         scene.objects = vec![first, second];
@@ -312,41 +361,52 @@ fn family_scene(code: u32, scope: &str, shade: &str, samples: u32) -> Scene {
     scene
 }
 
-fn write_raw_rgb(path: &Path, pixels: &[[f32; 4]]) -> anyhow::Result<()> {
-    let mut writer = BufWriter::new(File::create(path)?);
-    for pixel in pixels {
-        for channel in &pixel[..3] {
-            writer.write_all(&channel.to_le_bytes())?;
+fn traced_pixel_samples(tiled: &[[f32; 4]], width: usize, height: usize) -> f64 {
+    let tiles_per_row = width.div_ceil(8);
+    let mut total = 0.0f64;
+    for y in 0..height {
+        let tile_row = (y / 4) * tiles_per_row;
+        let in_tile_y = (y % 4) * 8;
+        for tx in 0..tiles_per_row {
+            let cols = (width - tx * 8).min(8);
+            let base = (tile_row + tx) * 32 + in_tile_y;
+            if let Some(slice) = tiled.get(base..base + cols) {
+                for pixel in slice {
+                    total += f64::from(pixel[3].max(0.0));
+                }
+            }
         }
     }
+    total
+}
+
+fn write_raw_rgb(path: &Path, pixels: &[[f32; 4]]) -> anyhow::Result<()> {
+    let mut writer = BufWriter::with_capacity(64 * 1024, File::create(path)?);
+    for pixel in pixels {
+        let mut rgb = [0u8; 12];
+        rgb[0..4].copy_from_slice(&pixel[0].to_le_bytes());
+        rgb[4..8].copy_from_slice(&pixel[1].to_le_bytes());
+        rgb[8..12].copy_from_slice(&pixel[2].to_le_bytes());
+        writer.write_all(&rgb)?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
+fn write_json(path: &Path, value: &impl Serialize) -> anyhow::Result<()> {
+    let mut writer = BufWriter::new(File::create(path)?);
+    serde_json::to_writer_pretty(&mut writer, value)?;
     writer.flush()?;
     Ok(())
 }
 
 /// Explicit all-family benchmark mode. Backend order alternates each round to expose thermal
 /// or clock drift; five or more odd repetitions produce an observed median rather than a best run.
-/// Allocation, preparation, warm-up, final raw readback and artifact I/O are outside the timed steps.
+/// Allocation, preparation, warm-up, raw readback and artifact I/O stay outside timed steps.
 fn run_families(args: &[String]) -> anyhow::Result<()> {
-    let directory = args
-        .get(2)
-        .filter(|value| !value.starts_with("--"))
-        .map(String::as_str)
-        .unwrap_or("family-bench");
-    let mut position = if args.get(2).is_some_and(|s| !s.starts_with("--")) {
-        3usize
-    } else {
-        2usize
-    };
-    let mut dimensions = [256usize, 192, 16];
-    for dimension in &mut dimensions {
-        if let Some(value) = args.get(position).filter(|s| !s.starts_with("--")) {
-            *dimension = value
-                .parse()
-                .context("Invalid family benchmark dimension/sample count")?;
-            position += 1;
-        }
-    }
-    let mut families: Vec<u32> = (8..Formula::COUNT).collect();
+    let (directory, dimensions, mut position) =
+        parse_bench_prefix(args, "family-bench", [256, 192, 16])?;
+    let mut families: Option<Vec<u32>> = None;
     let mut scopes = vec!["world"];
     let mut shades = vec!["fast"];
     let mut backends = vec![Backend::Cuda, Backend::Wgpu];
@@ -355,20 +415,27 @@ fn run_families(args: &[String]) -> anyhow::Result<()> {
     let mut batch = 4u32;
     while position < args.len() {
         let flag = &args[position];
-        let value = args
-            .get(position + 1)
-            .with_context(|| format!("Missing value for {flag}"))?;
         match flag.as_str() {
             "--families" => {
-                if value != "all" {
-                    families = value
-                        .split(',')
-                        .map(|code| code.parse().context("Invalid comma-separated family code"))
-                        .collect::<anyhow::Result<Vec<_>>>()?;
+                if let Some(value) = args.get(position + 1).filter(|v| !v.starts_with("--")) {
+                    position += 2;
+                    families = if value == "all" {
+                        Some((0..Formula::COUNT).collect())
+                    } else {
+                        let parsed = value
+                            .split(',')
+                            .map(|code| code.parse().context("Invalid comma-separated family code"))
+                            .collect::<anyhow::Result<Vec<_>>>()?;
+                        Some(parsed)
+                    };
+                } else {
+                    position += 1;
+                    families = Some((0..Formula::COUNT).collect());
                 }
+                continue;
             }
             "--scope" => {
-                scopes = match value.as_str() {
+                scopes = match take_flag_value(args, position, flag)? {
                     "all" => vec!["single", "world", "mixed"],
                     "single" => vec!["single"],
                     "world" => vec!["world"],
@@ -377,7 +444,7 @@ fn run_families(args: &[String]) -> anyhow::Result<()> {
                 };
             }
             "--shade" => {
-                shades = match value.as_str() {
+                shades = match take_flag_value(args, position, flag)? {
                     "all" => vec!["fast", "full", "direct"],
                     "fast" => vec!["fast"],
                     "full" => vec!["full"],
@@ -386,20 +453,30 @@ fn run_families(args: &[String]) -> anyhow::Result<()> {
                 };
             }
             "--backend" => {
-                backends = match value.as_str() {
+                backends = match take_flag_value(args, position, flag)? {
                     "both" => vec![Backend::Cuda, Backend::Wgpu],
                     "cuda" => vec![Backend::Cuda],
                     "wgpu" => vec![Backend::Wgpu],
                     _ => anyhow::bail!("Family backend must be cuda, wgpu or both"),
                 };
             }
-            "--repeats" => repeats = value.parse().context("Invalid family repetition count")?,
-            "--seed" => seed = value.parse().context("Invalid family seed")?,
-            "--batch" => batch = value.parse().context("Invalid family batch")?,
+            "--repeats" => {
+                let value = take_flag_value(args, position, flag)?;
+                repeats = value.parse().context("Invalid family repetition count")?;
+            }
+            "--seed" => {
+                let value = take_flag_value(args, position, flag)?;
+                seed = value.parse().context("Invalid family seed")?;
+            }
+            "--batch" => {
+                let value = take_flag_value(args, position, flag)?;
+                batch = value.parse().context("Invalid family batch")?;
+            }
             _ => anyhow::bail!("Unknown family benchmark option: {flag}"),
         }
         position += 2;
     }
+    let mut families = families.unwrap_or_else(|| (0..Formula::COUNT).collect());
     let [width, height, samples] = dimensions;
     let samples = u32::try_from(samples).context("Invalid family sample count")?;
     validate_size(width, height, samples)?;
@@ -411,7 +488,7 @@ fn run_families(args: &[String]) -> anyhow::Result<()> {
     families.sort_unstable();
     families.dedup();
     ensure!(
-        (5..=101).contains(&repeats) && repeats % 2 == 1,
+        (5..=101).contains(&repeats) && !repeats.is_multiple_of(2),
         "Family repetitions must be odd and between 5 and 101"
     );
     ensure!(batch == 4 || batch == 8, "Family batch must be 4 or 8");
@@ -426,27 +503,57 @@ fn run_families(args: &[String]) -> anyhow::Result<()> {
     std::fs::create_dir_all(directory)?;
     let directory = Path::new(directory);
     let mut gpu = new_gpu()?;
-    let mut summaries = Vec::new();
+    let total_cases = families
+        .len()
+        .saturating_mul(scopes.len())
+        .saturating_mul(shades.len());
+    let mut summaries = Vec::with_capacity(total_cases);
+    // Reuse one progressive Target per backend and shared readback/metric buffers across all
+    // warmup rounds, measurement repetitions, and families so GPU film allocations and host page
+    // faults never churn inside the benchmark loops.
+    let mut targets: Vec<Target> = (0..backends.len())
+        .map(|_| Target::new(width, height))
+        .collect();
+    let mut backend_scenes: Vec<Scene> = Vec::with_capacity(backends.len());
+    let mut times = vec![Vec::<f64>::with_capacity(repeats); backends.len()];
+    let mut sorted = Vec::<f64>::with_capacity(repeats);
+    let mut artifacts = vec![String::new(); backends.len()];
+    let mut first_pixels = vec![Vec::<[f32; 4]>::new(); backends.len()];
+    let mut tiled = Vec::<[f32; 4]>::new();
+    let mut cuda_resources = vec![serde_json::Value::Null; backends.len()];
+    let mut warmup_samples = vec![0u64; backends.len()];
+    let mut order: Vec<Vec<&'static str>> = Vec::with_capacity(repeats);
     for code in families {
         for &scope in &scopes {
             for &shade in &shades {
                 let scene = family_scene(code, scope, shade, samples);
                 let stem = format!("family-{code:02}-{scope}-{shade}");
-                let mut times = vec![Vec::<f64>::with_capacity(repeats); backends.len()];
-                let mut artifacts = vec![String::new(); backends.len()];
-                let mut first_pixels = vec![Vec::new(); backends.len()];
-                let mut cuda_resources = vec![serde_json::Value::Null; backends.len()];
-                let mut order = Vec::with_capacity(repeats);
+                backend_scenes.clear();
+                for &backend in &backends {
+                    let mut backend_scene = scene.clone();
+                    backend_scene.render.backend = backend;
+                    backend_scenes.push(backend_scene);
+                }
+                for slot in &mut times {
+                    slot.clear();
+                }
+                for slot in &mut artifacts {
+                    slot.clear();
+                }
+                cuda_resources.fill(serde_json::Value::Null);
+                warmup_samples.fill(0);
+                order.clear();
                 for (index, &backend) in backends.iter().enumerate() {
-                    let mut warm_scene = scene.clone();
-                    warm_scene.render.backend = backend;
+                    let warm_scene = &backend_scenes[index];
                     if backend == Backend::Cuda {
                         cuda_resources[index] =
-                            gpu.cuda_kernel_resources(&warm_scene, width, height)?;
+                            gpu.cuda_kernel_resources(warm_scene, width, height)?;
                     }
-                    gpu.prepare_scene(&warm_scene, width, height)?;
-                    let mut warm_target = Target::new(width, height);
-                    while !gpu.advance(&mut warm_target, &warm_scene, 1, seed, Batch::Fixed(1))? {}
+                    gpu.prepare_scene(warm_scene, width, height)?;
+                    let warm_target = &mut targets[index];
+                    warm_target.requested_backend = None;
+                    warm_target.colour_error = None;
+                    while !gpu.advance(warm_target, warm_scene, 1, seed, Batch::Fixed(1))? {}
                     ensure!(
                         warm_target.samples == 1,
                         "Warmup did not trace exactly one sample"
@@ -456,15 +563,15 @@ fn run_families(args: &[String]) -> anyhow::Result<()> {
                 // Pipeline compilation can leave the GPU idle for a long time. Warm the
                 // actual sample workload after every backend is ready, before timed rounds.
                 let warmup_started = Instant::now();
-                let mut warmup_samples = vec![0u64; backends.len()];
                 while warmup_started.elapsed().as_secs_f64() < 2.0 {
-                    for (index, &backend) in backends.iter().enumerate() {
-                        let mut warm_scene = scene.clone();
-                        warm_scene.render.backend = backend;
-                        let mut warm_target = Target::new(width, height);
+                    for index in 0..backends.len() {
+                        let warm_scene = &backend_scenes[index];
+                        let warm_target = &mut targets[index];
+                        warm_target.requested_backend = None;
+                        warm_target.colour_error = None;
                         while !gpu.advance(
-                            &mut warm_target,
-                            &warm_scene,
+                            warm_target,
+                            warm_scene,
                             samples,
                             seed,
                             Batch::Fixed(batch),
@@ -482,31 +589,28 @@ fn run_families(args: &[String]) -> anyhow::Result<()> {
                 }
                 let warmup_seconds = warmup_started.elapsed().as_secs_f64();
                 for round in 0..repeats {
-                    let indices: Vec<_> = if round % 2 == 0 {
-                        (0..backends.len()).collect()
-                    } else {
-                        (0..backends.len()).rev().collect()
-                    };
-                    order.push(
-                        indices
-                            .iter()
-                            .map(|&i| backends[i].label())
-                            .collect::<Vec<_>>(),
-                    );
-                    for index in indices {
+                    let mut round_labels = Vec::with_capacity(backends.len());
+                    for step in 0..backends.len() {
+                        let index = if round.is_multiple_of(2) {
+                            step
+                        } else {
+                            backends.len() - 1 - step
+                        };
                         let backend = backends[index];
-                        let mut measured_scene = scene.clone();
-                        measured_scene.render.backend = backend;
-                        let mut target = Target::new(width, height);
-                        gpu.prepare(&mut target, &measured_scene)?;
+                        round_labels.push(backend.label());
+                        let measured_scene = &backend_scenes[index];
+                        let target = &mut targets[index];
+                        target.requested_backend = None;
+                        target.colour_error = None;
+                        gpu.prepare(target, measured_scene)?;
                         // Presenting the empty film completes asynchronous clears/uploads before
                         // timing begins; it does not trace or consume any sample dimensions.
-                        gpu.step(&mut target, &measured_scene, 0, seed, false)?;
+                        gpu.step(target, measured_scene, 0, seed, false)?;
                         ensure!(target.samples == 0, "Preparation consumed traced samples");
                         let started = Instant::now();
                         while !gpu.advance(
-                            &mut target,
-                            &measured_scene,
+                            target,
+                            measured_scene,
                             samples,
                             seed,
                             Batch::Fixed(batch),
@@ -522,34 +626,38 @@ fn run_families(args: &[String]) -> anyhow::Result<()> {
                         );
                         times[index].push(elapsed);
                         if round == 0 {
-                            let pixels = gpu.raw_scene_linear(&target)?;
+                            let pixels = &mut first_pixels[index];
+                            gpu.read_film(target, Plane::Accum, true, &mut tiled, pixels)?;
                             ensure!(
                                 pixels
                                     .iter()
                                     .all(|pixel| pixel[..3].iter().all(|c| c.is_finite())),
                                 "Nonfinite raw output: family {code}, {scope}, {shade}, {backend:?}"
                             );
-                            artifacts[index] =
-                                format!("{stem}-{}.rgb.f32", backend.label().to_ascii_lowercase());
-                            write_raw_rgb(&directory.join(&artifacts[index]), &pixels)?;
-                            first_pixels[index] = pixels;
+                            let label = backend.label().to_ascii_lowercase();
+                            artifacts[index].clear();
+                            write!(&mut artifacts[index], "{stem}-{label}.rgb.f32")?;
+                            write_raw_rgb(&directory.join(&artifacts[index]), pixels)?;
                         }
                     }
+                    order.push(round_labels);
                 }
                 let results: Vec<_> = backends
                     .iter()
                     .enumerate()
                     .map(|(index, backend)| {
-                        let mut sorted = times[index].clone();
+                        sorted.clear();
+                        sorted.extend_from_slice(&times[index]);
                         sorted.sort_by(f64::total_cmp);
                         let median = sorted[repeats / 2];
+                        let safe_median = median.max(1.0e-12);
                         json!({
                             "backend": backend.label(), "seconds": times[index],
                             "median_seconds": median, "min_seconds": sorted[0],
                             "max_seconds": sorted[repeats - 1],
                             "median_ms_per_sample": median * 1000.0 / f64::from(samples),
                             "median_million_samples_per_second":
-                                (width * height) as f64 * f64::from(samples) / median / 1.0e6,
+                                (width * height) as f64 * f64::from(samples) / safe_median / 1.0e6,
                             "raw_file": artifacts[index],
                             "cuda_resources": cuda_resources[index],
                         })
@@ -558,11 +666,11 @@ fn run_families(args: &[String]) -> anyhow::Result<()> {
                 let comparison = if first_pixels.len() == 2 {
                     let mut squared_error = 0.0f64;
                     let mut reference_energy = 0.0f64;
-                    let mut max_absolute = 0.0f32;
+                    let mut max_absolute = 0.0f64;
                     for (a, b) in first_pixels[0].iter().zip(&first_pixels[1]) {
                         for channel in 0..3 {
-                            let difference = a[channel] - b[channel];
-                            squared_error += f64::from(difference).powi(2);
+                            let difference = f64::from(a[channel]) - f64::from(b[channel]);
+                            squared_error += difference.powi(2);
                             reference_energy += f64::from(b[channel]).powi(2);
                             max_absolute = max_absolute.max(difference.abs());
                         }
@@ -587,10 +695,7 @@ fn run_families(args: &[String]) -> anyhow::Result<()> {
                     "raw_format": "little-endian f32 RGB, row-major, scene-linear ACEScg, no header",
                     "scene": scene,
                 });
-                serde_json::to_writer_pretty(
-                    BufWriter::new(File::create(directory.join(format!("{stem}.json")))?),
-                    &report,
-                )?;
+                write_json(&directory.join(format!("{stem}.json")), &report)?;
                 println!(
                     "{}",
                     json!({
@@ -602,34 +707,51 @@ fn run_families(args: &[String]) -> anyhow::Result<()> {
             }
         }
     }
-    serde_json::to_writer_pretty(
-        BufWriter::new(File::create(directory.join("family-summary.json"))?),
-        &summaries,
-    )?;
+    write_json(&directory.join("family-summary.json"), &summaries)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct TempDirGuard(Option<PathBuf>);
+
+    impl Drop for TempDirGuard {
+        fn drop(&mut self) {
+            if let Some(directory) = self.0.take()
+                && directory.exists()
+                && let Err(err) = std::fs::remove_dir_all(&directory)
+            {
+                if std::thread::panicking() {
+                    eprintln!("Failed to remove {}: {err}", directory.display());
+                } else {
+                    panic!("Failed to remove {}: {err}", directory.display());
+                }
+            }
+        }
+    }
+
     #[test]
     #[ignore = "runs the GPU world benchmark; optional WARP_BRO_WORLD_BENCH_ARGS JSON argv"]
-    fn paired_world_de_benchmark() {
+    fn gpu_paired_world_de_benchmark() {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         let _gpu_test = crate::test_gpu::lock();
+        let mut cleanup = TempDirGuard(None);
         let args = match std::env::var("WARP_BRO_WORLD_BENCH_ARGS") {
             Ok(json) => serde_json::from_str::<Vec<String>>(&json).expect("benchmark JSON argv"),
             Err(_) => {
-                let stamp = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos();
-                let directory = std::env::temp_dir().join(format!(
-                    "warpbro-world-de-bench-{}-{stamp}",
-                    std::process::id()
-                ));
+                let pid = std::process::id();
+                let seq = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+                let name = format!("warpbro-world-de-bench-{pid}-{seq}");
+                let directory = std::env::temp_dir().join(name);
+                let arg = directory.to_string_lossy().into_owned();
+                cleanup.0 = Some(PathBuf::from(&arg));
                 vec![
                     "WarpBro".into(),
                     "--world-bench".into(),
-                    directory.to_string_lossy().into_owned(),
+                    arg,
                     "128".into(),
                     "128".into(),
                     "8".into(),
@@ -641,5 +763,6 @@ mod tests {
             }
         };
         super::run(&args).expect("world DE benchmark");
+        drop(cleanup);
     }
 }

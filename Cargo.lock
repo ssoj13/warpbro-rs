@@ -299,7 +299,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 [[package]]
 name = "appbus-rs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/appbus-rs.git?branch=main#90f6fa42a477bc5e391b52c24fab932d3273bfec"
+source = "git+ssh://git@github.com/ssoj13/appbus-rs.git?branch=main#f3c62d96bd83e569f776de4efebb63884c3de0b2"
 dependencies = [
  "crashdump-rs",
  "getrandom 0.3.4",
@@ -481,7 +481,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 [[package]]
 name = "av-codec"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec-aac",
  "av-codec-aac-enc",
@@ -508,7 +508,7 @@ dependencies = [
 [[package]]
 name = "av-codec-aac"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -522,7 +522,7 @@ dependencies = [
 [[package]]
 name = "av-codec-aac-enc"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec-aac",
  "av-codec-core",
@@ -538,7 +538,7 @@ dependencies = [
 [[package]]
 name = "av-codec-av1"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec-core",
  "av-codec-dovi",
@@ -556,7 +556,7 @@ dependencies = [
 [[package]]
 name = "av-codec-av1-enc"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec-av1",
  "av-codec-core",
@@ -573,7 +573,7 @@ dependencies = [
 [[package]]
 name = "av-codec-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-util-core",
  "av-util-data",
@@ -590,7 +590,7 @@ dependencies = [
 [[package]]
 name = "av-codec-dovi"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -604,7 +604,7 @@ dependencies = [
 [[package]]
 name = "av-codec-h264-enc"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -618,7 +618,7 @@ dependencies = [
 [[package]]
 name = "av-codec-h265"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec-core",
  "av-codec-dovi",
@@ -641,7 +641,7 @@ dependencies = [
 [[package]]
 name = "av-codec-h265-enc"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec-core",
  "av-codec-h265",
@@ -661,7 +661,7 @@ dependencies = [
 [[package]]
 name = "av-codec-h26x"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -677,7 +677,7 @@ dependencies = [
 [[package]]
 name = "av-codec-h274"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-util-core",
  "av-util-frame",
@@ -687,7 +687,7 @@ dependencies = [
 [[package]]
 name = "av-codec-jxl"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -702,7 +702,7 @@ dependencies = [
 [[package]]
 name = "av-codec-mjpeg"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec-core",
  "av-codec-mpegvideo",
@@ -719,7 +719,7 @@ dependencies = [
 [[package]]
 name = "av-codec-mp3"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -732,7 +732,7 @@ dependencies = [
 [[package]]
 name = "av-codec-mpegvideo"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -744,7 +744,7 @@ dependencies = [
 [[package]]
 name = "av-codec-pcm"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -757,7 +757,7 @@ dependencies = [
 [[package]]
 name = "av-codec-prores"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -772,7 +772,7 @@ dependencies = [
 [[package]]
 name = "av-codec-raw"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -786,7 +786,7 @@ dependencies = [
 [[package]]
 name = "av-codec-sei"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec-core",
  "av-codec-dovi",
@@ -800,7 +800,7 @@ dependencies = [
 [[package]]
 name = "av-codec-vp9"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -817,7 +817,7 @@ dependencies = [
 [[package]]
 name = "av-decode"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec",
  "av-codec-core",
@@ -837,7 +837,7 @@ dependencies = [
 [[package]]
 name = "av-format"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec",
  "av-codec-core",
@@ -860,7 +860,7 @@ dependencies = [
 [[package]]
 name = "av-format-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec-core",
  "av-util-core",
@@ -879,7 +879,7 @@ dependencies = [
 [[package]]
 name = "av-format-mov"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec",
  "av-codec-core",
@@ -897,7 +897,7 @@ dependencies = [
 [[package]]
 name = "av-format-movenc"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec-av1",
  "av-codec-core",
@@ -915,7 +915,7 @@ dependencies = [
 [[package]]
 name = "av-format-mp3"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec-core",
  "av-codec-mp3",
@@ -928,7 +928,7 @@ dependencies = [
 [[package]]
 name = "av-format-raw"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec",
  "av-codec-core",
@@ -942,7 +942,7 @@ dependencies = [
 [[package]]
 name = "av-format-wav"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec-core",
  "av-format-core",
@@ -954,7 +954,7 @@ dependencies = [
 [[package]]
 name = "av-frame-io"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-swscale",
  "av-util-core",
@@ -969,7 +969,7 @@ dependencies = [
 [[package]]
 name = "av-hwaccel-vulkan"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "ash",
  "av-codec-av1",
@@ -992,7 +992,7 @@ dependencies = [
 [[package]]
 name = "av-player"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-codec",
  "av-codec-core",
@@ -1031,7 +1031,7 @@ dependencies = [
 [[package]]
 name = "av-swresample"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-util-core",
  "av-util-cpu",
@@ -1044,7 +1044,7 @@ dependencies = [
 [[package]]
 name = "av-swscale"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-util-core",
  "av-util-cpu",
@@ -1058,7 +1058,7 @@ dependencies = [
 [[package]]
 name = "av-sync"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-decode",
  "av-util-samplefmt",
@@ -1067,7 +1067,7 @@ dependencies = [
 [[package]]
 name = "av-util-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "bytemuck",
  "log",
@@ -1077,7 +1077,7 @@ dependencies = [
 [[package]]
 name = "av-util-cpu"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-util-core",
  "num-traits",
@@ -1086,7 +1086,7 @@ dependencies = [
 [[package]]
 name = "av-util-crypto"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-util-core",
 ]
@@ -1094,7 +1094,7 @@ dependencies = [
 [[package]]
 name = "av-util-data"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-util-core",
  "av-util-math",
@@ -1105,7 +1105,7 @@ dependencies = [
 [[package]]
 name = "av-util-frame"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-util-core",
  "av-util-data",
@@ -1118,7 +1118,7 @@ dependencies = [
 [[package]]
 name = "av-util-hash"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-util-core",
 ]
@@ -1126,7 +1126,7 @@ dependencies = [
 [[package]]
 name = "av-util-hwcontext"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-util-core",
  "av-util-frame",
@@ -1137,7 +1137,7 @@ dependencies = [
 [[package]]
 name = "av-util-math"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-util-core",
  "av-util-hash",
@@ -1147,7 +1147,7 @@ dependencies = [
 [[package]]
 name = "av-util-pixfmt"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-util-core",
  "av-util-math",
@@ -1158,7 +1158,7 @@ dependencies = [
 [[package]]
 name = "av-util-samplefmt"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-util-core",
  "av-util-str",
@@ -1167,7 +1167,7 @@ dependencies = [
 [[package]]
 name = "av-util-str"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-util-core",
 ]
@@ -1175,7 +1175,7 @@ dependencies = [
 [[package]]
 name = "av-util-time"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-util-core",
  "av-util-math",
@@ -1184,7 +1184,7 @@ dependencies = [
 [[package]]
 name = "av-util-tx"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#cb2a35e3ce40cb724225f84643d8475b51e80425"
+source = "git+ssh://git@github.com/ssoj13/ffmpeg-rs.git?branch=main#bdbfdea351d3e5d4bf906c07f829c2f8ae9cc85e"
 dependencies = [
  "av-util-core",
  "av-util-cpu",
@@ -1478,7 +1478,7 @@ dependencies = [
 [[package]]
 name = "blosc-rs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/openvdb-rs.git?branch=main#93061401ebcf88fd005de2a4277561462831b5ca"
+source = "git+ssh://git@github.com/ssoj13/openvdb-rs.git?branch=main#204fd0d3a98cbaf28e7220e9d18c762121c76ca3"
 dependencies = [
  "lz4-rs",
 ]
@@ -1509,7 +1509,7 @@ dependencies = [
 [[package]]
 name = "box-rs"
 version = "0.3.0"
-source = "git+ssh://git@github.com/ssoj13/box-rs.git?branch=main#7ad6e83ea756be4d271cd18852a0f3f84e8604df"
+source = "git+ssh://git@github.com/ssoj13/box-rs.git?branch=main#b99c8be3684d50d79ec7ca1359d1425cf1fdfbb8"
 dependencies = [
  "serde",
  "serde_json",
@@ -1559,7 +1559,7 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 [[package]]
 name = "burn"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "burn-core",
  "burn-linalg",
@@ -1574,7 +1574,7 @@ dependencies = [
 [[package]]
 name = "burn-autodiff"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "burn-backend",
  "burn-std",
@@ -1589,7 +1589,7 @@ dependencies = [
 [[package]]
 name = "burn-backend"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "burn-std",
  "cubecl",
@@ -1607,7 +1607,7 @@ dependencies = [
 [[package]]
 name = "burn-backend-extension"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1617,7 +1617,7 @@ dependencies = [
 [[package]]
 name = "burn-core"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "burn-backend",
  "burn-backend-extension",
@@ -1645,7 +1645,7 @@ dependencies = [
 [[package]]
 name = "burn-cpu"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "burn-backend",
  "burn-cubecl",
@@ -1655,7 +1655,7 @@ dependencies = [
 [[package]]
 name = "burn-cubecl"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "burn-backend",
  "burn-cubecl-fusion",
@@ -1674,7 +1674,7 @@ dependencies = [
 [[package]]
 name = "burn-cubecl-fusion"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "burn-backend",
  "burn-fusion",
@@ -1692,7 +1692,7 @@ dependencies = [
 [[package]]
 name = "burn-cuda"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "burn-backend",
  "burn-cubecl",
@@ -1702,7 +1702,7 @@ dependencies = [
 [[package]]
 name = "burn-derive"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "burn-einsum",
  "derive-new",
@@ -1714,7 +1714,7 @@ dependencies = [
 [[package]]
 name = "burn-device"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#35e38da717e68981efaf028b5663e703083f2174"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#474a50c5be8f00910a7e65ad6a40225337efc8b4"
 dependencies = [
  "burn",
  "cubecl-runtime",
@@ -1728,7 +1728,7 @@ dependencies = [
 [[package]]
 name = "burn-dispatch"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "burn-autodiff",
  "burn-backend",
@@ -1742,12 +1742,12 @@ dependencies = [
 [[package]]
 name = "burn-einsum"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 
 [[package]]
 name = "burn-flex"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "burn-backend",
  "burn-ir",
@@ -1764,7 +1764,7 @@ dependencies = [
 [[package]]
 name = "burn-fusion"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "burn-backend",
  "burn-ir",
@@ -1780,7 +1780,7 @@ dependencies = [
 [[package]]
 name = "burn-ir"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "burn-backend",
  "burn-std",
@@ -1791,7 +1791,7 @@ dependencies = [
 [[package]]
 name = "burn-linalg"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "burn-core",
  "burn-cubecl",
@@ -1803,7 +1803,7 @@ dependencies = [
 [[package]]
 name = "burn-nn"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "burn-core",
  "burn-linalg",
@@ -1813,7 +1813,7 @@ dependencies = [
 [[package]]
 name = "burn-optim"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "burn-core",
  "burn-derive",
@@ -1828,7 +1828,7 @@ dependencies = [
 [[package]]
 name = "burn-pack"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "burn-std",
  "byteorder",
@@ -1839,7 +1839,7 @@ dependencies = [
 [[package]]
 name = "burn-rocm"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "burn-backend",
  "burn-cubecl",
@@ -1849,7 +1849,7 @@ dependencies = [
 [[package]]
 name = "burn-signal"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "burn-autodiff",
  "burn-core",
@@ -1861,7 +1861,7 @@ dependencies = [
 [[package]]
 name = "burn-std"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "ahash",
  "bytemuck",
@@ -1886,7 +1886,7 @@ dependencies = [
 [[package]]
 name = "burn-store"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "burn-core",
  "burn-pack",
@@ -1903,7 +1903,7 @@ dependencies = [
 [[package]]
 name = "burn-tensor"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "burn-backend",
  "burn-derive",
@@ -1919,7 +1919,7 @@ dependencies = [
 [[package]]
 name = "burn-vision"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "aligned-vec",
  "bon",
@@ -1939,7 +1939,7 @@ dependencies = [
 [[package]]
 name = "burn-wgpu"
 version = "0.22.0"
-source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#35000953fb4195bb117d6d876544a9775b27f067"
+source = "git+ssh://git@github.com/ssoj13/burn_b.git?branch=main#2e44f9825d60f452dbd94ecac2037bbe652ff473"
 dependencies = [
  "burn-backend",
  "burn-cubecl",
@@ -2054,7 +2054,7 @@ dependencies = [
 [[package]]
 name = "cam-controls"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "cam-viewport",
  "glam",
@@ -2064,7 +2064,7 @@ dependencies = [
 [[package]]
 name = "cam-controls-egui"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "cam-controls",
  "cam-viewport",
@@ -2074,7 +2074,7 @@ dependencies = [
 [[package]]
 name = "cam-viewport"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "glam",
 ]
@@ -2571,7 +2571,7 @@ dependencies = [
 [[package]]
 name = "cubecl"
 version = "0.11.0"
-source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f15c54bf7f7446303fa325d9d79ef5a8dedee94c"
+source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f0e8059bd0b2ac1d8b2dce4453eb0ad7b28bff3f"
 dependencies = [
  "cubecl-core",
  "cubecl-cpu",
@@ -2589,7 +2589,7 @@ dependencies = [
 [[package]]
 name = "cubecl-common"
 version = "0.11.0"
-source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f15c54bf7f7446303fa325d9d79ef5a8dedee94c"
+source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f0e8059bd0b2ac1d8b2dce4453eb0ad7b28bff3f"
 dependencies = [
  "bytemuck",
  "cfg_aliases",
@@ -2612,7 +2612,7 @@ dependencies = [
 [[package]]
 name = "cubecl-core"
 version = "0.11.0"
-source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f15c54bf7f7446303fa325d9d79ef5a8dedee94c"
+source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f0e8059bd0b2ac1d8b2dce4453eb0ad7b28bff3f"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -2641,7 +2641,7 @@ dependencies = [
 [[package]]
 name = "cubecl-cpp"
 version = "0.11.0"
-source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f15c54bf7f7446303fa325d9d79ef5a8dedee94c"
+source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f0e8059bd0b2ac1d8b2dce4453eb0ad7b28bff3f"
 dependencies = [
  "bytemuck",
  "cubecl-common",
@@ -2664,7 +2664,7 @@ dependencies = [
 [[package]]
 name = "cubecl-cpu"
 version = "0.11.0"
-source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f15c54bf7f7446303fa325d9d79ef5a8dedee94c"
+source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f0e8059bd0b2ac1d8b2dce4453eb0ad7b28bff3f"
 dependencies = [
  "bytemuck",
  "crossbeam-utils",
@@ -2686,7 +2686,7 @@ dependencies = [
 [[package]]
 name = "cubecl-cuda"
 version = "0.11.0"
-source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f15c54bf7f7446303fa325d9d79ef5a8dedee94c"
+source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f0e8059bd0b2ac1d8b2dce4453eb0ad7b28bff3f"
 dependencies = [
  "bytemuck",
  "cubecl-common",
@@ -2706,7 +2706,7 @@ dependencies = [
 [[package]]
 name = "cubecl-environment"
 version = "0.11.0"
-source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f15c54bf7f7446303fa325d9d79ef5a8dedee94c"
+source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f0e8059bd0b2ac1d8b2dce4453eb0ad7b28bff3f"
 dependencies = [
  "async-channel",
  "backtrace",
@@ -2743,7 +2743,7 @@ dependencies = [
 [[package]]
 name = "cubecl-hip"
 version = "0.11.0"
-source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f15c54bf7f7446303fa325d9d79ef5a8dedee94c"
+source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f0e8059bd0b2ac1d8b2dce4453eb0ad7b28bff3f"
 dependencies = [
  "bytemuck",
  "cubecl-common",
@@ -2775,7 +2775,7 @@ dependencies = [
 [[package]]
 name = "cubecl-ir"
 version = "0.11.0"
-source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f15c54bf7f7446303fa325d9d79ef5a8dedee94c"
+source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f0e8059bd0b2ac1d8b2dce4453eb0ad7b28bff3f"
 dependencies = [
  "bumpalo",
  "cubecl-common",
@@ -2806,7 +2806,7 @@ dependencies = [
 [[package]]
 name = "cubecl-llvm"
 version = "0.11.0"
-source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f15c54bf7f7446303fa325d9d79ef5a8dedee94c"
+source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f0e8059bd0b2ac1d8b2dce4453eb0ad7b28bff3f"
 dependencies = [
  "cc",
  "cubecl-core",
@@ -2825,7 +2825,7 @@ dependencies = [
 [[package]]
 name = "cubecl-macros"
 version = "0.11.0"
-source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f15c54bf7f7446303fa325d9d79ef5a8dedee94c"
+source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f0e8059bd0b2ac1d8b2dce4453eb0ad7b28bff3f"
 dependencies = [
  "darling 0.24.1",
  "derive-new",
@@ -2842,7 +2842,7 @@ dependencies = [
 [[package]]
 name = "cubecl-macros-internal"
 version = "0.11.0"
-source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f15c54bf7f7446303fa325d9d79ef5a8dedee94c"
+source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f0e8059bd0b2ac1d8b2dce4453eb0ad7b28bff3f"
 dependencies = [
  "darling 0.24.1",
  "inflections",
@@ -2854,7 +2854,7 @@ dependencies = [
 [[package]]
 name = "cubecl-metal"
 version = "0.11.0"
-source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f15c54bf7f7446303fa325d9d79ef5a8dedee94c"
+source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f0e8059bd0b2ac1d8b2dce4453eb0ad7b28bff3f"
 dependencies = [
  "block2 0.6.2",
  "bytemuck",
@@ -2878,7 +2878,7 @@ dependencies = [
 [[package]]
 name = "cubecl-monitoring"
 version = "0.11.0"
-source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f15c54bf7f7446303fa325d9d79ef5a8dedee94c"
+source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f0e8059bd0b2ac1d8b2dce4453eb0ad7b28bff3f"
 dependencies = [
  "cfg_aliases",
  "cubecl-ir",
@@ -2891,7 +2891,7 @@ dependencies = [
 [[package]]
 name = "cubecl-opt"
 version = "0.11.0"
-source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f15c54bf7f7446303fa325d9d79ef5a8dedee94c"
+source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f0e8059bd0b2ac1d8b2dce4453eb0ad7b28bff3f"
 dependencies = [
  "cubecl-common",
  "cubecl-core",
@@ -2913,7 +2913,7 @@ dependencies = [
 [[package]]
 name = "cubecl-runtime"
 version = "0.11.0"
-source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f15c54bf7f7446303fa325d9d79ef5a8dedee94c"
+source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f0e8059bd0b2ac1d8b2dce4453eb0ad7b28bff3f"
 dependencies = [
  "buildid",
  "bytemuck",
@@ -2943,7 +2943,7 @@ dependencies = [
 [[package]]
 name = "cubecl-server"
 version = "0.11.0"
-source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f15c54bf7f7446303fa325d9d79ef5a8dedee94c"
+source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f0e8059bd0b2ac1d8b2dce4453eb0ad7b28bff3f"
 dependencies = [
  "buildid",
  "bytemuck",
@@ -2971,7 +2971,7 @@ dependencies = [
 [[package]]
 name = "cubecl-spirv"
 version = "0.11.0"
-source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f15c54bf7f7446303fa325d9d79ef5a8dedee94c"
+source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f0e8059bd0b2ac1d8b2dce4453eb0ad7b28bff3f"
 dependencies = [
  "bitflags 2.13.2",
  "cubecl-common",
@@ -2994,7 +2994,7 @@ dependencies = [
 [[package]]
 name = "cubecl-std"
 version = "0.11.0"
-source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f15c54bf7f7446303fa325d9d79ef5a8dedee94c"
+source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f0e8059bd0b2ac1d8b2dce4453eb0ad7b28bff3f"
 dependencies = [
  "cubecl-common",
  "cubecl-core",
@@ -3011,7 +3011,7 @@ dependencies = [
 [[package]]
 name = "cubecl-wgpu"
 version = "0.11.0"
-source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f15c54bf7f7446303fa325d9d79ef5a8dedee94c"
+source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f0e8059bd0b2ac1d8b2dce4453eb0ad7b28bff3f"
 dependencies = [
  "bytemuck",
  "cfg-if",
@@ -3042,7 +3042,7 @@ dependencies = [
 [[package]]
 name = "cubecl-zspace"
 version = "0.11.0"
-source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f15c54bf7f7446303fa325d9d79ef5a8dedee94c"
+source = "git+ssh://git@github.com/ssoj13/cubecl_b.git?branch=main#f0e8059bd0b2ac1d8b2dce4453eb0ad7b28bff3f"
 dependencies = [
  "derive-new",
  "serde",
@@ -3052,7 +3052,7 @@ dependencies = [
 [[package]]
 name = "cubek"
 version = "0.3.0"
-source = "git+ssh://git@github.com/ssoj13/cubek_b.git?branch=main#920ac9209f6128c3a6fdd0851277edfb15949833"
+source = "git+ssh://git@github.com/ssoj13/cubek_b.git?branch=main#e60537506a51b713081d115fbfc8235358cbf58b"
 dependencies = [
  "cubecl",
  "cubek-attention",
@@ -3070,7 +3070,7 @@ dependencies = [
 [[package]]
 name = "cubek-attention"
 version = "0.3.0"
-source = "git+ssh://git@github.com/ssoj13/cubek_b.git?branch=main#920ac9209f6128c3a6fdd0851277edfb15949833"
+source = "git+ssh://git@github.com/ssoj13/cubek_b.git?branch=main#e60537506a51b713081d115fbfc8235358cbf58b"
 dependencies = [
  "bytemuck",
  "cubecl",
@@ -3084,7 +3084,7 @@ dependencies = [
 [[package]]
 name = "cubek-convolution"
 version = "0.3.0"
-source = "git+ssh://git@github.com/ssoj13/cubek_b.git?branch=main#920ac9209f6128c3a6fdd0851277edfb15949833"
+source = "git+ssh://git@github.com/ssoj13/cubek_b.git?branch=main#e60537506a51b713081d115fbfc8235358cbf58b"
 dependencies = [
  "bytemuck",
  "cubecl",
@@ -3100,7 +3100,7 @@ dependencies = [
 [[package]]
 name = "cubek-fft"
 version = "0.3.0"
-source = "git+ssh://git@github.com/ssoj13/cubek_b.git?branch=main#920ac9209f6128c3a6fdd0851277edfb15949833"
+source = "git+ssh://git@github.com/ssoj13/cubek_b.git?branch=main#e60537506a51b713081d115fbfc8235358cbf58b"
 dependencies = [
  "cubecl",
  "thiserror 2.0.21",
@@ -3109,7 +3109,7 @@ dependencies = [
 [[package]]
 name = "cubek-interpolate"
 version = "0.3.0"
-source = "git+ssh://git@github.com/ssoj13/cubek_b.git?branch=main#920ac9209f6128c3a6fdd0851277edfb15949833"
+source = "git+ssh://git@github.com/ssoj13/cubek_b.git?branch=main#e60537506a51b713081d115fbfc8235358cbf58b"
 dependencies = [
  "cubecl",
  "cubecl-common",
@@ -3122,7 +3122,7 @@ dependencies = [
 [[package]]
 name = "cubek-matmul"
 version = "0.3.0"
-source = "git+ssh://git@github.com/ssoj13/cubek_b.git?branch=main#920ac9209f6128c3a6fdd0851277edfb15949833"
+source = "git+ssh://git@github.com/ssoj13/cubek_b.git?branch=main#e60537506a51b713081d115fbfc8235358cbf58b"
 dependencies = [
  "bytemuck",
  "cubecl",
@@ -3136,7 +3136,7 @@ dependencies = [
 [[package]]
 name = "cubek-pool"
 version = "0.3.0"
-source = "git+ssh://git@github.com/ssoj13/cubek_b.git?branch=main#920ac9209f6128c3a6fdd0851277edfb15949833"
+source = "git+ssh://git@github.com/ssoj13/cubek_b.git?branch=main#e60537506a51b713081d115fbfc8235358cbf58b"
 dependencies = [
  "cubecl",
  "cubecl-common",
@@ -3146,7 +3146,7 @@ dependencies = [
 [[package]]
 name = "cubek-quant"
 version = "0.3.0"
-source = "git+ssh://git@github.com/ssoj13/cubek_b.git?branch=main#920ac9209f6128c3a6fdd0851277edfb15949833"
+source = "git+ssh://git@github.com/ssoj13/cubek_b.git?branch=main#e60537506a51b713081d115fbfc8235358cbf58b"
 dependencies = [
  "cubecl",
  "cubecl-common",
@@ -3158,7 +3158,7 @@ dependencies = [
 [[package]]
 name = "cubek-random"
 version = "0.3.0"
-source = "git+ssh://git@github.com/ssoj13/cubek_b.git?branch=main#920ac9209f6128c3a6fdd0851277edfb15949833"
+source = "git+ssh://git@github.com/ssoj13/cubek_b.git?branch=main#e60537506a51b713081d115fbfc8235358cbf58b"
 dependencies = [
  "cubecl",
  "cubecl-common",
@@ -3173,7 +3173,7 @@ dependencies = [
 [[package]]
 name = "cubek-reduce"
 version = "0.3.0"
-source = "git+ssh://git@github.com/ssoj13/cubek_b.git?branch=main#920ac9209f6128c3a6fdd0851277edfb15949833"
+source = "git+ssh://git@github.com/ssoj13/cubek_b.git?branch=main#e60537506a51b713081d115fbfc8235358cbf58b"
 dependencies = [
  "cubecl",
  "cubek-std",
@@ -3186,7 +3186,7 @@ dependencies = [
 [[package]]
 name = "cubek-std"
 version = "0.3.0"
-source = "git+ssh://git@github.com/ssoj13/cubek_b.git?branch=main#920ac9209f6128c3a6fdd0851277edfb15949833"
+source = "git+ssh://git@github.com/ssoj13/cubek_b.git?branch=main#e60537506a51b713081d115fbfc8235358cbf58b"
 dependencies = [
  "cubecl",
  "cubecl-common",
@@ -3196,7 +3196,7 @@ dependencies = [
 [[package]]
 name = "cubek-tile"
 version = "0.3.0"
-source = "git+ssh://git@github.com/ssoj13/cubek_b.git?branch=main#920ac9209f6128c3a6fdd0851277edfb15949833"
+source = "git+ssh://git@github.com/ssoj13/cubek_b.git?branch=main#e60537506a51b713081d115fbfc8235358cbf58b"
 dependencies = [
  "bytemuck",
  "cubecl",
@@ -4285,7 +4285,7 @@ dependencies = [
 [[package]]
 name = "flex-geom"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/wgpu-widgets-rs.git?branch=main#d41326bb0bd22e67b40d7219b5cb1888177dfcda"
+source = "git+ssh://git@github.com/ssoj13/wgpu-widgets-rs.git?branch=main#21a824ff19c17fb387de32bd1698df8359108ec0"
 dependencies = [
  "glam",
 ]
@@ -4795,7 +4795,7 @@ dependencies = [
 [[package]]
 name = "gpu-info-rs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/gpu-info-rs.git?branch=main#bb476cdc7b1cf5a79172c3d36e0bde0b73bdd18d"
+source = "git+ssh://git@github.com/ssoj13/gpu-info-rs.git?branch=main#25e69fd003fb021e17053547d85cdb1cd6d2af81"
 dependencies = [
  "ash",
  "bytemuck",
@@ -5640,7 +5640,7 @@ dependencies = [
 [[package]]
 name = "jph-rs"
 version = "0.2.0"
-source = "git+ssh://git@github.com/ssoj13/jph-rs.git?branch=main#a1bf2dbbe6c3e000d67063ce2bb5aff4bd6f1b13"
+source = "git+ssh://git@github.com/ssoj13/jph-rs.git?branch=main#6b8beb11d741ef6b1d3712b1a2994a20327df3b2"
 
 [[package]]
 name = "js-sys"
@@ -6074,7 +6074,7 @@ dependencies = [
 [[package]]
 name = "lz4-rs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/openvdb-rs.git?branch=main#93061401ebcf88fd005de2a4277561462831b5ca"
+source = "git+ssh://git@github.com/ssoj13/openvdb-rs.git?branch=main#204fd0d3a98cbaf28e7220e9d18c762121c76ca3"
 
 [[package]]
 name = "lz4_flex"
@@ -6946,7 +6946,7 @@ dependencies = [
 [[package]]
 name = "oidn-model"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oidn-rs.git?branch=main#7694062ccaed2387e63d0cbd8eb4eb55c3131473"
+source = "git+ssh://git@github.com/ssoj13/oidn-rs.git?branch=main#a171b231e75d01862038a893a70add95e0c68709"
 dependencies = [
  "burn",
  "oidn-tza",
@@ -6956,7 +6956,7 @@ dependencies = [
 [[package]]
 name = "oidn-rs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oidn-rs.git?branch=main#7694062ccaed2387e63d0cbd8eb4eb55c3131473"
+source = "git+ssh://git@github.com/ssoj13/oidn-rs.git?branch=main#a171b231e75d01862038a893a70add95e0c68709"
 dependencies = [
  "burn",
  "bytemuck",
@@ -6970,7 +6970,7 @@ dependencies = [
 [[package]]
 name = "oidn-tza"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oidn-rs.git?branch=main#7694062ccaed2387e63d0cbd8eb4eb55c3131473"
+source = "git+ssh://git@github.com/ssoj13/oidn-rs.git?branch=main#a171b231e75d01862038a893a70add95e0c68709"
 dependencies = [
  "bytemuck",
  "bytes",
@@ -7015,7 +7015,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 [[package]]
 name = "openvdb"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/openvdb-rs.git?branch=main#93061401ebcf88fd005de2a4277561462831b5ca"
+source = "git+ssh://git@github.com/ssoj13/openvdb-rs.git?branch=main#204fd0d3a98cbaf28e7220e9d18c762121c76ca3"
 dependencies = [
  "blosc-rs",
  "bytemuck",
@@ -7280,7 +7280,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 [[package]]
 name = "playa-coord"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#6238d789db35e6ed8f0037c68f96a94b8366a8f9"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#394f297c918f5193d7bd62fb1a264617586a7747"
 dependencies = [
  "glam",
 ]
@@ -7288,7 +7288,7 @@ dependencies = [
 [[package]]
 name = "playa-engine"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#6238d789db35e6ed8f0037c68f96a94b8366a8f9"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#394f297c918f5193d7bd62fb1a264617586a7747"
 dependencies = [
  "alembic-rs",
  "animation",
@@ -7340,7 +7340,7 @@ dependencies = [
 [[package]]
 name = "playa-events"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#6238d789db35e6ed8f0037c68f96a94b8366a8f9"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#394f297c918f5193d7bd62fb1a264617586a7747"
 dependencies = [
  "appbus-rs",
  "log",
@@ -7352,7 +7352,7 @@ dependencies = [
 [[package]]
 name = "playa-graph"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#6238d789db35e6ed8f0037c68f96a94b8366a8f9"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#394f297c918f5193d7bd62fb1a264617586a7747"
 dependencies = [
  "box-rs",
  "crashdump-rs",
@@ -7370,7 +7370,7 @@ dependencies = [
 [[package]]
 name = "playa-io"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#6238d789db35e6ed8f0037c68f96a94b8366a8f9"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#394f297c918f5193d7bd62fb1a264617586a7747"
 dependencies = [
  "audio-decode",
  "av-format-core",
@@ -7396,7 +7396,7 @@ dependencies = [
 [[package]]
 name = "playa-player"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#6238d789db35e6ed8f0037c68f96a94b8366a8f9"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#394f297c918f5193d7bd62fb1a264617586a7747"
 dependencies = [
  "log",
  "lru",
@@ -7407,7 +7407,7 @@ dependencies = [
 [[package]]
 name = "playa-templates"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#6238d789db35e6ed8f0037c68f96a94b8366a8f9"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#394f297c918f5193d7bd62fb1a264617586a7747"
 dependencies = [
  "serde",
  "serde_json",
@@ -7416,7 +7416,7 @@ dependencies = [
 [[package]]
 name = "playa-time"
 version = "0.1.143"
-source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#6238d789db35e6ed8f0037c68f96a94b8366a8f9"
+source = "git+ssh://git@github.com/ssoj13/playa.git?branch=main#394f297c918f5193d7bd62fb1a264617586a7747"
 dependencies = [
  "animation",
 ]
@@ -7713,7 +7713,7 @@ dependencies = [
 [[package]]
 name = "pt-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#35e38da717e68981efaf028b5663e703083f2174"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#474a50c5be8f00910a7e65ad6a40225337efc8b4"
 dependencies = [
  "bytemuck",
  "glam",
@@ -7723,7 +7723,7 @@ dependencies = [
 [[package]]
 name = "pt-denoise-oidn"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#35e38da717e68981efaf028b5663e703083f2174"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#474a50c5be8f00910a7e65ad6a40225337efc8b4"
 dependencies = [
  "anyhow",
  "burn",
@@ -7732,7 +7732,6 @@ dependencies = [
  "bytemuck",
  "cubecl-wgpu",
  "gpu-info-rs",
- "half",
  "log",
  "oidn-rs",
  "wgpu",
@@ -7741,7 +7740,7 @@ dependencies = [
 [[package]]
 name = "pt-integrator"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#35e38da717e68981efaf028b5663e703083f2174"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#474a50c5be8f00910a7e65ad6a40225337efc8b4"
 dependencies = [
  "half",
  "pt-core",
@@ -8230,7 +8229,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "render-color"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#35e38da717e68981efaf028b5663e703083f2174"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#474a50c5be8f00910a7e65ad6a40225337efc8b4"
 dependencies = [
  "log",
  "serde",
@@ -8241,7 +8240,7 @@ dependencies = [
 [[package]]
 name = "render-color-gpu"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#35e38da717e68981efaf028b5663e703083f2174"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#474a50c5be8f00910a7e65ad6a40225337efc8b4"
 dependencies = [
  "bytemuck",
  "gpu-info-rs",
@@ -8253,12 +8252,20 @@ dependencies = [
 [[package]]
 name = "render-env"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#35e38da717e68981efaf028b5663e703083f2174"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#474a50c5be8f00910a7e65ad6a40225337efc8b4"
 dependencies = [
  "bytemuck",
  "image",
  "pt-integrator",
  "rayon",
+]
+
+[[package]]
+name = "render-settings"
+version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#474a50c5be8f00910a7e65ad6a40225337efc8b4"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -8881,7 +8888,7 @@ checksum = "c4fdfe13e1c42e45f497416afb8dc4e783bf0e25b7be9077c1c77c5fb14cb998"
 [[package]]
 name = "soluwell-chrome"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "egui",
  "indexmap",
@@ -8895,7 +8902,7 @@ dependencies = [
 [[package]]
 name = "soluwell-config"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "egui",
  "serde",
@@ -8905,7 +8912,7 @@ dependencies = [
 [[package]]
 name = "soluwell-controls"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "curves",
  "egui",
@@ -8916,7 +8923,7 @@ dependencies = [
 [[package]]
 name = "soluwell-dev"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "appbus-rs",
  "crashdump-rs",
@@ -8941,7 +8948,7 @@ dependencies = [
 [[package]]
 name = "soluwell-panels"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "box-rs",
  "egui",
@@ -8954,7 +8961,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "animation",
  "anyhow",
@@ -9016,7 +9023,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-browser"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "appbus-rs",
  "egui",
@@ -9026,7 +9033,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "animation",
  "anyhow",
@@ -9066,7 +9073,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-export"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "av-util-core",
  "bytemuck",
@@ -9092,7 +9099,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-inspector"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "appbus-rs",
  "egui",
@@ -9103,7 +9110,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-jobs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "appbus-rs",
  "egui",
@@ -9114,7 +9121,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-materials"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "appbus-rs",
  "egui",
@@ -9128,7 +9135,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-node-editor"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "appbus-rs",
  "egui",
@@ -9142,7 +9149,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-outliner"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "appbus-rs",
  "egui",
@@ -9153,7 +9160,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-profiler"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "egui",
  "soluwell-studio-core",
@@ -9162,7 +9169,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-project"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "appbus-rs",
  "egui",
@@ -9175,7 +9182,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-render"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "bytemuck",
  "crashdump-rs",
@@ -9202,7 +9209,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-scene"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "animation",
  "appbus-rs",
@@ -9228,7 +9235,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-settings"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "egui",
  "serde",
@@ -9238,7 +9245,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-takes"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "appbus-rs",
  "egui",
@@ -9253,7 +9260,7 @@ dependencies = [
 [[package]]
 name = "soluwell-studio-timeline"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "appbus-rs",
  "egui",
@@ -9264,7 +9271,7 @@ dependencies = [
 [[package]]
 name = "soluwell-timeline"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "egui",
  "exr-core",
@@ -9282,7 +9289,7 @@ dependencies = [
 [[package]]
 name = "soluwell-viewport"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -9296,6 +9303,7 @@ dependencies = [
  "gpu-info-rs",
  "half",
  "log",
+ "render-settings",
  "serde",
  "serde_json",
  "soluwell-config",
@@ -9309,7 +9317,7 @@ dependencies = [
 [[package]]
 name = "soluwell-window"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "appbus-rs",
  "crashdump-rs",
@@ -9359,7 +9367,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 [[package]]
 name = "standard-surface-bsdf"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#35e38da717e68981efaf028b5663e703083f2174"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#474a50c5be8f00910a7e65ad6a40225337efc8b4"
 dependencies = [
  "cuda-device",
  "libm",
@@ -10216,7 +10224,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 [[package]]
 name = "ui-theme"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/wgpu-widgets-rs.git?branch=main#d41326bb0bd22e67b40d7219b5cb1888177dfcda"
+source = "git+ssh://git@github.com/ssoj13/wgpu-widgets-rs.git?branch=main#21a824ff19c17fb387de32bd1698df8359108ec0"
 dependencies = [
  "flex-geom",
  "glam",
@@ -10372,7 +10380,7 @@ dependencies = [
 [[package]]
 name = "usd-ar"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#db966884dbcbbd5a115288b2371a2a52bcd148ff"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#5f04e374602cce04ccbbe7469b4e8b39b3dd8355"
 dependencies = [
  "log",
  "once_cell",
@@ -10386,12 +10394,12 @@ dependencies = [
 [[package]]
 name = "usd-arch"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#db966884dbcbbd5a115288b2371a2a52bcd148ff"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#5f04e374602cce04ccbbe7469b4e8b39b3dd8355"
 
 [[package]]
 name = "usd-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#db966884dbcbbd5a115288b2371a2a52bcd148ff"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#5f04e374602cce04ccbbe7469b4e8b39b3dd8355"
 dependencies = [
  "once_cell",
  "ordered-float",
@@ -10415,7 +10423,7 @@ dependencies = [
 [[package]]
 name = "usd-derive-macros"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#db966884dbcbbd5a115288b2371a2a52bcd148ff"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#5f04e374602cce04ccbbe7469b4e8b39b3dd8355"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -10425,7 +10433,7 @@ dependencies = [
 [[package]]
 name = "usd-geom"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#db966884dbcbbd5a115288b2371a2a52bcd148ff"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#5f04e374602cce04ccbbe7469b4e8b39b3dd8355"
 dependencies = [
  "log",
  "once_cell",
@@ -10440,7 +10448,7 @@ dependencies = [
 [[package]]
 name = "usd-gf"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#db966884dbcbbd5a115288b2371a2a52bcd148ff"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#5f04e374602cce04ccbbe7469b4e8b39b3dd8355"
 dependencies = [
  "half",
  "num-traits",
@@ -10450,7 +10458,7 @@ dependencies = [
 [[package]]
 name = "usd-js"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#db966884dbcbbd5a115288b2371a2a52bcd148ff"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#5f04e374602cce04ccbbe7469b4e8b39b3dd8355"
 dependencies = [
  "serde_json",
 ]
@@ -10458,7 +10466,7 @@ dependencies = [
 [[package]]
 name = "usd-kind"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#db966884dbcbbd5a115288b2371a2a52bcd148ff"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#5f04e374602cce04ccbbe7469b4e8b39b3dd8355"
 dependencies = [
  "log",
  "usd-plug",
@@ -10468,7 +10476,7 @@ dependencies = [
 [[package]]
 name = "usd-pcp"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#db966884dbcbbd5a115288b2371a2a52bcd148ff"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#5f04e374602cce04ccbbe7469b4e8b39b3dd8355"
 dependencies = [
  "bitflags 2.13.2",
  "log",
@@ -10486,7 +10494,7 @@ dependencies = [
 [[package]]
 name = "usd-plug"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#db966884dbcbbd5a115288b2371a2a52bcd148ff"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#5f04e374602cce04ccbbe7469b4e8b39b3dd8355"
 dependencies = [
  "glob",
  "libloading 0.8.9",
@@ -10499,7 +10507,7 @@ dependencies = [
 [[package]]
 name = "usd-sdf"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#db966884dbcbbd5a115288b2371a2a52bcd148ff"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#5f04e374602cce04ccbbe7469b4e8b39b3dd8355"
 dependencies = [
  "alembic-rs",
  "bitflags 2.13.2",
@@ -10530,7 +10538,7 @@ dependencies = [
 [[package]]
 name = "usd-tf"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#db966884dbcbbd5a115288b2371a2a52bcd148ff"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#5f04e374602cce04ccbbe7469b4e8b39b3dd8355"
 dependencies = [
  "crashdump-rs",
  "glob",
@@ -10546,7 +10554,7 @@ dependencies = [
 [[package]]
 name = "usd-trace"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#db966884dbcbbd5a115288b2371a2a52bcd148ff"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#5f04e374602cce04ccbbe7469b4e8b39b3dd8355"
 dependencies = [
  "once_cell",
  "parking_lot",
@@ -10558,7 +10566,7 @@ dependencies = [
 [[package]]
 name = "usd-ts"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#db966884dbcbbd5a115288b2371a2a52bcd148ff"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#5f04e374602cce04ccbbe7469b4e8b39b3dd8355"
 dependencies = [
  "num-traits",
  "usd-gf",
@@ -10569,7 +10577,7 @@ dependencies = [
 [[package]]
 name = "usd-vt"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#db966884dbcbbd5a115288b2371a2a52bcd148ff"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#5f04e374602cce04ccbbe7469b4e8b39b3dd8355"
 dependencies = [
  "ordered-float",
  "usd-gf",
@@ -10697,7 +10705,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vfx-color"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8e45891f4f16291dacb7a0a7e9935c41d5fcca2f"
+source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8739bb8a529057447b0678bed25dbc682e0e331d"
 dependencies = [
  "thiserror 2.0.21",
  "vfx-core",
@@ -10710,7 +10718,7 @@ dependencies = [
 [[package]]
 name = "vfx-compute"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8e45891f4f16291dacb7a0a7e9935c41d5fcca2f"
+source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8739bb8a529057447b0678bed25dbc682e0e331d"
 dependencies = [
  "bytemuck",
  "crashdump-rs",
@@ -10730,7 +10738,7 @@ dependencies = [
 [[package]]
 name = "vfx-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8e45891f4f16291dacb7a0a7e9935c41d5fcca2f"
+source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8739bb8a529057447b0678bed25dbc682e0e331d"
 dependencies = [
  "half",
  "rayon",
@@ -10741,7 +10749,7 @@ dependencies = [
 [[package]]
 name = "vfx-core-math"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8e45891f4f16291dacb7a0a7e9935c41d5fcca2f"
+source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8739bb8a529057447b0678bed25dbc682e0e331d"
 dependencies = [
  "libm",
 ]
@@ -10749,7 +10757,7 @@ dependencies = [
 [[package]]
 name = "vfx-icc"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8e45891f4f16291dacb7a0a7e9935c41d5fcca2f"
+source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8739bb8a529057447b0678bed25dbc682e0e331d"
 dependencies = [
  "bytemuck",
  "lcms-rs",
@@ -10759,7 +10767,7 @@ dependencies = [
 [[package]]
 name = "vfx-io"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8e45891f4f16291dacb7a0a7e9935c41d5fcca2f"
+source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8739bb8a529057447b0678bed25dbc682e0e331d"
 dependencies = [
  "bytemuck",
  "byteorder",
@@ -10802,7 +10810,7 @@ dependencies = [
 [[package]]
 name = "vfx-lut"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8e45891f4f16291dacb7a0a7e9935c41d5fcca2f"
+source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8739bb8a529057447b0678bed25dbc682e0e331d"
 dependencies = [
  "quick-xml 0.42.0",
  "thiserror 2.0.21",
@@ -10814,7 +10822,7 @@ dependencies = [
 [[package]]
 name = "vfx-math"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8e45891f4f16291dacb7a0a7e9935c41d5fcca2f"
+source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8739bb8a529057447b0678bed25dbc682e0e331d"
 dependencies = [
  "glam",
  "vfx-core",
@@ -10824,7 +10832,7 @@ dependencies = [
 [[package]]
 name = "vfx-ocio"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8e45891f4f16291dacb7a0a7e9935c41d5fcca2f"
+source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8739bb8a529057447b0678bed25dbc682e0e331d"
 dependencies = [
  "bytemuck",
  "glam",
@@ -10850,7 +10858,7 @@ dependencies = [
 [[package]]
 name = "vfx-ocio-px"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8e45891f4f16291dacb7a0a7e9935c41d5fcca2f"
+source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8739bb8a529057447b0678bed25dbc682e0e331d"
 dependencies = [
  "libm",
  "vfx-core-math",
@@ -10859,7 +10867,7 @@ dependencies = [
 [[package]]
 name = "vfx-ops"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8e45891f4f16291dacb7a0a7e9935c41d5fcca2f"
+source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8739bb8a529057447b0678bed25dbc682e0e331d"
 dependencies = [
  "rayon",
  "thiserror 2.0.21",
@@ -10872,7 +10880,7 @@ dependencies = [
 [[package]]
 name = "vfx-primaries"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8e45891f4f16291dacb7a0a7e9935c41d5fcca2f"
+source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8739bb8a529057447b0678bed25dbc682e0e331d"
 dependencies = [
  "vfx-core",
  "vfx-math",
@@ -10881,7 +10889,7 @@ dependencies = [
 [[package]]
 name = "vfx-transfer"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8e45891f4f16291dacb7a0a7e9935c41d5fcca2f"
+source = "git+ssh://git@github.com/ssoj13/oiio-rs.git?branch=main#8739bb8a529057447b0678bed25dbc682e0e331d"
 dependencies = [
  "vfx-core",
  "vfx-core-math",
@@ -10919,7 +10927,7 @@ dependencies = [
 [[package]]
 name = "video-io-egui"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#b71be706d45cbfac28d9254b92b0bedec057a26d"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#0f63f612117472da66597b42e43d800fff8d63df"
 dependencies = [
  "egui",
  "serde",

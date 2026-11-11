@@ -2590,7 +2590,7 @@
           "environment": {
             "enabled": true,
             "intensity": 1.0,
-            "path": "",
+            "path": "builtin:venice_sunset_2k",
             "rotation_degrees": 0.0
           },
           "sky": {
@@ -2622,7 +2622,7 @@
               "Float": 1.0
             },
             "/environment/path": {
-              "Str": "C:\\18\\venice_sunset_2k.hdr"
+              "Str": "builtin:venice_sunset_2k"
             },
             "/environment/rotation_degrees": {
               "Float": 0.0
@@ -4521,7 +4521,7 @@
         "environment": {
           "enabled": true,
           "intensity": 1.0,
-          "path": "",
+          "path": "builtin:venice_sunset_2k",
           "rotation_degrees": 0.0
         },
         "formula": {

@@ -56,9 +56,16 @@ fn guides(gpu: &mut Gpu, scene: &Scene, backend: Backend) -> Guides {
     Guides { albedo, normal }
 }
 
-/// The largest per-channel difference of two pixels' rgb.
+/// The largest per-channel difference of two pixels' rgb, or `NaN` if any rgb lane is non-finite.
 fn channel_error(a: [f32; 4], b: [f32; 4]) -> f32 {
-    (0..3).map(|c| (a[c] - b[c]).abs()).fold(0.0, f32::max)
+    let mut max = 0.0f32;
+    for c in 0..3 {
+        if !a[c].is_finite() || !b[c].is_finite() {
+            return f32::NAN;
+        }
+        max = max.max((a[c] - b[c]).abs());
+    }
+    max
 }
 
 /// Per-case agreement of the two films: the largest normal and albedo errors and the share of
@@ -73,6 +80,8 @@ fn compare(cuda: &Guides, wgpu: &Guides) -> Agreement {
     let pixels = cuda.normal.len();
     assert_eq!(pixels, WIDTH * HEIGHT);
     assert_eq!(wgpu.normal.len(), pixels);
+    assert_eq!(cuda.albedo.len(), pixels);
+    assert_eq!(wgpu.albedo.len(), pixels);
     let mut agreement = Agreement {
         normal_max: 0.0,
         albedo_max: 0.0,
@@ -82,8 +91,16 @@ fn compare(cuda: &Guides, wgpu: &Guides) -> Agreement {
     for i in 0..pixels {
         let normal = channel_error(cuda.normal[i], wgpu.normal[i]);
         let albedo = channel_error(cuda.albedo[i], wgpu.albedo[i]);
-        agreement.normal_max = agreement.normal_max.max(normal);
-        agreement.albedo_max = agreement.albedo_max.max(albedo);
+        agreement.normal_max = if normal.is_nan() || agreement.normal_max.is_nan() {
+            f32::NAN
+        } else {
+            agreement.normal_max.max(normal)
+        };
+        agreement.albedo_max = if albedo.is_nan() || agreement.albedo_max.is_nan() {
+            f32::NAN
+        } else {
+            agreement.albedo_max.max(albedo)
+        };
         // A NaN error counts as beyond the tolerance.
         if !(normal <= NORMAL_TOLERANCE && albedo <= ALBEDO_TOLERANCE) {
             beyond += 1;
@@ -96,10 +113,16 @@ fn compare(cuda: &Guides, wgpu: &Guides) -> Agreement {
 /// The share of pixels with a primary hit (a nonzero normal guide): a case must show its
 /// fractal for the comparison to mean anything.
 fn coverage(g: &Guides) -> f32 {
+    if g.normal.is_empty() {
+        return 0.0;
+    }
     let hits = g
         .normal
         .iter()
-        .filter(|n| n[0] * n[0] + n[1] * n[1] + n[2] * n[2] > 0.25)
+        .filter(|n| {
+            let len2 = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+            len2.is_finite() && len2 > 0.25
+        })
         .count();
     hits as f32 / g.normal.len() as f32
 }
@@ -188,21 +211,18 @@ fn cuda_wgpu_primary_guides_agree_per_pixel() {
         let cuda = guides(&mut gpu, scene, Backend::Cuda);
         let wgpu = guides(&mut gpu, scene, Backend::Wgpu);
         let shown = coverage(&cuda);
+        let wgpu_shown = coverage(&wgpu);
         let a = compare(&cuda, &wgpu);
         eprintln!(
-            "{name}: coverage {:.3} (WGPU {:.3}), normal max {:.4}, albedo max {:.4}, beyond tolerance {:.4}",
-            shown,
-            coverage(&wgpu),
-            a.normal_max,
-            a.albedo_max,
-            a.mismatch,
+            "{name}: coverage {shown:.3} (WGPU {wgpu_shown:.3}), normal max {:.4}, albedo max {:.4}, beyond tolerance {:.4}",
+            a.normal_max, a.albedo_max, a.mismatch,
         );
-        if shown < 0.02 {
+        if shown < 0.02 || wgpu_shown < 0.02 {
             failures.push(format!(
-                "{name}: the fractal covers only {shown:.3} of the frame"
+                "{name}: the fractal covers only {shown:.3} (CUDA) / {wgpu_shown:.3} (WGPU) of the frame"
             ));
         }
-        if a.mismatch > MISMATCH_SHARE {
+        if !a.normal_max.is_finite() || !a.albedo_max.is_finite() || a.mismatch > MISMATCH_SHARE {
             failures.push(format!(
                 "{name}: {:.4} of the pixels differ (normal max {:.4}, albedo max {:.4})",
                 a.mismatch, a.normal_max, a.albedo_max
@@ -242,11 +262,20 @@ fn gpu_wgpu_frame_past_the_dispatch_limit_covers_every_pixel() {
     gpu.read_film(&target, Plane::Accum, false, &mut tiled, &mut radiance)
         .unwrap();
     assert_eq!(radiance.len(), width * height);
+    let nonfinite = radiance
+        .iter()
+        .filter(|p| !p[..3].iter().all(|v| v.is_finite()))
+        .count();
+    assert_eq!(
+        nonfinite, 0,
+        "{nonfinite} pixels have non-finite accumulated radiance"
+    );
     let wrong = radiance.iter().filter(|p| p[3] != 1.0).count();
     assert_eq!(
         wrong, 0,
         "{wrong} pixels did not receive exactly one sample"
     );
+    assert_eq!(target.pixels.len(), width * height);
     let blank = target.pixels.iter().filter(|&&p| p >> 24 != 0xff).count();
     assert_eq!(blank, 0, "{blank} pixels have no display code");
 }
@@ -286,8 +315,10 @@ fn formula_probe_points(radius: f32) -> Vec<[f32; 4]> {
 /// This checks every packed slot without coupling failures to a simultaneous extreme preset.
 fn parameter_probe_formulas(formula: Formula) -> Vec<(String, Formula)> {
     use serde_json::{Value, json};
+    init_warpbro();
     let meta = &crate::formulas::FORMULAS[formula.code() as usize];
     let original = serde_json::to_value(formula).unwrap();
+    let base_packed = Scene::preset_fractal(formula).pack(1, 1);
     let mut result = Vec::new();
     for parameter in meta.params {
         let value = &original[meta.variant][parameter.name];
@@ -301,30 +332,48 @@ fn parameter_probe_formulas(formula: Formula) -> Vec<(String, Formula)> {
         else {
             continue;
         };
-        let mut variant = original.clone();
-        let changed = if let Some(array) = value.as_array() {
-            Value::Array(
-                array
-                    .iter()
-                    .enumerate()
-                    .map(|(i, _)| json!(lo + (hi - lo) * (0.31 + 0.11 * i as f64)))
-                    .collect(),
-            )
-        } else if value.is_number() {
-            let number = lo + (hi - lo) * 0.37;
-            if value.is_u64() {
-                json!(number.round().max(0.0) as u64)
-            } else if value.is_i64() {
-                json!(number.round() as i64)
-            } else {
-                json!(number)
-            }
-        } else {
+        if !value.is_array() && !value.is_number() {
             continue;
-        };
-        variant[meta.variant][parameter.name] = changed;
-        let changed: Formula = serde_json::from_value(variant)
-            .unwrap_or_else(|error| panic!("{} {}: {error}", meta.variant, parameter.name));
+        }
+        let mut selected = None;
+        for (attempt, fraction) in [0.37, 0.12, 0.81].into_iter().enumerate() {
+            let mut variant = original.clone();
+            let changed = if let Some(array) = value.as_array() {
+                let base = if attempt == 0 { 0.31 } else { fraction };
+                Value::Array(
+                    array
+                        .iter()
+                        .enumerate()
+                        .map(|(i, _)| {
+                            let t = (base + 0.11 * i as f64).clamp(0.05, 0.95);
+                            json!(lo + (hi - lo) * t)
+                        })
+                        .collect(),
+                )
+            } else {
+                let number = lo + (hi - lo) * fraction;
+                if value.is_u64() {
+                    json!(number.round().max(0.0) as u64)
+                } else if value.is_i64() {
+                    json!(number.round() as i64)
+                } else {
+                    json!(number)
+                }
+            };
+            variant[meta.variant][parameter.name] = changed;
+            let candidate: Formula = serde_json::from_value(variant)
+                .unwrap_or_else(|error| panic!("{} {}: {error}", meta.variant, parameter.name));
+            if Scene::preset_fractal(candidate).pack(1, 1) != base_packed {
+                selected = Some(candidate);
+                break;
+            }
+        }
+        let changed = selected.unwrap_or_else(|| {
+            panic!(
+                "{} {} did not change packed scene ABI",
+                meta.variant, parameter.name
+            )
+        });
         result.push((parameter.name.into(), changed));
     }
     use crate::formulas::{AttractorKind, ComplexTpmsKind, PolyhedralSymmetry, TpmsKind};
@@ -362,6 +411,12 @@ fn parameter_probe_formulas(formula: Formula) -> Vec<(String, Formula)> {
             }
             _ => unreachable!(),
         }
+        assert_ne!(
+            Scene::preset_fractal(changed).pack(1, 1),
+            base_packed,
+            "{} mode {mode} did not change packed scene ABI",
+            meta.variant
+        );
         result.push(((*mode).into(), changed));
     }
     result
@@ -535,7 +590,12 @@ fn cuda_extended_full_de_short_orbits_and_noniterating_traps_match_wgpu() {
                 for (index, (a, b)) in cuda.iter().zip(&wgpu).enumerate() {
                     let errors = [(a[0] - b[0]).abs(), (a[1] - b[1]).abs()];
                     for channel in 0..2 {
-                        if errors[channel] > maximum[channel] {
+                        if !a[channel].is_finite() || !b[channel].is_finite() {
+                            if !maximum[channel].is_nan() {
+                                maximum[channel] = f32::NAN;
+                                worst[channel] = index;
+                            }
+                        } else if !maximum[channel].is_nan() && errors[channel] > maximum[channel] {
                             maximum[channel] = errors[channel];
                             worst[channel] = index;
                         }
@@ -625,7 +685,12 @@ fn cuda_extended_formula_estimates_and_traps_match_wgpu() {
             for (index, (a, b)) in cuda.iter().zip(&wgpu).enumerate() {
                 for channel in 0..2 {
                     let error = (a[channel] - b[channel]).abs();
-                    if error > max_error[channel] {
+                    if !a[channel].is_finite() || !b[channel].is_finite() {
+                        if !max_error[channel].is_nan() {
+                            max_error[channel] = f32::NAN;
+                            worst[channel] = index;
+                        }
+                    } else if !max_error[channel].is_nan() && error > max_error[channel] {
                         max_error[channel] = error;
                         worst[channel] = index;
                     }
@@ -707,23 +772,27 @@ fn cuda_extended_primary_guides_match_wgpu_with_fractional_iterations_and_invers
             }
             let cuda = guides(&mut gpu, &scene, Backend::Cuda);
             let wgpu = guides(&mut gpu, &scene, Backend::Wgpu);
+            let cov_cuda = coverage(&cuda);
+            let cov_wgpu = coverage(&wgpu);
             let agreement = compare(&cuda, &wgpu);
             eprintln!(
                 "{}",
                 serde_json::json!({
                     "check": "extended-guides", "family": code, "modified": modified,
-                    "coverage_cuda": coverage(&cuda), "coverage_wgpu": coverage(&wgpu),
+                    "coverage_cuda": cov_cuda, "coverage_wgpu": cov_wgpu,
                     "normal_max": agreement.normal_max, "albedo_max": agreement.albedo_max,
                     "mismatch": agreement.mismatch,
                 })
             );
-            if coverage(&cuda) < 0.02
-                || coverage(&wgpu) < 0.02
+            if cov_cuda < 0.02
+                || cov_wgpu < 0.02
+                || !agreement.normal_max.is_finite()
+                || !agreement.albedo_max.is_finite()
                 || agreement.mismatch > MISMATCH_SHARE
             {
                 failures.push(format!(
-                    "family={code} modified={modified} mismatch={}",
-                    agreement.mismatch
+                    "family={code} modified={modified} coverage={cov_cuda:.3}/{cov_wgpu:.3} mismatch={} normal_max={} albedo_max={}",
+                    agreement.mismatch, agreement.normal_max, agreement.albedo_max
                 ));
             }
         }
@@ -738,10 +807,11 @@ fn cuda_extended_primary_guides_match_wgpu_with_fractional_iterations_and_invers
 /// A real primary hit belonging to one of the two solid-colour oracle objects.
 fn oracle_object(guides: &Guides, index: usize) -> Option<usize> {
     let n = guides.normal[index];
-    if n[0] * n[0] + n[1] * n[1] + n[2] * n[2] <= 0.25 {
+    let len2 = n[0] * n[0] + n[1] * n[1] + n[2] * n[2];
+    let color = guides.albedo[index];
+    if !len2.is_finite() || len2 <= 0.25 || !color[..3].iter().all(|v| v.is_finite()) {
         return None;
     }
-    let color = guides.albedo[index];
     if color[0] > color[2] * 2.0 {
         Some(0)
     } else if color[2] > color[0] * 2.0 {
@@ -833,14 +903,18 @@ struct OracleFilm {
     radiance: Vec<[f32; 4]>,
     albedo: Vec<[f32; 4]>,
     normal: Vec<[f32; 4]>,
-    samples: Vec<[f32; 4]>,
+    sample_counts: Vec<f32>,
     first: Guides,
 }
 
-fn oracle_plane(gpu: &Gpu, target: &Target, plane: Plane) -> Vec<[f32; 4]> {
-    let mut tiled = Vec::new();
+fn oracle_plane(
+    gpu: &Gpu,
+    target: &Target,
+    plane: Plane,
+    tiled: &mut Vec<[f32; 4]>,
+) -> Vec<[f32; 4]> {
     let mut output = Vec::new();
-    gpu.read_film(target, plane, false, &mut tiled, &mut output)
+    gpu.read_film(target, plane, false, tiled, &mut output)
         .unwrap();
     output
 }
@@ -848,21 +922,34 @@ fn oracle_plane(gpu: &Gpu, target: &Target, plane: Plane) -> Vec<[f32; 4]> {
 /// Progressive 1+3+4 samples exercise the launch offsets as well as the material path.
 fn oracle_film(gpu: &mut Gpu, scene: &Scene) -> OracleFilm {
     let mut target = Target::new(48, 32);
+    let mut tiled = Vec::new();
     gpu.step(&mut target, scene, 1, 17, false).unwrap();
     let first = Guides {
-        albedo: oracle_plane(gpu, &target, Plane::Albedo),
-        normal: oracle_plane(gpu, &target, Plane::Normal),
+        albedo: oracle_plane(gpu, &target, Plane::Albedo, &mut tiled),
+        normal: oracle_plane(gpu, &target, Plane::Normal, &mut tiled),
     };
     for count in [3, 4] {
         gpu.step(&mut target, scene, count, 17, false).unwrap();
     }
     assert_eq!(target.samples, 8);
     assert!(target.colour_error.is_none(), "{:?}", target.colour_error);
+    let accum = oracle_plane(gpu, &target, Plane::Accum, &mut tiled);
+    let mut sample_counts = Vec::with_capacity(accum.len());
+    let mut radiance = Vec::with_capacity(accum.len());
+    for pixel in accum {
+        sample_counts.push(pixel[3]);
+        let inv = if pixel[3] > 0.0 {
+            pixel[3].recip()
+        } else {
+            0.0
+        };
+        radiance.push([pixel[0] * inv, pixel[1] * inv, pixel[2] * inv, 1.0]);
+    }
     OracleFilm {
-        radiance: gpu.raw_scene_linear(&target).unwrap(),
-        albedo: oracle_plane(gpu, &target, Plane::Albedo),
-        normal: oracle_plane(gpu, &target, Plane::Normal),
-        samples: oracle_plane(gpu, &target, Plane::Accum),
+        radiance,
+        albedo: oracle_plane(gpu, &target, Plane::Albedo, &mut tiled),
+        normal: oracle_plane(gpu, &target, Plane::Normal, &mut tiled),
+        sample_counts,
         first,
     }
 }
@@ -878,6 +965,7 @@ fn compare_oracle_plane(
     plane: &str,
 ) -> Option<String> {
     assert_eq!(actual.len(), expected.len());
+    assert!(!actual.is_empty());
     let mut max_absolute = 0.0f32;
     let mut max_relative = 0.0f32;
     let mut exact_differences = 0;
@@ -889,11 +977,19 @@ fn compare_oracle_plane(
             if a[channel] != b[channel] {
                 exact_differences += 1;
             }
-            if error > max_absolute {
-                max_absolute = error;
-                worst = (index, channel);
+            if !a[channel].is_finite() || !b[channel].is_finite() {
+                if !max_absolute.is_nan() {
+                    max_absolute = f32::NAN;
+                    max_relative = f32::NAN;
+                    worst = (index, channel);
+                }
+            } else if !max_absolute.is_nan() {
+                if error > max_absolute {
+                    max_absolute = error;
+                    worst = (index, channel);
+                }
+                max_relative = max_relative.max(error / b[channel].abs().max(1.0e-12));
             }
-            max_relative = max_relative.max(error / b[channel].abs().max(1.0e-12));
             if !a[channel].is_finite()
                 || !b[channel].is_finite()
                 || error > 3.0e-5 + 3.0e-5 * b[channel].abs()
@@ -1013,14 +1109,28 @@ fn cuda_extended_specialized_worlds_match_dynamic_dispatch() {
                 ("radiance", &specialized.radiance, &dynamic.radiance),
                 ("albedo", &specialized.albedo, &dynamic.albedo),
                 ("normal", &specialized.normal, &dynamic.normal),
+                (
+                    "first_albedo",
+                    &specialized.first.albedo,
+                    &dynamic.first.albedo,
+                ),
+                (
+                    "first_normal",
+                    &specialized.first.normal,
+                    &dynamic.first.normal,
+                ),
             ] {
                 failures.extend(compare_oracle_plane(actual, reference, code, shade, plane));
             }
-            for (index, (a, b)) in specialized.samples.iter().zip(&dynamic.samples).enumerate() {
-                if a[3] != 8.0 || b[3] != 8.0 {
+            for (index, (&a, &b)) in specialized
+                .sample_counts
+                .iter()
+                .zip(&dynamic.sample_counts)
+                .enumerate()
+            {
+                if a != 8.0 || b != 8.0 {
                     failures.push(format!(
-                        "family={code} shade={shade} pixel={index} sample counts={}/{}",
-                        a[3], b[3]
+                        "family={code} shade={shade} pixel={index} sample counts={a}/{b}"
                     ));
                     break;
                 }
@@ -1121,10 +1231,15 @@ fn cuda_extended_mixed_world_guides_match_wgpu() {
                 "albedo_max": agreement.albedo_max, "mismatch": agreement.mismatch,
             })
         );
-        if cuda_hits.contains(&0) || wgpu_hits.contains(&0) || agreement.mismatch > MISMATCH_SHARE {
+        if cuda_hits.contains(&0)
+            || wgpu_hits.contains(&0)
+            || !agreement.normal_max.is_finite()
+            || !agreement.albedo_max.is_finite()
+            || agreement.mismatch > MISMATCH_SHARE
+        {
             failures.push(format!(
-                "family={code} hits={cuda_hits:?}/{wgpu_hits:?} mismatch={}",
-                agreement.mismatch
+                "family={code} hits={cuda_hits:?}/{wgpu_hits:?} mismatch={} normal_max={} albedo_max={}",
+                agreement.mismatch, agreement.normal_max, agreement.albedo_max
             ));
         }
     }
@@ -1163,23 +1278,33 @@ fn cuda_extended_rounding_matches_wgpu_at_positive_and_negative_half_cells() {
             points.push(point);
         }
     }
-    for backend in [Backend::Cuda, Backend::Wgpu] {
-        scene.render.backend = backend;
-        let result = gpu.probe_formula(&scene, &points).unwrap();
-        assert_eq!(result.len(), points.len());
-        for (point, actual) in points.iter().zip(result) {
-            // One iteration has a closed-form trap. Its asymmetric point distinguishes the
-            // signs of ±half-cell wraps even when the radial distance estimate is symmetric.
-            let wrapped: [f32; 3] =
-                std::array::from_fn(|axis| point[axis] - point[axis].round_ties_even());
-            let radius2: f32 = wrapped.iter().map(|value| value * value).sum();
-            let factor = (1.0 / radius2.max(0.0625)).clamp(1.0, 16.0);
-            let expected = wrapped
-                .iter()
-                .zip(trap_point)
-                .map(|(&value, trap)| (value * factor - trap).powi(2))
-                .sum::<f32>()
-                .sqrt();
+    scene.render.backend = Backend::Cuda;
+    let cuda_half = gpu.probe_formula(&scene, &points).unwrap();
+    scene.render.backend = Backend::Wgpu;
+    let wgpu_half = gpu.probe_formula(&scene, &points).unwrap();
+    assert_eq!(cuda_half.len(), points.len());
+    assert_eq!(wgpu_half.len(), points.len());
+    for (index, point) in points.iter().enumerate() {
+        let c = cuda_half[index];
+        let w = wgpu_half[index];
+        let de_tolerance = 5.0e-5 + 2.0e-4 * w[0].abs();
+        assert!(
+            c[0].is_finite() && w[0].is_finite() && (c[0] - w[0]).abs() <= de_tolerance,
+            "Mobius half-cell point={point:?} DE cuda={c:?} wgpu={w:?}",
+        );
+        // One iteration has a closed-form trap. Its asymmetric point distinguishes the
+        // signs of ±half-cell wraps even when the radial distance estimate is symmetric.
+        let wrapped: [f32; 3] =
+            std::array::from_fn(|axis| point[axis] - point[axis].round_ties_even());
+        let radius2: f32 = wrapped.iter().map(|value| value * value).sum();
+        let factor = (1.0 / radius2.max(0.0625)).clamp(1.0, 16.0);
+        let expected = wrapped
+            .iter()
+            .zip(trap_point)
+            .map(|(&value, trap)| (value * factor - trap).powi(2))
+            .sum::<f32>()
+            .sqrt();
+        for (backend, actual) in [(Backend::Cuda, c), (Backend::Wgpu, w)] {
             assert!(
                 actual[1].is_finite() && (actual[1] - expected).abs() <= 1.0e-4,
                 "Mobius half-cell point={point:?} backend={backend:?} trap={} expected={expected}",
@@ -1431,12 +1556,14 @@ fn cuda_extended_axis_and_nearest_branch_diagnostic() {
     let exact_pole_pore = ((frequency * std::f64::consts::FRAC_PI_2).cos() - 0.45) / frequency;
     for backend in [Backend::Cuda, Backend::Wgpu] {
         superformula.render.backend = backend;
+        let values = gpu.probe_formula(&superformula, &super_points).unwrap();
+        assert!(values.iter().flatten().all(|value| value.is_finite()));
         eprintln!(
             "{}",
             serde_json::json!({
                 "check": "superformula-pole-attribution", "backend": backend.label(),
                 "points": super_points, "closed_form_pole_pore": exact_pole_pore,
-                "values": gpu.probe_formula(&superformula, &super_points).unwrap(),
+                "values": values,
             })
         );
     }
@@ -1453,12 +1580,14 @@ fn cuda_extended_axis_and_nearest_branch_diagnostic() {
     ];
     for backend in [Backend::Cuda, Backend::Wgpu] {
         knot.render.backend = backend;
+        let values = gpu.probe_formula(&knot, &knot_points).unwrap();
+        assert!(values.iter().flatten().all(|value| value.is_finite()));
         eprintln!(
             "{}",
             serde_json::json!({
                 "check": "knot-symmetric-branch-attribution", "backend": backend.label(),
                 "points": knot_points, "point_bits": knot_points.map(|p| p.map(f32::to_bits)),
-                "values": gpu.probe_formula(&knot, &knot_points).unwrap(),
+                "values": values,
             })
         );
     }
@@ -1471,6 +1600,13 @@ fn cuda_extended_axis_and_nearest_branch_diagnostic() {
         )));
         for backend in [Backend::Cuda, Backend::Wgpu] {
             let rendered = guides(&mut gpu, &scene, backend);
+            assert!(
+                rendered
+                    .normal
+                    .iter()
+                    .chain(&rendered.albedo)
+                    .all(|p| p[..3].iter().all(|v| v.is_finite()))
+            );
             eprintln!(
                 "{}",
                 serde_json::json!({
@@ -1642,7 +1778,7 @@ fn cuda_extended_pole_estimates_match_analytic_geometry_on_both_backends() {
                 + radius;
             let error = (f64::from(value[1]) - expected).abs();
             assert!(
-                error <= 1.0e-4 + 2.0e-4 * expected,
+                value[0].is_finite() && value[1].is_finite() && error <= 1.0e-4 + 2.0e-4 * expected,
                 "{backend:?} Harmonic pole {point:?}: {value:?}, expected trap {expected}"
             );
         }
@@ -1667,7 +1803,9 @@ fn cuda_extended_pole_estimates_match_analytic_geometry_on_both_backends() {
             for (point, value) in points.iter().zip(values) {
                 let error = (f64::from(value[0]) - expected).abs();
                 assert!(
-                    error <= 5.0e-5 + 2.0e-4 * expected.abs(),
+                    value[0].is_finite()
+                        && value[1].is_finite()
+                        && error <= 5.0e-5 + 2.0e-4 * expected.abs(),
                     "{backend:?} Superformula pole {point:?} f={frequency}: {value:?}, expected {expected}"
                 );
             }
@@ -1929,9 +2067,10 @@ fn pixel_beam_start_fixes_recorded_mobius_surface_skip() {
         2.0 * 62.5 / WIDTH as f32 - 1.0,
         1.0 - 2.0 * 6.5 / HEIGHT as f32,
     ]);
-    // Sample 31 of the 8-D Bayer-shuffled Sobol net hits the sphere-facing corner (~[0.070, 0.914]).
+    // Sample 12 of the 8-D Owen-scrambled Sobol net (`shuffled = 12 ^ 6 = 10`) hits the
+    // sphere-facing corner (~[0.095, 0.997]) within the first 16-sample `(0, 2)`-net stratum.
     let jitter: [f32; 2] = std::array::from_fn(|dim| {
-        standard_surface_bsdf::sampling::sobol(62 ^ SEED, 6, 31, dim as u32)
+        standard_surface_bsdf::sampling::sobol(62 ^ SEED, 6, 12, dim as u32)
     });
     let sample = ray([
         2.0 * (62.0 + jitter[0]) / WIDTH as f32 - 1.0,

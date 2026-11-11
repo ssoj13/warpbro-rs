@@ -1,6 +1,11 @@
 //! WarpBro's dual CUDA (`fractal-kernels`) + 28-family WGPU (`formulas.wgsl`) compute engine
 //! implementing [`soluwell_studio::render::ComputeEngine`], plus one-time host registration
-//! (`init_warpbro`).
+//! ([`init_warpbro`]) and [`WarpBroFractalModule`] (`StudioModule`).
+//!
+//! Exists so `soluwell-studio` remains fractal-agnostic while WarpBro drives both the embedded
+//! `cuda-oxide` PTX kernels (`fractal_kernels::kernels`) and the per-family WGSL shader hook
+//! ([`warpbro_shader_hook`]) over the shared `P_COUNT` studio ABI. Consumed by `src/main.rs`,
+//! `src/render_bench.rs`, and `src/parity_tests.rs`.
 
 use std::sync::{Arc, OnceLock};
 
@@ -11,7 +16,7 @@ use sha2::{Digest, Sha256};
 use soluwell_studio::palette::build_lut;
 use soluwell_studio::render::{
     BackendFilm, ComputeEngine, Gpu, RenderError, StepOutcome, StepSpec, Target, denoise_due,
-    film_mismatch, fused_display,
+    film_mismatch, fused_display, validate_size,
 };
 use soluwell_studio::render_prep::{
     BLOCK, LightResidentKey, LutResidentKey, ObjectResidentKey, Plane, PreparationStats,
@@ -127,13 +132,17 @@ pub fn warpbro_shader_hook(family: Option<u32>) -> (&'static str, String) {
         "fn family_distance(is_world: bool, obj: u32, family_override: u32, p: vec3<f32>, trap_mode: u32) -> vec2<f32> {\n",
     );
     match family {
-        Some(code) => {
-            let _ = writeln!(
-                s,
-                "    return {}(is_world, obj, p, trap_mode);",
-                FORMULAS[code as usize].wgsl
-            );
-        }
+        Some(code) => match FORMULAS.get(code as usize) {
+            Some(meta) => {
+                let _ = writeln!(s, "    return {}(is_world, obj, p, trap_mode);", meta.wgsl);
+            }
+            None => {
+                let _ = writeln!(
+                    s,
+                    "    return unknown_fractal_family_{code}(is_world, obj, p, trap_mode);"
+                );
+            }
+        },
         None => {
             s.push_str("    switch resolved_family(is_world, obj, family_override) {\n");
             for meta in &FORMULAS {
@@ -192,6 +201,10 @@ fn device(what: &str, error: impl std::fmt::Debug) -> RenderError {
     RenderError::Device(format!("{what}: {error:?}"))
 }
 
+fn unresolved_auto() -> RenderError {
+    RenderError::Backend("The Auto backend was not resolved before dispatch".into())
+}
+
 fn zeroed<T: DeviceCopy>(
     stream: &CudaStream,
     len: usize,
@@ -224,6 +237,8 @@ struct CudaEngine {
     lut: DeviceBuffer<[f32; 4]>,
     objects: DeviceBuffer<f32>,
     lights: DeviceBuffer<f32>,
+    pick_query: DeviceBuffer<[f32; 4]>,
+    pick_out: DeviceBuffer<[f32; 4]>,
     lut_resident: Resident<LutResidentKey>,
     object_resident: Resident<ObjectResidentKey>,
     light_resident: Resident<LightResidentKey>,
@@ -258,6 +273,10 @@ impl CudaEngine {
             lut,
             objects: DeviceBuffer::zeroed(&stream, 1).map_err(|e| format!("objects: {e:?}"))?,
             lights: DeviceBuffer::zeroed(&stream, 1).map_err(|e| format!("lights: {e:?}"))?,
+            pick_query: DeviceBuffer::zeroed(&stream, 1)
+                .map_err(|e| format!("pick query: {e:?}"))?,
+            pick_out: DeviceBuffer::zeroed(&stream, 1)
+                .map_err(|e| format!("pick result: {e:?}"))?,
             lut_resident: Default::default(),
             object_resident: Default::default(),
             light_resident: Default::default(),
@@ -266,11 +285,14 @@ impl CudaEngine {
     }
 
     fn create_target(&self, width: usize, height: usize) -> Result<CudaTarget, RenderError> {
+        validate_size(width, height, 1)?;
+        let pixels = width * height;
         let padded = padded_len(width, height);
+        let tiles = padded / 32;
         let s = &self.stream;
-        let mut active = zeroed(s, padded / 32, "tile flags")?;
+        let mut active = zeroed(s, tiles, "tile flags")?;
         active
-            .copy_from_host(s, &vec![1u32; padded / 32])
+            .copy_from_host(s, &vec![1u32; tiles])
             .map_err(|e| device("activate tiles", e))?;
         Ok(CudaTarget {
             accum: zeroed(s, padded, "accumulator")?,
@@ -279,7 +301,7 @@ impl CudaEngine {
             stats: zeroed(s, padded, "sample statistics")?,
             tally: zeroed(s, TALLY_THREADS, "tally sums")?,
             active,
-            out: zeroed(s, width * height, "output")?,
+            out: zeroed(s, pixels, "output")?,
             padded,
         })
     }
@@ -483,6 +505,14 @@ impl WarpBroComputeEngine {
         if points.is_empty() {
             return Ok(Vec::new());
         }
+        let backend = match backend {
+            Backend::Auto => self.resolve_backend(scene)?,
+            Backend::Wgpu => self.init_wgpu()?,
+            Backend::Cuda => {
+                self.cuda()?;
+                Backend::Cuda
+            }
+        };
         let p: [f32; P_COUNT] = scene.pack(1, 1).try_into().expect("packed parameter ABI");
         if backend == Backend::Wgpu {
             let wgpu = self.wgpu_mut()?;
@@ -578,15 +608,21 @@ impl ComputeEngine for WarpBroComputeEngine {
         pick: bool,
         force_mixed_world: bool,
     ) -> Result<bool, RenderError> {
-        if pick && (!scene.world_render || scene.objects.is_empty()) {
-            return Ok(true);
+        match backend {
+            Backend::Cuda => {
+                self.cuda()?;
+                Ok(true)
+            }
+            Backend::Wgpu => {
+                if pick && (!scene.world_render || scene.objects.is_empty()) {
+                    return Ok(true);
+                }
+                self.init_wgpu()?;
+                self.wgpu()?
+                    .pipeline_ready(scene, prepared, pick, force_mixed_world)
+            }
+            Backend::Auto => Err(unresolved_auto()),
         }
-        if backend != Backend::Wgpu {
-            return Ok(true);
-        }
-        self.init_wgpu()?;
-        self.wgpu()?
-            .pipeline_ready(scene, prepared, pick, force_mixed_world)
     }
 
     fn create_film(
@@ -601,9 +637,7 @@ impl ComputeEngine for WarpBroComputeEngine {
                 self.init_wgpu()?;
                 Ok(Box::new(self.wgpu()?.create_target(width, height)?))
             }
-            Backend::Auto => Err(RenderError::Backend(
-                "The Auto backend was not resolved before allocating a film".into(),
-            )),
+            Backend::Auto => Err(unresolved_auto()),
         }
     }
 
@@ -671,24 +705,28 @@ impl ComputeEngine for WarpBroComputeEngine {
         params: &[f32; P_COUNT],
         stats: &mut PreparationStats,
     ) -> Result<(), RenderError> {
-        if backend == Backend::Wgpu {
-            self.init_wgpu()?;
-            let wgpu = self.wgpu_mut()?;
-            wgpu.upload_prepared(prepared, env, world_render, stats)?;
-            wgpu.set_params(params)
-        } else {
-            let mut staging = std::mem::take(&mut self.lut_staging);
-            let res = {
-                let cuda = self.cuda_mut()?;
-                cuda.upload_prepared(prepared, env, world_render, &mut staging, stats)
-                    .and_then(|()| {
-                        cuda.module
-                            .set_params(&cuda.stream, params)
-                            .map_err(|e| device("CUDA parameter upload", e))
-                    })
-            };
-            self.lut_staging = staging;
-            res
+        match backend {
+            Backend::Wgpu => {
+                self.init_wgpu()?;
+                let wgpu = self.wgpu_mut()?;
+                wgpu.upload_prepared(prepared, env, world_render, stats)?;
+                wgpu.set_params(params)
+            }
+            Backend::Cuda => {
+                let mut staging = std::mem::take(&mut self.lut_staging);
+                let res = {
+                    let cuda = self.cuda_mut()?;
+                    cuda.upload_prepared(prepared, env, world_render, &mut staging, stats)
+                        .and_then(|()| {
+                            cuda.module
+                                .set_params(&cuda.stream, params)
+                                .map_err(|e| device("CUDA parameter upload", e))
+                        })
+                };
+                self.lut_staging = staging;
+                res
+            }
+            Backend::Auto => Err(unresolved_auto()),
         }
     }
 
@@ -706,178 +744,188 @@ impl ComputeEngine for WarpBroComputeEngine {
         let force_mixed_world = trace.force_mixed_world;
         let spp = step.spp;
         let final_pass = step.final_pass;
-        if backend == Backend::Wgpu {
-            let adaptive = scene.render.adaptive;
-            let next_samples = target.samples + spp;
-            let run_adapt = adaptive.enabled && next_samples >= adaptive.min();
-            let total_tiles = target.active_host.len();
-            let wgpu = self.wgpu()?;
-            if !run_adapt {
-                target.samples = next_samples;
-                target.tally_dirty = true;
-                if !display(target) {
+        match backend {
+            Backend::Wgpu => {
+                let adaptive = scene.render.adaptive;
+                let next_samples = target.samples + spp;
+                let run_adapt = adaptive.enabled && next_samples >= adaptive.min();
+                let total_tiles = target.active_host.len();
+                let wgpu = self.wgpu()?;
+                if !run_adapt {
+                    target.samples = next_samples;
+                    target.tally_dirty = true;
+                    if !display(target) {
+                        let wt = target
+                            .film
+                            .as_ref()
+                            .and_then(|(_, f)| f.downcast_ref::<WgpuTarget>())
+                            .ok_or_else(film_mismatch)?;
+                        wgpu.launch_trace(wt, scene, prepared, full, force_mixed_world)?;
+                        return Ok(StepOutcome::CompletedNoDisplay);
+                    }
+                    let due = denoise_due(target, scene, final_pass);
+                    if fused_display(target, scene, due) {
+                        let wt = target
+                            .film
+                            .as_ref()
+                            .and_then(|(_, f)| f.downcast_ref::<WgpuTarget>())
+                            .ok_or_else(film_mismatch)?;
+                        target.unresolved = wgpu.launch_fused_step_display(
+                            wt,
+                            trace,
+                            target.width,
+                            target.height,
+                            &mut target.light,
+                            &mut target.pixels,
+                        )?;
+                        target.tally_dirty = false;
+                        return Ok(StepOutcome::FusedDisplayDone);
+                    }
                     let wt = target
                         .film
                         .as_ref()
                         .and_then(|(_, f)| f.downcast_ref::<WgpuTarget>())
                         .ok_or_else(film_mismatch)?;
-                    wgpu.launch_trace(wt, scene, prepared, full, force_mixed_world)?;
-                    return Ok(StepOutcome::CompletedNoDisplay);
-                }
-                let due = denoise_due(target, scene, final_pass);
-                if fused_display(target, scene, due) {
-                    let wt = target
-                        .film
-                        .as_ref()
-                        .and_then(|(_, f)| f.downcast_ref::<WgpuTarget>())
-                        .ok_or_else(film_mismatch)?;
-                    target.unresolved = wgpu.launch_fused_step_display(
-                        wt,
-                        trace,
-                        target.width,
-                        target.height,
-                        &mut target.light,
-                        &mut target.pixels,
-                    )?;
+                    let (unresolved, _, _) =
+                        wgpu.launch_trace_and_tally(wt, trace, false, total_tiles)?;
+                    target.unresolved = unresolved;
                     target.tally_dirty = false;
-                    return Ok(StepOutcome::FusedDisplayDone);
+                    Ok(StepOutcome::NeedsDisplay {
+                        decided_due: Some(due),
+                    })
+                } else {
+                    let wt = target
+                        .film
+                        .as_ref()
+                        .and_then(|(_, f)| f.downcast_ref::<WgpuTarget>())
+                        .ok_or_else(film_mismatch)?;
+                    let (unresolved, active, converged) =
+                        wgpu.launch_trace_and_tally(wt, trace, true, total_tiles)?;
+                    target.unresolved = unresolved;
+                    target.tally_dirty = false;
+                    target.active_tiles = (active, total_tiles);
+                    target.converged = converged;
+                    target.samples = next_samples;
+                    if !display(target) {
+                        return Ok(StepOutcome::CompletedNoDisplay);
+                    }
+                    Ok(StepOutcome::NeedsDisplay { decided_due: None })
                 }
-                let wt = target
-                    .film
-                    .as_ref()
-                    .and_then(|(_, f)| f.downcast_ref::<WgpuTarget>())
-                    .ok_or_else(film_mismatch)?;
-                let (unresolved, _, _) =
-                    wgpu.launch_trace_and_tally(wt, trace, false, total_tiles)?;
-                target.unresolved = unresolved;
-                target.tally_dirty = false;
-                Ok(StepOutcome::NeedsDisplay {
-                    decided_due: Some(due),
-                })
-            } else {
-                let wt = target
-                    .film
-                    .as_ref()
-                    .and_then(|(_, f)| f.downcast_ref::<WgpuTarget>())
-                    .ok_or_else(film_mismatch)?;
-                let (unresolved, active, converged) =
-                    wgpu.launch_trace_and_tally(wt, trace, true, total_tiles)?;
-                target.unresolved = unresolved;
-                target.tally_dirty = false;
-                target.active_tiles = (active, total_tiles);
-                target.converged = converged;
-                target.samples = next_samples;
+            }
+            Backend::Cuda => {
+                {
+                    let cuda = self.cuda()?;
+                    let ct = target
+                        .film
+                        .as_mut()
+                        .and_then(|(_, f)| f.downcast_mut::<CudaTarget>())
+                        .ok_or_else(film_mismatch)?;
+                    let padded = ct.accum.len() as u32;
+                    let cfg = LaunchConfig1D::new(padded.div_ceil(BLOCK), BLOCK, 0);
+                    let (m, s, lut, acc) = (&cuda.module, &cuda.stream, &cuda.lut, &mut ct.accum);
+                    macro_rules! launch {
+                        ($prep:ident, $run:ident) => {{
+                            let prep = m.$prep(cfg).map_err(|e| device(stringify!($prep), e))?;
+                            m.$run(
+                                s,
+                                &prep,
+                                lut,
+                                &cuda.objects,
+                                &cuda.lights,
+                                acc,
+                                &mut ct.albedo,
+                                &mut ct.normal,
+                                &ct.active,
+                                &mut ct.stats,
+                            )
+                            .map_err(|e| device(stringify!($run), e))?;
+                        }};
+                    }
+                    let (shade, family) = cuda_trace_entry(scene, prepared, force_mixed_world);
+                    fractal_kernels::dispatch_trace!(
+                        launch,
+                        scene.world_render,
+                        shade,
+                        family,
+                        return Err(RenderError::Scene("unsupported CUDA trace entry".into()))
+                    );
+                }
+                target.samples += spp;
+                target.tally_dirty = true;
+                let adaptive = scene.render.adaptive;
+                if adaptive.enabled && target.samples >= adaptive.min() {
+                    let tiles = target.active_host.len();
+                    if tiles > 0 {
+                        let cuda = self.cuda()?;
+                        let ct = target
+                            .film
+                            .as_mut()
+                            .and_then(|(_, f)| f.downcast_mut::<CudaTarget>())
+                            .ok_or_else(film_mismatch)?;
+                        let cfg = LaunchConfig1D::new((tiles as u32).div_ceil(BLOCK), BLOCK, 0);
+                        let prep = cuda
+                            .module
+                            .prepare_adapt(cfg)
+                            .map_err(|e| device("prepare adapt", e))?;
+                        cuda.module
+                            .adapt(&cuda.stream, &prep, &ct.accum, &ct.stats, &mut ct.active)
+                            .map_err(|e| device("adapt", e))?;
+                        ct.active
+                            .copy_to_host(&cuda.stream, &mut target.active_host)
+                            .map_err(|e| device("tile flags readback", e))?;
+                        let active = target.active_host.iter().filter(|&&a| a != 0).count();
+                        target.active_tiles = (active, tiles);
+                        target.converged = active == 0;
+                    }
+                }
                 if !display(target) {
                     return Ok(StepOutcome::CompletedNoDisplay);
                 }
                 Ok(StepOutcome::NeedsDisplay { decided_due: None })
             }
-        } else {
-            {
-                let cuda = self.cuda()?;
-                let ct = target
-                    .film
-                    .as_mut()
-                    .and_then(|(_, f)| f.downcast_mut::<CudaTarget>())
-                    .ok_or_else(film_mismatch)?;
-                let padded = ct.accum.len() as u32;
-                let cfg = LaunchConfig1D::new(padded.div_ceil(BLOCK), BLOCK, 0);
-                let (m, s, lut, acc) = (&cuda.module, &cuda.stream, &cuda.lut, &mut ct.accum);
-                macro_rules! launch {
-                    ($prep:ident, $run:ident) => {{
-                        let prep = m.$prep(cfg).map_err(|e| device(stringify!($prep), e))?;
-                        m.$run(
-                            s,
-                            &prep,
-                            lut,
-                            &cuda.objects,
-                            &cuda.lights,
-                            acc,
-                            &mut ct.albedo,
-                            &mut ct.normal,
-                            &ct.active,
-                            &mut ct.stats,
-                        )
-                        .map_err(|e| device(stringify!($run), e))?;
-                    }};
-                }
-                let (shade, family) = cuda_trace_entry(scene, prepared, force_mixed_world);
-                fractal_kernels::dispatch_trace!(
-                    launch,
-                    scene.world_render,
-                    shade,
-                    family,
-                    return Err(RenderError::Scene("unsupported CUDA trace entry".into()))
-                );
-            }
-            target.samples += spp;
-            target.tally_dirty = true;
-            let adaptive = scene.render.adaptive;
-            if adaptive.enabled && target.samples >= adaptive.min() {
-                let tiles = target.active_host.len();
-                let cuda = self.cuda()?;
-                let ct = target
-                    .film
-                    .as_mut()
-                    .and_then(|(_, f)| f.downcast_mut::<CudaTarget>())
-                    .ok_or_else(film_mismatch)?;
-                let cfg = LaunchConfig1D::new((tiles as u32).div_ceil(BLOCK), BLOCK, 0);
-                let prep = cuda
-                    .module
-                    .prepare_adapt(cfg)
-                    .map_err(|e| device("prepare adapt", e))?;
-                cuda.module
-                    .adapt(&cuda.stream, &prep, &ct.accum, &ct.stats, &mut ct.active)
-                    .map_err(|e| device("adapt", e))?;
-                ct.active
-                    .copy_to_host(&cuda.stream, &mut target.active_host)
-                    .map_err(|e| device("tile flags readback", e))?;
-                let active = target.active_host.iter().filter(|&&a| a != 0).count();
-                target.active_tiles = (active, tiles);
-                target.converged = active == 0;
-            }
-            if !display(target) {
-                return Ok(StepOutcome::CompletedNoDisplay);
-            }
-            Ok(StepOutcome::NeedsDisplay { decided_due: None })
+            Backend::Auto => Err(unresolved_auto()),
         }
     }
 
     fn tally(&mut self, backend: Backend, film: &mut BackendFilm) -> Result<f32, RenderError> {
-        if backend == Backend::Wgpu {
-            let wt = film
-                .downcast_mut::<WgpuTarget>()
-                .ok_or_else(film_mismatch)?;
-            self.wgpu()?.tally(wt)
-        } else {
-            let ct = film
-                .downcast_mut::<CudaTarget>()
-                .ok_or_else(film_mismatch)?;
-            let mut tally_host = std::mem::take(&mut self.tally_host);
-            let res = (|| -> Result<f32, RenderError> {
-                let cuda = self.cuda()?;
-                let cfg = LaunchConfig1D::new(TALLY_THREADS as u32 / BLOCK, BLOCK, 0);
-                let prepared = cuda
-                    .module
-                    .prepare_tally(cfg)
-                    .map_err(|e| device("prepare tally", e))?;
-                cuda.module
-                    .tally(&cuda.stream, &prepared, &ct.accum, &ct.stats, &mut ct.tally)
-                    .map_err(|e| device("tally", e))?;
-                ct.tally
-                    .copy_to_host(&cuda.stream, &mut tally_host)
-                    .map_err(|e| device("tally readback", e))?;
-                let (unresolved, samples) = tally_host
-                    .iter()
-                    .fold((0.0f64, 0.0f64), |(l, s), t| (l + t[0], s + t[1]));
-                Ok(if samples > 0.0 {
-                    (unresolved / samples) as f32
-                } else {
-                    0.0
-                })
-            })();
-            self.tally_host = tally_host;
-            res
+        match backend {
+            Backend::Wgpu => {
+                let wt = film
+                    .downcast_mut::<WgpuTarget>()
+                    .ok_or_else(film_mismatch)?;
+                self.wgpu()?.tally(wt)
+            }
+            Backend::Cuda => {
+                let ct = film
+                    .downcast_mut::<CudaTarget>()
+                    .ok_or_else(film_mismatch)?;
+                let mut tally_host = std::mem::take(&mut self.tally_host);
+                let res = (|| -> Result<f32, RenderError> {
+                    let cuda = self.cuda()?;
+                    let cfg = LaunchConfig1D::new(TALLY_THREADS as u32 / BLOCK, BLOCK, 0);
+                    let prepared = cuda
+                        .module
+                        .prepare_tally(cfg)
+                        .map_err(|e| device("prepare tally", e))?;
+                    cuda.module
+                        .tally(&cuda.stream, &prepared, &ct.accum, &ct.stats, &mut ct.tally)
+                        .map_err(|e| device("tally", e))?;
+                    ct.tally
+                        .copy_to_host(&cuda.stream, &mut tally_host)
+                        .map_err(|e| device("tally readback", e))?;
+                    let (unresolved, samples) = tally_host
+                        .iter()
+                        .fold((0.0f64, 0.0f64), |(l, s), t| (l + t[0], s + t[1]));
+                    Ok(if samples > 0.0 {
+                        (unresolved / samples) as f32
+                    } else {
+                        0.0
+                    })
+                })();
+                self.tally_host = tally_host;
+                res
+            }
+            Backend::Auto => Err(unresolved_auto()),
         }
     }
 
@@ -890,15 +938,17 @@ impl ComputeEngine for WarpBroComputeEngine {
         light: &mut Vec<[f32; 4]>,
         pixels: &mut Vec<u32>,
     ) -> Result<bool, RenderError> {
-        if backend == Backend::Wgpu {
-            let wt = film
-                .downcast_mut::<WgpuTarget>()
-                .ok_or_else(film_mismatch)?;
-            self.wgpu()?
-                .tonemap_display(wt, width, height, light, pixels)?;
-            Ok(true)
-        } else {
-            Ok(false)
+        match backend {
+            Backend::Wgpu => {
+                let wt = film
+                    .downcast_mut::<WgpuTarget>()
+                    .ok_or_else(film_mismatch)?;
+                self.wgpu()?
+                    .tonemap_display(wt, width, height, light, pixels)?;
+                Ok(true)
+            }
+            Backend::Cuda => Ok(false),
+            Backend::Auto => Err(unresolved_auto()),
         }
     }
 
@@ -910,28 +960,50 @@ impl ComputeEngine for WarpBroComputeEngine {
         height: usize,
         raw: &mut Vec<[f32; 4]>,
     ) -> Result<(), RenderError> {
-        if backend == Backend::Wgpu {
-            let wt = film
-                .downcast_mut::<WgpuTarget>()
-                .ok_or_else(film_mismatch)?;
-            self.wgpu()?.tonemap(wt, width, height, raw)
-        } else {
-            let ct = film
-                .downcast_mut::<CudaTarget>()
-                .ok_or_else(film_mismatch)?;
-            let cuda = self.cuda()?;
-            let n = (width * height) as u32;
-            let cfg = LaunchConfig1D::new(n.div_ceil(BLOCK), BLOCK, 0);
-            let prepared = cuda
-                .module
-                .prepare_tonemap(cfg)
-                .map_err(|e| device("prepare tonemap", e))?;
-            cuda.module
-                .tonemap(&cuda.stream, &prepared, &ct.accum, &mut ct.out)
-                .map_err(|e| device("tonemap", e))?;
-            ct.out
-                .copy_to_host(&cuda.stream, raw)
-                .map_err(|e| device("display readback", e))
+        let pixels = width
+            .checked_mul(height)
+            .ok_or_else(|| RenderError::Scene("Render target dimensions overflow".into()))?;
+        match backend {
+            Backend::Wgpu => {
+                if pixels == 0 {
+                    raw.clear();
+                    return Ok(());
+                }
+                raw.resize(pixels, [0.0; 4]);
+                let wt = film
+                    .downcast_mut::<WgpuTarget>()
+                    .ok_or_else(film_mismatch)?;
+                self.wgpu()?.tonemap(wt, width, height, raw)
+            }
+            Backend::Cuda => {
+                if pixels == 0 {
+                    raw.clear();
+                    return Ok(());
+                }
+                raw.resize(pixels, [0.0; 4]);
+                let ct = film
+                    .downcast_mut::<CudaTarget>()
+                    .ok_or_else(film_mismatch)?;
+                let cuda = self.cuda()?;
+                if ct.out.len() != pixels {
+                    ct.out = zeroed(&cuda.stream, pixels, "output")?;
+                }
+                let n = u32::try_from(pixels).map_err(|_| {
+                    RenderError::Scene("Render target pixel count exceeds u32".into())
+                })?;
+                let cfg = LaunchConfig1D::new(n.div_ceil(BLOCK), BLOCK, 0);
+                let prepared = cuda
+                    .module
+                    .prepare_tonemap(cfg)
+                    .map_err(|e| device("prepare tonemap", e))?;
+                cuda.module
+                    .tonemap(&cuda.stream, &prepared, &ct.accum, &mut ct.out)
+                    .map_err(|e| device("tonemap", e))?;
+                ct.out
+                    .copy_to_host(&cuda.stream, raw)
+                    .map_err(|e| device("display readback", e))
+            }
+            Backend::Auto => Err(unresolved_auto()),
         }
     }
 
@@ -972,66 +1044,75 @@ impl ComputeEngine for WarpBroComputeEngine {
         (ndc, family): ([f32; 2], Option<u32>),
         stats: &mut PreparationStats,
     ) -> Result<Option<(usize, f32)>, RenderError> {
-        if backend == Backend::Wgpu {
-            self.init_wgpu()?;
-            let wgpu = self.wgpu_mut()?;
-            wgpu.upload_prepared(prepared, env, true, stats)?;
-            wgpu.set_params(params)?;
-            return wgpu.pick(ndc, family);
-        }
-        let mut staging = std::mem::take(&mut self.lut_staging);
-        let res = (|| -> Result<Option<(usize, f32)>, RenderError> {
-            let cuda = self.cuda_mut()?;
-            cuda.upload_prepared(prepared, env, true, &mut staging, stats)?;
-            cuda.module
-                .set_params(&cuda.stream, params)
-                .map_err(|e| device("CUDA parameter upload", e))?;
-            let mut query = zeroed(&cuda.stream, 1, "pick query")?;
-            query
-                .copy_from_host(&cuda.stream, &[[ndc[0], ndc[1], 0.0, 0.0]])
-                .map_err(|e| device("pick upload", e))?;
-            let mut out = zeroed(&cuda.stream, 1, "pick result")?;
-            macro_rules! pick_entry {
-                ($prepare:ident, $run:ident) => {{
-                    let launch = cuda
-                        .module
-                        .$prepare(LaunchConfig1D::new(1, 32, 0))
-                        .map_err(|e| device("prepare pick", e))?;
-                    cuda.module
-                        .$run(
-                            &cuda.stream,
-                            &launch,
-                            &cuda.objects,
-                            &cuda.lights,
-                            &query,
-                            &mut out,
-                        )
-                        .map_err(|e| device("pick", e))?;
-                }};
+        match backend {
+            Backend::Wgpu => {
+                self.init_wgpu()?;
+                let wgpu = self.wgpu_mut()?;
+                wgpu.upload_prepared(prepared, env, true, stats)?;
+                wgpu.set_params(params)?;
+                wgpu.pick(ndc, family)
             }
-            fractal_kernels::dispatch_pick!(
-                pick_entry,
-                family,
-                return Err(RenderError::Scene("unsupported CUDA pick entry".into()))
-            );
-            let mut hit = [[0.0f32; 4]];
-            out.copy_to_host(&cuda.stream, &mut hit)
-                .map_err(|e| device("pick readback", e))?;
-            let [[object, _, depth, _]] = hit;
-            Ok((object >= 1.0).then(|| (object as usize - 1, depth)))
-        })();
-        self.lut_staging = staging;
-        res
+            Backend::Cuda => {
+                let mut staging = std::mem::take(&mut self.lut_staging);
+                let res = (|| -> Result<Option<(usize, f32)>, RenderError> {
+                    let cuda = self.cuda_mut()?;
+                    cuda.upload_prepared(prepared, env, true, &mut staging, stats)?;
+                    let CudaEngine {
+                        ref stream,
+                        ref module,
+                        ref objects,
+                        ref lights,
+                        ref mut pick_query,
+                        ref mut pick_out,
+                        ..
+                    } = *cuda;
+                    module
+                        .set_params(stream, params)
+                        .map_err(|e| device("CUDA parameter upload", e))?;
+                    pick_query
+                        .copy_from_host(stream, &[[ndc[0], ndc[1], 0.0, 0.0]])
+                        .map_err(|e| device("pick upload", e))?;
+                    pick_out
+                        .zero_async(stream)
+                        .map_err(|e| device("clear pick result", e))?;
+                    macro_rules! pick_entry {
+                        ($prepare:ident, $run:ident) => {{
+                            let launch = module
+                                .$prepare(LaunchConfig1D::new(1, 32, 0))
+                                .map_err(|e| device("prepare pick", e))?;
+                            module
+                                .$run(stream, &launch, objects, lights, &*pick_query, pick_out)
+                                .map_err(|e| device("pick", e))?;
+                        }};
+                    }
+                    fractal_kernels::dispatch_pick!(
+                        pick_entry,
+                        family,
+                        return Err(RenderError::Scene("unsupported CUDA pick entry".into()))
+                    );
+                    let mut hit = [[0.0f32; 4]];
+                    pick_out
+                        .copy_to_host(stream, &mut hit)
+                        .map_err(|e| device("pick readback", e))?;
+                    let [[object, _, depth, _]] = hit;
+                    Ok((object >= 1.0).then(|| (object as usize - 1, depth)))
+                })();
+                self.lut_staging = staging;
+                res
+            }
+            Backend::Auto => Err(unresolved_auto()),
+        }
     }
 
     fn finish(&self, backend: Backend) -> Result<(), RenderError> {
-        if backend == Backend::Wgpu {
-            self.wgpu()?.finish()
-        } else {
-            self.cuda()?
+        match backend {
+            Backend::Wgpu => self.wgpu()?.finish(),
+            Backend::Cuda => self
+                .cuda()?
                 .stream
                 .synchronize()
-                .map_err(|e| device("CUDA stream synchronize", e))
+                .map_err(|e| device("CUDA stream synchronize", e)),
+            Backend::Auto => Err(unresolved_auto()),
         }
     }
 }
@@ -1078,6 +1159,7 @@ impl WarpBroGpuExt for Gpu {
         width: usize,
         height: usize,
     ) -> Result<serde_json::Value, RenderError> {
+        validate_size(width, height, 1)?;
         if self.resolve_backend(scene)? != Backend::Cuda {
             return Err(RenderError::Backend(
                 "CUDA resources require the CUDA backend".into(),

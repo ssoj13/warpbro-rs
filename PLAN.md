@@ -46,7 +46,7 @@ top of the shared `soluwell-studio` widget (`egui-widgets-rs/crates/soluwell/stu
   `PreviewController`, `ThumbnailCache`, and `ExportController`.
 - **Fractal Registration**: WarpBro registers:
   1. `"Fractal"` scene node (`src/fractal_node.rs`, `FractalNodeSpec` implementing `NodeTypeSpec`).
-     Evaluates into `scene.objects` with 28-variant `Formula` and `pack_object` (`P_COUNT` 128-float ABI).
+     Evaluates into `scene.objects` with 28-variant `Formula` and `pack_object` (`P_COUNT` = 243-float ABI).
   2. Pluggable `WarpBroComputeEngine` (`src/engine.rs` implementing `soluwell_studio::render::ComputeEngine`):
      - **CUDA**: 234 compile-time specialized kernel entries from `fractal-rs` (`fractal-kernels`),
        compiled to PTX by `cuda-oxide` and linked via `#[cuda_module]`.

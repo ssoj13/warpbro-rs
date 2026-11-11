@@ -58,22 +58,6 @@ where
     }
 }
 
-/// The WarpBro profile, `~/.warpbro` (or `$WARPBRO_HOME`): `settings.json`, `bookmarks/`,
-/// `templates/` and every render / screenshot under `out/`.
-pub fn warpbro_dir() -> std::path::PathBuf {
-    soluwell_studio::warpbro_dir()
-}
-
-/// `~/.warpbro/out`: every export and screenshot gets its own timestamped folder here.
-pub fn out_root() -> std::path::PathBuf {
-    soluwell_studio::out_root()
-}
-
-/// A new, unique `<root>/<local timestamp>` folder for one export or screenshot.
-pub fn new_out_dir(root: &std::path::Path) -> Result<std::path::PathBuf, String> {
-    soluwell_studio::new_out_dir(root)
-}
-
 /// Render (or only time) every gallery preset offscreen.
 fn headless(
     out: Option<&str>,
@@ -101,7 +85,7 @@ fn headless(
         let t0 = Instant::now();
         while !gpu.advance(&mut t, &scene, spp, 0, Batch::Fixed(8))? {}
         let secs = t0.elapsed().as_secs_f64();
-        let traced = (spp - 1).max(1) as f64;
+        let traced = spp.saturating_sub(1).max(1) as f64;
         println!(
             "{:<28} {:>16} {:>9.2} {:>11.1}",
             scene.name,
@@ -167,7 +151,7 @@ fn animated_fixtures(
         } else {
             vec![
                 document.first,
-                (document.first + document.last) / 2,
+                document.first.midpoint(document.last),
                 document.last,
             ]
         };

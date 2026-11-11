@@ -1,3 +1,15 @@
+# Systemic `/sysgo` & `/mastermind` Plan — Ecosystem SSH Git Ref Upgrade (`2026-11-11`)
+
+## Active `/mastermind` Wave (`box-rs` + `warpbro-rs` Lock & Seam Upgrade)
+- [x] **D00 (`box-rs`)**: Restore complete `//!` crate header in `box-rs/src/lib.rs` + fix Rust 1.99 clippy lint in `src/container.rs`, pass `cargo fmt --check`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo doc`, and `cargo test --all-features` (26 passed), committed `b99c8be` and pushed to `origin/main`.
+- [x] **D01 (All 3 Lockfiles in `warpbro-rs`)**: Upgraded all SSH git refs (`ssh://git@github.com/ssoj13/*`) across `Cargo.lock`, `xtask/Cargo.lock`, and `tools/mp4-quality/Cargo.lock`.
+- [x] **D02 (`engine` / `pipeline_cache_probe` / `xtask` / `mp4-quality`)**: Audited 91/91 symbols + Tier 2 Inquisitor (`0` defects): fixed `examples/pipeline_cache_probe.rs` post-compile reload for `gpu-info-rs@25e69fd`, migrated `tools/mp4-quality/src/main.rs` to `ffmpeg-rs@bdbfdea` (`set_video_color_for`, zero-churn `read_sample_into`), fixed `CudaTarget::out` reuse resize + persistent `pick_query`/`pick_out` buffers + exhaustive `Backend` match in `src/engine.rs`, and aligned `xtask/src/main.rs` with `vcv-rs@d74f16e` CUDA MSVC range.
+- [ ] **D03 (`fractal_node` / `presets` / `templates`)**: Audit `FractalNodeSpec` (`NodeTypeSpec` v2), `pack_object` kernel ABI, and `animation` / `curves` contracts.
+- [x] **D04 (`parity_tests` / `render_bench` / `test_gpu`)**: Audited 49/49 (`D04a`) + 23/23 (`D04b`) symbols through 3 Inquisitor passes (`0` defects): aligned `pixel_beam_start_fixes_recorded_mobius_surface_skip` (`sample = 12`) with `standard-surface-bsdf@61c7fc3`, fixed quantized `parameter_probe_formulas` & `oracle_film` readback churn, fixed `render_bench` `"mixed"` `code == 0` homogeneity bug + adaptive sample accounting + `gpu_paired_world_de_benchmark` prefix, and upgraded `test_gpu.rs` workspace lock/prefix ratchet.
+- [ ] **Inquisitor & Seam Gate**: Independent Tier 2 Inquisitor audit (7 Mandatory Questions) + `SEAM_MATRIX.md` + `python bootstrap.py c` + `cargo oxide test` + seeded mutant check + `python bootstrap.py b` GPU warmup + `AGENTS.md` changelog update.
+
+---
+
 # Systemic `/sysgo` & `/mastermind` Plan — `animation-rs` & `soluwell-studio` Ecosystem Unification
 
 ## Completed Milestones

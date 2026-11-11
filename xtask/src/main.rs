@@ -11,7 +11,15 @@ fn native_env() -> Result<BTreeMap<String, String>, String> {
     use vcv_rs::detect::{detect_sdk, detect_ucrt, detect_vs_range};
     use vcv_rs::env::{add_cuda, add_vcpkg, build_env, detect_vcpkg, probe_vcpkg};
 
-    let vs = detect_vs_range(None, Some(2026))
+    // Resolve CUDA before Visual Studio so a machine with multiple Visual Studio releases prefers
+    // a compiler version accepted by the installed CUDA toolkit's `host_config.h`, falling back to
+    // any VS <= 2026 when CUDA is absent or only a newer VS is installed (`cuda-oxide` uses rustc).
+    let cuda = vcv_rs::detect_cuda();
+    let vs = cuda
+        .as_ref()
+        .and_then(|c| c.msvc)
+        .and_then(|r| detect_vs_range(r.min_vs_year(), r.max_vs_year()))
+        .or_else(|| detect_vs_range(None, Some(2026)))
         .ok_or("Visual Studio C++ tools not found (VS 2022/2026 required)")?;
     let sdk = detect_sdk().ok_or("Windows SDK not found")?;
     let ucrt = detect_ucrt().ok_or("Universal CRT not found")?;
@@ -21,7 +29,7 @@ fn native_env() -> Result<BTreeMap<String, String>, String> {
         vs.version, vs.tools_ver
     );
 
-    if let Some(cuda) = vcv_rs::detect_cuda() {
+    if let Some(cuda) = cuda {
         add_cuda(&mut assembled, &cuda, Arch::X64);
         assembled
             .vars

@@ -1,8 +1,19 @@
-//! Standalone CPU-only quality/stride/timestamp regression using frac's locked codec ref.
+//! `frac-mp4-quality`: standalone CPU-only HEVC/MP4 quality, row-stride, colour-tag, and
+//! edit-list timestamp regression harness for WarpBro's locked `ffmpeg-rs` codec stack.
+//!
+//! Exists to verify that odd/padded RGB24 row strides (width 66), BT.709/sRGB `nclx` colour boxes,
+//! B-frame CTS + `elst` preroll trimming, in-place Annex-B sample framing, and Kvazaar HEVC PSNR
+//! progression hold end-to-end without requiring a GPU. Synthesizes (or loads via `--rgb-sequence`)
+//! 32 RGB24 frames, encodes `(27, "veryfast")` and `(18, "medium")` MP4s via `av-swscale` +
+//! `av-codec` + `av-format-movenc`, demuxes/decodes via `av-format-mov`, and writes `summary.csv`.
 use av_codec_core::{AVCodecContext, AVPacket};
 use av_util_frame::{AVFrame, av_frame_alloc, av_frame_get_buffer};
-use av_util_pixfmt::{AVColorSpace as C, AVPixelFormat as P};
+use av_util_pixfmt::{
+    AVColorPrimaries as Pri, AVColorSpace as C, AVColorTransferCharacteristic as Trc,
+    AVPixelFormat as P,
+};
 use std::{
+    fmt::Write as _,
     fs::{self, File},
     path::Path,
     time::Instant,
@@ -52,7 +63,11 @@ fn pattern(w: usize, h: usize, number: usize) -> Vec<u8> {
         for x in 0..w {
             let sx = x + number * 2;
             let sy = y + number;
-            let fine = if (sx / 2 + sy / 2) % 2 == 0 { 28 } else { -28 };
+            let fine = if (sx / 2 + sy / 2).is_multiple_of(2) {
+                28
+            } else {
+                -28
+            };
             let gray = (120 + fine + ((sx * 11 + sy * 7) % 31) as i32 - 15).clamp(0, 255) as u8;
             let mut p = [gray; 3];
             if y > h / 3 && y < 2 * h / 3 {
@@ -209,52 +224,70 @@ struct Encoded {
     ms: f64,
     stride: i32,
 }
-fn drain(
-    ctx: &mut AVCodecContext,
+fn init_video_track(
     writer: &mut av_format_movenc::MovWriter<File>,
-    header: &mut bool,
+    hvcc_source: &[u8],
     w: usize,
     h: usize,
-    timing: &mut String,
-    count: &mut usize,
-    timeline: &mut PacketTimeline,
 ) -> R<()> {
+    writer
+        .add_video(
+            av_format_core::Codec::Hevc,
+            &av_codec::hvcc_from_au(hvcc_source).map_err(err)?,
+            w as u32,
+            h as u32,
+            FPS.0,
+            &av_format_core::UNITY_MATRIX,
+        )
+        .map_err(err)?;
+    writer
+        .set_video_color_for(
+            0,
+            Pri::AVCOL_PRI_BT709 as i32,
+            Trc::AVCOL_TRC_IEC61966_2_1 as i32,
+            C::AVCOL_SPC_BT709 as i32,
+            false,
+        )
+        .map_err(err)
+}
+struct MuxSink {
+    writer: av_format_movenc::MovWriter<File>,
+    header: bool,
+    timing: String,
+    count: usize,
+    timeline: PacketTimeline,
+}
+fn drain(ctx: &mut AVCodecContext, mux: &mut MuxSink, w: usize, h: usize) -> R<()> {
+    let mut packet = AVPacket::new();
     loop {
-        let mut packet = AVPacket::new();
         match ctx.avcodec_receive_packet(&mut packet) {
             Ok(()) => {
-                if !*header {
-                    writer
-                        .add_video(
-                            av_format_core::Codec::Hevc,
-                            &av_codec::hvcc_from_au(packet.data()).map_err(err)?,
-                            w as u32,
-                            h as u32,
-                            FPS.0,
-                            &av_format_core::UNITY_MATRIX,
-                        )
-                        .map_err(err)?;
-                    writer.set_video_colr(COLR).map_err(err)?;
-                    *header = true;
+                if !mux.header {
+                    init_video_track(&mut mux.writer, packet.data(), w, h)?;
+                    mux.header = true;
                 }
-                let delta = i32::try_from(packet.pts - packet.dts).map_err(err)?;
+                let delta =
+                    i32::try_from(packet.pts.checked_sub(packet.dts).ok_or("CTS overflow")?)
+                        .map_err(err)?;
                 if delta < 0 {
                     return Err("negative CTS".into());
                 }
                 if packet.duration != i64::from(FPS.1) {
                     return Err(format!("duration {}", packet.duration));
                 }
-                timeline.record(&packet)?;
-                timing.push_str(&format!(
-                    "{},{},{},{},{},{}\n",
-                    *count,
+                mux.timeline.record(&packet)?;
+                writeln!(
+                    mux.timing,
+                    "{},{},{},{},{},{}",
+                    mux.count,
                     packet.pts,
                     packet.dts,
                     packet.duration,
                     packet.data().len(),
                     packet.flags
-                ));
-                writer
+                )
+                .map_err(err)?;
+                mux.writer
                     .write_sample(
                         0,
                         &av_codec::annexb_to_length_prefixed(packet.data()),
@@ -263,7 +296,7 @@ fn drain(
                         packet.flags & av_codec_core::AV_PKT_FLAG_KEY != 0,
                     )
                     .map_err(err)?;
-                *count += 1;
+                mux.count += 1;
             }
             Err(av_util_core::AvError::Posix(11)) | Err(av_util_core::AvError::Eof) => {
                 return Ok(());
@@ -284,6 +317,8 @@ fn encode(
     let mut ctx = av_codec_core::avcodec_alloc_context3();
     ctx.width = w as i32;
     ctx.height = h as i32;
+    ctx.time_base.num = FPS.1 as i32;
+    ctx.time_base.den = FPS.0 as i32;
     ctx.pix_fmt = P::YUV420P;
     ctx.flags |= av_codec_core::AV_CODEC_FLAG_GLOBAL_HEADER | av_codec_core::AV_CODEC_FLAG_QSCALE;
     ctx.global_quality = i32::from(qp) * av_codec_core::FF_QP2LAMBDA;
@@ -291,70 +326,43 @@ fn encode(
     ctx.open_with_opts((entry.make)(), &[("preset", preset)])
         .map_err(err)?;
     let sws = scaler(w, h, P::RGB24, P::YUV420P, true, false)?;
-    let mut writer =
-        av_format_movenc::MovWriter::new(File::create(path).map_err(err)?).map_err(err)?;
-    let mut timing = String::from("packet,pts,dts,duration,bytes,flags\n");
-    let mut header = false;
-    let mut packets = 0;
-    let mut timeline = PacketTimeline::default();
-    let stride = rgb_frame(w, h, 0, &refs[0].rgb)?.linesize[0];
+    let mut mux = MuxSink {
+        writer: av_format_movenc::MovWriter::new(File::create(path).map_err(err)?).map_err(err)?,
+        header: false,
+        timing: String::from("packet,pts,dts,duration,bytes,flags\n"),
+        count: 0,
+        timeline: PacketTimeline::default(),
+    };
+    let stride = rgb_frame(w, h, 0, &refs.first().ok_or("empty refs")?.rgb)?.linesize[0];
     if !ctx.extradata.is_empty() {
-        writer
-            .add_video(
-                av_format_core::Codec::Hevc,
-                &av_codec::hvcc_from_au(&ctx.extradata).map_err(err)?,
-                w as u32,
-                h as u32,
-                FPS.0,
-                &av_format_core::UNITY_MATRIX,
-            )
-            .map_err(err)?;
-        writer.set_video_colr(COLR).map_err(err)?;
-        header = true;
+        init_video_track(&mut mux.writer, &ctx.extradata, w, h)?;
+        mux.header = true;
     }
     let start = Instant::now();
-    for n in 0..N {
-        let src = rgb_frame(w, h, n, &refs[n].rgb)?;
+    for (n, expected) in refs.iter().enumerate().take(N) {
+        let src = rgb_frame(w, h, n, &expected.rgb)?;
         let dst = convert(&sws, &src, P::YUV420P)?;
         ctx.avcodec_send_frame(Some(&dst)).map_err(err)?;
-        drain(
-            &mut ctx,
-            &mut writer,
-            &mut header,
-            w,
-            h,
-            &mut timing,
-            &mut packets,
-            &mut timeline,
-        )?;
+        drain(&mut ctx, &mut mux, w, h)?;
     }
     ctx.avcodec_send_frame(None).map_err(err)?;
-    drain(
-        &mut ctx,
-        &mut writer,
-        &mut header,
-        w,
-        h,
-        &mut timing,
-        &mut packets,
-        &mut timeline,
-    )?;
+    drain(&mut ctx, &mut mux, w, h)?;
     // Keep the B-frame CTS values intact; trim their decode preroll from presentation.
     // set_video_edits takes media-clock (start,end), not duration or movie-clock ticks.
-    let window = timeline.window()?;
+    let window = mux.timeline.window()?;
     if window.1 - window.0 != N as i64 * i64::from(FPS.1) {
         return Err("encoded presentation duration".into());
     }
     if trim {
-        writer.set_video_edits(&[window]).map_err(err)?;
+        mux.writer.set_video_edits(&[window]).map_err(err)?;
     }
-    writer.finish().map_err(err)?;
-    fs::write(path.with_extension("packets.csv"), timing).map_err(err)?;
-    if packets != N {
-        return Err(format!("packet count {packets} != {N}"));
+    mux.writer.finish().map_err(err)?;
+    fs::write(path.with_extension("packets.csv"), mux.timing).map_err(err)?;
+    if mux.count != N {
+        return Err(format!("packet count {} != {N}", mux.count));
     }
     Ok(Encoded {
-        packets,
+        packets: mux.count,
         bytes: fs::metadata(path).map_err(err)?.len(),
         ms: start.elapsed().as_secs_f64() * 1000.0,
         stride,
@@ -378,7 +386,7 @@ impl ErrorSum {
         Ok(())
     }
     fn psnr(&self) -> f64 {
-        if self.sum == 0.0 {
+        if self.sum == 0.0 || self.count == 0 {
             f64::INFINITY
         } else {
             10.0 * (255.0 * 255.0 / (self.sum / self.count as f64)).log10()
@@ -463,7 +471,7 @@ fn decode(path: &Path, w: usize, h: usize, refs: &[Expected], trim: bool) -> R<M
         .map(|n| demux.display_pts(n).map_err(err))
         .collect::<R<Vec<_>>>()?;
     pts.sort_unstable();
-    let first = pts[0];
+    let first = *pts.first().ok_or("empty PTS table")?;
     if trim
         && (first != 0
             || demux.start_time() != 0
@@ -491,7 +499,10 @@ fn decode(path: &Path, w: usize, h: usize, refs: &[Expected], trim: bool) -> R<M
         demux.edit_list()
     );
     for (n, pts) in pts.iter().enumerate() {
-        if *pts != first + n as i64 * i64::from(FPS.1) {
+        let expected_pts = first
+            .checked_add(n as i64 * i64::from(FPS.1))
+            .ok_or("PTS overflow")?;
+        if *pts != expected_pts {
             return Err("MP4 presentation gaps".into());
         }
     }
@@ -504,6 +515,7 @@ fn decode(path: &Path, w: usize, h: usize, refs: &[Expected], trim: bool) -> R<M
     let mut m = Metrics::default();
     let mut timing = String::from("sample,pts,dts,duration\n");
     let mut previous_dts = None;
+    let mut packet = AVPacket::new();
     for n in 0..N {
         let pts = demux.display_pts(n).map_err(err)?;
         let dts = demux.sample_dts(n).map_err(err)?;
@@ -513,21 +525,12 @@ fn decode(path: &Path, w: usize, h: usize, refs: &[Expected], trim: bool) -> R<M
         }
         previous_dts = Some(dts);
         timing.push_str(&format!("{n},{pts},{dts},{duration}\n"));
-        let sample = demux.read_sample(n).map_err(err)?;
-        // ffmpeg-rs HEVC init retains extradata; parameter sets enter its parser in-band.
-        let bytes = if n == 0 {
-            let mut bytes = demux.parameter_sets_annexb();
-            bytes.extend_from_slice(&sample);
-            bytes
-        } else {
-            sample
-        };
-        let mut packet = AVPacket::new();
-        av_codec_core::ff_get_encode_buffer(&mut packet, bytes.len(), 0)
-            .map_err(err)?
-            .copy_from_slice(&bytes);
-        packet.pts = pts - first;
-        packet.dts = dts - first;
+        // ffmpeg-rs HEVC init retains extradata; parameter sets enter its parser in-band on sample 0.
+        demux
+            .read_sample_into(n, &mut packet, n == 0)
+            .map_err(err)?;
+        packet.pts = pts.checked_sub(first).ok_or("PTS underflow")?;
+        packet.dts = dts.checked_sub(first).ok_or("DTS underflow")?;
         packet.duration = i64::from(duration);
         ctx.avcodec_send_packet(&packet)
             .map_err(|e| format!("send sample {n} pts{pts}: {e:?}"))?;
@@ -612,11 +615,14 @@ fn main() -> R<()> {
             results.push(metrics);
             fs::write(out.join("summary.csv"), &csv).map_err(err)?;
         }
-        if sequence.is_none() && results[1].yuv[0].psnr() <= results[0].yuv[0].psnr() {
+        let [fast, med] = results.as_slice() else {
+            return Err("expected 2 encode runs".into());
+        };
+        if sequence.is_none() && med.yuv[0].psnr() <= fast.yuv[0].psnr() {
             return Err(format!("{w}x{h}: QP18 medium did not improve luma PSNR"));
         }
-        let low = results[0].yuv[1].sum + results[0].yuv[2].sum;
-        let high = results[1].yuv[1].sum + results[1].yuv[2].sum;
+        let low = fast.yuv[1].sum + fast.yuv[2].sum;
+        let high = med.yuv[1].sum + med.yuv[2].sum;
         if sequence.is_none() && high >= low {
             return Err(format!("{w}x{h}: QP18 medium did not improve chroma error"));
         }
