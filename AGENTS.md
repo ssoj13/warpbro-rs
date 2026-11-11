@@ -232,6 +232,14 @@ IoService thread: settings / scenes / bookmarks (tmp + rename), frame and window
   hook. Unknown family codes are a miss in WGSL and CUDA alike.
 - `--warmup` loads CUDA directly (`engine::warmup_cuda`) and reports it unavailable instead of
   falling back; unknown `--options` are errors, not the GUI.
+- Clip radii are derived, not fixed: `mandelbox_reach` / `kifs_reach` (`fractal_node.rs`) give
+  a ball that holds the set from the instance parameters, and the clip is the max of that and
+  the framing-based one. A new parameter that moves a set outward needs the same treatment,
+  and a check like `tests::mandelbox_and_kifs_clips_hold_the_set` (CPU escape-time probe).
+- Slider/hard ranges must not exceed the clamps the estimators apply (WGSL and
+  fractal-kernels), or part of the range does nothing (plan1 L4).
+- The machine is shared: before a cargo run, message the build coordinator session and wait
+  for its go-ahead; JOBS=4, INCREMENTAL=0 (see the project memory).
 - `cargo` shares `target/` with other agent sessions on this repo; a build may block on the
   directory lock for minutes. Check for a running `cargo` before assuming a hang.
 
@@ -245,6 +253,7 @@ IoService thread: settings / scenes / bookmarks (tmp + rename), frame and window
 
 ## Changelog
 
+- **2026-11-11 (later)**: plan1 wave D, pushed before its test run on the operator's word: Mandelbox/KIFS clips from parameters (the Mandelbox clip cut even the scale-2 preset's corners), ranges aligned with the estimator clamps, Astrolabe teeth rounding, Mandelbox inner-radius floor. `fractal_node::tests` still to run.
 - **2026-11-11**: `/bughunt` audit at `a5ee386` ([plan1.md](plan1.md)), then waves A-C: node validation hook upstream (egui-widgets-rs `13d6f8d`: `validate_node`, `WgpuComputeEngine::wgpu_mut`, `tile_count`), strict custom-branch readers, integer leaves, enum-derived choices, classic labels/hints from `FORMULAS`, WGPU delegated to soluwell, WGSL unknown-family miss, honest `--warmup`, strict CLI, build.rs rerun keys, xtask VS-fallback warning.
 - **2026-11-08**: Upgraded ecosystem lock to `render-rs@23c01af`, `fractal-rs@21c3f4e`, and `egui-widgets-rs@1a621308` (`gpu-info-rs@bb476cdc`): adopted `ThinFilmEnergy::Conserving` default for non-OFX renders across CUDA (`fractal-kernels`) and WGPU (`soluwell-studio-render`), GPU-native OIDN `GpuDenoiser` on `WgpuTarget` tiled planes (with `HostDenoiser` fallback for CUDA), shared `gpu_info::create_compute_pipeline` shader caching, 69 curated `standard_surface_bsdf::presets` SSOT, and aligned `parity_tests::pixel_beam_start_fixes_recorded_mobius_surface_skip` with the paired 8-D Bayer-shuffled Sobol sampler.
 - **2026-10-30**: Synchronized `warpbro-rs` with `soluwell-studio` (`NodeTypeSpec v2`, `StudioModule`, `appbus` two-layer nervous system) and `render-rs` shared studio SSOT (`pt_integrator::studio_abi`, `render_env::studio`, `standard_surface_bsdf::presets`): added `WarpBroFractalModule` (`StudioModule`) in `src/engine.rs`, wired `StudioConfig::modules` in `src/main.rs`, and implemented `FractalNodeSpec::payload_kind() -> NodePayloadKind::SdfField` in `src/fractal_node.rs`.

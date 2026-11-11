@@ -117,8 +117,8 @@ run at the end of a wave, GPU tests only with the operator's yes.
 - [x] C4 (L12, F8): `rerun-if-env-changed` for `CLIPPY_ARGS` / `RA_RUSTC_WRAPPER`; warn on the VS fallback in xtask.
 
 ### Wave D: ranges and clipping (needs renders, operator look)
-- [ ] D1 (L3): derive the Mandelbox / KIFS / Kleinian / Apollonian clip radius from the instance parameters. First confirm the cut-off in a render at Mandelbox scale near 1.
-- [ ] D2 (L4): align the slider ranges with the WGSL clamps (jitter 0.95, step_dt 0.15); host guard on `min_radius_ratio`; the Astrolabe inactive check uses the same rounding as the WGSL.
+- [~] D1 (L3, code pushed, tests not run yet): Mandelbox and KIFS clip from the instance parameters (`mandelbox_reach`, `kifs_reach`). Kleinian / Apollonian already clip at the instance `bound_radius`; only their camera framing uses the preset radius, which does not cut. Verified by a CPU escape-time test instead of a GPU render (deterministic, no GPU needed): `fractal_node::tests::mandelbox_and_kifs_clips_hold_the_set`.
+- [~] D2 (L4, code pushed, tests not run yet): align the slider ranges with the WGSL clamps (jitter 0.95, step_dt 0.15); host guard on `min_radius_ratio`; the Astrolabe inactive check uses the same rounding as the WGSL.
 
 ### Wave E: tests, tools, docs
 - [ ] E1 (T1): make the preset animation test count only tracks that actually change.
@@ -139,8 +139,26 @@ Why the fixes look the way they do:
 - Correction to the audit: the `FINGERPRINT` `OnceLock` (S10) is not dead.
   `set_extra_renderer_fingerprint` needs `&'static`, so it stays, with a comment. Also, L13's
   `None` arm was only partly dead: it handled unknown variants, which validation now rejects.
-- Not done: B5 (needs an API change), P1 (formula parsed once per trait call), wave D (needs
-  renders), wave E.
+- Not done: B5 (needs an API change), P1 (formula parsed once per trait call), wave E.
+
+### Status of wave D (2026-11-11, pushed before its test run)
+
+The operator asked to push before the test slot on the shared machine came free, so D1/D2 are
+in `main` but `fractal_node::tests` has not run on them yet (`[~]` above).
+- D1, Mandelbox: the old clip `2.5 * 4.0637 = 10.16` cut even the scale-2 preset's corners
+  (the set fills the cube `|c_i| <= 6`, radius 10.39) and cut hard near scale 1 (scale 1.5
+  needs 17.3). Derived from the kernel's `box_step`: for `s > 1` the extreme bounded orbit is
+  the 2-cycle `B -> -2F -> B`, so `B = 2F(s+1)/(s-1)`; for `s < -1` it is `B = 2F`; the
+  clip is `sqrt(3) * B`. The clip only grows (max with the old one), so nothing that was
+  right gets worse. Not covered by the derivation: an active Julia constant or orbit offset,
+  and per-iteration rotation (the clip is then at least the old one, but not proven to hold).
+- D1, KIFS: `kifs_reach` is a norm bound: folds and rotation are isometries through the
+  origin, the Menger plane fold moves a point by at most `2|h|`, so beyond
+  `(|shift| + 2|h|s)/(s-1)` the orbit only grows. `P_KIFS_BOUND` is the DE's base shape, not
+  the clip, and is unchanged.
+- D2: ranges follow the clamps both estimators already apply (WGSL and fractal-kernels):
+  `step_dt <= 0.15`, `jitter <= 0.95`; the Astrolabe teeth check rounds half-to-even like
+  them; the Mandelbox inner radius gets the same `1e-6` floor as AmazingSurface and Mobius.
 
 Out of scope: soluwell-studio / render-rs / fractal-kernels internals (cross-repo items B1 and E3
 only touch them through public API requests), the PLAN.md Sections A-D roadmap, and any GPU benchmark.

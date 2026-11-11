@@ -1849,7 +1849,8 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
                 name: "step_dt",
                 label: "Advection step",
                 hint: "ODE integration time step per iteration",
-                range: Some((0.005, 0.2)),
+                // Both estimators clamp to [0.005, 0.15]; a larger value would do nothing.
+                range: Some((0.005, 0.15)),
                 slider: lin(0.01, 0.1),
                 choices: None,
                 order: 21,
@@ -2445,9 +2446,10 @@ pub const FORMULAS: [FormulaMeta; TOTAL_FORMULA_COUNT as usize] = [
             ParamMeta {
                 name: "jitter",
                 label: "Cell jitter",
-                hint: "Randomness of Voronoi seed positions (0 = regular BCC/cubic grid, 1 = organic foam)",
-                range: Some((0.0, 1.0)),
-                slider: lin(0.0, 1.0),
+                hint: "Randomness of Voronoi seed positions (0 = regular BCC/cubic grid, 0.95 = organic foam)",
+                // Both estimators clamp to [0, 0.95]: seeds must stay inside their cells.
+                range: Some((0.0, 0.95)),
+                slider: lin(0.0, 0.95),
                 choices: None,
                 order: 22,
             },
@@ -2758,7 +2760,11 @@ pub fn formula_param_inactive_reason<'a>(
                 .then_some("Septa / Rib count is 0")
         }
         ("AstrolabeGimbal", "tooth_depth") => {
-            (value("/formula/AstrolabeGimbal/gear_teeth")?.as_f64()? < 1.0)
+            // The estimators round the count half-to-even (`round` / `round_ties_even`).
+            (value("/formula/AstrolabeGimbal/gear_teeth")?
+                .as_f64()?
+                .round_ties_even()
+                < 1.0)
                 .then_some("Gear teeth is 0")
         }
         ("AstrolabeGimbal", "gear_teeth") => {

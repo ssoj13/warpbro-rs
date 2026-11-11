@@ -1686,6 +1686,67 @@ impl NodeTypeSpec for FractalNodeSpec {
     }
 }
 
+/// KIFS shift vector and Menger fold height, as packed into `P_KIFS_SHIFT` /
+/// `P_KIFS_FOLD_HEIGHT`: each step is `z' = s * fold(rot(z)) - shift`.
+fn kifs_layout(k: &Kifs) -> ([f32; 3], f32) {
+    let s = k.scale;
+    let base = k.kind.centre();
+    let cc = [
+        base[0] + k.offset[0],
+        base[1] + k.offset[1],
+        base[2] + k.offset[2],
+    ];
+    let (shift_z, fold_height) = match k.kind {
+        KifsKind::Menger => (
+            0.0,
+            if s != 0.0 {
+                0.5 * cc[2] * (s - 1.0) / s
+            } else {
+                0.0
+            },
+        ),
+        _ => ((s - 1.0) * cc[2], 0.0),
+    };
+    ([(s - 1.0) * cc[0], (s - 1.0) * cc[1], shift_z], fold_height)
+}
+
+/// Radius of a ball holding the whole KIFS, from its parameters (plan1 D1: the fixed
+/// per-kind radius cut sets moved by `offset`). Each step is `s * fold(rot(z)) - shift`; the
+/// rotation and the symmetry folds are reflections through the origin (norm-preserving) and
+/// the Menger plane fold at `h` moves a point by at most `2|h|`, so
+/// `|z'| >= s(|z| - 2|h|) - |shift|`. Beyond `R* = (|shift| + 2|h|s) / (s - 1)` the orbit
+/// only grows, so points farther than `max(base radius, R*)` never meet the final base test.
+/// `None` for `s <= 1`, where the map does not expand and no such bound exists.
+fn kifs_reach(k: &Kifs) -> Option<f32> {
+    let s = k.scale;
+    if s <= 1.0 {
+        return None;
+    }
+    let (shift, h) = kifs_layout(k);
+    let r = (length(shift) + 2.0 * h.abs() * s) / (s - 1.0);
+    Some(k.kind.bounding_radius().max(r))
+}
+
+/// Radius of a ball holding the whole Mandelbox, from its scale and fold limit (plan1 D1: the
+/// fixed 4.0637 framing cut sets with a scale near 1). Per axis, with the orbit constant the
+/// point itself: for `s > 1` the extreme bounded orbit is the 2-cycle `B -> -2F -> B`, so
+/// `|c_i| <= 2F(s + 1)/(s - 1)` (6 for the classic s = 2, F = 1); for `s < -1` it is the fixed
+/// point `fold(B) = 0`, `|c_i| <= 2F`. The sphere fold only scales by >= 1, which moves a
+/// point out faster, so the set lies in that cube: radius `sqrt(3) * B`. `None` for
+/// `|s| <= 1`, where the map does not expand. Checked by
+/// `tests::mandelbox_and_kifs_clips_hold_the_set` with an escape-time probe of `box_step`.
+fn mandelbox_reach(b: &MandelBox) -> Option<f32> {
+    let (s, f) = (b.scale, b.fold_limit.abs());
+    let axis = if s > 1.0 {
+        2.0 * f * (s + 1.0) / (s - 1.0)
+    } else if s < -1.0 {
+        2.0 * f
+    } else {
+        return None;
+    };
+    Some(axis * 3.0f32.sqrt())
+}
+
 fn pack_object_with_transform(
     scene: &Scene,
     object_scale: f32,
@@ -1722,6 +1783,9 @@ fn pack_object_with_transform(
         object_radius = object_radius.max(bulb_escape(b) * abs_scale);
     }
 
+    // The parameter-derived reach only ever widens the framing-based clip: where no bound is
+    // derived (non-contracting scales, see `mandelbox_reach` / `kifs_reach`) the old clip stays.
+    let framed = REACH_MARGIN_FRAMES * radius;
     let clip_object = match &formula {
         Formula::Mandelbulb(_)
         | Formula::QuaternionJulia(_)
@@ -1730,8 +1794,10 @@ fn pack_object_with_transform(
         | Formula::BurningShip(_)
         | Formula::HarmonicBulb(_)
         | Formula::Mandelbar3D(_) => None,
+        Formula::Mandelbox(b) => Some(mandelbox_reach(b).map_or(framed, |r| r.max(framed))),
+        Formula::Kifs(k) => Some(kifs_reach(k).map_or(framed, |r| r.max(framed))),
         _ if formula.bound_radius() > 0.0 => Some(formula.bound_radius()),
-        _ => Some(REACH_MARGIN_FRAMES * radius),
+        _ => Some(framed),
     };
 
     p[P_FAMILY] = formula.code() as f32;
@@ -1770,37 +1836,19 @@ fn pack_object_with_transform(
     };
     let pack_box = |p: &mut [f32], b: &MandelBox| {
         let min_r = b.min_radius_ratio * b.fixed_radius;
+        // A zero inner radius would divide by zero in the sphere fold (`fixed_r2 / r2` at the
+        // origin); the same guard as AmazingSurface's and Mobius's packing.
+        let min_r2 = (min_r * min_r).max(1.0e-6);
         p[P_BOX_SCALE] = b.scale;
         p[P_BOX_FOLD] = b.fold_limit;
-        p[P_BOX_MIN_R2] = min_r * min_r;
-        p[P_BOX_FIXED_R2] = b.fixed_radius * b.fixed_radius;
+        p[P_BOX_MIN_R2] = min_r2;
+        p[P_BOX_FIXED_R2] = (b.fixed_radius * b.fixed_radius).max(min_r2);
     };
     let pack_kifs = |p: &mut [f32], k: &Kifs| {
-        let s = k.scale;
-        let base = k.kind.centre();
-        let cc = [
-            base[0] + k.offset[0],
-            base[1] + k.offset[1],
-            base[2] + k.offset[2],
-        ];
-        let (shift_z, fold_height) = match k.kind {
-            KifsKind::Menger => (
-                0.0,
-                if s != 0.0 {
-                    0.5 * cc[2] * (s - 1.0) / s
-                } else {
-                    0.0
-                },
-            ),
-            _ => ((s - 1.0) * cc[2], 0.0),
-        };
+        let (shift, fold_height) = kifs_layout(k);
         p[P_KIFS_KIND] = k.kind.code() as f32;
-        p[P_KIFS_SCALE] = s;
-        put3(
-            p,
-            P_KIFS_SHIFT,
-            [(s - 1.0) * cc[0], (s - 1.0) * cc[1], shift_z],
-        );
+        p[P_KIFS_SCALE] = k.scale;
+        put3(p, P_KIFS_SHIFT, shift);
         p[P_KIFS_FOLD_HEIGHT] = fold_height;
         p[P_KIFS_BOUND] = k.kind.bounding_radius();
     };
@@ -2077,6 +2125,99 @@ mod tests {
             .expect("Hybrid KIFS kind has choices")
             .expect("choices build");
         assert_eq!(kifs.len(), KifsKind::ALL.len());
+    }
+
+    /// plan1 D1: the Mandelbox and KIFS clip spheres hold the whole set at the parameters the
+    /// sliders allow, not only at the presets (the fixed radii cut sets with a scale near 1 or
+    /// a large KIFS offset). The Mandelbox side is an escape-time probe mirroring the kernel's
+    /// `box_step` (fractal-kernels): every point just outside the clip must escape.
+    #[test]
+    fn mandelbox_and_kifs_clips_hold_the_set() {
+        fn clip_of(formula: Formula) -> f32 {
+            let scene = Scene::preset_fractal(formula);
+            let mut p = [0.0f32; P_COUNT];
+            pack_object_with_transform(&scene, 1.0, [0.0; 3], &mut p, 0.0);
+            p[P_CLIP_RADIUS]
+        }
+        fn box_fold(v: f32, limit: f32) -> f32 {
+            if v > limit {
+                2.0 * limit - v
+            } else if v < -limit {
+                -2.0 * limit - v
+            } else {
+                v
+            }
+        }
+        fn escapes(b: &MandelBox, c: [f32; 3]) -> bool {
+            let min_r = b.min_radius_ratio * b.fixed_radius;
+            let min_r2 = (min_r * min_r).max(1.0e-6);
+            let fixed_r2 = (b.fixed_radius * b.fixed_radius).max(min_r2);
+            let mut z = c;
+            for _ in 0..400 {
+                let t = z.map(|v| box_fold(v, b.fold_limit));
+                let r2 = t[0] * t[0] + t[1] * t[1] + t[2] * t[2];
+                let k = if r2 < min_r2 {
+                    fixed_r2 / min_r2
+                } else if r2 < fixed_r2 {
+                    fixed_r2 / r2
+                } else {
+                    1.0
+                };
+                z = std::array::from_fn(|i| t[i] * k * b.scale + c[i]);
+                if length(z) > 1.0e6 {
+                    return true;
+                }
+            }
+            false
+        }
+        // A Fibonacci sphere plus the cube diagonal, where the bound is tight.
+        let golden = std::f32::consts::PI * (3.0 - 5.0f32.sqrt());
+        let mut dirs: Vec<[f32; 3]> = (0..256)
+            .map(|i| {
+                let y = 1.0 - 2.0 * (i as f32 + 0.5) / 256.0;
+                let r = (1.0 - y * y).sqrt();
+                let a = golden * i as f32;
+                [r * a.cos(), y, r * a.sin()]
+            })
+            .collect();
+        dirs.push([1.0 / 3.0f32.sqrt(); 3]);
+        for scale in [1.25f32, 1.5, 2.0, 3.0, -1.5, -2.0, -3.0] {
+            for fixed_radius in [1.0f32, 2.0] {
+                for min_radius_ratio in [0.25f32, 0.5] {
+                    for fold_limit in [0.5f32, 1.0] {
+                        let b = MandelBox {
+                            scale,
+                            min_radius_ratio,
+                            fixed_radius,
+                            fold_limit,
+                            rotation_degrees: [0.0; 3],
+                        };
+                        let clip = clip_of(Formula::Mandelbox(b));
+                        for d in &dirs {
+                            for beyond in [1.02f32, 1.2] {
+                                let c = d.map(|v| v * clip * beyond);
+                                assert!(
+                                    escapes(&b, c),
+                                    "{b:?}: {c:?} beyond clip {clip} stays bounded"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for kind in KifsKind::ALL {
+            let mut k = Kifs::preset(kind);
+            k.offset = [12.0, -9.0, 5.0];
+            let centre = kind.centre();
+            let cc: [f32; 3] = std::array::from_fn(|i| centre[i] + k.offset[i]);
+            let clip = clip_of(Formula::Kifs(k));
+            assert!(
+                clip >= length(cc),
+                "{kind:?}: clip {clip} < |cc| {}",
+                length(cc)
+            );
+        }
     }
 
     /// plan1 S6: labels and hints of the classic families come from `FORMULAS` too.
