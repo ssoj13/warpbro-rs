@@ -181,7 +181,7 @@ flowchart LR
 
 ---
 
-## 6. Backend Resolution, Shader Hook & Fractal Validation (after plan1 waves A-C)
+## 6. Backend Resolution, Shader Hook, Fractal Validation & Clip (after plan1 waves A-D)
 
 Real codepaths in `src/engine.rs` / `src/fractal_node.rs` and soluwell `world.rs`
 (egui-widgets-rs `13d6f8d`). See [plan1.md](plan1.md) for why each path is shaped this way.
@@ -211,6 +211,11 @@ flowchart TD
   vcn --> vn["FractalNodeSpec::validate_node<br/>validate_fractal_branches"]
   vn -->|Err| rej["decode fails / edit rolled back / snapshot Err"]
   vn -->|Ok| pack["Scene::pack: accessors read validated branches"]
+  pack --> clip{"clip radius (P_CLIP_RADIUS)"}
+  clip -->|Mandelbox| mb["max(framed, mandelbox_reach: sqrt3 * 2F(s+1)/(s-1) or sqrt3 * 2F)"]
+  clip -->|KIFS| kr["max(framed, kifs_reach: (|shift| + 2|h|s)/(s-1))"]
+  clip -->|bulb-like| be["bailout * 1.001"]
+  clip -->|own bound_radius| br["instance bound_radius"]
 ```
 
 ---

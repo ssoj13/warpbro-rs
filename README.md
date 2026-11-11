@@ -192,8 +192,12 @@ On Linux / WSL2:
 export CUDA_HOME=/usr/local/cuda CUDA_OXIDE_LLC=/usr/bin/llc-22
 python bootstrap.py r                                  # build, warm the CUDA cache, then open
 ./target/release/WarpBro --gallery out 1920 1080 256    # every preset to out/*.png
-./target/release/WarpBro --bench 960 540 32             # timing table
+./target/release/WarpBro --bench 960 540 32             # timing table (needs SPP >= 2)
 ```
+
+The command line is strict: an unknown `--option`, a stray extra argument or a flag in the place
+of the output directory is an error, not a silent GUI launch or a directory named `--hdr`.
+`--gallery` creates its output directory before rendering the first preset.
 
 **Controls:**
 
@@ -485,7 +489,9 @@ material previews and Gallery wait for it. Release archives avoid it on most GPU
 - `python bootstrap.py b` (PTX only) warms the cache for the executable it built, on this GPU,
   before reporting success (`--skip-warmup` skips it).
 - On the PTX route, `WarpBro --warmup` warms the cache ahead of time: it creates the
-  context, loads and validates the module, and exits. A driver update, another GPU, a cleared
+  context, loads and validates the module, and exits. On a machine where CUDA does not come up
+  it prints `CUDA unavailable, not warmed: <reason>` and still warms WGPU; it never reports
+  CUDA as ready when only WGPU initialized. A driver update, another GPU, a cleared
   cache or `CUDA_CACHE_DISABLE` means warming again; `CUDA_CACHE_PATH` and
   `CUDA_CACHE_MAXSIZE` must match between warm-up and use.
 

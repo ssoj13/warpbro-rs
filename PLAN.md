@@ -147,6 +147,12 @@ top of the shared `soluwell-studio` widget (`egui-widgets-rs/crates/soluwell/stu
 
 ### Section C: Document & Error Propagation Hardening
 
+0. **Done (2026-11-11, [plan1.md](plan1.md))**: the Fractal node no longer falls back silently.
+   Custom branches are validated on load, edit and snapshot (soluwell `NodeTypeSpec::validate_node`,
+   egui-widgets-rs `13d6f8d`), integer formula leaves stay whole, enum choices come from the enums,
+   the WGPU backend is soluwell's own engine, and clip radii follow the parameters. Still open there:
+   B5 (device name per resolved backend), P1 (formula parsed per trait call) and wave E
+   (tests/tools/docs).
 9. **Complete `.ok()` sweep part 2 (`nodes() -> Result`)**:
    - Audit remaining `.ok()` conversions in document traversal: `WorldDocument::nodes_at` drops a node whose
      `info_at` fails, and `info_at_with` silently defaults flags whose values fail.
