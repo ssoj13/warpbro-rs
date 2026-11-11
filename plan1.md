@@ -117,8 +117,8 @@ run at the end of a wave, GPU tests only with the operator's yes.
 - [x] C4 (L12, F8): `rerun-if-env-changed` for `CLIPPY_ARGS` / `RA_RUSTC_WRAPPER`; warn on the VS fallback in xtask.
 
 ### Wave D: ranges and clipping (needs renders, operator look)
-- [~] D1 (L3, code pushed, tests not run yet): Mandelbox and KIFS clip from the instance parameters (`mandelbox_reach`, `kifs_reach`). Kleinian / Apollonian already clip at the instance `bound_radius`; only their camera framing uses the preset radius, which does not cut. Verified by a CPU escape-time test instead of a GPU render (deterministic, no GPU needed): `fractal_node::tests::mandelbox_and_kifs_clips_hold_the_set`.
-- [~] D2 (L4, code pushed, tests not run yet): align the slider ranges with the WGSL clamps (jitter 0.95, step_dt 0.15); host guard on `min_radius_ratio`; the Astrolabe inactive check uses the same rounding as the WGSL.
+- [x] D1 (L3): Mandelbox and KIFS clip from the instance parameters (`mandelbox_reach`, `kifs_reach`). Kleinian / Apollonian already clip at the instance `bound_radius`; only their camera framing uses the preset radius, which does not cut. Verified by a CPU escape-time test instead of a GPU render (deterministic, no GPU needed): `fractal_node::tests::mandelbox_and_kifs_clips_hold_the_set`.
+- [x] D2 (L4): align the slider ranges with the WGSL clamps (jitter 0.95, step_dt 0.15); host guard on `min_radius_ratio`; the Astrolabe inactive check uses the same rounding as the WGSL.
 
 ### Wave E: tests, tools, docs
 - [ ] E1 (T1): make the preset animation test count only tracks that actually change.
@@ -141,10 +141,10 @@ Why the fixes look the way they do:
   `None` arm was only partly dead: it handled unknown variants, which validation now rejects.
 - Not done: B5 (needs an API change), P1 (formula parsed once per trait call), wave E.
 
-### Status of wave D (2026-11-11, pushed before its test run)
+### Status of wave D (2026-11-11)
 
-The operator asked to push before the test slot on the shared machine came free, so D1/D2 are
-in `main` but `fractal_node::tests` has not run on them yet (`[~]` above).
+Pushed first on the operator's word (no test slot on the shared machine yet), then verified:
+`fractal_node::tests` 8 passed, including `mandelbox_and_kifs_clips_hold_the_set`.
 - D1, Mandelbox: the old clip `2.5 * 4.0637 = 10.16` cut even the scale-2 preset's corners
   (the set fills the cube `|c_i| <= 6`, radius 10.39) and cut hard near scale 1 (scale 1.5
   needs 17.3). Derived from the kernel's `box_step`: for `s > 1` the extreme bounded orbit is
