@@ -19,10 +19,10 @@ fractal-core = { git = "ssh://git@github.com/ssoj13/fractal-rs.git", branch = "m
 # `direct`: the Direct display's deterministic shading kernels (`world_direct`, `direct_<family>`).
 fractal-kernels = { git = "ssh://git@github.com/ssoj13/fractal-rs.git", branch = "main", features = ["direct"] }
 # Our Windows fork includes the Rust 1.99 backend fixes.
-cuda-device = { git = "ssh://git@github.com/ssoj13/cuda-rust-windows.git", branch = "main" }
-cuda-host = { git = "ssh://git@github.com/ssoj13/cuda-rust-windows.git", branch = "main" }
+cuda-device = { git = "ssh://git@github.com/ssoj13/cuda-rust_b.git", branch = "main" }
+cuda-host = { git = "ssh://git@github.com/ssoj13/cuda-rust_b.git", branch = "main" }
 # The monorepo ships cuda-core next to cuda-host; one source keeps a single cuda-core in the graph.
-cuda-core = { git = "ssh://git@github.com/ssoj13/cuda-rust-windows.git", branch = "main" }
+cuda-core = { git = "ssh://git@github.com/ssoj13/cuda-rust_b.git", branch = "main" }
 curves = { git = "ssh://git@github.com/ssoj13/curves-rs.git", branch = "main", features = ["serde"] }
 egui = "0.36"
 soluwell-config = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }

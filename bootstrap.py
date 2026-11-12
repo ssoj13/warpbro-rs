@@ -66,7 +66,7 @@ BIN_NAME = "WarpBro.exe" if IS_WINDOWS else "WarpBro"
 RELEASE_BIN = ROOT_DIR / "target" / "release" / BIN_NAME
 INSTALL_DIR = Path.home() / ".local" / "bin"
 
-CUDA_OXIDE_GIT = "ssh://git@github.com/ssoj13/cuda-rust-windows.git"
+CUDA_OXIDE_GIT = "ssh://git@github.com/ssoj13/cuda-rust_b.git"
 CUDA_OXIDE_REV = "9370f8c91eba499a880a5769ecd11f39fa65ffbb"
 RUST_COMPONENTS = ["rust-src", "rustc-dev", "rust-analyzer", "clippy", "rustfmt", "llvm-tools"]
 # Release builds (`--cubins`) also embed cubins for these GPUs (RTX 20/30/40/50), assembled
