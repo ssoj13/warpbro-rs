@@ -1,8 +1,8 @@
 //! WarpBro's dual CUDA (`fractal-kernels`) + 28-family WGPU (`formulas.wgsl`) compute engine
-//! implementing [`soluwell_studio::render::ComputeEngine`], plus one-time host registration
+//! implementing [`sl_studio::render::ComputeEngine`], plus one-time host registration
 //! ([`init_warpbro`]) and [`WarpBroFractalModule`] (`StudioModule`).
 //!
-//! Exists so `soluwell-studio` remains fractal-agnostic while WarpBro drives both the embedded
+//! Exists so `sl-studio` remains fractal-agnostic while WarpBro drives both the embedded
 //! `cuda-oxide` PTX kernels (`fractal_kernels::kernels`) and the per-family WGSL shader hook
 //! ([`warpbro_shader_hook`]) over the shared `P_COUNT` studio ABI. Consumed by `src/main.rs`,
 //! `src/render_bench.rs`, and `src/parity_tests.rs`.
@@ -13,28 +13,28 @@ use cuda_core::{CudaContext, CudaStream, DeviceBuffer, DeviceCopy, LaunchConfig1
 use fractal_core::params::*;
 use fractal_kernels::kernels;
 use sha2::{Digest, Sha256};
-use soluwell_studio::palette::build_lut;
-use soluwell_studio::render::{
+use sl_studio::palette::build_lut;
+use sl_studio::render::{
     BackendFilm, ComputeEngine, Gpu, RenderError, StepOutcome, StepSpec, Target, WgpuComputeEngine,
     film_mismatch, validate_size,
 };
-use soluwell_studio::render_prep::{
+use sl_studio::render_prep::{
     BLOCK, LightResidentKey, LutResidentKey, ObjectResidentKey, Plane, PreparationStats,
     PreparedScene, Resident, TALLY_THREADS, WorldMaterial, padded_len, tile_count, untile_into,
 };
-use soluwell_studio::render_profiles::Backend;
-use soluwell_studio::render_wgpu::{TraceDispatch, WgpuTarget};
-use soluwell_studio::scene::{MaterialModel, Scene};
+use sl_studio::render_profiles::Backend;
+use sl_studio::render_wgpu::{TraceDispatch, WgpuTarget};
+use sl_studio::scene::{MaterialModel, Scene};
 
 use crate::formulas::{FORMULAS, ITERATING_MASK, SIGNED_MASK};
-use crate::fractal_node::{FractalNodeSpec, FractalSceneExt};
+use crate::fractal_node::FractalNodeSpec;
 
-/// Hot-pluggable [`soluwell_studio::StudioModule`] ("organ") registering WarpBro's `"Fractal"`
+/// Hot-pluggable [`sl_studio::StudioModule`] ("organ") registering WarpBro's `"Fractal"`
 /// SDF scene node (`FractalNodeSpec`), 28-family WGSL shader hook, thumbnail fingerprint, and
-/// built-in scene templates into `soluwell-studio`.
+/// built-in scene templates into `sl-studio`.
 pub struct WarpBroFractalModule;
 
-impl soluwell_studio::StudioModule for WarpBroFractalModule {
+impl sl_studio::StudioModule for WarpBroFractalModule {
     fn id(&self) -> &'static str {
         "warpbro.fractals"
     }
@@ -43,21 +43,21 @@ impl soluwell_studio::StudioModule for WarpBroFractalModule {
         "WarpBro 3D Fractals"
     }
 
-    fn node_specs(&self) -> Vec<std::sync::Arc<dyn soluwell_studio::node_spec::NodeTypeSpec>> {
+    fn node_specs(&self) -> Vec<std::sync::Arc<dyn sl_studio::node_spec::NodeTypeSpec>> {
         vec![std::sync::Arc::new(crate::fractal_node::FractalNodeSpec)]
     }
 
     fn on_register(
         &self,
-        _bus: &soluwell_studio::app_control::appbus::EventBus,
-        _hotkeys: &mut soluwell_studio::HotkeyRegistry,
+        _bus: &sl_studio::app_control::appbus::EventBus,
+        _hotkeys: &mut sl_studio::HotkeyRegistry,
     ) {
         init_warpbro();
     }
 }
 
 /// Register WarpBro's `"Fractal"` node spec, 28-family WGSL shader hook, extra thumbnail
-/// cache fingerprint, and built-in scene templates into `soluwell-studio`.
+/// cache fingerprint, and built-in scene templates into `sl-studio`.
 /// Safe and idempotent to call from `main`, CLI subcommands, and tests.
 ///
 /// `register_node_type` replaces by name, so the second registration through
@@ -66,8 +66,8 @@ impl soluwell_studio::StudioModule for WarpBroFractalModule {
 pub fn init_warpbro() {
     static INIT: OnceLock<()> = OnceLock::new();
     INIT.get_or_init(|| {
-        soluwell_studio::node_spec::register_node_type(Arc::new(FractalNodeSpec));
-        soluwell_studio::render_wgpu::set_custom_shader_hook(warpbro_shader_hook);
+        sl_studio::node_spec::register_node_type(Arc::new(FractalNodeSpec));
+        sl_studio::render_wgpu::set_custom_shader_hook(warpbro_shader_hook);
         // `set_extra_renderer_fingerprint` keeps a `&'static [u8]`: the static owns the digest.
         static FINGERPRINT: OnceLock<[u8; 32]> = OnceLock::new();
         let fp = FINGERPRINT.get_or_init(|| {
@@ -84,7 +84,7 @@ pub fn init_warpbro() {
             }
             h.finalize().into()
         });
-        soluwell_studio::thumbnail_cache::set_extra_renderer_fingerprint(fp);
+        sl_studio::thumbnail_cache::set_extra_renderer_fingerprint(fp);
         crate::templates::register_warpbro_templates();
     });
 }
@@ -103,7 +103,7 @@ pub fn new_gpu() -> Result<Gpu, RenderError> {
     Gpu::with_engine(Box::new(WarpBroComputeEngine::new()?))
 }
 
-/// WGSL shader hook injected into `soluwell-studio-render`'s `shader_source(family)`.
+/// WGSL shader hook injected into `sl-studio-render`'s `shader_source(family)`.
 pub fn warpbro_shader_hook(family: Option<u32>) -> (&'static str, String) {
     use std::fmt::Write;
     let defs = include_str!("formulas.wgsl");
@@ -118,7 +118,7 @@ pub fn warpbro_shader_hook(family: Option<u32>) -> (&'static str, String) {
     );
     // A family code outside `FORMULAS` is a miss, as in CUDA's `family_distance`
     // (`(f32::MAX, TRAP_START)`): both backends then render nothing for it instead of WGPU
-    // drawing a Mandelbulb. Validated scenes never carry one (`FractalNodeSpec::validate_node`).
+    // drawing a Mandelbulb. Scenes never carry one (`FractalNodeSpec::prepare` parses it).
     const MISS: &str = "return vec2<f32>(F32_MAX, TRAP_START);";
     match family {
         Some(code) => match FORMULAS.get(code as usize) {
@@ -170,7 +170,7 @@ fn cuda_trace_entry(
         TraceMaterial::Fast
     };
     let family = if !scene.world_render {
-        Some(scene.formula().code())
+        Some(scene.family_code())
     } else if force_dynamic {
         None
     } else {
@@ -313,7 +313,7 @@ impl CudaEngine {
     fn upload_prepared(
         &mut self,
         prepared: &Arc<PreparedScene>,
-        env: Option<&soluwell_studio::environment::Map>,
+        env: Option<&sl_studio::environment::Map>,
         world: bool,
         table: &mut Vec<[f32; 4]>,
         stats: &mut PreparationStats,
@@ -421,15 +421,14 @@ pub struct WarpBroComputeEngine {
     wgpu: Option<Result<WgpuComputeEngine, String>>,
     lut_staging: Vec<[f32; 4]>,
     tally_host: Vec<[f64; 2]>,
-    name: String,
 }
 
 impl WarpBroComputeEngine {
     pub fn new() -> Result<Self, RenderError> {
         init_warpbro();
         let cuda = CudaEngine::new();
-        let (name, wgpu) = match &cuda {
-            Ok(c) => (c.name.clone(), None),
+        let wgpu = match &cuda {
+            Ok(_) => None,
             Err(cuda_err) => {
                 log::warn!("CUDA unavailable ({cuda_err}); initializing WGPU compute backend");
                 let wgpu = WgpuComputeEngine::new().map_err(|wgpu_err| {
@@ -437,8 +436,7 @@ impl WarpBroComputeEngine {
                         "{cuda_err}; WGPU fallback also failed: {wgpu_err}"
                     ))
                 })?;
-                let name = wgpu.name().to_owned();
-                (name, Some(Ok(wgpu)))
+                Some(Ok(wgpu))
             }
         };
         Ok(Self {
@@ -446,7 +444,6 @@ impl WarpBroComputeEngine {
             wgpu,
             lut_staging: Vec::new(),
             tally_host: vec![[0.0; 2]; TALLY_THREADS],
-            name,
         })
     }
 
@@ -509,7 +506,7 @@ impl WarpBroComputeEngine {
         if backend == Backend::Wgpu {
             let wgpu = self.wgpu_mut()?.wgpu_mut()?;
             wgpu.set_params(&p)?;
-            return wgpu.probe_formula(scene.formula().code(), points);
+            return wgpu.probe_formula(scene.family_code(), points);
         }
         let cuda = self.cuda_mut()?;
         cuda.module
@@ -576,8 +573,14 @@ impl WarpBroComputeEngine {
 }
 
 impl ComputeEngine for WarpBroComputeEngine {
-    fn name(&self) -> &str {
-        &self.name
+    fn device_name(&self, backend: Backend) -> Result<&str, RenderError> {
+        match backend {
+            Backend::Cuda => Ok(self.cuda()?.name.as_str()),
+            Backend::Wgpu => self.wgpu()?.device_name(Backend::Wgpu),
+            Backend::Auto => Err(RenderError::Backend(
+                "Auto names no device: it is resolved to CUDA or WGPU first".into(),
+            )),
+        }
     }
 
     fn resolve_backend(&mut self, scene: &Scene) -> Result<Backend, RenderError> {
@@ -675,7 +678,7 @@ impl ComputeEngine for WarpBroComputeEngine {
         &mut self,
         backend: Backend,
         prepared: &Arc<PreparedScene>,
-        env: Option<&soluwell_studio::environment::Map>,
+        env: Option<&sl_studio::environment::Map>,
         world_render: bool,
         params: &[f32; P_COUNT],
         stats: &mut PreparationStats,
@@ -932,7 +935,7 @@ impl ComputeEngine for WarpBroComputeEngine {
         &mut self,
         backend: Backend,
         prepared: &Arc<PreparedScene>,
-        env: Option<&soluwell_studio::environment::Map>,
+        env: Option<&sl_studio::environment::Map>,
         params: &[f32; P_COUNT],
         (ndc, family): ([f32; 2], Option<u32>),
         stats: &mut PreparationStats,

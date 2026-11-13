@@ -1,10 +1,10 @@
 #![recursion_limit = "256"]
-//! WarpBro: a path-traced 3D fractal browser built on top of `soluwell-studio`.
+//! WarpBro: a path-traced 3D fractal browser built on top of `sl-studio`.
 //!
 //! WarpBro registers its `"Fractal"` scene node type ([`fractal_node::FractalNodeSpec`]),
 //! 28-family WGSL distance estimators (`formulas.wgsl`), built-in animated/static templates,
 //! 38 gallery presets, and dual CUDA (`fractal-kernels` via `cuda-oxide`) + WGPU compute
-//! engine ([`engine::WarpBroComputeEngine`]) into `soluwell-studio`.
+//! engine ([`engine::WarpBroComputeEngine`]) into `sl-studio`.
 //!
 //!   WarpBro                                          the browser
 //!   WarpBro --gallery DIR [W H SPP] [--hdr] [--display-exr]
@@ -39,12 +39,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use fractal_node::{Bulb, Formula, FractalSceneExt};
-use soluwell_studio::color::{BT2408_SDR_WHITE_NITS, HDR_VIEW};
-use soluwell_studio::fs_name;
-use soluwell_studio::render::{Batch, Target, validate_size};
-use soluwell_studio::render_service::{Frame, FrameFile, PngEncoding};
-use soluwell_studio::render_wgpu;
-use soluwell_studio::scene::Scene;
+use sl_studio::color::{BT2408_SDR_WHITE_NITS, HDR_VIEW};
+use sl_studio::fs_name;
+use sl_studio::render::{Batch, Target, validate_size};
+use sl_studio::render_service::{Frame, FrameFile, PngEncoding};
+use sl_studio::render_wgpu;
+use sl_studio::scene::Scene;
 
 /// Optional positional argument `i`: absent, or a `--flag` in its place (`--gallery DIR --hdr`),
 /// takes `default`; anything else must parse, so `--bench 96O` is an error, not 960 silently.
@@ -107,12 +107,9 @@ fn headless(
         std::fs::create_dir_all(dir)?;
     }
     let mut gpu = engine::new_gpu()?;
-    println!("GPU: {}  ·  {w}x{h}, {spp} spp", gpu.name);
-    println!(
-        "{:<28} {:>16} {:>9} {:>11}",
-        "preset", "model", "ms/spp", "Msamples/s"
-    );
-    for mut scene in Scene::fractal_gallery() {
+    // The renderer is known once a scene resolved its backend: printed after the first warm-up.
+    let mut header = false;
+    for mut scene in Scene::fractal_gallery().map_err(anyhow::Error::msg)? {
         if hdr {
             scene.colour.config = "ocio://studio-config-latest".into();
             scene.colour.display = "Rec.2100-PQ - Display".into();
@@ -120,6 +117,15 @@ fn headless(
         }
         let mut t = Target::new(w, h);
         gpu.step(&mut t, &scene, 1, 0, spp <= 1)?; // warm-up
+        if !header {
+            let (backend, device) = render_bench::renderer(&t)?;
+            println!("GPU: {} · {device}  ·  {w}x{h}, {spp} spp", backend.label());
+            println!(
+                "{:<28} {:>16} {:>9} {:>11}",
+                "preset", "model", "ms/spp", "Msamples/s"
+            );
+            header = true;
+        }
         let t0 = Instant::now();
         while !gpu.advance(&mut t, &scene, spp, 0, Batch::Fixed(8))? {}
         let secs = t0.elapsed().as_secs_f64();
@@ -288,17 +294,20 @@ fn main() -> anyhow::Result<()> {
             "unknown option {option}; modes: --gallery, --bench, --world-bench, \
              --animated-fixtures, --warmup (see the header of src/main.rs)"
         ),
-        _ => soluwell_studio::run_with(soluwell_studio::StudioConfig {
-            title: "WarpBro".into(),
-            initial_scene: Some(Scene::preset_fractal(Formula::Mandelbulb(Bulb::PRESET))),
-            gallery: Some(Scene::fractal_gallery()),
-            engine_factory: Some(Arc::new(engine::new_gpu)),
-            material_swatch_base: Some(Arc::new(|| {
-                Scene::preset_fractal(Formula::Mandelbulb(Bulb::PRESET))
-            })),
-            gpu_init_label: "Initializing GPU (CUDA / WGPU)…".into(),
-            modules: vec![Arc::new(engine::WarpBroFractalModule)],
-        }),
+        _ => {
+            let bulb =
+                Scene::fractal_preset(Formula::Mandelbulb(Bulb::PRESET)).map_err(anyhow::Error::msg)?;
+            let swatch = bulb.clone();
+            sl_studio::run_with(sl_studio::StudioConfig {
+                title: "WarpBro".into(),
+                initial_scene: Some(bulb),
+                gallery: Some(Scene::fractal_gallery().map_err(anyhow::Error::msg)?),
+                engine_factory: Some(Arc::new(engine::new_gpu)),
+                material_swatch_base: Some(Arc::new(move || swatch.clone())),
+                gpu_init_label: "Initializing GPU (CUDA / WGPU)…".into(),
+                modules: vec![Arc::new(engine::WarpBroFractalModule)],
+            })
+        }
     }
 }
 

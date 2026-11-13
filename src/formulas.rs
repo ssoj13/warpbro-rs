@@ -33,7 +33,7 @@ pub use fractal_core::params::{
 // Declarative Metadata Types
 // =============================================================================
 
-pub use soluwell_studio::world::Slider;
+pub use sl_studio::world::Slider;
 
 /// A linear slider span, for the [`FORMULAS`] table.
 const fn lin(min: f64, max: f64) -> Option<Slider> {

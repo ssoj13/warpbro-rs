@@ -3,15 +3,15 @@
 ## Unreleased - 2026-11-08
 
 - **Ecosystem Upgrade (`render-rs@23c01af`, `fractal-rs@21c3f4e`, `egui-widgets-rs@1a621308`)**:
-  - Enabled `ThinFilmEnergy::Conserving` by default for non-OFX scenes across both `fractal-kernels` (CUDA) and `soluwell-studio-render` (WGPU), backed by the 69 curated `standard_surface_bsdf::presets` SSOT and `pt_integrator::studio_abi` / `render_env::studio`.
-  - Enabled GPU-native OIDN `GpuDenoiser` directly on `WgpuTarget` tiled accumulation/guide planes via `soluwell-studio`, retaining `HostDenoiser` fallback for CUDA targets, plus persistent `gpu-info` (`bb476cdc`) pipeline caching (`gpu_info::create_compute_pipeline`).
+  - Enabled `ThinFilmEnergy::Conserving` by default for non-OFX scenes across both `fractal-kernels` (CUDA) and `sl-studio-render` (WGPU), backed by the 69 curated `standard_surface_bsdf::presets` SSOT and `pt_integrator::studio_abi` / `render_env::studio`.
+  - Enabled GPU-native OIDN `GpuDenoiser` directly on `WgpuTarget` tiled accumulation/guide planes via `sl-studio`, retaining `HostDenoiser` fallback for CUDA targets, plus persistent `gpu-info` (`bb476cdc`) pipeline caching (`gpu_info::create_compute_pipeline`).
   - Updated `parity_tests::pixel_beam_start_fixes_recorded_mobius_surface_skip` sample index for the paired 8-D Bayer-shuffled Sobol sequence in `standard_surface_bsdf::sampling::sobol`.
 
 ## 2026-10-28
 
-- **Migration onto `soluwell-studio` (`egui-widgets-rs`)**: extracted shared studio UI, dock panels, Outliner, Timeline, Attribute Editor, Curve Editor, Playa `EventBus` dispatch, loopback REST API (`app-control`), `WorldDocument` graph/undo, `RenderService`, `PreparationCache`, OCIO display pipeline, OIDN denoiser, `PreviewController`, `ThumbnailCache`, and `ExportController` into `egui-widgets-rs/crates/soluwell/studio`. `warpbro-rs` registers `"Fractal"` (`src/fractal_node.rs`, `FractalNodeSpec`), `WarpBroComputeEngine` (`src/engine.rs`, dual CUDA `fractal-kernels` + 28-family WGPU `src/formulas.wgsl`), and built-in templates/gallery (`src/templates.rs`, `src/presets.rs`). Removed 45 duplicated files and `crates/app-control` from `warpbro-rs`.
+- **Migration onto `sl-studio` (`egui-widgets-rs`)**: extracted shared studio UI, dock panels, Outliner, Timeline, Attribute Editor, Curve Editor, Playa `EventBus` dispatch, loopback REST API (`app-control`), `WorldDocument` graph/undo, `RenderService`, `PreparationCache`, OCIO display pipeline, OIDN denoiser, `PreviewController`, `ThumbnailCache`, and `ExportController` into `egui-widgets-rs/crates/soluwell/studio`. `warpbro-rs` registers `"Fractal"` (`src/fractal_node.rs`, `FractalNodeSpec`), `WarpBroComputeEngine` (`src/engine.rs`, dual CUDA `fractal-kernels` + 28-family WGPU `src/formulas.wgsl`), and built-in templates/gallery (`src/templates.rs`, `src/presets.rs`). Removed 45 duplicated files and `crates/app-control` from `warpbro-rs`.
 - **Inline Compute Backend Selector (`Auto / CUDA / WGPU`)**: added inline `Backend` selector on `RenderSettings` binding rows (`Moving`, `Still`, `Manual`, `Output`) in `Settings -> Render & Viewport`, viewport toolbar profile menu, and `Render / Encode`, backed by `/render/backend` on the `RenderSettings` node via `WorldCommand::SetAttribute` with single-step Undo. Added `PtComputeBackend` selector to `render-egui`.
-- **OIDN `WorkContext` & Toolchain Sync**: updated `soluwell-studio-core` OIDN processor to `pt-denoise-oidn` `HostDenoiser::new(ctx, &work)` (`gpu_info::WorkContext`), synced `CUDA_OXIDE_REV` (`9370f8c91eba499a880a5769ecd11f39fa65ffbb`), `render-rs`, `egui-widgets-rs`, and `ffmpeg-rs` OxideAV git dependencies.
+- **OIDN `WorkContext` & Toolchain Sync**: updated `sl-studio-core` OIDN processor to `pt-denoise-oidn` `HostDenoiser::new(ctx, &work)` (`gpu_info::WorkContext`), synced `CUDA_OXIDE_REV` (`9370f8c91eba499a880a5769ecd11f39fa65ffbb`), `render-rs`, `egui-widgets-rs`, and `ffmpeg-rs` OxideAV git dependencies.
 - **All 28 families on CUDA & WGPU (`fractal-rs` `5a21813e`)**: 20 extended DE families (`8..27`) ported to CUDA with compile-time family specialization (234 kernel entries) and conservative ray-beam bounding-sphere entry (`cone_start`).
 
 ## 2026-10-25
@@ -107,7 +107,7 @@ the 2026-10-25 verification records.
   `gpu_info::create_compute_pipeline` (persistent cache, Vulkan). `WarpBro --warmup` replaces
   `--warmup-cuda` (`bootstrap.py --skip-warmup`): CUDA module plus WGPU device, module and post
   pipelines. `--world-bench --backend auto|cuda|wgpu`.
-- **Window on `soluwell-window`:** `window.rs` is an adapter onto the shared egui-widgets-rs host
+- **Window on `sl-window`:** `window.rs` is an adapter onto the shared egui-widgets-rs host
   (private present queue, `max_fps` = GUI fps, HDR window shots through `App::presented`, locked
   cursor falls back to confined).
 - **Formula registry SSOT:** `FORMULAS` drives presets (`Scene::preset(Formula)`), masks

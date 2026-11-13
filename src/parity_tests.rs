@@ -10,16 +10,16 @@
 //! hit a different fold or miss. The tolerance below is per pixel, plus a small share of pixels
 //! allowed beyond it; the test reports every case's largest errors either way.
 
-use soluwell_studio::render::{Batch, Gpu, Target};
-use soluwell_studio::render_prep::{Plane, WorldUpload, padded_len};
-use soluwell_studio::render_profiles::{Backend, DirectRender, DirectShading};
-use soluwell_studio::scene::{
+use sl_studio::render::{Batch, Gpu, Target};
+use sl_studio::render_prep::{Plane, WorldUpload, padded_len};
+use sl_studio::render_profiles::{Backend, DirectRender, DirectShading};
+use sl_studio::scene::{
     ArrayAxis, ArrayKind, ColorSource, Coloring, Facing, Mask, MaskArray, MaskInstance, MaskShape,
     Material, MaterialModel, Scene,
 };
 
 use crate::engine::{WarpBroGpuExt, init_warpbro, new_gpu};
-use crate::fractal_node::{Formula, FractalSceneExt};
+use crate::fractal_node::{Formula, FractalTestScene};
 
 const WIDTH: usize = 96;
 const HEIGHT: usize = 64;

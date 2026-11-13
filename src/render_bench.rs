@@ -13,9 +13,9 @@ use std::time::Instant;
 use anyhow::{Context, ensure};
 use serde::Serialize;
 use serde_json::json;
-use soluwell_studio::render::{Batch, Plane, Target, validate_size};
-use soluwell_studio::render_profiles::{Backend, DirectRender, DirectShading};
-use soluwell_studio::scene::{Material, MaterialModel, Scene};
+use sl_studio::render::{Batch, Plane, Target, validate_size};
+use sl_studio::render_profiles::{Backend, DirectRender, DirectShading};
+use sl_studio::scene::{Material, MaterialModel, Scene};
 
 use crate::engine::{WarpBroGpuExt, init_warpbro, new_gpu};
 use crate::fractal_node::{Formula, FractalSceneExt};
@@ -150,10 +150,8 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     std::fs::create_dir_all(directory)?;
     let base = Path::new(directory);
     let mut gpu = new_gpu()?;
-    println!(
-        "World benchmark GPU: {} · {width}x{height} · {samples} spp · seed {seed} · batch {batch}",
-        gpu.name
-    );
+    // The renderer is reported per case (`renderer`): each scene resolves its own backend.
+    println!("World benchmark · {width}x{height} · {samples} spp · seed {seed} · batch {batch}");
     // Hoist warmup/measured targets and readback scratch outside the case loop so repeated
     // benchmarks reuse GPU film allocations and warm host pages across cases.
     let mut warmup = Target::new(width, height);
@@ -266,17 +264,17 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let raw_path = base.join(&raw_name);
         write_raw_rgb(&raw_path, &pixels)?;
         let shot =
-            soluwell_studio::render_service::Frame::snapshot(&target, 0, false, false, 100.0);
+            sl_studio::render_service::Frame::snapshot(&target, 0, false, false, 100.0);
         let encoding =
-            soluwell_studio::render_service::PngEncoding::displayed(shot.light_kind.hdr());
+            sl_studio::render_service::PngEncoding::displayed(shot.light_kind.hdr());
         shot.save_png(
-            &base.join(soluwell_studio::fs_name::frame_file(
+            &base.join(sl_studio::fs_name::frame_file(
                 &stem,
                 None,
                 encoding.suffix(),
             )),
             encoding,
-            soluwell_studio::color::BT2408_SDR_WHITE_NITS,
+            sl_studio::color::BT2408_SDR_WHITE_NITS,
             true,
         )
         .map_err(anyhow::Error::msg)?;
@@ -285,10 +283,11 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let mean_spp = pixel_samples / pixel_count;
         let ms_per_sample = elapsed * 1000.0 / mean_spp.max(1.0e-12);
         let msamples_per_s = pixel_samples / safe_elapsed / 1.0e6;
+        let (used_backend, device) = renderer(&target)?;
         let metadata = json!({
             "schema": 1,
             "case": name, "preset": template.name, "frame": frame,
-            "gpu": &gpu.name, "width": width, "height": height, "samples": samples,
+            "backend": used_backend.label(), "gpu": device, "width": width, "height": height, "samples": samples,
             "seed": seed, "batch": batch, "world_render": true,
             "adaptive_threshold": adaptive_threshold, "samples_taken": target.samples,
             "pixel_samples_taken": pixel_samples, "mean_spp": mean_spp,
@@ -311,16 +310,27 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         });
         write_json(&base.join(format!("{stem}.json")), &metadata)?;
         println!(
-            "{name}: {elapsed:.3}s · {ms_per_sample:.2} ms/spp · {msamples_per_s:.2} Msamples/s"
+            "{name} ({} · {device}): {elapsed:.3}s · {ms_per_sample:.2} ms/spp · {msamples_per_s:.2} Msamples/s",
+            used_backend.label()
         );
     }
     Ok(())
 }
 
+/// The backend and device that rendered `target` (`Target::device`). Read from the target,
+/// not the engine: the scene picks the backend, so one engine renders on several devices.
+pub fn renderer(target: &Target) -> anyhow::Result<(Backend, &str)> {
+    match (&target.film, target.device.as_deref()) {
+        (Some((backend, _)), Some(device)) => Ok((*backend, device)),
+        _ => anyhow::bail!("The target was never rendered: no backend or device to report"),
+    }
+}
+
 /// Build a controlled standalone, homogeneous editor world or genuinely mixed-family world.
 /// Family benchmarks share geometry and materials across backends; only the engine differs.
-fn family_scene(code: u32, scope: &str, shade: &str, samples: u32) -> Scene {
-    let mut scene = Scene::preset_fractal(Formula::PRESETS[code as usize]);
+fn family_scene(code: u32, scope: &str, shade: &str, samples: u32) -> anyhow::Result<Scene> {
+    let mut scene =
+        Scene::fractal_preset(Formula::PRESETS[code as usize]).map_err(anyhow::Error::msg)?;
     scene.render.denoise.enabled = false;
     scene.render.adaptive.enabled = false;
     scene.render.max_bounces = 2;
@@ -340,7 +350,7 @@ fn family_scene(code: u32, scope: &str, shade: &str, samples: u32) -> Scene {
         });
     }
     if scope != "single" {
-        let radius = scene.formula().framing_radius();
+        let radius = scene.framing_radius();
         let mut first = scene.clone();
         first.direct = None;
         let mut matrix = glam::Mat4::from_scale(glam::Vec3::new(0.65, 0.7, 0.6));
@@ -352,13 +362,15 @@ fn family_scene(code: u32, scope: &str, shade: &str, samples: u32) -> Scene {
         second.object_world = Some(matrix.to_cols_array_2d());
         if scope == "mixed" {
             let partner = if code == 0 { 1 } else { 0 };
-            second.set_formula(Formula::PRESETS[partner]);
+            second
+                .edit_fractal(|f| f.formula = Formula::PRESETS[partner])
+                .map_err(anyhow::Error::msg)?;
         }
         scene.world_render = true;
         scene.objects = vec![first, second];
         scene.lights = vec![scene.sun];
     }
-    scene
+    Ok(scene)
 }
 
 fn traced_pixel_samples(tiled: &[[f32; 4]], width: usize, height: usize) -> f64 {
@@ -526,7 +538,7 @@ fn run_families(args: &[String]) -> anyhow::Result<()> {
     for code in families {
         for &scope in &scopes {
             for &shade in &shades {
-                let scene = family_scene(code, scope, shade, samples);
+                let scene = family_scene(code, scope, shade, samples)?;
                 let stem = format!("family-{code:02}-{scope}-{shade}");
                 backend_scenes.clear();
                 for &backend in &backends {
@@ -658,6 +670,7 @@ fn run_families(args: &[String]) -> anyhow::Result<()> {
                             "median_ms_per_sample": median * 1000.0 / f64::from(samples),
                             "median_million_samples_per_second":
                                 (width * height) as f64 * f64::from(samples) / safe_median / 1.0e6,
+                            "gpu": targets[index].device.as_deref(),
                             "raw_file": artifacts[index],
                             "cuda_resources": cuda_resources[index],
                         })
@@ -684,10 +697,10 @@ fn run_families(args: &[String]) -> anyhow::Result<()> {
                     serde_json::Value::Null
                 };
                 let report = json!({
-                    "schema": 1, "case": stem, "family": code, "formula": scene.formula().name(),
+                    "schema": 1, "case": stem, "family": code, "formula": scene.summary_label(),
                     "scope": scope, "shade": shade, "width": width, "height": height,
                     "samples": samples, "seed": seed, "batch": batch, "repeats": repeats,
-                    "gpu": gpu.name, "round_backend_order": order,
+                    "round_backend_order": order,
                     "workload_warmup_seconds": warmup_seconds,
                     "workload_warmup_samples_per_backend": warmup_samples,
                     "timing_scope": "Synchronized Gpu::advance including final display; excludes JIT, warmup, allocation, preparation, raw readback and artifact I/O. Not isolated kernel-event timing.",

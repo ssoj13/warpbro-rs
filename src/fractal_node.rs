@@ -1,34 +1,36 @@
 //! First-class `"Fractal"` scene node specification (`FractalNodeSpec`), 28-family
-//! `Formula` definitions, typed `FractalSceneExt` accessors over `Scene::custom`,
-//! and kernel parameter packing (`pack_object`).
+//! `Formula` definitions, the parsed fractal model (`FractalParams`, built once per scene by
+//! `FractalNodeSpec::prepare` and read through `FractalSceneExt`), and kernel parameter
+//! packing (`FractalParams::pack`).
 //!
-//! `soluwell-studio` has zero built-in knowledge of fractals or formulas. By registering
-//! [`FractalNodeSpec`] via [`soluwell_studio::node_spec::register_node_type`], WarpBro turns
-//! `"Fractal"` into a first-class renderable scene node in `soluwell-studio`. When a
+//! `sl-studio` has zero built-in knowledge of fractals or formulas. By registering
+//! [`FractalNodeSpec`] via [`sl_studio::node_spec::register_node_type`], WarpBro turns
+//! `"Fractal"` into a first-class renderable scene node in `sl-studio`. When a
 //! `"Fractal"` node is present and visible in the graph, it is evaluated into `scene.objects`
-//! and rendered; when absent or hidden, `soluwell-studio` renders the 3D studio environment.
+//! and rendered; when absent or hidden, `sl-studio` renders the 3D studio environment.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use fractal_core::params::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use soluwell_studio::node_spec::NodeTypeSpec;
-use soluwell_studio::palette::PaletteScheme;
-use soluwell_studio::render_profiles::Backend;
-use soluwell_studio::scene::{
+use sl_studio::custom_branches::{BranchMap, CustomBranches, PreparedNode};
+use sl_studio::node_spec::NodeTypeSpec;
+use sl_studio::palette::PaletteScheme;
+use sl_studio::render_profiles::Backend;
+use sl_studio::scene::{
     Adaptive, Camera, Coloring, DEFAULT_GLASS_PROBES, DEFAULT_MAX_STEPS, Material, MaterialModel,
     ObjectTransform, Render, Scene, Sky, Sun, length,
 };
-use soluwell_studio::world::{AttrValue, Attrs, Slider, WorldAttribute};
+use sl_studio::world::{AttrValue, Attrs, Slider, WorldAttribute};
 
 use crate::formulas::*;
 
-/// The `WorldKind` of a WarpBro `"Fractal"` node in `soluwell-studio`.
+/// The `WorldKind` of a WarpBro `"Fractal"` node in `sl-studio`.
 #[cfg(test)]
-pub const FRACTAL_KIND: soluwell_studio::world::WorldKind =
-    soluwell_studio::world::WorldKind::Custom("Fractal");
+pub const FRACTAL_KIND: sl_studio::world::WorldKind =
+    sl_studio::world::WorldKind::Custom("Fractal");
 
 // =============================================================================
 // Formulas
@@ -414,25 +416,106 @@ impl Formula {
 }
 
 // =============================================================================
-// Typed Scene Extension (`FractalSceneExt`)
+// Parsed fractal (`FractalParams`) and the typed Scene extension (`FractalSceneExt`)
 // =============================================================================
 
+/// A fractal node's custom branches parsed into its typed model: what
+/// [`FractalNodeSpec::prepare`] builds once whenever a `Scene` is built from the branches, and
+/// what every render-side question (framing, bounds, family, packing) is answered from
+/// (`sl_studio::custom_branches`). Before, each of those calls re-parsed the formula JSON, and
+/// a malformed value could only be logged and replaced by a default; now a scene with one
+/// cannot be built. Fields are the branches of the same names.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FractalParams {
+    pub formula: Formula,
+    pub julia: [f32; 3],
+    pub julia_mix: f32,
+    pub orbit_offset: [f32; 3],
+    pub inversion_strength: f32,
+    pub inversion_center: [f32; 3],
+    pub inversion_radius: f32,
+    pub trap_point: [f32; 3],
+    pub trap_axis: u32,
+    pub trap_scale: f32,
+}
+
+impl FractalParams {
+    /// `formula` with every other branch at its default (no Julia mix, inversion or offset).
+    pub fn new(formula: Formula) -> Self {
+        Self {
+            formula,
+            julia: [0.0; 3],
+            julia_mix: 0.0,
+            orbit_offset: [0.0; 3],
+            inversion_strength: 0.0,
+            inversion_center: [0.0; 3],
+            inversion_radius: 1.0,
+            trap_point: [0.0; 3],
+            trap_axis: 1,
+            trap_scale: 1.5,
+        }
+    }
+
+    /// Read every branch with the strict readers below, plus the two ranges packing relies on
+    /// (`trap_axis` indexes an axis, `inversion_radius` divides).
+    fn parse(branches: &BranchMap) -> Result<Self, String> {
+        let get = |key: &str| branches.get(key);
+        let params = Self {
+            formula: custom_formula(get("formula"))?,
+            julia: custom_vec3("julia", get("julia"))?,
+            julia_mix: custom_f32("julia_mix", get("julia_mix"))?,
+            orbit_offset: custom_vec3("orbit_offset", get("orbit_offset"))?,
+            inversion_strength: custom_f32("inversion_strength", get("inversion_strength"))?,
+            inversion_center: custom_vec3("inversion_center", get("inversion_center"))?,
+            inversion_radius: custom_f32("inversion_radius", get("inversion_radius"))?,
+            trap_point: custom_vec3("trap_point", get("trap_point"))?,
+            trap_axis: custom_u32("trap_axis", get("trap_axis"))?,
+            trap_scale: custom_f32("trap_scale", get("trap_scale"))?,
+        };
+        if params.inversion_radius <= 0.0 {
+            return Err("/inversion_radius must be positive".into());
+        }
+        if params.trap_axis > 2 {
+            return Err("/trap_axis must be 0, 1 or 2".into());
+        }
+        Ok(params)
+    }
+
+    /// The branches these parameters are stored as (`Scene::custom`, a node's template).
+    pub fn branches(&self) -> BranchMap {
+        BranchMap::from([
+            // Plain data: serializing it cannot fail (a non-finite value becomes `null`, which
+            // `parse` then rejects).
+            (
+                "formula".into(),
+                serde_json::to_value(self.formula).expect("Formula serializes to JSON"),
+            ),
+            ("julia".into(), json!(self.julia)),
+            ("julia_mix".into(), json!(self.julia_mix)),
+            ("orbit_offset".into(), json!(self.orbit_offset)),
+            ("inversion_strength".into(), json!(self.inversion_strength)),
+            ("inversion_center".into(), json!(self.inversion_center)),
+            ("inversion_radius".into(), json!(self.inversion_radius)),
+            ("trap_point".into(), json!(self.trap_point)),
+            ("trap_axis".into(), json!(self.trap_axis)),
+            ("trap_scale".into(), json!(self.trap_scale)),
+        ])
+    }
+}
+
 pub fn default_fractal_custom_branches(formula: Formula) -> Map<String, Value> {
-    let mut map = Map::new();
-    map.insert(
-        "formula".into(),
-        serde_json::to_value(formula).expect("Formula serializes to JSON"),
-    );
-    map.insert("julia".into(), json!([0.0, 0.0, 0.0]));
-    map.insert("julia_mix".into(), json!(0.0));
-    map.insert("orbit_offset".into(), json!([0.0, 0.0, 0.0]));
-    map.insert("inversion_strength".into(), json!(0.0));
-    map.insert("inversion_center".into(), json!([0.0, 0.0, 0.0]));
-    map.insert("inversion_radius".into(), json!(1.0));
-    map.insert("trap_point".into(), json!([0.0, 0.0, 0.0]));
-    map.insert("trap_axis".into(), json!(1u32));
-    map.insert("trap_scale".into(), json!(1.5));
-    map
+    FractalParams::new(formula).branches().into_iter().collect()
+}
+
+/// The one `FractalNodeSpec` instance branches are built for (`CustomBranches::for_spec`).
+fn fractal_spec() -> Arc<dyn NodeTypeSpec> {
+    static SPEC: LazyLock<Arc<dyn NodeTypeSpec>> = LazyLock::new(|| Arc::new(FractalNodeSpec));
+    SPEC.clone()
+}
+
+/// `params` as a scene's custom branches, parsed back by the spec like any other build.
+fn fractal_branches(params: &FractalParams) -> Result<CustomBranches, String> {
+    CustomBranches::for_spec(fractal_spec(), params.branches())
 }
 
 fn base_fractal_scene(
@@ -442,8 +525,8 @@ fn base_fractal_scene(
     iterations: f32,
     hit_epsilon: f32,
     palette: PaletteScheme,
-) -> Scene {
-    Scene {
+) -> Result<Scene, String> {
+    Ok(Scene {
         world_render: false,
         camera_reference: None,
         objects: Vec::new(),
@@ -458,7 +541,7 @@ fn base_fractal_scene(
         animation: Default::default(),
         environment: Default::default(),
         name: name.into(),
-        colour: soluwell_studio::color::default_selection(),
+        colour: sl_studio::color::default_selection(),
         object: ObjectTransform {
             offset: [0.0; 3],
             rotation_degrees: [0.0; 3],
@@ -470,9 +553,7 @@ fn base_fractal_scene(
         material: Material::default(),
         palette,
         coloring: Coloring::Radius,
-        custom: default_fractal_custom_branches(formula)
-            .into_iter()
-            .collect(),
+        custom: fractal_branches(&FractalParams::new(formula))?,
         render: Render {
             iterations,
             max_steps: DEFAULT_MAX_STEPS,
@@ -487,56 +568,110 @@ fn base_fractal_scene(
             adaptive: Adaptive::default(),
             backend: Backend::default(),
         },
+    })
+}
+
+/// Typed access to a scene's fractal ([`FractalParams`], parsed once by
+/// `FractalNodeSpec::prepare`). Building or editing one goes through the same parse as a
+/// loaded document, so a preset or edit that breaks an invariant is an error, never a scene.
+pub trait FractalSceneExt {
+    fn fractal_preset(f: Formula) -> Result<Scene, String>;
+    fn classic_fractal_gallery() -> Result<Vec<Scene>, String>;
+    fn fractal_gallery() -> Result<Vec<Scene>, String>;
+
+    /// This scene's fractal; `None` for a scene without one (a studio scene).
+    fn fractal(&self) -> Option<&FractalParams>;
+
+    /// Change this scene's fractal. The edited parameters are stored as branches and parsed
+    /// again; on `Err` the scene is unchanged.
+    fn edit_fractal(&mut self, edit: impl FnOnce(&mut FractalParams)) -> Result<(), String>;
+}
+
+/// Test shorthands over [`FractalSceneExt`]: a test may panic on a scene without a fractal.
+#[cfg(test)]
+pub trait FractalTestScene {
+    fn preset_fractal(f: Formula) -> Scene;
+    fn params(&self) -> FractalParams;
+    fn edit(&mut self, edit: impl FnOnce(&mut FractalParams));
+
+    fn formula(&self) -> Formula {
+        self.params().formula
+    }
+    fn julia_mix(&self) -> f32 {
+        self.params().julia_mix
+    }
+    fn orbit_offset(&self) -> [f32; 3] {
+        self.params().orbit_offset
+    }
+    fn inversion_strength(&self) -> f32 {
+        self.params().inversion_strength
+    }
+    fn inversion_center(&self) -> [f32; 3] {
+        self.params().inversion_center
+    }
+    fn inversion_radius(&self) -> f32 {
+        self.params().inversion_radius
+    }
+    fn trap_point(&self) -> [f32; 3] {
+        self.params().trap_point
+    }
+    fn trap_axis(&self) -> u32 {
+        self.params().trap_axis
+    }
+    fn trap_scale(&self) -> f32 {
+        self.params().trap_scale
+    }
+    fn set_formula(&mut self, v: Formula) {
+        self.edit(|f| f.formula = v);
+    }
+    fn modify_formula(&mut self, edit: impl FnOnce(&mut Formula)) {
+        self.edit(|f| edit(&mut f.formula));
+    }
+    fn set_julia(&mut self, v: [f32; 3]) {
+        self.edit(|f| f.julia = v);
+    }
+    fn set_julia_mix(&mut self, v: f32) {
+        self.edit(|f| f.julia_mix = v);
+    }
+    fn set_orbit_offset(&mut self, v: [f32; 3]) {
+        self.edit(|f| f.orbit_offset = v);
+    }
+    fn set_inversion_strength(&mut self, v: f32) {
+        self.edit(|f| f.inversion_strength = v);
+    }
+    fn set_inversion_center(&mut self, v: [f32; 3]) {
+        self.edit(|f| f.inversion_center = v);
+    }
+    fn set_inversion_radius(&mut self, v: f32) {
+        self.edit(|f| f.inversion_radius = v);
+    }
+    fn set_trap_point(&mut self, v: [f32; 3]) {
+        self.edit(|f| f.trap_point = v);
+    }
+    fn set_trap_axis(&mut self, v: u32) {
+        self.edit(|f| f.trap_axis = v);
+    }
+    fn set_trap_scale(&mut self, v: f32) {
+        self.edit(|f| f.trap_scale = v);
     }
 }
 
-pub trait FractalSceneExt {
-    fn preset_fractal(f: Formula) -> Scene;
-    fn classic_fractal_gallery() -> Vec<Scene>;
-    fn fractal_gallery() -> Vec<Scene>;
-
-    fn formula(&self) -> Formula;
-    fn set_formula(&mut self, f: Formula);
-    fn modify_formula(&mut self, edit: impl FnOnce(&mut Formula));
-
-    fn julia(&self) -> [f32; 3];
-    fn set_julia(&mut self, v: [f32; 3]);
-
-    fn julia_mix(&self) -> f32;
-    fn set_julia_mix(&mut self, v: f32);
-
-    fn orbit_offset(&self) -> [f32; 3];
-    #[cfg(test)]
-    fn set_orbit_offset(&mut self, v: [f32; 3]);
-
-    fn inversion_strength(&self) -> f32;
-    #[cfg(test)]
-    fn set_inversion_strength(&mut self, v: f32);
-
-    fn inversion_center(&self) -> [f32; 3];
-    #[cfg(test)]
-    fn set_inversion_center(&mut self, v: [f32; 3]);
-
-    fn inversion_radius(&self) -> f32;
-    #[cfg(test)]
-    fn set_inversion_radius(&mut self, v: f32);
-
-    fn trap_point(&self) -> [f32; 3];
-    #[cfg(test)]
-    fn set_trap_point(&mut self, v: [f32; 3]);
-
-    fn trap_axis(&self) -> u32;
-    #[cfg(test)]
-    fn set_trap_axis(&mut self, v: u32);
-
-    fn trap_scale(&self) -> f32;
-    fn set_trap_scale(&mut self, v: f32);
+#[cfg(test)]
+impl FractalTestScene for Scene {
+    fn preset_fractal(f: Formula) -> Scene {
+        Scene::fractal_preset(f).expect("preset fractal")
+    }
+    fn params(&self) -> FractalParams {
+        *self.fractal().expect("a fractal scene")
+    }
+    fn edit(&mut self, edit: impl FnOnce(&mut FractalParams)) {
+        self.edit_fractal(edit).expect("valid fractal edit");
+    }
 }
 
 // Strict readers of the fractal's custom branches: a missing key or a value of the wrong type
-// is an error, never a default (no legacy-data compatibility). `FractalNodeSpec::validate_node`
-// runs them on every document load, edit and snapshot, so the infallible accessors below only
-// ever meet values they accept.
+// is an error, never a default (no legacy-data compatibility). `FractalParams::parse` runs
+// them whenever a scene is built from the branches (document load, edit, snapshot).
 
 fn custom_f32(key: &str, value: Option<&Value>) -> Result<f32, String> {
     let v = value.ok_or_else(|| format!("/{key} is missing"))?;
@@ -575,35 +710,6 @@ fn custom_formula(value: Option<&Value>) -> Result<Formula, String> {
     Formula::deserialize(v).map_err(|e| format!("Invalid /formula: {e}"))
 }
 
-/// Every custom branch of a fractal, checked with the readers the render path uses, plus the
-/// two ranges the packing relies on (`trap_axis` indexes an axis, `inversion_radius` divides).
-fn validate_fractal_branches<'v>(get: impl Fn(&str) -> Option<&'v Value>) -> Result<(), String> {
-    custom_formula(get("formula"))?;
-    for key in ["julia", "orbit_offset", "inversion_center", "trap_point"] {
-        custom_vec3(key, get(key))?;
-    }
-    for key in ["julia_mix", "inversion_strength", "trap_scale"] {
-        custom_f32(key, get(key))?;
-    }
-    if custom_f32("inversion_radius", get("inversion_radius"))? <= 0.0 {
-        return Err("/inversion_radius must be positive".into());
-    }
-    if custom_u32("trap_axis", get("trap_axis"))? > 2 {
-        return Err("/trap_axis must be 0, 1 or 2".into());
-    }
-    Ok(())
-}
-
-/// The accessors read branches [`validate_fractal_branches`] accepted. An error here means a
-/// scene that bypassed it (built in code without the custom branches): it is logged as the
-/// bug it is and the type's zero is used, since the render-side trait methods cannot fail.
-fn checked<T: Default>(read: Result<T, String>) -> T {
-    read.unwrap_or_else(|e| {
-        log::error!("Unvalidated fractal scene: {e}");
-        T::default()
-    })
-}
-
 /// Formula leaves whose model type is an integer (`u32` counts such as
 /// `/formula/GyroidTpms/octaves`). Read from the presets' JSON, where serde writes an integer
 /// field as an integer number and an `f32` as a float, so the model types stay the one source.
@@ -636,7 +742,7 @@ fn integer_formula_leaf(path: &str) -> bool {
 }
 
 impl FractalSceneExt for Scene {
-    fn preset_fractal(f: Formula) -> Scene {
+    fn fractal_preset(f: Formula) -> Result<Scene, String> {
         use PaletteScheme as P;
         let code = f.code();
         let name = f.name();
@@ -669,7 +775,7 @@ impl FractalSceneExt for Scene {
             FAMILY_CRYSTAL_GEODE => base_fractal_scene(name, f, 38.0, 8.0, 0.001, P::Amethyst),
             FAMILY_ASTROLABE => base_fractal_scene(name, f, 38.0, 8.0, 0.001, P::Copper),
             _ => base_fractal_scene(name, f, 38.0, 12.0, 0.001, P::Aurora),
-        };
+        }?;
         if code >= FAMILY_AMAZING_SURFACE {
             s.coloring = Coloring::TrapOrigin;
         }
@@ -704,103 +810,107 @@ impl FractalSceneExt for Scene {
         s.camera.yaw_degrees = 35.0;
         s.camera.pitch_degrees = 20.0;
         s.camera.distance = 3.1;
-        s
+        Ok(s)
     }
 
-    fn classic_fractal_gallery() -> Vec<Scene> {
+    fn classic_fractal_gallery() -> Result<Vec<Scene>, String> {
         use PaletteScheme as P;
-        let mut v: Vec<Scene> = Formula::PRESETS[..8]
+        let mut v = Formula::PRESETS[..8]
             .iter()
-            .map(|f| Self::preset_fractal(*f))
-            .collect();
+            .map(|f| Self::fractal_preset(*f))
+            .collect::<Result<Vec<_>, _>>()?;
 
-        let mut s = Self::preset_fractal(Formula::Mandelbulb(Bulb::PRESET));
+        let mut s = Self::fractal_preset(Formula::Mandelbulb(Bulb::PRESET))?;
         s.name = "Bulb · power 3".into();
-        s.modify_formula(|f| {
-            if let Formula::Mandelbulb(b) = f {
+        s.edit_fractal(|f| {
+            if let Formula::Mandelbulb(b) = &mut f.formula {
                 b.power = 3.0;
             }
-        });
+        })?;
         s.palette = P::Sunset;
         v.push(s);
 
-        let mut s = Self::preset_fractal(Formula::Mandelbulb(Bulb::PRESET));
+        let mut s = Self::fractal_preset(Formula::Mandelbulb(Bulb::PRESET))?;
         s.name = "Bulb · power 12, gold".into();
-        s.modify_formula(|f| {
-            if let Formula::Mandelbulb(b) = f {
+        s.edit_fractal(|f| {
+            if let Formula::Mandelbulb(b) = &mut f.formula {
                 b.power = 12.0;
             }
-        });
+        })?;
         s.palette = P::Copper;
         s.material.metalness = 1.0;
         s.material.specular_roughness = 0.25;
         v.push(s);
 
-        let mut s = Self::preset_fractal(Formula::Mandelbulb(Bulb::PRESET));
+        let mut s = Self::fractal_preset(Formula::Mandelbulb(Bulb::PRESET))?;
         s.name = "Bulb · Julia".into();
-        s.set_julia([0.35, 0.35, -0.4]);
-        s.set_julia_mix(1.0);
+        s.edit_fractal(|f| {
+            f.julia = [0.35, 0.35, -0.4];
+            f.julia_mix = 1.0;
+        })?;
         s.camera.distance = 3.4;
         s.palette = P::Aurora;
         s.coloring = Coloring::TrapOrigin;
         v.push(s);
 
-        let mut s = Self::preset_fractal(Formula::Mandelbulb(Bulb::PRESET));
+        let mut s = Self::fractal_preset(Formula::Mandelbulb(Bulb::PRESET))?;
         s.name = "Bulb · twisted".into();
-        s.modify_formula(|f| {
-            if let Formula::Mandelbulb(b) = f {
+        s.edit_fractal(|f| {
+            if let Formula::Mandelbulb(b) = &mut f.formula {
                 b.angle_phase_degrees = [40.0, 0.0];
                 b.rotation_degrees = [0.0, 25.0, 0.0];
             }
-        });
+        })?;
         s.palette = P::Neon;
         v.push(s);
 
-        let mut s = Self::preset_fractal(Formula::Mandelbox(MandelBox::PRESET));
+        let mut s = Self::fractal_preset(Formula::Mandelbox(MandelBox::PRESET))?;
         s.name = "Mandelbox · scale −1.5".into();
-        s.modify_formula(|f| {
-            if let Formula::Mandelbox(b) = f {
+        s.edit_fractal(|f| {
+            if let Formula::Mandelbox(b) = &mut f.formula {
                 b.scale = -1.5;
             }
-        });
+        })?;
         s.camera.distance = 1.6;
         s.palette = P::RoseGold;
         v.push(s);
 
-        let mut s = Self::preset_fractal(Formula::Kifs(Kifs::preset(KifsKind::Tetrahedron)));
+        let mut s = Self::fractal_preset(Formula::Kifs(Kifs::preset(KifsKind::Tetrahedron)))?;
         s.name = "Menger sponge".into();
-        s.set_formula(Formula::Kifs(Kifs::preset(KifsKind::Menger)));
+        s.edit_fractal(|f| f.formula = Formula::Kifs(Kifs::preset(KifsKind::Menger)))?;
         s.palette = P::Mono;
         s.material.model = MaterialModel::StandardSurface;
         s.material.coat = 1.0;
         v.push(s);
 
-        let mut s = Self::preset_fractal(Formula::Kifs(Kifs::preset(KifsKind::Tetrahedron)));
+        let mut s = Self::fractal_preset(Formula::Kifs(Kifs::preset(KifsKind::Tetrahedron)))?;
         s.name = "Octahedron KIFS".into();
-        s.set_formula(Formula::Kifs(Kifs {
-            rotation_degrees: [12.0, 0.0, 8.0],
-            ..Kifs::preset(KifsKind::Octahedron)
-        }));
+        s.edit_fractal(|f| {
+            f.formula = Formula::Kifs(Kifs {
+                rotation_degrees: [12.0, 0.0, 8.0],
+                ..Kifs::preset(KifsKind::Octahedron)
+            });
+        })?;
         s.palette = P::Verdant;
         v.push(s);
 
-        let mut s = Self::preset_fractal(Formula::QuaternionJulia(Quat::PRESET));
+        let mut s = Self::fractal_preset(Formula::QuaternionJulia(Quat::PRESET))?;
         s.name = "Quaternion · glass-coat".into();
-        s.modify_formula(|f| {
-            if let Formula::QuaternionJulia(q) = f {
+        s.edit_fractal(|f| {
+            if let Formula::QuaternionJulia(q) = &mut f.formula {
                 q.constant = [-0.291, -0.399, 0.339, 0.437];
             }
-        });
+        })?;
         s.material.model = MaterialModel::StandardSurface;
         s.material.coat = 1.0;
         s.material.thin_film_thickness = 450.0;
         s.palette = P::Ice;
         v.push(s);
 
-        let mut s = Self::preset_fractal(Formula::Hybrid(Hybrid::PRESET));
+        let mut s = Self::fractal_preset(Formula::Hybrid(Hybrid::PRESET))?;
         s.name = "Hybrid · bulb + KIFS".into();
-        s.modify_formula(|f| {
-            if let Formula::Hybrid(h) = f {
+        s.edit_fractal(|f| {
+            if let Formula::Hybrid(h) = &mut f.formula {
                 h.steps = [
                     HybridStep::Mandelbulb,
                     HybridStep::KifsFold,
@@ -808,136 +918,37 @@ impl FractalSceneExt for Scene {
                     HybridStep::Off,
                 ];
             }
-        });
+        })?;
         s.palette = P::Fire;
         v.push(s);
 
-        let mut s = Self::preset_fractal(Formula::PseudoKleinian(PseudoKleinian::PRESET));
+        let mut s = Self::fractal_preset(Formula::PseudoKleinian(PseudoKleinian::PRESET))?;
         s.name = "Pseudo-Kleinian · cave".into();
         s.camera.distance = 0.6;
         s.camera.fov_y_degrees = 60.0;
         s.sky.intensity = 12.0;
         v.push(s);
 
-        v
+        Ok(v)
     }
 
-    fn fractal_gallery() -> Vec<Scene> {
-        let mut v = Self::classic_fractal_gallery();
-        v.extend(
-            Formula::PRESETS[8..]
-                .iter()
-                .map(|f| Self::preset_fractal(*f)),
-        );
-        v
+    fn fractal_gallery() -> Result<Vec<Scene>, String> {
+        let mut v = Self::classic_fractal_gallery()?;
+        for f in &Formula::PRESETS[8..] {
+            v.push(Self::fractal_preset(*f)?);
+        }
+        Ok(v)
     }
 
-    fn formula(&self) -> Formula {
-        // Validated on load, edit and snapshot (`validate_fractal_branches`); see `checked`.
-        custom_formula(self.custom.get("formula")).unwrap_or_else(|e| {
-            log::error!("Unvalidated fractal scene: {e}");
-            Formula::Mandelbulb(Bulb::PRESET)
-        })
+    fn fractal(&self) -> Option<&FractalParams> {
+        self.custom.node()?.downcast()
     }
 
-    fn set_formula(&mut self, f: Formula) {
-        self.custom.insert(
-            "formula".into(),
-            serde_json::to_value(f).expect("Formula serializes to JSON"),
-        );
-    }
-
-    fn modify_formula(&mut self, edit: impl FnOnce(&mut Formula)) {
-        let mut f = self.formula();
-        edit(&mut f);
-        self.set_formula(f);
-    }
-
-    fn julia(&self) -> [f32; 3] {
-        checked(custom_vec3("julia", self.custom.get("julia")))
-    }
-
-    fn set_julia(&mut self, v: [f32; 3]) {
-        self.custom.insert("julia".into(), json!(v));
-    }
-
-    fn julia_mix(&self) -> f32 {
-        checked(custom_f32("julia_mix", self.custom.get("julia_mix")))
-    }
-
-    fn set_julia_mix(&mut self, v: f32) {
-        self.custom.insert("julia_mix".into(), json!(v));
-    }
-
-    fn orbit_offset(&self) -> [f32; 3] {
-        checked(custom_vec3("orbit_offset", self.custom.get("orbit_offset")))
-    }
-
-    #[cfg(test)]
-    fn set_orbit_offset(&mut self, v: [f32; 3]) {
-        self.custom.insert("orbit_offset".into(), json!(v));
-    }
-
-    fn inversion_strength(&self) -> f32 {
-        checked(custom_f32(
-            "inversion_strength",
-            self.custom.get("inversion_strength"),
-        ))
-    }
-
-    #[cfg(test)]
-    fn set_inversion_strength(&mut self, v: f32) {
-        self.custom.insert("inversion_strength".into(), json!(v));
-    }
-
-    fn inversion_center(&self) -> [f32; 3] {
-        checked(custom_vec3(
-            "inversion_center",
-            self.custom.get("inversion_center"),
-        ))
-    }
-
-    #[cfg(test)]
-    fn set_inversion_center(&mut self, v: [f32; 3]) {
-        self.custom.insert("inversion_center".into(), json!(v));
-    }
-
-    fn inversion_radius(&self) -> f32 {
-        checked(custom_f32(
-            "inversion_radius",
-            self.custom.get("inversion_radius"),
-        ))
-    }
-
-    #[cfg(test)]
-    fn set_inversion_radius(&mut self, v: f32) {
-        self.custom.insert("inversion_radius".into(), json!(v));
-    }
-
-    fn trap_point(&self) -> [f32; 3] {
-        checked(custom_vec3("trap_point", self.custom.get("trap_point")))
-    }
-
-    #[cfg(test)]
-    fn set_trap_point(&mut self, v: [f32; 3]) {
-        self.custom.insert("trap_point".into(), json!(v));
-    }
-
-    fn trap_axis(&self) -> u32 {
-        checked(custom_u32("trap_axis", self.custom.get("trap_axis")))
-    }
-
-    #[cfg(test)]
-    fn set_trap_axis(&mut self, v: u32) {
-        self.custom.insert("trap_axis".into(), json!(v));
-    }
-
-    fn trap_scale(&self) -> f32 {
-        checked(custom_f32("trap_scale", self.custom.get("trap_scale")))
-    }
-
-    fn set_trap_scale(&mut self, v: f32) {
-        self.custom.insert("trap_scale".into(), json!(v));
+    fn edit_fractal(&mut self, edit: impl FnOnce(&mut FractalParams)) -> Result<(), String> {
+        let mut params = *self.fractal().ok_or("The scene has no fractal")?;
+        edit(&mut params);
+        self.custom = fractal_branches(&params)?;
+        Ok(())
     }
 }
 
@@ -1026,7 +1037,7 @@ impl NodeTypeSpec for FractalNodeSpec {
     }
 
     fn icon(&self) -> &'static str {
-        soluwell_config::icons::FRACTAL
+        sl_config::icons::FRACTAL
     }
 
     fn color(&self) -> egui::Color32 {
@@ -1118,12 +1129,12 @@ impl NodeTypeSpec for FractalNodeSpec {
                 return Ok(());
             }
             "/render/denoise/mode" => {
-                soluwell_studio::denoise::Mode::deserialize(value)
+                sl_studio::denoise::Mode::deserialize(value)
                     .map_err(|e| format!("Invalid denoise mode: {e}"))?;
                 return Ok(());
             }
             "/render/denoise/quality" => {
-                soluwell_studio::denoise::Quality::deserialize(value)
+                sl_studio::denoise::Quality::deserialize(value)
                     .map_err(|e| format!("Invalid denoise quality: {e}"))?;
                 return Ok(());
             }
@@ -1151,8 +1162,8 @@ impl NodeTypeSpec for FractalNodeSpec {
         Ok(())
     }
 
-    fn validate_node(&self, evaluated: &Value) -> Result<(), String> {
-        validate_fractal_branches(|key| evaluated.get(key))
+    fn prepare(&self, branches: &BranchMap) -> Result<Arc<dyn PreparedNode>, String> {
+        Ok(Arc::new(FractalParams::parse(branches)?))
     }
 
     fn attribute_choices(&self, path: &str) -> Option<Result<Vec<Value>, String>> {
@@ -1612,7 +1623,7 @@ impl NodeTypeSpec for FractalNodeSpec {
             return;
         }
         // The trait cannot fail: a mismatch is logged (an edit that leaves the formula invalid
-        // is then rejected and rolled back by `validate_node`).
+        // is then rejected and rolled back by `prepare`).
         let Some(mut formula) = attrs.get("/formula").cloned().map(attr_json) else {
             log::warn!("Hybrid step edit without a /formula attribute; formula not synced");
             return;
@@ -1640,49 +1651,12 @@ impl NodeTypeSpec for FractalNodeSpec {
         attrs.set("/formula", to_attr(&formula));
     }
 
-    fn framing_radius(&self, scene: &Scene) -> f32 {
-        scene.formula().framing_radius()
-    }
-
-    fn bound_radius(&self, scene: &Scene) -> f32 {
-        scene.formula().bound_radius()
-    }
-
-    fn local_pick_radius(&self, scene: &Scene) -> f32 {
-        if scene.inversion_strength() != 0.0 {
-            let mut p = [0.0f32; P_COUNT];
-            p[P_BAILOUT] = 2.0;
-            pack_object_with_transform(scene, 1.0, [0.0; 3], &mut p, 0.0);
-            p[P_CLIP_RADIUS]
-        } else {
-            scene.formula().framing_radius()
-        }
-    }
-
-    fn family_code(&self, scene: &Scene) -> u32 {
-        scene.formula().code()
-    }
-
     fn family_count(&self) -> u32 {
         Formula::COUNT
     }
 
-    fn summary_label(&self, scene: &Scene) -> String {
-        scene.formula().name().to_owned()
-    }
-
-    fn pack_object(&self, scene: &Scene, p: &mut [f32], camera_dist: f32) {
-        pack_object_with_transform(
-            scene,
-            scene.object.scale,
-            scene.object.offset,
-            p,
-            camera_dist,
-        );
-    }
-
-    fn payload_kind(&self) -> soluwell_studio::NodePayloadKind {
-        soluwell_studio::NodePayloadKind::SdfField
+    fn payload_kind(&self) -> sl_studio::NodePayloadKind {
+        sl_studio::NodePayloadKind::SdfField
     }
 }
 
@@ -1747,28 +1721,94 @@ fn mandelbox_reach(b: &MandelBox) -> Option<f32> {
     Some(axis * 3.0f32.sqrt())
 }
 
-fn pack_object_with_transform(
-    scene: &Scene,
-    object_scale: f32,
-    object_offset: [f32; 3],
-    p: &mut [f32],
+/// What packing a fractal needs besides the fractal itself: its object's placement and the
+/// few scene values the fractal's parameter slots carry.
+struct Placement {
+    scale: f32,
+    offset: [f32; 3],
     camera_dist: f32,
-) {
+    camera_target: [f32; 3],
+    coloring: Coloring,
+    iterations: f32,
+}
+
+impl Placement {
+    /// A unit object at the origin: for the local clip radius (`local_pick_radius`), which
+    /// reads only `P_CLIP_RADIUS` (the camera, colouring and iterations do not enter it).
+    const LOCAL: Self = Self {
+        scale: 1.0,
+        offset: [0.0; 3],
+        camera_dist: 0.0,
+        camera_target: [0.0; 3],
+        coloring: Coloring::Radius,
+        iterations: 0.0,
+    };
+
+    fn of(scene: &Scene, camera_dist: f32) -> Self {
+        Self {
+            scale: scene.object.scale,
+            offset: scene.object.offset,
+            camera_dist,
+            camera_target: scene.camera.target,
+            coloring: scene.coloring,
+            iterations: scene.render.iterations,
+        }
+    }
+}
+
+impl PreparedNode for FractalParams {
+    fn framing_radius(&self) -> f32 {
+        self.formula.framing_radius()
+    }
+
+    fn bound_radius(&self) -> f32 {
+        self.formula.bound_radius()
+    }
+
+    fn local_pick_radius(&self) -> f32 {
+        if self.inversion_strength != 0.0 {
+            let mut p = [0.0f32; P_COUNT];
+            p[P_BAILOUT] = 2.0;
+            pack_fractal(self, &Placement::LOCAL, &mut p);
+            p[P_CLIP_RADIUS]
+        } else {
+            self.formula.framing_radius()
+        }
+    }
+
+    fn family_code(&self) -> u32 {
+        self.formula.code()
+    }
+
+    fn summary_label(&self) -> &str {
+        self.formula.name()
+    }
+
+    fn pack_object(&self, scene: &Scene, p: &mut [f32], camera_dist: f32) {
+        pack_fractal(self, &Placement::of(scene, camera_dist), p);
+    }
+}
+
+fn pack_fractal(f: &FractalParams, at: &Placement, p: &mut [f32]) {
     debug_assert!(p.len() >= P_COUNT);
     if p.len() < P_COUNT {
         return;
     }
-    let formula = scene.formula();
+    let (object_scale, object_offset, camera_dist) = (at.scale, at.offset, at.camera_dist);
+    let formula = f.formula;
     let radius = formula.framing_radius();
-    let julia = scene.julia();
-    let julia_mix = scene.julia_mix();
-    let orbit_offset = scene.orbit_offset();
-    let inversion_strength = scene.inversion_strength();
-    let inversion_center = scene.inversion_center();
-    let inversion_radius = scene.inversion_radius();
-    let trap_point = scene.trap_point();
-    let trap_axis = scene.trap_axis();
-    let trap_scale = scene.trap_scale();
+    let FractalParams {
+        julia,
+        julia_mix,
+        orbit_offset,
+        inversion_strength,
+        inversion_center,
+        inversion_radius,
+        trap_point,
+        trap_axis,
+        trap_scale,
+        ..
+    } = *f;
 
     let bulb_escape = |b: &Bulb| -> f32 {
         b.bailout
@@ -1801,7 +1841,7 @@ fn pack_object_with_transform(
     };
 
     p[P_FAMILY] = formula.code() as f32;
-    p[P_ITERATIONS] = scene.render.iterations;
+    p[P_ITERATIONS] = at.iterations;
     let orbit = formula.has_orbit_constant();
     p[P_JULIA] = if orbit { julia_mix } else { 0.0 };
     put3(p, P_JULIA_C, julia);
@@ -1948,9 +1988,9 @@ fn pack_object_with_transform(
     object_radius = object_radius.max(clip_scaled);
     p[P_CLIP_RADIUS] = clip_scaled;
     p[P_MAX_DISTANCE] =
-        camera_dist + length(scene.camera.target) + length(object_offset) + object_radius;
+        camera_dist + length(at.camera_target) + length(object_offset) + object_radius;
 
-    p[P_COLOR_MODE] = scene.coloring as u32 as f32;
+    p[P_COLOR_MODE] = at.coloring as u32 as f32;
     put3(p, P_TRAP_POINT, trap_point);
     let mut axis = [0.0; 3];
     axis[trap_axis.min(2) as usize] = 1.0;
@@ -2006,20 +2046,20 @@ fn rotation_matrix4(degrees: [f32; 3]) -> [[f32; 4]; 4] {
 
 #[cfg(test)]
 mod tests {
-    use soluwell_studio::render_prep::WorldUpload;
-    use soluwell_studio::world::{WorldCommand, WorldDocument, WorldEditor};
+    use sl_studio::render_prep::WorldUpload;
+    use sl_studio::world::{WorldCommand, WorldDocument, WorldEditor};
 
     use super::*;
 
     /// plan1 F1/F2: a broken formula or a mistyped branch is a typed error at every boundary
-    /// (rejected by `validate_node`, an edit rolled back), never a silent Mandelbulb or default.
+    /// (rejected by `prepare`, an edit rolled back), never a silent Mandelbulb or default.
     #[test]
     fn invalid_fractal_branches_are_rejected_not_defaulted() {
         crate::engine::init_warpbro();
-        let defaults = default_fractal_custom_branches(Formula::Mandelbulb(Bulb::PRESET));
-        FractalNodeSpec
-            .validate_node(&Value::Object(defaults.clone()))
-            .expect("default branches are valid");
+        let defaults = FractalParams::new(Formula::Mandelbulb(Bulb::PRESET)).branches();
+        let parsed = FractalParams::parse(&defaults).expect("default branches are valid");
+        // The stored form round-trips: what `edit_fractal` writes is what `prepare` reads.
+        assert_eq!(parsed, FractalParams::new(Formula::Mandelbulb(Bulb::PRESET)));
         for (key, bad) in [
             ("formula", json!({"NotAFormula": {}})),
             ("julia", json!([0.0, "x", 0.0])),
@@ -2031,19 +2071,17 @@ mod tests {
             let mut broken = defaults.clone();
             broken.insert(key.into(), bad.clone());
             assert!(
-                FractalNodeSpec
-                    .validate_node(&Value::Object(broken))
-                    .is_err(),
+                FractalNodeSpec.prepare(&broken).is_err(),
                 "{key} = {bad} must be rejected"
             );
         }
         let mut missing = defaults;
         missing.remove("trap_scale");
-        assert!(
-            FractalNodeSpec
-                .validate_node(&Value::Object(missing))
-                .is_err()
-        );
+        assert!(FractalNodeSpec.prepare(&missing).is_err());
+        // A typed edit that breaks an invariant is refused and leaves the scene as it was.
+        let mut bulb = Scene::preset_fractal(Formula::Mandelbulb(Bulb::PRESET));
+        assert!(bulb.edit_fractal(|f| f.trap_axis = 3).is_err());
+        assert_eq!(bulb.trap_axis(), 1);
 
         let scene = Scene::preset_fractal(Formula::Mandelbulb(Bulb::PRESET));
         let mut editor = WorldEditor::new(WorldDocument::from_scene(&scene));
@@ -2055,7 +2093,7 @@ mod tests {
             .expect("Fractal node")
             .id;
         // A string passes the leaf check (no range, no choices) but breaks the node: only
-        // `validate_node` can reject it. (A numeric value out of range would just be clamped
+        // `prepare` can reject it. (A numeric value out of range would just be clamped
         // to `attribute_range` by the editor.)
         let edit = editor.execute_edit(
             WorldCommand::SetAttribute {
@@ -2134,9 +2172,8 @@ mod tests {
     #[test]
     fn mandelbox_and_kifs_clips_hold_the_set() {
         fn clip_of(formula: Formula) -> f32 {
-            let scene = Scene::preset_fractal(formula);
             let mut p = [0.0f32; P_COUNT];
-            pack_object_with_transform(&scene, 1.0, [0.0; 3], &mut p, 0.0);
+            pack_fractal(&FractalParams::new(formula), &Placement::LOCAL, &mut p);
             p[P_CLIP_RADIUS]
         }
         fn box_fold(v: f32, limit: f32) -> f32 {
@@ -2237,11 +2274,11 @@ mod tests {
 
     #[test]
     fn fractal_node_lifecycle_and_parameter_roundtrip() {
-        use soluwell_studio::StudioModule;
+        use sl_studio::StudioModule;
         crate::engine::init_warpbro();
         assert_eq!(
             FractalNodeSpec.payload_kind(),
-            soluwell_studio::NodePayloadKind::SdfField
+            sl_studio::NodePayloadKind::SdfField
         );
         assert_eq!(crate::engine::WarpBroFractalModule.id(), "warpbro.fractals");
         assert_eq!(
@@ -2445,7 +2482,7 @@ mod tests {
                 "Gyroid / Schwarz TPMS is analytical (no iteration loop)"
             ))
         );
-        // An unknown variant never reaches the inspector (`validate_node` rejects it), so it
+        // An unknown variant never reaches the inspector (`prepare` rejects it), so it
         // gets no guessed "no orbit constant" reason: the check falls through to the Julia mix,
         // which this probe does not provide.
         assert_eq!(
@@ -2459,7 +2496,7 @@ mod tests {
     #[test]
     fn packed_max_distance_covers_clip_sphere_across_gallery_and_scales() {
         crate::engine::init_warpbro();
-        for mut scene in Scene::fractal_gallery() {
+        for mut scene in Scene::fractal_gallery().unwrap() {
             let (_, _, dist) = scene.camera_eye();
             let p = scene.pack(64, 64);
             assert!(

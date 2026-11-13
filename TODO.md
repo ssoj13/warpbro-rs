@@ -10,13 +10,13 @@
 
 ---
 
-# Systemic `/sysgo` & `/mastermind` Plan — `animation-rs` & `soluwell-studio` Ecosystem Unification
+# Systemic `/sysgo` & `/mastermind` Plan — `animation-rs` & `sl-studio` Ecosystem Unification
 
 ## Completed Milestones
 - [x] **M0**: Extract standalone `animation-rs` (`animation` crate: `time`, `anim`, `attrs`, `transform`, `keys`, `curves`) with `#![forbid(unsafe_code)]`, 97 unit tests, and NaN/Inf/empty-slice boundary guards (`607e380`).
 - [x] **M1**: Rewire `playa` (`playa-time`, `playa-engine`) to re-export `animation::*` (`-5,213` duplicate lines deleted, `818a26f`).
-- [x] **M2**: Rewire `egui-widgets-rs` (`soluwell-studio-core`, `soluwell-studio-scene`, `soluwell-studio-render`, `soluwell-studio`) directly to `animation`, fix camera keyframe navigation + 3-pose hold-key seeding (`84f39a3`).
-- [x] **M3**: Rewire `warpbro-rs` onto `soluwell-studio` + `animation-rs`, prune 33 unused dependencies (`597b60c`).
+- [x] **M2**: Rewire `egui-widgets-rs` (`sl-studio-core`, `sl-studio-scene`, `sl-studio-render`, `sl-studio`) directly to `animation`, fix camera keyframe navigation + 3-pose hold-key seeding (`84f39a3`).
+- [x] **M3**: Rewire `warpbro-rs` onto `sl-studio` + `animation-rs`, prune 33 unused dependencies (`597b60c`).
 
 ## Completed `/mastermind` Wave — Consumer Ecosystem Unification (`D01`..`D04`)
 - [x] **D01 (`animation-rs` `607e380` & `playa` `818a26f` — SSOT Deduplication)**:
@@ -40,5 +40,5 @@
   - **Verified**: `cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace --quiet` in `skelly-rs` (16 passed; 0 failed).
 
 ## Out of Scope (Deferred to Dedicated Repo Sessions)
-- Full 57-file shell deletion in `openvdb-rs/crates/vdb-view` (requires extracting `VolumeNodeSpec` + `VdbComputeEngine` + custom EXR/Scope dock tabs into `soluwell-studio`).
+- Full 57-file shell deletion in `openvdb-rs/crates/vdb-view` (requires extracting `VolumeNodeSpec` + `VdbComputeEngine` + custom EXR/Scope dock tabs into `sl-studio`).
 - `usd-rs` internal `usd-ts` / `usd-vt::spline` consolidation.

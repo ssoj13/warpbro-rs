@@ -3,7 +3,7 @@
 The authoritative working document: rules, state, open work, durable findings. Keep it current:
 drop done items (details go to CHANGELOG.md, history stays in git), add new requests, keep open work
 sorted by priority. Code, comments and documentation in English; chat in Russian. Reusable UI and
-studio infrastructure live in `soluwell-studio` (`egui-widgets-rs/crates/soluwell/studio`). Topic
+studio infrastructure live in `sl-studio` (`egui-widgets-rs/crates/soluwell/studio`). Topic
 docs live in `docs/`; this file tracks architecture, open work, and technical invariants.
 
 ---
@@ -38,20 +38,20 @@ docs live in `docs/`; this file tracks architecture, open work, and technical in
 ## Current Architecture & State (`5afff8a`)
 
 WarpBro is an egui desktop browser and animator for path-traced 3D fractals (28 DE families) built on
-top of the shared `soluwell-studio` widget (`egui-widgets-rs/crates/soluwell/studio`):
+top of the shared `sl-studio` widget (`egui-widgets-rs/crates/soluwell/studio`):
 
-- **Domain Separation**: `soluwell-studio` owns the dock panels (Outliner, Timeline, Attribute Editor,
+- **Domain Separation**: `sl-studio` owns the dock panels (Outliner, Timeline, Attribute Editor,
   Curve Editor), Playa `EventBus` dispatch, loopback HTTP REST API, `WorldDocument` graph/undo,
   `RenderService` worker, `PreparationCache`, OCIO display pipeline, OIDN denoiser,
   `PreviewController`, `ThumbnailCache`, and `ExportController`.
 - **Fractal Registration**: WarpBro registers:
   1. `"Fractal"` scene node (`src/fractal_node.rs`, `FractalNodeSpec` implementing `NodeTypeSpec`).
      Evaluates into `scene.objects` with 28-variant `Formula` and `pack_object` (`P_COUNT` = 243-float ABI).
-  2. Pluggable `WarpBroComputeEngine` (`src/engine.rs` implementing `soluwell_studio::render::ComputeEngine`):
+  2. Pluggable `WarpBroComputeEngine` (`src/engine.rs` implementing `sl_studio::render::ComputeEngine`):
      - **CUDA**: 234 compile-time specialized kernel entries from `fractal-rs` (`fractal-kernels`),
        compiled to PTX by `cuda-oxide` and linked via `#[cuda_module]`.
      - **WGPU**: 28 per-family WGSL shader modules + 1 dynamic 28-way module (`src/formulas.wgsl`
-       injected into `soluwell-studio-render` via `render_wgpu::set_custom_shader_hook`).
+       injected into `sl-studio-render` via `render_wgpu::set_custom_shader_hook`).
   3. Built-in templates (`src/templates.rs`, 14 templates) and procedural animated presets
      (`src/presets.rs`, `ANIMATED = 0..5`), plus 38 curated gallery scenes (`Scene::fractal_gallery`).
 - **Inline Compute Backend Selection**: `Backend { Auto, Cuda, Wgpu }` selectable per render binding
@@ -148,15 +148,15 @@ top of the shared `soluwell-studio` widget (`egui-widgets-rs/crates/soluwell/stu
 ### Section C: Document & Error Propagation Hardening
 
 0. **Done (2026-11-11, [plan1.md](plan1.md))**: the Fractal node no longer falls back silently.
-   Custom branches are validated on load, edit and snapshot (soluwell `NodeTypeSpec::validate_node`,
-   egui-widgets-rs `13d6f8d`), integer formula leaves stay whole, enum choices come from the enums,
-   the WGPU backend is soluwell's own engine, and clip radii follow the parameters. Still open there:
-   B5 (device name per resolved backend), P1 (formula parsed per trait call) and wave E
-   (tests/tools/docs).
+   Custom branches are parsed once per scene build (`NodeTypeSpec::prepare`, `CustomBranches`),
+   integer formula leaves stay whole, enum choices come from the enums, the WGPU backend is
+   soluwell's own engine, clip radii follow the parameters, and the renderer label is the
+   frame's resolved backend and device (P1, B5: branch `fix/node-prepare-device`, waiting on the
+   egui rename merge). Still open there: wave E (tests/tools/docs).
 9. **Complete `.ok()` sweep part 2 (`nodes() -> Result`)**:
    - Audit remaining `.ok()` conversions in document traversal: `WorldDocument::nodes_at` drops a node whose
      `info_at` fails, and `info_at_with` silently defaults flags whose values fail.
-   - Convert `nodes()` and related traversal methods across `soluwell-studio-core` to return `Result<...>`
+   - Convert `nodes()` and related traversal methods across `sl-studio-core` to return `Result<...>`
      so data corruptions or invalid node states surface as typed errors rather than vanishing.
    - Audit error handling in `warpbro_dir()` fallback, `preview.rs` `frame_count().ok()`, and `exr_io.rs`
      header inspection.
@@ -202,7 +202,7 @@ top of the shared `soluwell-studio` widget (`egui-widgets-rs/crates/soluwell/stu
 
 | File | Role |
 |---|---|
-| `src/main.rs` | Entry point, CLI flag dispatch (`--gallery`, `--bench`, `--world-bench`, `--warmup`), `soluwell_studio::run_with(StudioConfig)` |
+| `src/main.rs` | Entry point, CLI flag dispatch (`--gallery`, `--bench`, `--world-bench`, `--warmup`), `sl_studio::run_with(StudioConfig)` |
 | `src/engine.rs` | `WarpBroComputeEngine`, `init_warpbro()`, dual CUDA + WGPU dispatch, custom shader hook injection |
 | `src/fractal_node.rs` | `"Fractal"` `NodeTypeSpec`, 28-variant `Formula`, `pack_object` (`P_COUNT` ABI), `fractal_gallery()` |
 | `src/formulas.rs` | Declarative metadata table `FORMULAS: [FormulaMeta; 28]`, `EXT_SLOTS`, parameter definitions |

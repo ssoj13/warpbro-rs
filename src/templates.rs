@@ -1,9 +1,9 @@
 //! Scene templates: built into the binary, overridable by files in `~/.warpbro/templates`.
-//! Registered into `soluwell-studio` via [`register_warpbro_templates`].
+//! Registered into `sl-studio` via [`register_warpbro_templates`].
 
-use soluwell_studio::scene::Scene;
-pub use soluwell_studio::templates::{BuiltinTemplate, builtin_scene};
-use soluwell_studio::world::WorldDocument;
+use sl_studio::scene::Scene;
+pub use sl_studio::templates::{BuiltinTemplate, builtin_scene};
+use sl_studio::world::WorldDocument;
 
 pub fn decode_scene(text: &str) -> Result<Scene, String> {
     let document = WorldDocument::decode_json(text).map_err(|e| format!("Invalid scene: {e}"))?;
@@ -141,16 +141,16 @@ pub const BUILTINS: [BuiltinTemplate; 14] = [
     },
 ];
 
-/// Register WarpBro's 14 built-in templates and animated showcase range with `soluwell-studio`.
+/// Register WarpBro's 14 built-in templates and animated showcase range with `sl-studio`.
 pub fn register_warpbro_templates() {
-    soluwell_studio::templates::register_builtins(&BUILTINS, ANIMATED);
+    sl_studio::templates::register_builtins(&BUILTINS, ANIMATED);
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
-    use soluwell_studio::templates::{Source, catalog};
+    use sl_studio::templates::{Source, catalog};
 
     use super::*;
 
@@ -199,7 +199,7 @@ mod tests {
                     scene.environment.path
                 );
                 if checked_envs.insert(scene.environment.path.clone()) {
-                    soluwell_studio::environment::Map::load(&scene.environment.path)
+                    sl_studio::environment::Map::load(&scene.environment.path)
                         .unwrap_or_else(|e| panic!("{}: {e}", entry.name));
                 }
             }
@@ -208,10 +208,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let first = BUILTINS[0].name;
         let text = serde_json::to_string(&builtin_scene(1).unwrap().document).unwrap();
-        let replaced = dir.join(soluwell_studio::fs_name::frame_file(
-            &soluwell_studio::fs_name::stem(first),
+        let replaced = dir.join(sl_studio::fs_name::frame_file(
+            &sl_studio::fs_name::stem(first),
             None,
-            soluwell_studio::fs_name::SCENE_SUFFIX,
+            sl_studio::fs_name::SCENE_SUFFIX,
         ));
         let user = dir.join("user-scene.json");
         std::fs::write(&replaced, &text).unwrap();
@@ -239,7 +239,7 @@ mod tests {
         crate::engine::init_warpbro();
         let mut names: Vec<_> = BUILTINS
             .iter()
-            .map(|b| soluwell_studio::fs_name::slug(b.name))
+            .map(|b| sl_studio::fs_name::slug(b.name))
             .collect();
         names.sort();
         names.dedup();

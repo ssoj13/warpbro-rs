@@ -117,17 +117,17 @@ Documentation: [fractals and procedural shapes](docs/formulas.md), [render and q
 
 ## Origin and Architecture
 
-WarpBro originated as a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX plug-ins (WGPU/WGSL). It is built as a specialized fractal application on top of the shared `soluwell-studio` framework (`egui-widgets-rs/crates/soluwell/studio`).
+WarpBro originated as a CUDA port of `ofx-fractal`, the fractal engine of the ofx-rs OpenFX plug-ins (WGPU/WGSL). It is built as a specialized fractal application on top of the shared `sl-studio` framework (`egui-widgets-rs/crates/soluwell/studio`).
 
-The shared `soluwell-studio` framework knows nothing about fractals or fractal formulas. The studio shell, dock panels, Outliner, Timeline, Attribute Editor, Curve Editor, `WorldDocument` graph/undo, `RenderService`, OCIO display pipeline, OIDN denoiser, `ThumbnailCache`, `ExportController`, and loopback REST API all live in `egui-widgets-rs/crates/soluwell/studio`.
+The shared `sl-studio` framework knows nothing about fractals or fractal formulas. The studio shell, dock panels, Outliner, Timeline, Attribute Editor, Curve Editor, `WorldDocument` graph/undo, `RenderService`, OCIO display pipeline, OIDN denoiser, `ThumbnailCache`, `ExportController`, and loopback REST API all live in `egui-widgets-rs/crates/soluwell/studio`.
 
 `warpbro-rs/src/` contains only the 10 fractal domain files:
-- `main.rs`: CLI entry, `engine::init_warpbro()`, and `soluwell_studio::run_with`
+- `main.rs`: CLI entry, `engine::init_warpbro()`, and `sl_studio::run_with`
 - `engine.rs`: `WarpBroComputeEngine` (dual CUDA `fractal-kernels` + 28-family WGPU `WgpuEngine`), `init_warpbro()`, shader hook
 - `fractal_node.rs`: `"Fractal"` scene node (`FractalNodeSpec`), 28-variant `Formula`, `FractalSceneExt`, and `pack_object` (`P_COUNT` kernel ABI)
 - `formulas.rs`: Declarative 28-family metadata table (`FORMULAS`), extended parameter structs and packing
-- `formulas.wgsl`: WGSL distance estimators for all 28 families injected into `soluwell-studio-render`
-- `templates.rs`: Built-in templates (`BUILTINS`) registered into `soluwell_studio::templates::register_builtins`
+- `formulas.wgsl`: WGSL distance estimators for all 28 families injected into `sl-studio-render`
+- `templates.rs`: Built-in templates (`BUILTINS`) registered into `sl_studio::templates::register_builtins`
 - `presets.rs`: Five authored 250-frame animated `WorldDocument` builders (`ANIMATED = 0..5`)
 - `render_bench.rs`: Evaluated world/family A/B benchmarks
 - `parity_tests.rs`: CUDA vs WGPU per-pixel and ray-beam parity suite
@@ -139,7 +139,7 @@ External dependencies provide tracing kernels, BSDF evaluation, and camera contr
 | --- | --- | --- |
 | `fractal-kernels` (`fractal-rs`) | Rust kernels compiled to PTX via `cuda-oxide` | All 28 DE families, NEE + MIS path tracing, BSDF |
 | `fractal-core` (`fractal-rs`) | Rust parameter ABI & sampler | `P_COUNT` packed layout, Sobol / blue noise sampler |
-| `soluwell-studio-render` | WGPU compute pipeline with WGSL hook | WGSL fallback & parity renderer for all 28 families |
+| `sl-studio-render` | WGPU compute pipeline with WGSL hook | WGSL fallback & parity renderer for all 28 families |
 | `standard-surface-bsdf` | SSH crate with opt-in `cuda-math` | Autodesk Standard Surface (MaterialX port) |
 | `fractal-materials` | Renderer-independent material library | 69 curated presets from `usd-mat-lib` |
 | `cam-controls` / `cam-controls-egui` | Gitnexus-rs camera controls | Flight rig, horizon lock, Houdini orbit, fly bindings |
@@ -548,7 +548,7 @@ The timings above predate this bridge, the World tracer and OIDN integration.
 
 ## Layout
 
-The architecture cleanly separates the generic studio shell in `soluwell-studio` from the 10 domain-specific fractal files in `warpbro-rs/src/`:
+The architecture cleanly separates the generic studio shell in `sl-studio` from the 10 domain-specific fractal files in `warpbro-rs/src/`:
 
 ```text
 egui-widgets-rs/crates/soluwell/studio:
@@ -557,12 +557,12 @@ egui-widgets-rs/crates/soluwell/studio:
   OIDN denoiser, PreparationCache, ThumbnailCache, ExportController, and loopback REST API.
 
 warpbro-rs/src/ (10 fractal domain files):
-  src/main.rs           CLI entry & flags, engine::init_warpbro(), and soluwell_studio::run_with
+  src/main.rs           CLI entry & flags, engine::init_warpbro(), and sl_studio::run_with
   src/engine.rs         WarpBroComputeEngine (dual CUDA fractal-kernels + 28-family WGPU WgpuEngine)
   src/fractal_node.rs   "Fractal" scene node (FractalNodeSpec), 28-variant Formula, FractalSceneExt, pack_object
   src/formulas.rs       Declarative 28-family metadata table (FORMULAS) and extended parameter packing
-  src/formulas.wgsl     WGSL distance estimators for all 28 families injected into soluwell-studio-render
-  src/templates.rs      14 built-in templates (BUILTINS) registered into soluwell_studio
+  src/formulas.wgsl     WGSL distance estimators for all 28 families injected into sl-studio-render
+  src/templates.rs      14 built-in templates (BUILTINS) registered into sl_studio
   src/presets.rs        Procedural 250-frame animated WorldDocument builders (ANIMATED = 0..5)
   src/render_bench.rs   Evaluated world/family A/B benchmarks
   src/parity_tests.rs   CUDA vs WGPU per-pixel and ray-beam parity suite
@@ -583,4 +583,4 @@ and are under PolyForm-Noncommercial-1.0.0. The retained vendor copies are histo
 Cargo uses the pinned SSH dependencies above. The fractal formulas credit their sources in the ofx-rs code they were ported from
 (Knighty's KIFS, Leys' Kleinian, Mandelbulber's pseudo-Kleinian, and others).
 
-The OCIO panel in soluwell-studio is adapted from exr-view. The ACES 2.0 presets follow the [Academy output transform parameters](https://docs.acescentral.com/system-components/output-transforms/parameters/).
+The OCIO panel in sl-studio is adapted from exr-view. The ACES 2.0 presets follow the [Academy output transform parameters](https://docs.acescentral.com/system-components/output-transforms/parameters/).

@@ -18,7 +18,7 @@
 
 | # | Micro-Unit | Symbol / Item | Exact Location (`file:line`) | Parity & 6-Axis Verification | Verdict |
 |---|---|---|---|---|---|
-| **1** | `U01` | `vdb-view` crate dependencies (`animation`, `playa-time`, `playa-engine`) | `openvdb-rs/crates/vdb-view/Cargo.toml:22-28` | Replaced `playa-time` with `animation = { git = "ssh://git@github.com/ssoj13/animation-rs.git", branch = "main" }` (`L26`). Retained `playa-engine` (`default-features = false`, `L23`) alongside `playa-player` (`L22`) because `src/preview.rs:7-14` directly imports `playa_engine::{colour, core, entities::frame}` (matching `soluwell-studio-render/Cargo.toml:29`). Zero `playa_time` imports remain anywhere in `crates/vdb-view/src/**`. | **VERIFIED** |
+| **1** | `U01` | `vdb-view` crate dependencies (`animation`, `playa-time`, `playa-engine`) | `openvdb-rs/crates/vdb-view/Cargo.toml:22-28` | Replaced `playa-time` with `animation = { git = "ssh://git@github.com/ssoj13/animation-rs.git", branch = "main" }` (`L26`). Retained `playa-engine` (`default-features = false`, `L23`) alongside `playa-player` (`L22`) because `src/preview.rs:7-14` directly imports `playa_engine::{colour, core, entities::frame}` (matching `sl-studio-render/Cargo.toml:29`). Zero `playa_time` imports remain anywhere in `crates/vdb-view/src/**`. | **VERIFIED** |
 | **2** | `U01` | `camera_orbit::integrate` & `Channel` / `Keyframe` imports | `openvdb-rs/crates/vdb-view/src/camera_orbit.rs:3, 7-12, 18` | Switched `playa_engine::entities::anim::{Channel, Keyframe}` to `animation::anim::Channel` (`L3`) and `animation::anim::Keyframe` (`L18`). | **VERIFIED** |
 | **3** | `U01` | `camera_recorder` `Animation` & `Channel` imports | `openvdb-rs/crates/vdb-view/src/camera_recorder.rs:9` | Switched `playa_engine::entities::anim::{Animation, Channel}` to `animation::anim::{Animation, Channel}` (`L9`). | **VERIFIED** |
 | **4** | `U02` | `world.rs` `animation::{anim, attrs, transform}` imports, `local_pose`, `world_matrix` | `openvdb-rs/crates/vdb-view/src/world.rs:7-8, 22-27, 5154-5192` | Switched top-level imports to `animation::anim::{Animation, Channel, Keyframe}` (`L7`) and `animation::attrs::{AttrValue, Attrs}` (`L8`); updated `local_pose` (`L24`) to `animation::transform::decompose_pose` and `world_matrix` (`L5184`) to `animation::transform::build_model_matrix`. | **VERIFIED** |
@@ -53,7 +53,7 @@
    - Switched `playa_engine::entities::anim::{Animation, Channel}` to `animation::anim::{Animation, Channel}`.
 4. `C:\projects\projects.rust.cg\cglibs\openvdb-rs\crates\vdb-view\src\world.rs`:
    - Switched `playa_engine::entities::*` imports (`Animation, Channel, Keyframe, AttrValue, Attrs, transform::{decompose_pose, build_model_matrix}`) to `animation::{anim, attrs, transform}`.
-   - Ported `WorldEditor::navigate_camera` (`POSE_PATHS`, `seed_frames`, `pose_animated`, `write_navigation_value` call) and `WorldDocument::write_navigation_value` (3-pose `should_seed` hold-key seeding, zero `/_navigation/*` writes) from `soluwell-studio-scene`.
+   - Ported `WorldEditor::navigate_camera` (`POSE_PATHS`, `seed_frames`, `pose_animated`, `write_navigation_value` call) and `WorldDocument::write_navigation_value` (3-pose `should_seed` hold-key seeding, zero `/_navigation/*` writes) from `sl-studio-scene`.
 5. `C:\projects\projects.rust.cg\cglibs\openvdb-rs\crates\vdb-view\src\world_tests.rs`:
    - Switched `playa_engine::entities::*` references to `animation::*`.
    - Updated `camera_navigation_without_auto_key_keys_animated_pose_and_leaves_no_navigation_offsets` and `camera_navigation_auto_key_compensates_existing_offsets_and_keys_changed_components_only`.
@@ -65,7 +65,7 @@
 
 - **Pass 1 (`0d0bae7b-0a04-4527-8231-df0bc0d70b4e`)**:
   - **Verdict**: `REJECTED (1 defect found)`
-  - **Defect 1 (`Q2` / `Q7` — Broken Crate Wiring)**: Removing `playa-engine` from `crates/vdb-view/Cargo.toml` broke `crates/vdb-view/src/preview.rs:7-14`, which still imports `playa_engine::{colour::{ColorSpaceId, Tier}, core::{CacheManager, GlobalFrameCache, global_cache::TierCache}, entities::{CacheStrategy, frame::{Frame as PlayaFrame, PixelBuffer, PixelFormat, Premult}}}` (unlike `warpbro-rs`, `vdb-view` still compiles its own `preview.rs`, just like `soluwell-studio-render/Cargo.toml:29`).
+  - **Defect 1 (`Q2` / `Q7` — Broken Crate Wiring)**: Removing `playa-engine` from `crates/vdb-view/Cargo.toml` broke `crates/vdb-view/src/preview.rs:7-14`, which still imports `playa_engine::{colour::{ColorSpaceId, Tier}, core::{CacheManager, GlobalFrameCache, global_cache::TierCache}, entities::{CacheStrategy, frame::{Frame as PlayaFrame, PixelBuffer, PixelFormat, Premult}}}` (unlike `warpbro-rs`, `vdb-view` still compiles its own `preview.rs`, just like `sl-studio-render/Cargo.toml:29`).
 - **Repair Applied**:
   - Restored `playa-engine = { git = "ssh://git@github.com/ssoj13/playa.git", branch = "main", default-features = false }` in `crates/vdb-view/Cargo.toml:23` next to `playa-player`, while keeping `animation` (`L26`) and keeping `playa-time` removed.
 - **Pass 2 (`97a3a0ca-c7ae-4d61-8a8a-621f54c97baf`)**:

@@ -11,7 +11,7 @@ path = "src/main.rs"
 default = []
 
 [dependencies]
-soluwell-studio = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
+sl-studio = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
 animation = { git = "ssh://git@github.com/ssoj13/animation-rs.git", branch = "main" }
 # The fractal path tracer shared with ofx-rs: parameter ABI and sampling, and the CUDA kernels
 # (built into this binary through #[cuda_module]).
@@ -25,7 +25,7 @@ cuda-host = { git = "ssh://git@github.com/ssoj13/cuda-rust_b.git", branch = "mai
 cuda-core = { git = "ssh://git@github.com/ssoj13/cuda-rust_b.git", branch = "main" }
 curves = { git = "ssh://git@github.com/ssoj13/curves-rs.git", branch = "main", features = ["serde"] }
 egui = "0.36"
-soluwell-config = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
+sl-config = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
 glam = "0.33.6"
 log = "0.4"
 anyhow = "1"

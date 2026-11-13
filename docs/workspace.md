@@ -15,9 +15,9 @@ The Attribute Editor retains Playa-style collapsible sections and the existing s
 
 ### Pluggable "Fractal" scene node
 
-`soluwell-studio` provides the engine-agnostic studio shell, outliner, timeline, and rendering pipeline, knowing nothing about fractal formulas. WarpBro registers the `"Fractal"` scene node type (`FractalNodeSpec` in `src/fractal_node.rs`) via `soluwell_studio::node_spec::register_node_type`:
+`sl-studio` provides the engine-agnostic studio shell, outliner, timeline, and rendering pipeline, knowing nothing about fractal formulas. WarpBro registers the `"Fractal"` scene node type (`FractalNodeSpec` in `src/fractal_node.rs`) via `sl_studio::node_spec::register_node_type`:
 - When a `"Fractal"` node is present and visible in the scene graph, its formula parameters, transform, and material evaluate into `scene.objects` and are path-traced by `WarpBroComputeEngine` (CUDA or WGPU).
-- When no `"Fractal"` node is present or all fractal nodes are hidden, `scene.objects` is empty (`P_OBJECT_COUNT == 0`), and `soluwell-studio` renders only the 3D studio environment: sky/HDRI, the infinite 3D grid, and viewport manipulator gizmos.
+- When no `"Fractal"` node is present or all fractal nodes are hidden, `scene.objects` is empty (`P_OBJECT_COUNT == 0`), and `sl-studio` renders only the 3D studio environment: sky/HDRI, the infinite 3D grid, and viewport manipulator gizmos.
 
 ## Select and assign materials separately
 
