@@ -306,6 +306,9 @@ fn main() -> anyhow::Result<()> {
                 material_swatch_base: Some(Arc::new(move || swatch.clone())),
                 gpu_init_label: "Initializing GPU (CUDA / WGPU)…".into(),
                 modules: vec![Arc::new(engine::WarpBroFractalModule)],
+                // Profile root and encode-preset dir follow sl-studio's own defaults
+                // (`~/.warpbro`, shared video-io presets); new fields stay opt-in here.
+                ..Default::default()
             })
         }
     }

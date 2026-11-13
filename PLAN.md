@@ -66,7 +66,7 @@ top of the shared `sl-studio` widget (`egui-widgets-rs/crates/soluwell/studio`):
 - **Strict Document Decode**: `WorldDocument::decode_json` strictly verifies node shape, format, and attributes
   without legacy migrations.
 - **Pinned Dependencies**:
-  - `cuda-oxide`: `CUDA_OXIDE_REV = 0379bbf1182b9e81b0964c44d18d899f6d494b0f` (cuda-rust_b main, toolchain 1.99.1).
+  - `cuda-oxide`: `CUDA_OXIDE_REV = 7e2d940b40c09185e4563432ad96d831252e4453` (cuda-rust_b main, toolchain 1.99.1).
   - `fractal-rs`: `5a21813e0f8ae8f4d49a423d56564f84e5629dfd` (all 28 families on CUDA, 234 kernel entries,
     conservative `cone_start` beam-root).
   - `ffmpeg-rs` / OxideAV: git dependencies locked in `Cargo.lock` (`ssoj13/oxideav-av1`,

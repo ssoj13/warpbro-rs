@@ -152,7 +152,7 @@ External dependencies provide tracing kernels, BSDF evaluation, and camera contr
 - CUDA Toolkit 13.x, LLVM/`llc` 21 or newer, and clang (for bindgen).
 - Rust **1.99.1** (pinned in `rust-toolchain.toml`, the toolchain cuda-oxide pins for device code), with compiler-internal APIs enabled through `.cargo/config.toml` (see `rust-toolchain.toml`).
 - CUDA crates and the backend come from [our Windows fork](https://github.com/ssoj13/cuda-rust_b),
-  pinned to `0379bbf1182b9e81b0964c44d18d899f6d494b0f` (NVIDIA cuda-rust main plus our patch layer) with every
+  pinned to `7e2d940b40c09185e4563432ad96d831252e4453` (NVIDIA cuda-rust main plus our patch layer) with every
   `#[inline]` intent (`noinline` included) carried to LLVM; its cargo-oxide pins release
   codegen in the Cargo profile, so `cargo oxide test -- --release` and `cargo oxide build`
   share every compiled crate. Cargo fetches the
@@ -160,7 +160,7 @@ External dependencies provide tracing kernels, BSDF evaluation, and camera contr
 - `cargo-oxide` must come from the same fork and revision:
 
   ```sh
-  cargo +1.99.1 install --force --locked --git ssh://git@github.com/ssoj13/cuda-rust_b.git --rev 0379bbf1182b9e81b0964c44d18d899f6d494b0f cargo-oxide
+  cargo +1.99.1 install --force --locked --git ssh://git@github.com/ssoj13/cuda-rust_b.git --rev 7e2d940b40c09185e4563432ad96d831252e4453 cargo-oxide
   cargo oxide doctor
   ```
 
