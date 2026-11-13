@@ -16,7 +16,7 @@ Toolchain (see README.md):
     NVIDIA driver (on WSL2: the Windows driver, never a Linux one inside WSL)
     CUDA Toolkit 13.x (nvcc, libNVVM, nvJitLink)      CUDA_HOME, default /usr/local/cuda
     LLVM llc 21+ and clang + libclang headers         CUDA_OXIDE_LLC, default newest llc-2x
-    rustup toolchain stable (rust-toolchain.toml) + rust-src rustc-dev llvm-tools
+    rustup toolchain 1.99.1 (rust-toolchain.toml) + rust-src rustc-dev llvm-tools
     cargo-oxide from our fork at CUDA_OXIDE_REV       python bootstrap.py d --fix
 
 Commands:
@@ -67,7 +67,7 @@ RELEASE_BIN = ROOT_DIR / "target" / "release" / BIN_NAME
 INSTALL_DIR = Path.home() / ".local" / "bin"
 
 CUDA_OXIDE_GIT = "ssh://git@github.com/ssoj13/cuda-rust_b.git"
-CUDA_OXIDE_REV = "9370f8c91eba499a880a5769ecd11f39fa65ffbb"
+CUDA_OXIDE_REV = "0379bbf1182b9e81b0964c44d18d899f6d494b0f"
 RUST_COMPONENTS = ["rust-src", "rustc-dev", "rust-analyzer", "clippy", "rustfmt", "llvm-tools"]
 # Release builds (`--cubins`) also embed cubins for these GPUs (RTX 20/30/40/50), assembled
 # from the sm_75 PTX by cuda-oxide into one fat binary ahead of that PTX: those GPUs skip the

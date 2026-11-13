@@ -150,9 +150,9 @@ External dependencies provide tracing kernels, BSDF evaluation, and camera contr
   - On WSL2, install only the CUDA **toolkit**; the driver comes from Windows. Never install
     `cuda-drivers` or `nvidia-driver-*` inside WSL.
 - CUDA Toolkit 13.x, LLVM/`llc` 21 or newer, and clang (for bindgen).
-- Rust stable (currently **1.99**), with compiler-internal APIs enabled through `.cargo/config.toml` (see `rust-toolchain.toml`).
+- Rust **1.99.1** (pinned in `rust-toolchain.toml`, the toolchain cuda-oxide pins for device code), with compiler-internal APIs enabled through `.cargo/config.toml` (see `rust-toolchain.toml`).
 - CUDA crates and the backend come from [our Windows fork](https://github.com/ssoj13/cuda-rust_b),
-  pinned to `9370f8c91eba499a880a5769ecd11f39fa65ffbb` with the Rust 1.99 fixes and every
+  pinned to `0379bbf1182b9e81b0964c44d18d899f6d494b0f` (NVIDIA cuda-rust main plus our patch layer) with every
   `#[inline]` intent (`noinline` included) carried to LLVM; its cargo-oxide pins release
   codegen in the Cargo profile, so `cargo oxide test -- --release` and `cargo oxide build`
   share every compiled crate. Cargo fetches the
@@ -160,7 +160,7 @@ External dependencies provide tracing kernels, BSDF evaluation, and camera contr
 - `cargo-oxide` must come from the same fork and revision:
 
   ```sh
-  cargo +stable install --force --locked --git ssh://git@github.com/ssoj13/cuda-rust_b.git --rev 9370f8c91eba499a880a5769ecd11f39fa65ffbb cargo-oxide
+  cargo +1.99.1 install --force --locked --git ssh://git@github.com/ssoj13/cuda-rust_b.git --rev 0379bbf1182b9e81b0964c44d18d899f6d494b0f cargo-oxide
   cargo oxide doctor
   ```
 
