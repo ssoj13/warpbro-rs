@@ -24,7 +24,6 @@ Documentation: [fractals and procedural shapes](docs/formulas.md), [render and q
    - **Radial marking menu**: no longer pops up on every right-click — bound to **`Q + right-click`**.
    - **Sensitivity settings**: fixed the dead wiring — previously `Orbit/Zoom Sensitivity`, `Turntable`, and `Invert Zoom` were written to config but never read by the camera (which is why setting `0.1` changed nothing).
    - **A/B compare**: the split divider and handle now actually draw over the viewport and can be dragged/rotated.
-4. **Everything is built and pushed to `main`** (`render-rs`, `egui-widgets-rs`, `warpbro-rs`), `WarpBro.exe` is rebuilt, and the 3 new GPU tests (async parity, OptiX vs OIDN, zero-copy without CPU round-trip) pass. The only leftover is 4 old CPU template/preset tests failing from an earlier `sl-studio` scene schema change.
 
 ## What it does
 
