@@ -11,6 +11,21 @@ The project repository is [WarpBro](https://github.com/ssoj13/WarpBro), with SSH
 
 Documentation: [fractals and procedural shapes](docs/formulas.md), [render and quality profiles](docs/render-profiles.md), [workspace, materials and cached playback](docs/workspace.md), [colour](docs/color.md), [transparent and absorbing glass](docs/glass.md), [local REST API](docs/reference/rest-api.md), [changelog](CHANGELOG.md). Open work: [PLAN.md](PLAN.md).
 
+## Recent Updates
+
+1. **Moved host rendering to the official NVIDIA stack (`cuda-rust` + `nv-rs`) and sped up display**:
+   - Removed the blocking GPU wait after every step — batches now pipeline through a 2-slot ring buffer, and lightweight flags are read back asynchronously.
+   - Added **zero-copy presentation** via `pt-nv-interop` / `nv-wgpu`: CUDA runs tonemapping itself and hands the texture straight to `wgpu`/`egui`, with no pixel round-trips through system RAM.
+2. **Added a second denoiser on CUDA — OptiX**:
+   - You can now pick `Auto` / `OIDN` / `OptiX` in settings.
+   - `OptiX` runs entirely in GPU VRAM without copying buffers back to the CPU.
+3. **Fixed camera navigation, marking menu, and the A/B handle** (in `egui-widgets-rs`):
+   - **Mouse**: left button orbits properly, middle button pans, right button dollies instead of spinning wildly in `Fly` mode (`Alt + clicks` work too).
+   - **Radial marking menu**: no longer pops up on every right-click — bound to **`Q + right-click`**.
+   - **Sensitivity settings**: fixed the dead wiring — previously `Orbit/Zoom Sensitivity`, `Turntable`, and `Invert Zoom` were written to config but never read by the camera (which is why setting `0.1` changed nothing).
+   - **A/B compare**: the split divider and handle now actually draw over the viewport and can be dragged/rotated.
+4. **Everything is built and pushed to `main`** (`render-rs`, `egui-widgets-rs`, `warpbro-rs`), `WarpBro.exe` is rebuilt, and the 3 new GPU tests (async parity, OptiX vs OIDN, zero-copy without CPU round-trip) pass. The only leftover is 4 old CPU template/preset tests failing from an earlier `sl-studio` scene schema change.
+
 ## What it does
 
 - **28 distance-estimated fractal & procedural shape families ([full catalog](docs/formulas.md)):**
