@@ -40,11 +40,12 @@ use std::time::Instant;
 
 use fractal_node::{Bulb, Formula, FractalSceneExt};
 use sl_studio::color::{BT2408_SDR_WHITE_NITS, HDR_VIEW};
-use sl_studio::fs_name;
+use sl_studio::core::fs_name;
 use sl_studio::render::{Batch, Target, validate_size};
 use sl_studio::render_service::{Frame, FrameFile, PngEncoding};
 use sl_studio::render_wgpu;
 use sl_studio::scene::Scene;
+use sl_studio::world::SceneDocumentExt;
 
 /// Optional positional argument `i`: absent, or a `--flag` in its place (`--gallery DIR --hdr`),
 /// takes `default`; anything else must parse, so `--bench 96O` is an error, not 960 silently.
@@ -295,8 +296,8 @@ fn main() -> anyhow::Result<()> {
              --animated-fixtures, --warmup (see the header of src/main.rs)"
         ),
         _ => {
-            let bulb =
-                Scene::fractal_preset(Formula::Mandelbulb(Bulb::PRESET)).map_err(anyhow::Error::msg)?;
+            let bulb = Scene::fractal_preset(Formula::Mandelbulb(Bulb::PRESET))
+                .map_err(anyhow::Error::msg)?;
             let swatch = bulb.clone();
             sl_studio::run_with(sl_studio::StudioConfig {
                 title: "WarpBro".into(),

@@ -2295,3 +2295,173 @@ fn pixel_beam_slope_bounds_sheared_bases_and_disables_degenerate_shortcuts() {
         0.0
     );
 }
+
+#[test]
+fn cuda_async_pacing_matches_sync_accum_bit_identical() {
+    let _gpu_test = crate::test_gpu::lock();
+    let mut gpu = new_gpu().unwrap();
+    let mut scene = quiet(Scene::preset_fractal(
+        Formula::PRESETS[crate::params::FAMILY_BULB as usize],
+    ));
+    scene.render.backend = Backend::Cuda;
+    scene.render.adaptive.enabled = true;
+    scene.render.adaptive.min_samples = 1;
+
+    let mut async_target = Target::new(WIDTH, HEIGHT);
+    while !gpu
+        .advance(&mut async_target, &scene, 4, SEED, Batch::Fixed(1))
+        .unwrap()
+    {}
+
+    let mut tiled = Vec::new();
+    let mut sync_target = Target::new(WIDTH, HEIGHT);
+    while !gpu
+        .advance(&mut sync_target, &scene, 4, SEED, Batch::Fixed(1))
+        .unwrap()
+    {
+        // Force a full stream sync + readback between every step as the synchronous baseline.
+        let mut scratch = Vec::new();
+        gpu.read_film(&sync_target, Plane::Accum, false, &mut tiled, &mut scratch)
+            .unwrap();
+    }
+
+    let mut async_accum = Vec::new();
+    let mut sync_accum = Vec::new();
+    gpu.read_film(
+        &async_target,
+        Plane::Accum,
+        false,
+        &mut tiled,
+        &mut async_accum,
+    )
+    .unwrap();
+    gpu.read_film(
+        &sync_target,
+        Plane::Accum,
+        false,
+        &mut tiled,
+        &mut sync_accum,
+    )
+    .unwrap();
+
+    assert_eq!(async_accum.len(), WIDTH * HEIGHT);
+    assert_eq!(sync_accum.len(), WIDTH * HEIGHT);
+    for (i, (a, b)) in async_accum.iter().zip(sync_accum.iter()).enumerate() {
+        for c in 0..4 {
+            assert_eq!(
+                a[c].to_bits(),
+                b[c].to_bits(),
+                "async vs sync accum bit mismatch at pixel {i} channel {c}: {a:?} vs {b:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn cuda_optix_vs_oidn_denoiser_parity() {
+    use sl_studio::denoise::{DenoiseEngine, Mode};
+
+    let _gpu_test = crate::test_gpu::lock();
+    let mut gpu = new_gpu().unwrap();
+    let mut scene = quiet(Scene::preset_fractal(
+        Formula::PRESETS[crate::params::FAMILY_BULB as usize],
+    ));
+    scene.render.backend = Backend::Cuda;
+    scene.render.denoise.enabled = true;
+    scene.render.denoise.mode = Mode::ColorAlbedoNormal;
+    scene.render.denoise.interval = 4;
+
+    scene.render.denoise.engine = DenoiseEngine::Oidn;
+    let mut oidn_target = Target::new(WIDTH, HEIGHT);
+    while !gpu
+        .advance(&mut oidn_target, &scene, 4, SEED, Batch::Fixed(4))
+        .unwrap()
+    {}
+    assert_eq!(
+        oidn_target.denoise.resolved_engine,
+        Some(DenoiseEngine::Oidn)
+    );
+    let oidn_px = oidn_target
+        .denoise
+        .output
+        .as_ref()
+        .expect("OIDN produced host output");
+
+    scene.render.denoise.engine = DenoiseEngine::Optix;
+    let mut optix_target = Target::new(WIDTH, HEIGHT);
+    while !gpu
+        .advance(&mut optix_target, &scene, 4, SEED, Batch::Fixed(4))
+        .unwrap()
+    {}
+    assert_eq!(
+        optix_target.denoise.resolved_engine,
+        Some(DenoiseEngine::Optix)
+    );
+    let optix_px = optix_target
+        .denoise
+        .output
+        .as_ref()
+        .expect("OptiX produced host output when allow_zero_copy=false");
+
+    assert_eq!(oidn_px.len(), WIDTH * HEIGHT);
+    assert_eq!(optix_px.len(), WIDTH * HEIGHT);
+
+    let mut abs_sum = 0.0f64;
+    let mut non_zero = 0usize;
+    for (i, (a, b)) in oidn_px.iter().zip(optix_px.iter()).enumerate() {
+        for c in 0..3 {
+            assert!(a[c].is_finite(), "OIDN non-finite at pixel {i} ch {c}");
+            assert!(b[c].is_finite(), "OptiX non-finite at pixel {i} ch {c}");
+            abs_sum += f64::from((a[c] - b[c]).abs());
+            if b[c] > 1e-4 {
+                non_zero += 1;
+            }
+        }
+    }
+    let mae = abs_sum / ((WIDTH * HEIGHT * 3) as f64);
+    assert!(non_zero > 0, "OptiX output is unexpectedly all zero");
+    assert!(
+        mae < 0.08,
+        "OptiX vs OIDN mean absolute error {mae:.5} exceeds 0.08"
+    );
+}
+
+#[test]
+fn cuda_zero_copy_vram_denoise_and_present_skips_host_roundtrip() {
+    use sl_studio::denoise::{DenoiseEngine, Mode};
+
+    let _gpu_test = crate::test_gpu::lock();
+    let mut gpu = new_gpu().unwrap();
+    let mut scene = quiet(Scene::preset_fractal(
+        Formula::PRESETS[crate::params::FAMILY_BULB as usize],
+    ));
+    scene.render.backend = Backend::Cuda;
+    scene.render.denoise.enabled = true;
+    scene.render.denoise.engine = DenoiseEngine::Optix;
+    scene.render.denoise.mode = Mode::ColorAlbedoNormal;
+    scene.render.denoise.interval = 2;
+    scene.colour.on = false;
+
+    let mut target = Target::new(WIDTH, HEIGHT);
+    target.allow_zero_copy = true;
+    while !gpu
+        .advance(&mut target, &scene, 2, SEED, Batch::Fixed(2))
+        .unwrap()
+    {}
+
+    assert_eq!(target.denoise.resolved_engine, Some(DenoiseEngine::Optix));
+    assert!(
+        target.denoise.vram_ready,
+        "zero-copy OptiX denoise must remain VRAM-resident"
+    );
+    assert!(
+        target.denoise.output.is_none(),
+        "zero-copy OptiX denoise must not perform host PCIe readback"
+    );
+    if target.shared_view.is_some() {
+        assert!(
+            target.pixels.is_empty() && target.light.is_empty(),
+            "zero-copy interop present must not populate CPU display buffers"
+        );
+    }
+}

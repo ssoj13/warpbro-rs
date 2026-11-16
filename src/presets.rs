@@ -6,10 +6,13 @@ use serde_json::{Value, json};
 use sl_studio::palette::PaletteScheme;
 use sl_studio::scene::{Coloring, Facing, MaterialModel, Scene};
 use sl_studio::world::{
-    CAMERA_ORBIT_PHASE, CAMERA_ORBIT_SPEED, NodeId, WorldCommand, WorldDocument, WorldEditor,
+    CAMERA_ORBIT_PHASE, CAMERA_ORBIT_SPEED, NodeId, SceneDocumentExt, WorldCommand, WorldDocument,
+    WorldEditor,
 };
 
-use crate::fractal_node::{Formula, FractalSceneExt, Kifs, KifsKind, MandelBox, Quat};
+use crate::fractal_node::{
+    FRACTAL_KIND, Formula, FractalSceneExt, Kifs, KifsKind, MandelBox, Quat,
+};
 
 /// The animated worlds this module authors (`templates::BUILTINS` gives their names and
 /// descriptions).
@@ -134,11 +137,11 @@ pub fn scene(preset: Animated, name: &str) -> Result<Scene, String> {
             base.edit_fractal(|f| f.formula = Formula::Kifs(Kifs::preset(KifsKind::Octahedron)))?;
         }
     }
-    let mut editor = WorldEditor::new(WorldDocument::from_scene(&base));
+    let mut editor = WorldEditor::new(WorldDocument::from_scene(&base, Some(FRACTAL_KIND)));
     let object = editor.active().ok_or("Preset has no fractal")?;
     let camera = editor
         .document
-        .active_camera
+        .active_camera_id()
         .ok_or("Preset has no camera")?;
     let mut commands = vec![WorldCommand::SetTimeRange {
         first: 0,
@@ -278,7 +281,7 @@ pub fn scene(preset: Animated, name: &str) -> Result<Scene, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fractal_node::{FRACTAL_KIND, FractalTestScene};
+    use crate::fractal_node::FractalTestScene;
 
     #[test]
     fn animated_presets_remain_finite_visible_and_authored_for_all_250_frames() {

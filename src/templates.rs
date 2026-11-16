@@ -3,7 +3,7 @@
 
 use sl_studio::scene::Scene;
 pub use sl_studio::templates::{BuiltinTemplate, builtin_scene};
-use sl_studio::world::WorldDocument;
+use sl_studio::world::{SceneDocumentExt, WorldDocument};
 
 pub fn decode_scene(text: &str) -> Result<Scene, String> {
     let document = WorldDocument::decode_json(text).map_err(|e| format!("Invalid scene: {e}"))?;
@@ -208,10 +208,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let first = BUILTINS[0].name;
         let text = serde_json::to_string(&builtin_scene(1).unwrap().document).unwrap();
-        let replaced = dir.join(sl_studio::fs_name::frame_file(
-            &sl_studio::fs_name::stem(first),
+        let replaced = dir.join(sl_studio::core::fs_name::frame_file(
+            &sl_studio::core::fs_name::stem(first),
             None,
-            sl_studio::fs_name::SCENE_SUFFIX,
+            sl_studio::core::fs_name::SCENE_SUFFIX,
         ));
         let user = dir.join("user-scene.json");
         std::fs::write(&replaced, &text).unwrap();
@@ -239,7 +239,7 @@ mod tests {
         crate::engine::init_warpbro();
         let mut names: Vec<_> = BUILTINS
             .iter()
-            .map(|b| sl_studio::fs_name::slug(b.name))
+            .map(|b| sl_studio::core::fs_name::slug(b.name))
             .collect();
         names.sort();
         names.dedup();

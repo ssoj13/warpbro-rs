@@ -67,7 +67,7 @@ RELEASE_BIN = ROOT_DIR / "target" / "release" / BIN_NAME
 INSTALL_DIR = Path.home() / ".local" / "bin"
 
 CUDA_OXIDE_GIT = "ssh://git@github.com/ssoj13/cuda-rust_b.git"
-CUDA_OXIDE_REV = "7e2d940b40c09185e4563432ad96d831252e4453"
+CUDA_OXIDE_REV = "42cc04edaacd59e2e2a11008b9137c1807370cbb"
 RUST_COMPONENTS = ["rust-src", "rustc-dev", "rust-analyzer", "clippy", "rustfmt", "llvm-tools"]
 # Release builds (`--cubins`) also embed cubins for these GPUs (RTX 20/30/40/50), assembled
 # from the sm_75 PTX by cuda-oxide into one fat binary ahead of that PTX: those GPUs skip the

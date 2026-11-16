@@ -16,6 +16,7 @@ use serde_json::json;
 use sl_studio::render::{Batch, Plane, Target, validate_size};
 use sl_studio::render_profiles::{Backend, DirectRender, DirectShading};
 use sl_studio::scene::{Material, MaterialModel, Scene};
+use sl_studio::world::SceneDocumentExt;
 
 use crate::engine::{WarpBroGpuExt, init_warpbro, new_gpu};
 use crate::fractal_node::{Formula, FractalSceneExt};
@@ -263,12 +264,10 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
         let raw_name = format!("{stem}.rgb.f32");
         let raw_path = base.join(&raw_name);
         write_raw_rgb(&raw_path, &pixels)?;
-        let shot =
-            sl_studio::render_service::Frame::snapshot(&target, 0, false, false, 100.0);
-        let encoding =
-            sl_studio::render_service::PngEncoding::displayed(shot.light_kind.hdr());
+        let shot = sl_studio::render_service::Frame::snapshot(&target, 0, false, false, 100.0);
+        let encoding = sl_studio::render_service::PngEncoding::displayed(shot.light_kind.hdr());
         shot.save_png(
-            &base.join(sl_studio::fs_name::frame_file(
+            &base.join(sl_studio::core::fs_name::frame_file(
                 &stem,
                 None,
                 encoding.suffix(),

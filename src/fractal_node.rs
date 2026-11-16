@@ -12,25 +12,24 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock};
 
+use animation::attrs::{AttrValue, Attrs};
 use fractal_core::params::*;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use sl_studio::custom_branches::{BranchMap, CustomBranches, PreparedNode};
-use sl_studio::node_spec::NodeTypeSpec;
+use sl_studio::custom_branches::{BranchMap, CustomBranches, PreparedPayload, SceneObjectPacker};
+use sl_studio::node_spec::{NodePayloadKind, NodeTypeSpec};
 use sl_studio::palette::PaletteScheme;
 use sl_studio::render_profiles::Backend;
 use sl_studio::scene::{
     Adaptive, Camera, Coloring, DEFAULT_GLASS_PROBES, DEFAULT_MAX_STEPS, Material, MaterialModel,
     ObjectTransform, Render, Scene, Sky, Sun, length,
 };
-use sl_studio::world::{AttrValue, Attrs, Slider, WorldAttribute};
+use sl_studio::world::{NodeKind, Slider, WorldAttribute};
 
 use crate::formulas::*;
 
-/// The `WorldKind` of a WarpBro `"Fractal"` node in `sl-studio`.
-#[cfg(test)]
-pub const FRACTAL_KIND: sl_studio::world::WorldKind =
-    sl_studio::world::WorldKind::Custom("Fractal");
+/// The `NodeKind` of a WarpBro `"Fractal"` node in `sl-studio`.
+pub const FRACTAL_KIND: NodeKind = NodeKind::custom_static("Fractal");
 
 // =============================================================================
 // Formulas
@@ -1036,12 +1035,12 @@ impl NodeTypeSpec for FractalNodeSpec {
         "Objects"
     }
 
-    fn icon(&self) -> &'static str {
-        sl_config::icons::FRACTAL
+    fn icon_slug(&self) -> &'static str {
+        "sdf"
     }
 
-    fn color(&self) -> egui::Color32 {
-        egui::Color32::from_rgb(105, 153, 197)
+    fn color_rgba(&self) -> [u8; 4] {
+        [105, 153, 197, 255]
     }
 
     fn is_renderable(&self) -> bool {
@@ -1162,7 +1161,7 @@ impl NodeTypeSpec for FractalNodeSpec {
         Ok(())
     }
 
-    fn prepare(&self, branches: &BranchMap) -> Result<Arc<dyn PreparedNode>, String> {
+    fn prepare_payload(&self, branches: &BranchMap) -> Result<Arc<dyn PreparedPayload>, String> {
         Ok(Arc::new(FractalParams::parse(branches)?))
     }
 
@@ -1431,8 +1430,8 @@ impl NodeTypeSpec for FractalNodeSpec {
         &["Fractal"]
     }
 
-    fn section_color(&self, group: &str) -> Option<egui::Color32> {
-        (group == "Fractal").then(|| self.color())
+    fn section_color_rgba(&self, group: &str) -> Option<[u8; 4]> {
+        (group == "Fractal").then(|| self.color_rgba())
     }
 
     fn inactive_reason(
@@ -1655,8 +1654,8 @@ impl NodeTypeSpec for FractalNodeSpec {
         Formula::COUNT
     }
 
-    fn payload_kind(&self) -> sl_studio::NodePayloadKind {
-        sl_studio::NodePayloadKind::SdfField
+    fn payload_kind(&self) -> NodePayloadKind {
+        NodePayloadKind::SdfField
     }
 }
 
@@ -1756,7 +1755,7 @@ impl Placement {
     }
 }
 
-impl PreparedNode for FractalParams {
+impl PreparedPayload for FractalParams {
     fn framing_radius(&self) -> f32 {
         self.formula.framing_radius()
     }
@@ -1783,7 +1782,9 @@ impl PreparedNode for FractalParams {
     fn summary_label(&self) -> &str {
         self.formula.name()
     }
+}
 
+impl SceneObjectPacker for FractalParams {
     fn pack_object(&self, scene: &Scene, p: &mut [f32], camera_dist: f32) {
         pack_fractal(self, &Placement::of(scene, camera_dist), p);
     }
@@ -2047,7 +2048,7 @@ fn rotation_matrix4(degrees: [f32; 3]) -> [[f32; 4]; 4] {
 #[cfg(test)]
 mod tests {
     use sl_studio::render_prep::WorldUpload;
-    use sl_studio::world::{WorldCommand, WorldDocument, WorldEditor};
+    use sl_studio::world::{SceneDocumentExt, WorldCommand, WorldDocument, WorldEditor};
 
     use super::*;
 
@@ -2059,7 +2060,10 @@ mod tests {
         let defaults = FractalParams::new(Formula::Mandelbulb(Bulb::PRESET)).branches();
         let parsed = FractalParams::parse(&defaults).expect("default branches are valid");
         // The stored form round-trips: what `edit_fractal` writes is what `prepare` reads.
-        assert_eq!(parsed, FractalParams::new(Formula::Mandelbulb(Bulb::PRESET)));
+        assert_eq!(
+            parsed,
+            FractalParams::new(Formula::Mandelbulb(Bulb::PRESET))
+        );
         for (key, bad) in [
             ("formula", json!({"NotAFormula": {}})),
             ("julia", json!([0.0, "x", 0.0])),
@@ -2071,20 +2075,20 @@ mod tests {
             let mut broken = defaults.clone();
             broken.insert(key.into(), bad.clone());
             assert!(
-                FractalNodeSpec.prepare(&broken).is_err(),
+                FractalNodeSpec.prepare_payload(&broken).is_err(),
                 "{key} = {bad} must be rejected"
             );
         }
         let mut missing = defaults;
         missing.remove("trap_scale");
-        assert!(FractalNodeSpec.prepare(&missing).is_err());
+        assert!(FractalNodeSpec.prepare_payload(&missing).is_err());
         // A typed edit that breaks an invariant is refused and leaves the scene as it was.
         let mut bulb = Scene::preset_fractal(Formula::Mandelbulb(Bulb::PRESET));
         assert!(bulb.edit_fractal(|f| f.trap_axis = 3).is_err());
         assert_eq!(bulb.trap_axis(), 1);
 
         let scene = Scene::preset_fractal(Formula::Mandelbulb(Bulb::PRESET));
-        let mut editor = WorldEditor::new(WorldDocument::from_scene(&scene));
+        let mut editor = WorldEditor::new(WorldDocument::from_scene(&scene, Some(FRACTAL_KIND)));
         let id = editor
             .document
             .nodes()
@@ -2276,10 +2280,7 @@ mod tests {
     fn fractal_node_lifecycle_and_parameter_roundtrip() {
         use sl_studio::StudioModule;
         crate::engine::init_warpbro();
-        assert_eq!(
-            FractalNodeSpec.payload_kind(),
-            sl_studio::NodePayloadKind::SdfField
-        );
+        assert_eq!(FractalNodeSpec.payload_kind(), NodePayloadKind::SdfField);
         assert_eq!(crate::engine::WarpBroFractalModule.id(), "warpbro.fractals");
         assert_eq!(
             crate::engine::WarpBroFractalModule.title(),
@@ -2295,7 +2296,7 @@ mod tests {
         scene.set_trap_axis(2);
         scene.set_trap_scale(2.5);
 
-        let mut editor = WorldEditor::new(WorldDocument::from_scene(&scene));
+        let mut editor = WorldEditor::new(WorldDocument::from_scene(&scene, Some(FRACTAL_KIND)));
         let fractal_id = editor
             .document
             .nodes()
@@ -2409,9 +2410,10 @@ mod tests {
                 .validate_attribute("/render/backend", &json!("InvalidBackend"))
                 .is_err()
         );
-        let mut editor = WorldEditor::new(WorldDocument::from_scene(&Scene::preset_fractal(
-            Formula::Mandelbulb(Bulb::PRESET),
-        )));
+        let mut editor = WorldEditor::new(WorldDocument::from_scene(
+            &Scene::preset_fractal(Formula::Mandelbulb(Bulb::PRESET)),
+            Some(FRACTAL_KIND),
+        ));
         let fractal_id = editor
             .document
             .nodes()

@@ -41,19 +41,27 @@ fn native_env() -> Result<BTreeMap<String, String>, String> {
     );
 
     if let Some(cuda) = cuda {
-        add_cuda(&mut assembled, &cuda, Arch::X64);
+        add_cuda(&mut assembled, &cuda).map_err(|e| e.to_string())?;
         assembled
             .vars
-            .insert("CUDA_TOOLKIT_PATH".into(), cuda.root.display().to_string());
+            .insert("CUDA_TOOLKIT_PATH".into(), cuda.root.as_os_str().to_os_string());
         eprintln!("bootstrap: CUDA {} ({})", cuda.version, cuda.root.display());
     }
     if let Some(vcpkg) = detect_vcpkg().and_then(|root| probe_vcpkg(&root, Arch::X64)) {
-        add_vcpkg(&mut assembled, &vcpkg);
+        add_vcpkg(&mut assembled, &vcpkg).map_err(|e| e.to_string())?;
     }
 
-    let mut env = assembled.vars;
+    let mut env = BTreeMap::new();
+    for (name, val) in assembled.vars {
+        let s = val
+            .into_string()
+            .map_err(|v| format!("{name} is not valid UTF-8: {}", v.display()))?;
+        env.insert(name, s);
+    }
+    let mut exe_paths = assembled.path;
+    exe_paths.extend(assembled.runtime);
     for (name, paths) in [
-        ("PATH", assembled.path),
+        ("PATH", exe_paths),
         ("INCLUDE", assembled.include),
         ("LIB", assembled.lib),
         ("LIBPATH", assembled.libpath),
