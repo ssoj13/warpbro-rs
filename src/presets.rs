@@ -3,13 +3,16 @@
 //! animated showcase scenes there are authored documents (JSON).
 use curves::Tan;
 use serde_json::{Value, json};
-use soluwell_studio::palette::PaletteScheme;
-use soluwell_studio::scene::{Coloring, Facing, MaterialModel, Scene};
-use soluwell_studio::world::{
-    CAMERA_ORBIT_PHASE, CAMERA_ORBIT_SPEED, NodeId, WorldCommand, WorldDocument, WorldEditor,
+use sl_studio::palette::PaletteScheme;
+use sl_studio::scene::{Coloring, Facing, MaterialModel, Scene};
+use sl_studio::world::{
+    CAMERA_ORBIT_PHASE, CAMERA_ORBIT_SPEED, NodeId, SceneDocumentExt, WorldCommand, WorldDocument,
+    WorldEditor,
 };
 
-use crate::fractal_node::{Formula, FractalSceneExt, Kifs, KifsKind, MandelBox, Quat};
+use crate::fractal_node::{
+    FRACTAL_KIND, Formula, FractalSceneExt, Kifs, KifsKind, MandelBox, Quat,
+};
 
 /// The animated worlds this module authors (`templates::BUILTINS` gives their names and
 /// descriptions).
@@ -53,11 +56,11 @@ fn track(commands: &mut Vec<WorldCommand>, id: NodeId, path: &str, values: [Valu
 /// The world `preset` named `name`: 250 frames at 24 fps, the camera orbiting and pulling back
 /// while the fractal unfolds.
 pub fn scene(preset: Animated, name: &str) -> Result<Scene, String> {
-    let mut base = Scene::preset_fractal(match preset {
+    let mut base = Scene::fractal_preset(match preset {
         Animated::ChromeCathedral => Formula::Mandelbox(MandelBox::PRESET),
         Animated::OpalJulia => Formula::QuaternionJulia(Quat::PRESET),
         Animated::VerdantFold => Formula::Kifs(Kifs::preset(KifsKind::Tetrahedron)),
-    });
+    })?;
     base.name = name.into();
     base.animation.first = 0;
     base.animation.last = 249;
@@ -78,7 +81,7 @@ pub fn scene(preset: Animated, name: &str) -> Result<Scene, String> {
         Animated::VerdantFold => (0.3, 0.28),
     };
     base.coloring = Coloring::TrapOrigin;
-    base.set_trap_scale(1.25);
+    base.edit_fractal(|f| f.trap_scale = 1.25)?;
     let (palette, horizon, zenith, sun) = match preset {
         Animated::ChromeCathedral => (
             PaletteScheme::Ice,
@@ -115,11 +118,11 @@ pub fn scene(preset: Animated, name: &str) -> Result<Scene, String> {
     base.sky.background = true;
     match preset {
         Animated::ChromeCathedral => {
-            base.modify_formula(|f| {
-                if let Formula::Mandelbox(parameters) = f {
+            base.edit_fractal(|f| {
+                if let Formula::Mandelbox(parameters) = &mut f.formula {
                     parameters.scale = -1.5;
                 }
-            });
+            })?;
         }
         Animated::OpalJulia => {
             base.material.facing = Some(Facing {
@@ -131,14 +134,14 @@ pub fn scene(preset: Animated, name: &str) -> Result<Scene, String> {
             base.material.thin_film_thickness = 420.0;
         }
         Animated::VerdantFold => {
-            base.set_formula(Formula::Kifs(Kifs::preset(KifsKind::Octahedron)));
+            base.edit_fractal(|f| f.formula = Formula::Kifs(Kifs::preset(KifsKind::Octahedron)))?;
         }
     }
-    let mut editor = WorldEditor::new(WorldDocument::from_scene(&base));
+    let mut editor = WorldEditor::new(WorldDocument::from_scene(&base, Some(FRACTAL_KIND)));
     let object = editor.active().ok_or("Preset has no fractal")?;
     let camera = editor
         .document
-        .active_camera
+        .active_camera_id()
         .ok_or("Preset has no camera")?;
     let mut commands = vec![WorldCommand::SetTimeRange {
         first: 0,
@@ -278,7 +281,7 @@ pub fn scene(preset: Animated, name: &str) -> Result<Scene, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fractal_node::FRACTAL_KIND;
+    use crate::fractal_node::FractalTestScene;
 
     #[test]
     fn animated_presets_remain_finite_visible_and_authored_for_all_250_frames() {

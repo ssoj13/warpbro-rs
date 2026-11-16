@@ -10,32 +10,32 @@
 ## What it is
 
 WarpBro is an egui desktop browser / animator for path-traced 3D fractals (28 DE families) built on
-top of the shared `soluwell-studio` widget (`egui-widgets-rs/crates/soluwell/studio`) and the
+top of the shared `sl-studio` widget (`egui-widgets-rs/crates/soluwell/studio`) and the
 shared `animation-rs` animation/attribute substrate (`animation` crate: `time`, `anim`, `attrs`
-(`AttrValue`, `Attrs`), `transform`, `keys`, `curves`, re-exported via `soluwell_studio::world`).
+(`AttrValue`, `Attrs`), `transform`, `keys`, `curves`, re-exported via `sl_studio::world`).
 
-`soluwell-studio` knows nothing about fractals or fractal formulas (`soluwell-studio` has zero
+`sl-studio` knows nothing about fractals or fractal formulas (`sl-studio` has zero
 `fractal-*` dependencies; shared studio ABI, environment, and Standard Surface material presets live
 in `render-rs`: `pt_integrator::studio_abi`, `render_env::studio`, and
 `standard_surface_bsdf::presets`). WarpBro plugs in as a hot-pluggable
-`soluwell_studio::StudioModule` (`WarpBroFractalModule` in `src/engine.rs`, passed via
+`sl_studio::StudioModule` (`WarpBroFractalModule` in `src/engine.rs`, passed via
 `StudioConfig { modules: vec![Arc::new(engine::WarpBroFractalModule)], .. }`) and registers:
 - **`"Fractal"` scene node (`src/fractal_node.rs`, `FractalNodeSpec`)**: implements
   `NodeTypeSpec` v2 (`payload_kind() -> NodePayloadKind::SdfField`), registered via
-  `WarpBroFractalModule::node_specs` and `soluwell_studio::node_spec::register_node_type`. When a
+  `WarpBroFractalModule::node_specs` and `sl_studio::node_spec::register_node_type`. When a
   `"Fractal"` node is present and visible in the graph, it evaluates into `scene.objects` and
   renders; when absent or hidden, `scene.objects` is empty (`P_OBJECT_COUNT == 0`) and
-  `soluwell-studio` renders only the 3D studio environment (sky/HDRI + 3D grid + gizmos).
+  `sl-studio` renders only the 3D studio environment (sky/HDRI + 3D grid + gizmos).
 - **Two compute backends (`src/engine.rs`, `WarpBroComputeEngine`)** rendering the same packed scene
   ABI (`fractal_core::params`, `P_COUNT`, all 28 DE families `0..27`):
   - **CUDA**: Rust kernels from the `fractal-rs` git dependency (`fractal-kernels`), compiled to PTX
     by the `cuda-oxide` rustc backend and linked in with `#[cuda_module]`. All 28 families.
-  - **WGPU**: WGSL port (`src/formulas.wgsl` injected into `soluwell-studio-render` via
+  - **WGPU**: WGSL port (`src/formulas.wgsl` injected into `sl-studio-render` via
     `render_wgpu::set_custom_shader_hook`) on the shared `gpu_info::shared_device()`. All 28
     families. One shader module per family plus a dynamic 28-way module for mixed-family worlds.
 - **Built-in templates (`src/templates.rs`, `src/presets.rs`) and 38 gallery presets
-  (`Scene::fractal_gallery`)**: injected into `soluwell_studio::StudioConfig` and
-  `soluwell_studio::templates::register_builtins`.
+  (`Scene::fractal_gallery`)**: injected into `sl_studio::StudioConfig` and
+  `sl_studio::templates::register_builtins`.
 
 Build only through cuda-oxide (`cargo oxide build`, `python bootstrap.py b`); type-check with
 `FRAC_ALLOW_PLAIN_CARGO=1 cargo check --all-targets` or `python bootstrap.py c` (build.rs skips the
@@ -51,20 +51,20 @@ All shared studio UI, dock panels, Outliner/Timeline/Attribute Editor/Curve Edit
 two-layer nervous system (`EventBus` + `StateSlot<T>`), loopback HTTP control, `WorldDocument`
 graph/undo, `RenderService`, `PreparationCache`, OCIO display pipeline, OIDN denoiser,
 `PreviewController`, `ThumbnailCache`, and `ExportController` live in
-`egui-widgets-rs/crates/soluwell/studio` (`soluwell-studio`, `soluwell-studio-core`,
-`soluwell-studio-scene`, `soluwell-studio-render`), backed by `render-rs` (`pt-integrator`,
+`egui-widgets-rs/crates/soluwell/studio` (`sl-studio`, `sl-studio-core`,
+`sl-studio-scene`, `sl-studio-render`), backed by `render-rs` (`pt-integrator`,
 `render-env`, `standard-surface-bsdf`) and `animation-rs` (`animation` crate: `time`, `anim`,
 `attrs`, `transform`, `keys`, `curves`). `warpbro-rs` keeps a clean direct dependency graph
-(`soluwell-studio`, `animation`, `fractal-core`, `fractal-kernels`,
-`cuda-core`/`cuda-host`/`cuda-device`, `curves`, `egui`, `soluwell-config`, `glam`, `log`,
+(`sl-studio`, `animation`, `fractal-core`, `fractal-kernels`,
+`cuda-core`/`cuda-host`/`cuda-device`, `curves`, `egui`, `sl-config`, `glam`, `log`,
 `anyhow`, `env_logger`, `serde`, `serde_json`, `sha2`) after dropping unused direct `playa-*`,
 `video-io`, `vfx-ocio`, `exr-core`, `wgpu`, `bytemuck`, `gpu-info`, etc. dependencies.
 `warpbro-rs/src/` contains only the 10 fractal domain files:
 
 | Area | Files | Role |
 |---|---|---|
-| Entry & CLI | `main.rs` | `engine::init_warpbro()`, CLI modes (`--gallery`, `--bench`, `--world-bench`, `--animated-fixtures`, `--warmup`), else `soluwell_studio::run_with(StudioConfig { modules: vec![Arc::new(engine::WarpBroFractalModule)], ... })` |
-| Compute engine & module | `engine.rs` | `WarpBroFractalModule` (`StudioModule`), `init_warpbro()`, `WarpBroComputeEngine` (dual CUDA `fractal-kernels` + 28-family WGPU `WgpuEngine` implementing `soluwell_studio::render::ComputeEngine`), `warpbro_shader_hook` |
+| Entry & CLI | `main.rs` | `engine::init_warpbro()`, CLI modes (`--gallery`, `--bench`, `--world-bench`, `--animated-fixtures`, `--warmup`), else `sl_studio::run_with(StudioConfig { modules: vec![Arc::new(engine::WarpBroFractalModule)], ... })` |
+| Compute engine & module | `engine.rs` | `WarpBroFractalModule` (`StudioModule`), `init_warpbro()`, `WarpBroComputeEngine` (dual CUDA `fractal-kernels` + 28-family WGPU `WgpuEngine` implementing `sl_studio::render::ComputeEngine`), `warpbro_shader_hook` |
 | `"Fractal"` node & ABI | `fractal_node.rs` | `FractalNodeSpec` (`NodeTypeSpec` v2, `NodePayloadKind::SdfField`), 28-variant `Formula`, `FractalSceneExt` over `Scene::custom`, 38-preset `fractal_gallery()`, and `pack_object` (`P_COUNT` kernel ABI) |
 | Formula registry & WGSL | `formulas.rs`, `formulas.wgsl` | Declarative 28-family metadata table (`FORMULAS`), extended parameter structs/packing (`EXT_SLOTS`), and 28-family WGSL distance estimators |
 | Templates & presets | `templates.rs`, `presets.rs` | 14 built-in templates (`BUILTINS`, `ANIMATED = 0..5`) and procedural 250-frame animated `WorldDocument` builders |
@@ -74,7 +74,7 @@ graph/undo, `RenderService`, `PreparationCache`, OCIO display pipeline, OIDN den
 
 ```
 main.rs:main --> app::run --> window::run
-  soluwell_window::run: ctx.run_ui -> Window::ui -> App::ui -> paint -> present -> Window::presented (window shots)
+  sl_window::run: ctx.run_ui -> Window::ui -> App::ui -> paint -> present -> Window::presented (window shots)
 
 App owns:
   world: WorldEditor (world.rs:356)   document + undo/redo     <- the ONLY authored state
@@ -132,7 +132,7 @@ WorldDocument: graph (playa_graph::SubnetFile: nodes{uuid -> type, parent, host:
                active_camera / active_environment, first/last/fps, marks; takes + camera_slots outside undo.
                Animation & attribute primitives (`time`, `anim`, `attrs` (`AttrValue`, `Attrs`), `transform`,
                `keys`, `curves`) come from `animation-rs` (`animation` crate) and are re-exported via
-               `soluwell_studio::world`.
+               `sl_studio::world`.
 
 EDIT: WorldCommand (world.rs:188) -> WorldEditor::execute_edit(cmd, gesture) (415) -> apply_edit (471)
       -> apply (812) -> set_attribute (4550) -> validate_render_profiles (3361, Err = rollback)
@@ -209,7 +209,7 @@ IoService thread: settings / scenes / bookmarks (tmp + rename), frame and window
   remain terminal for that ticket. The compiler is separate from the sole owner of render targets.
 - Pipeline-cache persistence is driver-specific. The gpu-info dependency (`bb476cdc`, `>= f845ac88`)
   retains the cache-persistence guard fix and provides `gpu_info::create_compute_pipeline` /
-  `create_render_pipeline` used across `soluwell-studio-render` and `examples/pipeline_cache_probe.rs`.
+  `create_render_pipeline` used across `sl-studio-render` and `examples/pipeline_cache_probe.rs`.
   Verify accepted cache contents and reuse across restart; a large old disk file alone proves neither.
 - UI/REST admission must use reliable Playa EventBus `try_emit` (upstream `72ed08b`); do not add a
   parallel application queue or fall back to an emitter that evicts accepted actions on overflow.
@@ -218,11 +218,16 @@ IoService thread: settings / scenes / bookmarks (tmp + rename), frame and window
 - Many sources are CRLF; scripted replacements must match `\r\n`.
 - Tests: `cuda_*` need a CUDA device, `gpu_*` another GPU API, and no other test name contains
   them (`test_gpu::device_prefixes_only_start_test_names`); hosted CI skips both.
-- Fractal custom branches are validated, never defaulted: `FractalNodeSpec::validate_node`
-  (`validate_fractal_branches`) runs on decode, after every edit (rollback) and per shown node in
-  every snapshot (soluwell `NodeTypeSpec::validate_node`, egui-widgets-rs `13d6f8d`). The
-  infallible accessors (`formula()`, `julia()`, ...) therefore only log an error if a scene was
-  built around that validation. Add a new custom key to `validate_fractal_branches` too.
+- Fractal custom branches are parsed, never defaulted: `FractalNodeSpec::prepare`
+  (`FractalParams::parse`) runs whenever a `Scene` is built from them (decode, every edit with
+  rollback, every snapshot per shown node, `edit_fractal`), and `sl-studio`'s `CustomBranches`
+  keeps the parsed `FractalParams` next to the JSON. Radii, family, label and packing read that
+  model; nothing re-reads the JSON, and a scene with broken branches cannot exist. Read a
+  fractal through `FractalSceneExt::fractal()`, change it through `edit_fractal` (fallible).
+  A new custom key goes into `FractalParams` (field, `new`, `parse`, `branches`).
+- The renderer label comes from the frame (`Frame::renderer` = resolved backend + device,
+  `ComputeEngine::device_name(backend)`), never from the requested backend or a name fixed at
+  engine construction. Benches report it per case (`render_bench::renderer`).
 - Integer formula leaves (`u32` fields: `octaves`, `fibers`, ...) are found from the presets'
   JSON (`integer_formula_leaf`), validated as whole numbers and keyed discretely: a float there
   (even `3.0`) fails `Formula::deserialize`.
@@ -245,7 +250,7 @@ IoService thread: settings / scenes / bookmarks (tmp + rename), frame and window
 
 ## TODO
 
-- [x] Migrate `warpbro-rs` onto `soluwell-studio` with extensible `WorldKind::Custom("Fractal")` (`FractalNodeSpec`) and pluggable `ComputeEngine` (`WarpBroComputeEngine`).
+- [x] Migrate `warpbro-rs` onto `sl-studio` with extensible `WorldKind::Custom("Fractal")` (`FractalNodeSpec`) and pluggable `ComputeEngine` (`WarpBroComputeEngine`).
 - [ ] CUDA / WGPU parity verification & zero-spill launch bounds tuning across all 28 families (see [PLAN.md](PLAN.md) Section A).
 - [ ] Render pacing and the GPU display path stages 0..4 (two-batch ring, async readbacks, GPU tonemap/OCIO, zero-copy present; see [PLAN.md](PLAN.md) Section B).
 - [ ] oiio-rs CUDA OCIO on the film (`plan-cuda-oxide.md` in `oiio-rs`, feeds into Stage 3).
@@ -253,13 +258,14 @@ IoService thread: settings / scenes / bookmarks (tmp + rename), frame and window
 
 ## Changelog
 
+- **2026-11-11 (late)**: plan1 P1 + B5 on branch `fix/node-prepare-device`, with egui-widgets-rs branch `warpbro/node-prepare` (on `rename/ac-sl`): `NodeTypeSpec::prepare` + `CustomBranches` (formula parsed once per scene build), `FractalParams`, fallible `fractal_preset`/`edit_fractal`; `ComputeEngine::device_name(backend)`, device per film, `Frame::renderer` label; migrated to `sl-*` crate names. Lands after the egui rename merge.
 - **2026-11-11 (later)**: plan1 wave D, pushed before its test run on the operator's word: Mandelbox/KIFS clips from parameters (the Mandelbox clip cut even the scale-2 preset's corners), ranges aligned with the estimator clamps, Astrolabe teeth rounding, Mandelbox inner-radius floor. Then verified: `fractal_node::tests` 8 passed.
 - **2026-11-11**: `/bughunt` audit at `a5ee386` ([plan1.md](plan1.md)), then waves A-C: node validation hook upstream (egui-widgets-rs `13d6f8d`: `validate_node`, `WgpuComputeEngine::wgpu_mut`, `tile_count`), strict custom-branch readers, integer leaves, enum-derived choices, classic labels/hints from `FORMULAS`, WGPU delegated to soluwell, WGSL unknown-family miss, honest `--warmup`, strict CLI, build.rs rerun keys, xtask VS-fallback warning.
-- **2026-11-08**: Upgraded ecosystem lock to `render-rs@23c01af`, `fractal-rs@21c3f4e`, and `egui-widgets-rs@1a621308` (`gpu-info-rs@bb476cdc`): adopted `ThinFilmEnergy::Conserving` default for non-OFX renders across CUDA (`fractal-kernels`) and WGPU (`soluwell-studio-render`), GPU-native OIDN `GpuDenoiser` on `WgpuTarget` tiled planes (with `HostDenoiser` fallback for CUDA), shared `gpu_info::create_compute_pipeline` shader caching, 69 curated `standard_surface_bsdf::presets` SSOT, and aligned `parity_tests::pixel_beam_start_fixes_recorded_mobius_surface_skip` with the paired 8-D Bayer-shuffled Sobol sampler.
-- **2026-10-30**: Synchronized `warpbro-rs` with `soluwell-studio` (`NodeTypeSpec v2`, `StudioModule`, `appbus` two-layer nervous system) and `render-rs` shared studio SSOT (`pt_integrator::studio_abi`, `render_env::studio`, `standard_surface_bsdf::presets`): added `WarpBroFractalModule` (`StudioModule`) in `src/engine.rs`, wired `StudioConfig::modules` in `src/main.rs`, and implemented `FractalNodeSpec::payload_kind() -> NodePayloadKind::SdfField` in `src/fractal_node.rs`.
-- **2026-10-29**: Documented `animation-rs` (`animation` crate: `time`, `anim`, `attrs` (`AttrValue`, `Attrs`), `transform`, `keys`, `curves` re-exported via `soluwell_studio::world`) across `soluwell-studio` and cleaned up the `warpbro-rs` dependency graph by dropping unused direct `playa-*`, `video-io`, `vfx-ocio`, `exr-core`, `wgpu`, etc. dependencies.
+- **2026-11-08**: Upgraded ecosystem lock to `render-rs@23c01af`, `fractal-rs@21c3f4e`, and `egui-widgets-rs@1a621308` (`gpu-info-rs@bb476cdc`): adopted `ThinFilmEnergy::Conserving` default for non-OFX renders across CUDA (`fractal-kernels`) and WGPU (`sl-studio-render`), GPU-native OIDN `GpuDenoiser` on `WgpuTarget` tiled planes (with `HostDenoiser` fallback for CUDA), shared `gpu_info::create_compute_pipeline` shader caching, 69 curated `standard_surface_bsdf::presets` SSOT, and aligned `parity_tests::pixel_beam_start_fixes_recorded_mobius_surface_skip` with the paired 8-D Bayer-shuffled Sobol sampler.
+- **2026-10-30**: Synchronized `warpbro-rs` with `sl-studio` (`NodeTypeSpec v2`, `StudioModule`, `appbus` two-layer nervous system) and `render-rs` shared studio SSOT (`pt_integrator::studio_abi`, `render_env::studio`, `standard_surface_bsdf::presets`): added `WarpBroFractalModule` (`StudioModule`) in `src/engine.rs`, wired `StudioConfig::modules` in `src/main.rs`, and implemented `FractalNodeSpec::payload_kind() -> NodePayloadKind::SdfField` in `src/fractal_node.rs`.
+- **2026-10-29**: Documented `animation-rs` (`animation` crate: `time`, `anim`, `attrs` (`AttrValue`, `Attrs`), `transform`, `keys`, `curves` re-exported via `sl_studio::world`) across `sl-studio` and cleaned up the `warpbro-rs` dependency graph by dropping unused direct `playa-*`, `video-io`, `vfx-ocio`, `exr-core`, `wgpu`, etc. dependencies.
 - **2026-10-28**: Consolidated all root plan/handoff/bug documents into `PLAN.md`. Added inline `Backend` (`Auto / CUDA / WGPU`) selector across RenderSettings bindings, synced OIDN `WorkContext`, updated `CUDA_OXIDE_REV`, and locked OxideAV git dependencies in `Cargo.lock`. All 28 families ported to CUDA with 234 specialized kernel entries (`fractal-rs` `5a21813e`).
-- **2026-10-27**: Migrated `warpbro-rs` onto `soluwell-studio` (`egui-widgets-rs` `a8b4e935`). Removed all fractal/formula knowledge from `soluwell-studio`, extracted `"Fractal"` into `src/fractal_node.rs` (`FractalNodeSpec`) and the dual CUDA+WGPU backend into `src/engine.rs` (`WarpBroComputeEngine`), and deleted 45 duplicated UI/scene/render files and `crates/app-control`.
+- **2026-10-27**: Migrated `warpbro-rs` onto `sl-studio` (`egui-widgets-rs` `a8b4e935`). Removed all fractal/formula knowledge from `sl-studio`, extracted `"Fractal"` into `src/fractal_node.rs` (`FractalNodeSpec`) and the dual CUDA+WGPU backend into `src/engine.rs` (`WarpBroComputeEngine`), and deleted 45 duplicated UI/scene/render files and `crates/app-control`.
 
 <!-- gitnexus-rs:start -->
 # GitNexus-rs — Code Intelligence

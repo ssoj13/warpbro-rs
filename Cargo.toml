@@ -11,21 +11,28 @@ path = "src/main.rs"
 default = []
 
 [dependencies]
-soluwell-studio = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
+sl-studio = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
 animation = { git = "ssh://git@github.com/ssoj13/animation-rs.git", branch = "main" }
 # The fractal path tracer shared with ofx-rs: parameter ABI and sampling, and the CUDA kernels
 # (built into this binary through #[cuda_module]).
 fractal-core = { git = "ssh://git@github.com/ssoj13/fractal-rs.git", branch = "main" }
 # `direct`: the Direct display's deterministic shading kernels (`world_direct`, `direct_<family>`).
 fractal-kernels = { git = "ssh://git@github.com/ssoj13/fractal-rs.git", branch = "main", features = ["direct"] }
-# Our Windows fork includes the Rust 1.99 backend fixes.
-cuda-device = { git = "ssh://git@github.com/ssoj13/cuda-rust-windows.git", branch = "main" }
-cuda-host = { git = "ssh://git@github.com/ssoj13/cuda-rust-windows.git", branch = "main" }
-# The monorepo ships cuda-core next to cuda-host; one source keeps a single cuda-core in the graph.
-cuda-core = { git = "ssh://git@github.com/ssoj13/cuda-rust-windows.git", branch = "main" }
+# Host-side CUDA runtime/bindings from official NVIDIA/cuda-rust (matching nv-rs / pt-nv-interop).
+cuda-core = { git = "https://github.com/NVIDIA/cuda-rust.git", branch = "main" }
+cuda-bindings = { git = "https://github.com/NVIDIA/cuda-rust.git", branch = "main" }
+# Our Windows fork includes the Rust 1.99 backend fixes (kept for #[cuda_module] / fractal-kernels).
+cuda-device = { git = "ssh://git@github.com/ssoj13/cuda-rust_b.git", branch = "main" }
+cuda-host = { git = "ssh://git@github.com/ssoj13/cuda-rust_b.git", branch = "main" }
+# Zero-copy CUDA <-> wgpu interop and OptiX denoiser.
+pt-nv-interop = { git = "ssh://git@github.com/ssoj13/render-rs.git", branch = "main" }
+optix = { git = "ssh://git@github.com/ssoj13/nv-rs.git", branch = "main" }
+nv-wgpu = { git = "ssh://git@github.com/ssoj13/nv-rs.git", branch = "main" }
+gpu-info = { package = "gpu-info-rs", version = "0.1.1", default-features = false, features = ["wgpu"] }
+wgpu = "30"
 curves = { git = "ssh://git@github.com/ssoj13/curves-rs.git", branch = "main", features = ["serde"] }
 egui = "0.36"
-soluwell-config = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
+sl-config = { git = "ssh://git@github.com/ssoj13/egui-widgets-rs.git", branch = "main" }
 glam = "0.33.6"
 log = "0.4"
 anyhow = "1"
@@ -37,5 +44,13 @@ crashdump = { package = "crashdump-rs", git = "ssh://git@github.com/ssoj13/crash
 
 [dev-dependencies]
 standard-surface-bsdf = { git = "ssh://git@github.com/ssoj13/render-rs.git", branch = "main", features = ["cuda-math"] }
-gpu-info = { package = "gpu-info-rs", git = "ssh://git@github.com/ssoj13/gpu-info-rs.git", branch = "main", default-features = false, features = ["wgpu"] }
-wgpu = "30"
+
+[patch.crates-io]
+gpu-info-rs = { git = "ssh://git@github.com/ssoj13/gpu-info-rs.git", branch = "main" }
+
+[patch."https://github.com/ssoj13/cuda-rust_b.git"]
+cuda-device = { git = "ssh://git@github.com/ssoj13/cuda-rust_b.git", branch = "main" }
+cuda-macros = { git = "ssh://git@github.com/ssoj13/cuda-rust_b.git", branch = "main" }
+cuda-repr = { git = "ssh://git@github.com/ssoj13/cuda-rust_b.git", branch = "main" }
+oxide-tile-export = { git = "ssh://git@github.com/ssoj13/cuda-rust_b.git", branch = "main" }
+reserved-oxide-symbols = { git = "ssh://git@github.com/ssoj13/cuda-rust_b.git", branch = "main" }

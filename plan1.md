@@ -84,7 +84,7 @@ concurrent `cargo check` from another session held the build lock).
 ## 6. Docs drift
 
 - `src/formulas.rs:79` says the estimators live in `render_wgpu.wgsl`; they are in `formulas.wgsl`.
-- `AGENTS.md` "Ownership and per-frame loop" and "World document" anchors (`app.rs`, `world.rs:356`, `render_service.rs:393`, ...) describe files that now live in `soluwell-studio`, and the line numbers are from `4cfa5eb`. Keep them as cross-repo pointers, marked as such.
+- `AGENTS.md` "Ownership and per-frame loop" and "World document" anchors (`app.rs`, `world.rs:356`, `render_service.rs:393`, ...) describe files that now live in `sl-studio`, and the line numbers are from `4cfa5eb`. Keep them as cross-repo pointers, marked as such.
 - `DIAGRAMS.md` section 5 refers to a "WGSL consts! macro" emitting `FAMILY_*` that nothing consumes (S4).
 
 ## Remediation plan (proposed order, awaiting approval)
@@ -107,7 +107,7 @@ run at the end of a wave, GPU tests only with the operator's yes.
 - [x] B2 (S2, S3): give the WGSL `switch` an explicit `case FAMILY_BULB` and a `default` that returns the miss value; reject an unknown code before building a specialized shader, with a typed error.
 - [x] B3 (S4): delete the 27 unused `FAMILY_*` constants from the hook (keep the masks if the WGSL uses them; verify with grep first).
 - [x] B4 (S7, L8, L9, L10, F6, T3): shared tile constant from `render_prep`; the closure pattern for `lut_staging`; drop the duplicate tile upload; `const _: () = assert!(TALLY_THREADS % BLOCK == 0)`; log the device-name error; write the real `// SAFETY:` preconditions.
-- [ ] B5 (L11, deferred: `ComputeEngine::name` is static per engine; a per-backend name needs a soluwell API change): report the device name per resolved backend.
+- [x] B5 (L11): report the device name per resolved backend. See "Status of P1 and B5".
 - [ ] Gate: `python bootstrap.py c` + GPU-free tests `--skip cuda_ --skip gpu_` (release). GPU parity run only with the operator's yes.
 
 ### Wave C: CLI (main.rs, build.rs, xtask)
@@ -139,7 +139,7 @@ Why the fixes look the way they do:
 - Correction to the audit: the `FINGERPRINT` `OnceLock` (S10) is not dead.
   `set_extra_renderer_fingerprint` needs `&'static`, so it stays, with a comment. Also, L13's
   `None` arm was only partly dead: it handled unknown variants, which validation now rejects.
-- Not done: B5 (needs an API change), P1 (formula parsed once per trait call), wave E.
+- Not done then: B5 and P1 (done later, see "Status of P1 and B5"), wave E.
 
 ### Status of wave D (2026-11-11)
 
@@ -160,5 +160,28 @@ Pushed first on the operator's word (no test slot on the shared machine yet), th
   `step_dt <= 0.15`, `jitter <= 0.95`; the Astrolabe teeth check rounds half-to-even like
   them; the Mandelbox inner radius gets the same `1e-6` floor as AmazingSurface and Mobius.
 
-Out of scope: soluwell-studio / render-rs / fractal-kernels internals (cross-repo items B1 and E3
+### Status of P1 and B5 (2026-11-11)
+
+Both needed an API change in `sl-studio`, made on egui-widgets-rs branch `warpbro/node-prepare`
+(on top of the `rename/ac-sl` rename, so WarpBro moved to the `sl-*` crate names too); WarpBro's
+side is on branch `fix/node-prepare-device`. Both land after the rename is merged into egui `main`.
+- P1: the cost was structural, not a missing cache: render-side trait methods took `&Scene` and
+  each re-read the JSON. `NodeTypeSpec::validate_node` became `prepare`, which returns the
+  parsed model (`PreparedNode`), and `Scene::custom` became `CustomBranches`: the JSON map plus
+  the parsed node, built only through `prepare` (constructors and `Deserialize`, no mutable
+  access), so the two cannot disagree. Radii, family, label and `pack_object` moved from the
+  spec onto the parsed node. The formula is now parsed once per scene build (snapshot object,
+  load, edit) instead of several times per pack. Why not a cache keyed on the JSON: it would
+  still need invalidation on every `custom.insert`, and the old `checked` fallback (log and use
+  a default) would stay for scenes built in code; with parse-on-build there is no unparsed
+  state and no fallback. WarpBro: `FractalParams` (typed model), `FractalSceneExt::fractal()` /
+  fallible `edit_fractal`, presets and gallery return `Result`.
+- B5: the device depends on the backend the scene resolves to, so it cannot be an engine
+  constant. `ComputeEngine::name` became `device_name(backend)`; the film records its device
+  (`Target::device`), each `Frame` carries `renderer = (backend, device)`, and the studio
+  status label follows the shown frame. Removed: `Gpu.name`, `RenderEvent::Ready { name }`, and
+  the `ends_with("(WGPU)")` guess that labelled `Auto` as CUDA. Benches report the renderer per
+  case (`render_bench::renderer`).
+
+Out of scope: sl-studio / render-rs / fractal-kernels internals (cross-repo items B1 and E3
 only touch them through public API requests), the PLAN.md Sections A-D roadmap, and any GPU benchmark.

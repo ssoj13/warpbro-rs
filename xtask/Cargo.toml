@@ -11,4 +11,4 @@ publish = false
 serde_json = "1"
 
 [target.'cfg(windows)'.dependencies]
-vcv-rs = { git = "ssh://git@github.com/ssoj13/vcv-rs.git", branch = "main" }
+vcv-rs = { git = "ssh://git@github.com/ssoj13/vcv-rs.git", branch = "main", default-features = false, features = ["cuda"] }

@@ -1,6 +1,6 @@
 # WarpBro diagrams
 
-Mermaid views of the main system dataflows, reflecting the `soluwell-studio` architecture (`5afff8a`).
+Mermaid views of the main system dataflows, reflecting the `sl-studio` architecture (`5afff8a`).
 Companion architecture notebooks: [PLAN.md](PLAN.md) and [AGENTS.md](AGENTS.md).
 
 ---
@@ -13,11 +13,11 @@ flowchart TD
     anim_mods["curves / keys / time / anim / attrs (AttrValue, Attrs) / transform"]
   end
 
-  subgraph SoluwellStudioCrates["soluwell-studio workspace crates"]
-    ss_core["soluwell-studio-core (time, attrs, node_spec, params)"]
-    ss_scene["soluwell-studio-scene (WorldDocument, Scene, takes, presets)"]
-    ss_render["soluwell-studio-render (Gpu, RenderService, WgpuEngine, OCIO, OIDN)"]
-    ss_ui["soluwell-studio (StudioApp, dock panels, EventBus, ExportController)"]
+  subgraph SoluwellStudioCrates["sl-studio workspace crates"]
+    ss_core["sl-studio-core (time, attrs, node_spec, params)"]
+    ss_scene["sl-studio-scene (WorldDocument, Scene, takes, presets)"]
+    ss_render["sl-studio-render (Gpu, RenderService, WgpuEngine, OCIO, OIDN)"]
+    ss_ui["sl-studio (StudioApp, dock panels, EventBus, ExportController)"]
   end
 
   anim_mods --> ss_core
@@ -25,11 +25,11 @@ flowchart TD
   ss_core --> ss_scene --> ss_render --> ss_ui
 
   main["warpbro-rs (main.rs)"] -->|"engine::init_warpbro"| reg["Register FractalNodeSpec & WarpBroComputeEngine"]
-  ss_ui -->|"soluwell_studio::world re-exports animation-rs"| main
-  main -->|"soluwell_studio::run_with"| win["soluwell_window::run"]
-  win -->|"ctx.run_ui"| app["soluwell_studio::StudioApp"]
+  ss_ui -->|"sl_studio::world re-exports animation-rs"| main
+  main -->|"sl_studio::run_with"| win["sl_window::run"]
+  win -->|"ctx.run_ui"| app["sl_studio::StudioApp"]
 
-  subgraph StudioApp["StudioApp (soluwell-studio)"]
+  subgraph StudioApp["StudioApp (sl-studio)"]
     world["WorldEditor (SubnetFile graph + undo/redo)"]
     scene["Scene (evaluated scratch snapshot)"]
     colour["ocio::State (OCIO display pipeline)"]
@@ -93,7 +93,7 @@ flowchart TD
   dj --> doc["WorldDocument"]
   new["File > New"] -->|"from_scene"| doc
 
-  subgraph AnimSubstrate["animation-rs (re-exported via soluwell_studio::world)"]
+  subgraph AnimSubstrate["animation-rs (re-exported via sl_studio::world)"]
     anim_types["time / anim / attrs (AttrValue, Attrs) / transform / keys / curves"]
   end
   anim_types -->|"host Attrs & keyframe curves"| doc
@@ -105,7 +105,7 @@ flowchart TD
     val -->|"Ok: record_edit"| doc
   end
 
-  subgraph Evaluation["Evaluation Pipeline (soluwell-studio-core -> soluwell-studio-scene -> warpbro-rs)"]
+  subgraph Evaluation["Evaluation Pipeline (sl-studio-core -> sl-studio-scene -> warpbro-rs)"]
     doc -->|"snapshot_with_render_profile"| sc["Scene"]
     doc -->|"effective_render"| er["EffectiveRender"]
     er --> sc
@@ -207,10 +207,11 @@ flowchart TD
 
   load[WorldDocument::decode_json] --> vcn[validate_custom_nodes at first frame]
   edit[WorldEditor::apply_edit] --> vcn
-  snap[snapshot_with_render_profile] -->|each shown node, at the frame| vn
-  vcn --> vn["FractalNodeSpec::validate_node<br/>validate_fractal_branches"]
+  snap[snapshot_with_render_profile] -->|each shown node, at the frame| ov
+  vcn --> ov["overlay_scene: Scene deserialize<br/>CustomBranches::new"]
+  ov --> vn["FractalNodeSpec::prepare<br/>FractalParams::parse (once per scene build)"]
   vn -->|Err| rej["decode fails / edit rolled back / snapshot Err"]
-  vn -->|Ok| pack["Scene::pack: accessors read validated branches"]
+  vn -->|Ok| pack["Scene::pack, radii, family, label:<br/>read the cached FractalParams (no JSON)"]
   pack --> clip{"clip radius (P_CLIP_RADIUS)"}
   clip -->|Mandelbox| mb["max(framed, mandelbox_reach: sqrt3 * 2F(s+1)/(s-1) or sqrt3 * 2F)"]
   clip -->|KIFS| kr["max(framed, kifs_reach: (|shift| + 2|h|s)/(s-1))"]
