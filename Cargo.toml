@@ -28,6 +28,7 @@ cuda-host = { git = "ssh://git@github.com/ssoj13/cuda-rust_b.git", branch = "mai
 pt-nv-interop = { git = "ssh://git@github.com/ssoj13/render-rs.git", branch = "main" }
 optix = { git = "ssh://git@github.com/ssoj13/nv-rs.git", branch = "main" }
 nv-wgpu = { git = "ssh://git@github.com/ssoj13/nv-rs.git", branch = "main" }
+ngx = { git = "ssh://git@github.com/ssoj13/nv-rs.git", branch = "main" }
 gpu-info = { package = "gpu-info-rs", version = "0.1.1", default-features = false, features = ["wgpu"] }
 wgpu = "30"
 curves = { git = "ssh://git@github.com/ssoj13/curves-rs.git", branch = "main", features = ["serde"] }

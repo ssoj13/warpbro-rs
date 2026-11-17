@@ -28,9 +28,13 @@ use cuda_core::{
     launch_kernel_on_stream, sys,
 };
 use fractal_core::params::*;
+use nv_wgpu::{
+    InteropContext, SharedBuffer, SharedBufferDescriptor, SharedTexture, SharedTextureDescriptor,
+    VkImageTransition, vk_image_view_raw,
+};
 use pt_nv_interop::{InteropFrameTargets, InteropTargetConfig, PairedGpuContext};
 use sha2::{Digest, Sha256};
-use sl_studio::denoise::{self, DenoiseEngine, Mode};
+use sl_studio::denoise::{self, DenoiseEngine, DlssQuality, Mode};
 use sl_studio::palette::build_lut;
 use sl_studio::render::{
     BackendFilm, ComputeEngine, DenoiseOutcome, Gpu, RenderError, StepOutcome, StepSpec, Target,
@@ -312,6 +316,221 @@ B_QUANT:
 DONE_TM:
     ret;
 }
+
+.visible .entry dlss_depth_motion(
+    .param .u64 p_accum,
+    .param .u64 p_stats,
+    .param .u64 p_depth,
+    .param .u64 p_motion,
+    .param .u32 p_width,
+    .param .u32 p_height,
+    .param .u32 p_tile_cols,
+    .param .u32 p_depth_pitch,
+    .param .u32 p_motion_pitch,
+    .param .u32 p_has_prev,
+    .param .f32 p_ce_x,
+    .param .f32 p_ce_y,
+    .param .f32 p_ce_z,
+    .param .f32 p_cf_x,
+    .param .f32 p_cf_y,
+    .param .f32 p_cf_z,
+    .param .f32 p_cr_x,
+    .param .f32 p_cr_y,
+    .param .f32 p_cr_z,
+    .param .f32 p_cu_x,
+    .param .f32 p_cu_y,
+    .param .f32 p_cu_z,
+    .param .f32 p_c_hw,
+    .param .f32 p_c_hh,
+    .param .f32 p_pe_x,
+    .param .f32 p_pe_y,
+    .param .f32 p_pe_z,
+    .param .f32 p_pf_x,
+    .param .f32 p_pf_y,
+    .param .f32 p_pf_z,
+    .param .f32 p_pr_x,
+    .param .f32 p_pr_y,
+    .param .f32 p_pr_z,
+    .param .f32 p_pu_x,
+    .param .f32 p_pu_y,
+    .param .f32 p_pu_z,
+    .param .f32 p_p_hw,
+    .param .f32 p_p_hh
+)
+{
+    .reg .pred %p<6>;
+    .reg .u32 %r<20>;
+    .reg .u64 %rd<12>;
+    .reg .f32 %f<48>;
+
+    ld.param.u32 %r1, [p_width];
+    ld.param.u32 %r2, [p_height];
+    mov.u32 %r3, %ctaid.x;
+    mov.u32 %r4, %ntid.x;
+    mov.u32 %r5, %tid.x;
+    mad.lo.u32 %r6, %r3, %r4, %r5;
+    mul.lo.u32 %r7, %r1, %r2;
+    setp.ge.u32 %p0, %r6, %r7;
+    @%p0 bra DONE_DLSS;
+
+    div.u32 %r8, %r6, %r1;   // y
+    rem.u32 %r9, %r6, %r1;   // x
+
+    ld.param.u32 %r10, [p_tile_cols];
+    shr.u32 %r11, %r8, 2;
+    mul.lo.u32 %r11, %r11, %r10;
+    shr.u32 %r12, %r9, 3;
+    add.u32 %r11, %r11, %r12;
+    and.b32 %r13, %r8, 3;
+    shl.b32 %r13, %r13, 3;
+    and.b32 %r14, %r9, 7;
+    add.u32 %r13, %r13, %r14;
+    shl.b32 %r11, %r11, 5;
+    add.u32 %r11, %r11, %r13; // src_idx
+
+    mul.wide.u32 %rd1, %r11, 16;
+    add.u64 %rd1, %rd1, 12;   // .w offset
+    ld.param.u64 %rd2, [p_accum];
+    add.u64 %rd2, %rd2, %rd1;
+    ld.global.f32 %f0, [%rd2]; // sample_count
+
+    ld.param.u64 %rd3, [p_stats];
+    add.u64 %rd3, %rd3, %rd1;
+    ld.global.f32 %f1, [%rd3]; // depth_sum
+
+    setp.gt.f32 %p1, %f0, 0f00000000;
+    setp.gt.f32 %p2, %f1, 0f00000000;
+    and.pred %p1, %p1, %p2;
+    mov.f32 %f2, 0f00000000;   // hit_t = 0.0
+    @%p1 div.rn.f32 %f2, %f1, %f0;
+
+    mov.f32 %f3, 0f49742400;   // 1e6f on miss
+    @%p1 mov.f32 %f3, %f2;
+
+    ld.param.u32 %r15, [p_depth_pitch];
+    mad.lo.u32 %r16, %r8, %r15, %r9;
+    mul.wide.u32 %rd4, %r16, 4;
+    ld.param.u64 %rd5, [p_depth];
+    add.u64 %rd5, %rd5, %rd4;
+    st.global.f32 [%rd5], %f3;
+
+    mov.f32 %f4, 0f00000000;   // mv_x = 0.0
+    mov.f32 %f5, 0f00000000;   // mv_y = 0.0
+
+    ld.param.u32 %r17, [p_has_prev];
+    setp.ne.u32 %p3, %r17, 0;
+    @!%p3 bra STORE_MV;
+
+    cvt.rn.f32.u32 %f6, %r9;   // x
+    cvt.rn.f32.u32 %f7, %r8;   // y
+    cvt.rn.f32.u32 %f8, %r1;   // width
+    cvt.rn.f32.u32 %f9, %r2;   // height
+    add.f32 %f6, %f6, 0f3f000000; // cx = x + 0.5
+    add.f32 %f7, %f7, 0f3f000000; // cy = y + 0.5
+
+    div.rn.f32 %f10, %f6, %f8;
+    fma.rn.f32 %f10, %f10, 0f40000000, 0fbf800000; // ndc_x = (cx/w)*2 - 1
+    div.rn.f32 %f11, %f7, %f9;
+    fma.rn.f32 %f11, %f11, 0fc0000000, 0f3f800000; // ndc_y = 1 - (cy/h)*2
+
+    ld.param.f32 %f12, [p_c_hw];
+    ld.param.f32 %f13, [p_c_hh];
+    mul.f32 %f10, %f10, %f12;
+    mul.f32 %f11, %f11, %f13;
+
+    // raw_dir = cf + cr * sx + cu * sy
+    ld.param.f32 %f14, [p_cf_x];
+    ld.param.f32 %f15, [p_cf_y];
+    ld.param.f32 %f16, [p_cf_z];
+    ld.param.f32 %f17, [p_cr_x];
+    ld.param.f32 %f18, [p_cr_y];
+    ld.param.f32 %f19, [p_cr_z];
+    ld.param.f32 %f20, [p_cu_x];
+    ld.param.f32 %f21, [p_cu_y];
+    ld.param.f32 %f22, [p_cu_z];
+
+    fma.rn.f32 %f14, %f17, %f10, %f14;
+    fma.rn.f32 %f15, %f18, %f10, %f15;
+    fma.rn.f32 %f16, %f19, %f10, %f16;
+    fma.rn.f32 %f14, %f20, %f11, %f14;
+    fma.rn.f32 %f15, %f21, %f11, %f15;
+    fma.rn.f32 %f16, %f22, %f11, %f16;
+
+    mul.f32 %f23, %f14, %f14;
+    fma.rn.f32 %f23, %f15, %f15, %f23;
+    fma.rn.f32 %f23, %f16, %f16, %f23;
+    rsqrt.approx.f32 %f23, %f23;
+    mul.f32 %f14, %f14, %f23;  // dir.x
+    mul.f32 %f15, %f15, %f23;  // dir.y
+    mul.f32 %f16, %f16, %f23;  // dir.z
+
+    @!%p1 bra PROJ_PREV;
+
+    // v = (ce + dir * hit_t) - pe
+    ld.param.f32 %f24, [p_ce_x];
+    ld.param.f32 %f25, [p_ce_y];
+    ld.param.f32 %f26, [p_ce_z];
+    fma.rn.f32 %f24, %f14, %f2, %f24;
+    fma.rn.f32 %f25, %f15, %f2, %f25;
+    fma.rn.f32 %f26, %f16, %f2, %f26;
+    ld.param.f32 %f27, [p_pe_x];
+    ld.param.f32 %f28, [p_pe_y];
+    ld.param.f32 %f29, [p_pe_z];
+    sub.f32 %f14, %f24, %f27;
+    sub.f32 %f15, %f25, %f28;
+    sub.f32 %f16, %f26, %f29;
+
+PROJ_PREV:
+    ld.param.f32 %f30, [p_pf_x];
+    ld.param.f32 %f31, [p_pf_y];
+    ld.param.f32 %f32, [p_pf_z];
+    mul.f32 %f33, %f14, %f30;
+    fma.rn.f32 %f33, %f15, %f31, %f33;
+    fma.rn.f32 %f33, %f16, %f32, %f33; // pz
+
+    setp.gt.f32 %p4, %f33, 0f38d1b717; // 1e-4f
+    @!%p4 bra STORE_MV;
+
+    ld.param.f32 %f34, [p_pr_x];
+    ld.param.f32 %f35, [p_pr_y];
+    ld.param.f32 %f36, [p_pr_z];
+    mul.f32 %f37, %f14, %f34;
+    fma.rn.f32 %f37, %f15, %f35, %f37;
+    fma.rn.f32 %f37, %f16, %f36, %f37; // dot(v, pr)
+
+    ld.param.f32 %f38, [p_pu_x];
+    ld.param.f32 %f39, [p_pu_y];
+    ld.param.f32 %f40, [p_pu_z];
+    mul.f32 %f41, %f14, %f38;
+    fma.rn.f32 %f41, %f15, %f39, %f41;
+    fma.rn.f32 %f41, %f16, %f40, %f41; // dot(v, pu)
+
+    ld.param.f32 %f42, [p_p_hw];
+    ld.param.f32 %f43, [p_p_hh];
+    mul.f32 %f42, %f42, %f33;
+    mul.f32 %f43, %f43, %f33;
+    div.rn.f32 %f37, %f37, %f42; // px_ndc
+    div.rn.f32 %f41, %f41, %f43; // py_ndc
+
+    fma.rn.f32 %f37, %f37, 0f3f000000, 0f3f000000; // px_ndc * 0.5 + 0.5
+    mul.f32 %f37, %f37, %f8; // prev_x
+    fma.rn.f32 %f41, %f41, 0fbf000000, 0f3f000000; // 0.5 - py_ndc * 0.5
+    mul.f32 %f41, %f41, %f9; // prev_y
+
+    sub.f32 %f4, %f37, %f6; // mv_x
+    sub.f32 %f5, %f41, %f7; // mv_y
+
+STORE_MV:
+    ld.param.u32 %r18, [p_motion_pitch];
+    mad.lo.u32 %r19, %r8, %r18, %r9;
+    mul.wide.u32 %rd6, %r19, 8;
+    ld.param.u64 %rd7, [p_motion];
+    add.u64 %rd7, %rd7, %rd6;
+    st.global.v2.f32 [%rd7], {%f4, %f5};
+
+DONE_DLSS:
+    ret;
+}
 "#;
 
 /// Hot-pluggable [`sl_studio::StudioModule`] ("organ") registering WarpBro's `"Fractal"`
@@ -485,6 +704,7 @@ struct FractalModule {
     post_module: Arc<CudaModule>,
     untile_fn: CudaFunction,
     tonemap_surf_fn: CudaFunction,
+    dlss_dm_fn: CudaFunction,
 }
 
 fn find_ptx_const_symbol<'a>(ptx: &'a [u8], suffix: &str) -> Option<&'a str> {
@@ -579,6 +799,9 @@ impl FractalModule {
         let tonemap_surf_fn = post_module
             .load_function("tonemap_to_rgba8_surface")
             .map_err(|e| format!("load tonemap_to_rgba8_surface: {e:?}"))?;
+        let dlss_dm_fn = post_module
+            .load_function("dlss_depth_motion")
+            .map_err(|e| format!("load dlss_depth_motion: {e:?}"))?;
 
         Ok(Self {
             module,
@@ -589,6 +812,7 @@ impl FractalModule {
             post_module,
             untile_fn,
             tonemap_surf_fn,
+            dlss_dm_fn,
         })
     }
 
@@ -785,6 +1009,103 @@ impl FractalModule {
         }
         .map_err(|e| device("tonemap_to_rgba8_surface", e))
     }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "raw CUDA kernel launch parameters for dlss_depth_motion"
+    )]
+    fn launch_dlss_depth_motion(
+        &self,
+        stream: &Arc<CudaStream>,
+        accum: &DeviceBuffer<[f32; 4]>,
+        stats: &DeviceBuffer<[f32; 4]>,
+        depth_ptr: u64,
+        motion_ptr: u64,
+        width: u32,
+        height: u32,
+        depth_pitch_elems: u32,
+        motion_pitch_elems: u32,
+        cur: DlssCam,
+        prev: Option<DlssCam>,
+    ) -> Result<(), RenderError> {
+        let pixels = width.saturating_mul(height);
+        if pixels == 0 {
+            return Ok(());
+        }
+        let tile_cols = width.div_ceil(8);
+        let has_prev = u32::from(prev.is_some());
+        let prev = prev.unwrap_or(cur);
+        let mut p_accum = accum.cu_deviceptr();
+        let mut p_stats = stats.cu_deviceptr();
+        let mut p_depth = depth_ptr;
+        let mut p_motion = motion_ptr;
+        let mut p_w = width;
+        let mut p_h = height;
+        let mut p_tc = tile_cols;
+        let mut p_dp = depth_pitch_elems;
+        let mut p_mp = motion_pitch_elems;
+        let mut p_hp = has_prev;
+        let [mut p_cex, mut p_cey, mut p_cez] = cur.eye;
+        let [mut p_cfx, mut p_cfy, mut p_cfz] = cur.fwd;
+        let [mut p_crx, mut p_cry, mut p_crz] = cur.right;
+        let [mut p_cux, mut p_cuy, mut p_cuz] = cur.up;
+        let mut p_chw = cur.half_w;
+        let mut p_chh = cur.half_h;
+        let [mut p_pex, mut p_pey, mut p_pez] = prev.eye;
+        let [mut p_pfx, mut p_pfy, mut p_pfz] = prev.fwd;
+        let [mut p_prx, mut p_pry, mut p_prz] = prev.right;
+        let [mut p_pux, mut p_puy, mut p_puz] = prev.up;
+        let mut p_phw = prev.half_w;
+        let mut p_phh = prev.half_h;
+        let mut args: [*mut c_void; 38] = [
+            (&mut p_accum as *mut sys::CUdeviceptr).cast(),
+            (&mut p_stats as *mut sys::CUdeviceptr).cast(),
+            (&mut p_depth as *mut u64).cast(),
+            (&mut p_motion as *mut u64).cast(),
+            (&mut p_w as *mut u32).cast(),
+            (&mut p_h as *mut u32).cast(),
+            (&mut p_tc as *mut u32).cast(),
+            (&mut p_dp as *mut u32).cast(),
+            (&mut p_mp as *mut u32).cast(),
+            (&mut p_hp as *mut u32).cast(),
+            (&mut p_cex as *mut f32).cast(),
+            (&mut p_cey as *mut f32).cast(),
+            (&mut p_cez as *mut f32).cast(),
+            (&mut p_cfx as *mut f32).cast(),
+            (&mut p_cfy as *mut f32).cast(),
+            (&mut p_cfz as *mut f32).cast(),
+            (&mut p_crx as *mut f32).cast(),
+            (&mut p_cry as *mut f32).cast(),
+            (&mut p_crz as *mut f32).cast(),
+            (&mut p_cux as *mut f32).cast(),
+            (&mut p_cuy as *mut f32).cast(),
+            (&mut p_cuz as *mut f32).cast(),
+            (&mut p_chw as *mut f32).cast(),
+            (&mut p_chh as *mut f32).cast(),
+            (&mut p_pex as *mut f32).cast(),
+            (&mut p_pey as *mut f32).cast(),
+            (&mut p_pez as *mut f32).cast(),
+            (&mut p_pfx as *mut f32).cast(),
+            (&mut p_pfy as *mut f32).cast(),
+            (&mut p_pfz as *mut f32).cast(),
+            (&mut p_prx as *mut f32).cast(),
+            (&mut p_pry as *mut f32).cast(),
+            (&mut p_prz as *mut f32).cast(),
+            (&mut p_pux as *mut f32).cast(),
+            (&mut p_puy as *mut f32).cast(),
+            (&mut p_puz as *mut f32).cast(),
+            (&mut p_phw as *mut f32).cast(),
+            (&mut p_phh as *mut f32).cast(),
+        ];
+        let grid = (pixels.div_ceil(128), 1, 1);
+        // SAFETY: `self.dlss_dm_fn` is loaded from `self.post_module`; `accum` and `stats` are
+        // `padded_len(width, height)` tiled buffers and `depth_ptr`/`motion_ptr` are valid CUDA
+        // device pointers sized for `width x height` with `depth_pitch_elems` / `motion_pitch_elems`.
+        unsafe {
+            launch_kernel_on_stream(&self.dlss_dm_fn, grid, (128, 1, 1), 0, stream, &mut args)
+        }
+        .map_err(|e| device("dlss_depth_motion", e))
+    }
 }
 
 fn read_tiled_into(
@@ -811,9 +1132,332 @@ struct OptixDenoiserState {
     mode: Mode,
 }
 
+#[derive(Clone, Copy)]
+struct DlssCam {
+    eye: [f32; 3],
+    fwd: [f32; 3],
+    right: [f32; 3],
+    up: [f32; 3],
+    half_w: f32,
+    half_h: f32,
+}
+
+impl DlssCam {
+    fn from_scene(scene: &Scene, w: u32, h: u32) -> Self {
+        let (eye, orientation, _) = scene.camera_eye();
+        let half_h = (scene.camera.fov_y_degrees.to_radians() * 0.5).tan();
+        let half_w = half_h * w as f32 / h.max(1) as f32;
+        Self {
+            eye: eye.to_array(),
+            fwd: (orientation * -glam::Vec3::Z).to_array(),
+            right: (orientation * glam::Vec3::X).to_array(),
+            up: (orientation * glam::Vec3::Y).to_array(),
+            half_w,
+            half_h,
+        }
+    }
+}
+
+fn ngx_perf_quality(q: DlssQuality) -> Option<ngx::DlssPerfQuality> {
+    match q {
+        DlssQuality::Off => None,
+        DlssQuality::UltraPerformance => Some(ngx::DlssPerfQuality::UltraPerformance),
+        DlssQuality::MaxPerf => Some(ngx::DlssPerfQuality::MaxPerf),
+        DlssQuality::Balanced => Some(ngx::DlssPerfQuality::Balanced),
+        DlssQuality::MaxQuality => Some(ngx::DlssPerfQuality::MaxQuality),
+        DlssQuality::UltraQuality => Some(ngx::DlssPerfQuality::UltraQuality),
+        DlssQuality::Dlaa => Some(ngx::DlssPerfQuality::Dlaa),
+    }
+}
+
+struct NgxDlssPass {
+    feature: ngx::FeatureHandle,
+    eval_params: ngx::Parameters,
+    depth_buf: SharedBuffer,
+    motion_buf: SharedBuffer,
+    depth_pitch_bytes: u32,
+    motion_pitch_bytes: u32,
+    color_in: SharedTexture,
+    color_view: wgpu::TextureView,
+    depth_in: SharedTexture,
+    depth_view: wgpu::TextureView,
+    motion_in: SharedTexture,
+    motion_view: wgpu::TextureView,
+    output_out: SharedTexture,
+    output_view: wgpu::TextureView,
+    render_w: u32,
+    render_h: u32,
+    out_w: u32,
+    out_h: u32,
+    quality: DlssQuality,
+    reset_next: bool,
+}
+
+// SAFETY: `NgxDlssPass` is only created, evaluated, and dropped on the single render worker
+// thread that owns `CudaTarget` and `CudaEngine`'s `PairedGpuContext`.
+unsafe impl Send for NgxDlssPass {}
+// SAFETY: `NgxDlssPass` is never accessed concurrently from multiple threads; `Sync` is
+// required solely by `BackendFilm = Box<dyn Any + Send + Sync>`.
+unsafe impl Sync for NgxDlssPass {}
+
+impl NgxDlssPass {
+    fn new(
+        interop: &InteropContext,
+        ngx: &ngx::NgxVulkan,
+        render_w: u32,
+        render_h: u32,
+        out_w: u32,
+        out_h: u32,
+        quality: DlssQuality,
+    ) -> Result<Self, RenderError> {
+        let ngx_q = ngx_perf_quality(quality)
+            .ok_or_else(|| RenderError::Backend("DLSS quality Off cannot create pass".into()))?;
+        let make_tex = |w, h, fmt, usage, label| {
+            let mut desc = SharedTextureDescriptor::d2(w, h, fmt, usage, false);
+            desc.label = Some(label);
+            interop.create_texture(&desc).map_err(|e| device(label, e))
+        };
+        let depth_pitch_bytes = (render_w * 4).div_ceil(256) * 256;
+        let motion_pitch_bytes = (render_w * 8).div_ceil(256) * 256;
+        let depth_buf = interop
+            .create_buffer(&SharedBufferDescriptor {
+                label: Some("dlss-depth-buf"),
+                size: u64::from(depth_pitch_bytes) * u64::from(render_h),
+                usage: wgpu::BufferUsages::COPY_SRC,
+            })
+            .map_err(|e| device("dlss-depth-buf", e))?;
+        let motion_buf = interop
+            .create_buffer(&SharedBufferDescriptor {
+                label: Some("dlss-motion-buf"),
+                size: u64::from(motion_pitch_bytes) * u64::from(render_h),
+                usage: wgpu::BufferUsages::COPY_SRC,
+            })
+            .map_err(|e| device("dlss-motion-buf", e))?;
+
+        let color_in = make_tex(
+            render_w,
+            render_h,
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            "dlss-color-in",
+        )?;
+        let depth_in = make_tex(
+            render_w,
+            render_h,
+            wgpu::TextureFormat::R32Float,
+            wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            "dlss-depth-in",
+        )?;
+        let motion_in = make_tex(
+            render_w,
+            render_h,
+            wgpu::TextureFormat::Rg32Float,
+            wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            "dlss-motion-in",
+        )?;
+        let output_out = make_tex(
+            out_w,
+            out_h,
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            "dlss-output",
+        )?;
+
+        let color_view = color_in
+            .wgpu_texture()
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let depth_view = depth_in
+            .wgpu_texture()
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let motion_view = motion_in
+            .wgpu_texture()
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let output_view = output_out
+            .wgpu_texture()
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        let flags = ngx::DlssFeatureFlags::MV_LOW_RES | ngx::DlssFeatureFlags::DO_SHARPENING;
+        let mut create_res: Option<Result<ngx::FeatureHandle, ngx::Error>> = None;
+        interop
+            .submit_vulkan_commands(|cmd| {
+                // SAFETY: `cmd` is a valid recording `VkCommandBuffer` from `interop`.
+                create_res = Some(unsafe {
+                    ngx.create_dlss_sr(cmd, render_w, render_h, out_w, out_h, ngx_q, flags)
+                });
+                Ok(())
+            })
+            .map_err(|e| device("submit_vulkan_commands(create_dlss_sr)", e))?;
+        let feature = create_res
+            .ok_or_else(|| RenderError::Backend("DLSS feature creation did not run".into()))?
+            .map_err(|e| RenderError::Backend(format!("create_dlss_sr: {e}")))?;
+        let eval_params = ngx
+            .allocate_parameters()
+            .map_err(|e| RenderError::Backend(format!("allocate_parameters: {e}")))?;
+
+        Ok(Self {
+            feature,
+            eval_params,
+            depth_buf,
+            motion_buf,
+            depth_pitch_bytes,
+            motion_pitch_bytes,
+            color_in,
+            color_view,
+            depth_in,
+            depth_view,
+            motion_in,
+            motion_view,
+            output_out,
+            output_view,
+            render_w,
+            render_h,
+            out_w,
+            out_h,
+            quality,
+            reset_next: true,
+        })
+    }
+
+    fn vk_info(
+        tex: &SharedTexture,
+        view: &wgpu::TextureView,
+        w: u32,
+        h: u32,
+        read_write: bool,
+    ) -> Result<ngx::VkImageResourceInfo, RenderError> {
+        let image = tex
+            .vk_image_raw()
+            .ok_or_else(|| RenderError::Backend("DLSS texture missing VkImage".into()))?;
+        let image_view = vk_image_view_raw(view)
+            .ok_or_else(|| RenderError::Backend("DLSS texture missing VkImageView".into()))?;
+        let format = tex
+            .vk_format_raw()
+            .ok_or_else(|| RenderError::Backend("DLSS texture missing VkFormat".into()))?;
+        Ok(ngx::VkImageResourceInfo {
+            image_view,
+            image,
+            format,
+            width: w,
+            height: h,
+            read_write,
+        })
+    }
+
+    fn evaluate(
+        &mut self,
+        interop: &InteropContext,
+        jitter: [f32; 2],
+        sharpness: f32,
+    ) -> Result<(), RenderError> {
+        let color = Self::vk_info(
+            &self.color_in,
+            &self.color_view,
+            self.render_w,
+            self.render_h,
+            false,
+        )?;
+        let depth = Self::vk_info(
+            &self.depth_in,
+            &self.depth_view,
+            self.render_w,
+            self.render_h,
+            false,
+        )?;
+        let motion = Self::vk_info(
+            &self.motion_in,
+            &self.motion_view,
+            self.render_w,
+            self.render_h,
+            false,
+        )?;
+        let output = Self::vk_info(
+            &self.output_out,
+            &self.output_view,
+            self.out_w,
+            self.out_h,
+            true,
+        )?;
+
+        let reset = self.reset_next;
+        self.reset_next = false;
+        let mut eval_res: Option<Result<(), ngx::Error>> = None;
+        interop
+            .submit_vulkan_commands(|cmd| {
+                // SAFETY: `cmd` is a valid recording `VkCommandBuffer` and all 4
+                // `SharedTexture`s remain alive until `submit_vulkan_commands` completes.
+                unsafe {
+                    interop.vk_image_barrier(
+                        cmd,
+                        color.image,
+                        VkImageTransition::TransferDstToShaderRead,
+                    )?;
+                    interop.vk_image_barrier(
+                        cmd,
+                        depth.image,
+                        VkImageTransition::TransferDstToShaderRead,
+                    )?;
+                    interop.vk_image_barrier(
+                        cmd,
+                        motion.image,
+                        VkImageTransition::TransferDstToShaderRead,
+                    )?;
+                    interop.vk_image_barrier(
+                        cmd,
+                        output.image,
+                        VkImageTransition::UndefinedToGeneral,
+                    )?;
+                    let res = self.feature.evaluate_dlss_sr_with_params(
+                        cmd,
+                        &mut self.eval_params,
+                        color,
+                        depth,
+                        motion,
+                        output,
+                        self.render_w,
+                        self.render_h,
+                        jitter[0],
+                        jitter[1],
+                        1.0,
+                        1.0,
+                        sharpness,
+                        reset,
+                    );
+                    interop.vk_image_barrier(
+                        cmd,
+                        color.image,
+                        VkImageTransition::ShaderReadToTransferDst,
+                    )?;
+                    interop.vk_image_barrier(
+                        cmd,
+                        depth.image,
+                        VkImageTransition::ShaderReadToTransferDst,
+                    )?;
+                    interop.vk_image_barrier(
+                        cmd,
+                        motion.image,
+                        VkImageTransition::ShaderReadToTransferDst,
+                    )?;
+                    interop.vk_image_barrier(
+                        cmd,
+                        output.image,
+                        VkImageTransition::GeneralToShaderRead,
+                    )?;
+                    eval_res = Some(res);
+                }
+                Ok(())
+            })
+            .map_err(|e| device("submit_vulkan_commands(evaluate_dlss_sr)", e))?;
+        eval_res
+            .ok_or_else(|| RenderError::Backend("DLSS evaluation did not run".into()))?
+            .map_err(|e| RenderError::Backend(format!("evaluate_dlss_sr: {e}")))
+    }
+}
+
 struct CudaEngine {
     ctx: Arc<CudaContext>,
     stream: Arc<CudaStream>,
+    // Drop `ngx_vulkan` before `paired` because NGX borrows `paired`'s Vulkan device.
+    ngx_vulkan: Option<Result<ngx::NgxVulkan, String>>,
     paired: Option<PairedGpuContext>,
     module: FractalModule,
     lut: DeviceBuffer<[f32; 4]>,
@@ -881,6 +1525,7 @@ impl CudaEngine {
         Ok(Self {
             ctx,
             stream: stream.clone(),
+            ngx_vulkan: None,
             paired,
             module,
             lut,
@@ -901,6 +1546,46 @@ impl CudaEngine {
             last_luma: [0.272_228_7, 0.674_081_8, 0.053_689_5],
             name,
         })
+    }
+
+    fn ensure_ngx(&mut self) -> Result<&ngx::NgxVulkan, RenderError> {
+        if self.ngx_vulkan.is_none() {
+            let init = match self
+                .paired
+                .as_ref()
+                .and_then(|p| p.interop().raw_vulkan_handles())
+            {
+                Some(raw) => {
+                    match ngx::ProjectId::from_guid_str("a7b3c1d2-4e5f-4a6b-8c9d-0e1f2a3b4c5d") {
+                        Ok(pid) => {
+                            let data_path = std::env::current_exe()
+                                .ok()
+                                .and_then(|p| p.parent().map(std::path::Path::to_path_buf))
+                                .unwrap_or_else(|| std::path::PathBuf::from("."));
+                            let handles = ngx::VulkanDeviceHandles {
+                                instance: raw.instance,
+                                physical_device: raw.physical_device,
+                                device: raw.device,
+                                get_instance_proc_addr: raw.get_instance_proc_addr,
+                                get_device_proc_addr: raw.get_device_proc_addr,
+                            };
+                            // SAFETY: `self.paired` keeps the Vulkan instance/device alive until
+                            // after `ngx_vulkan` drops (field order in `CudaEngine`).
+                            unsafe { ngx::NgxVulkan::init(&pid, &data_path, handles) }
+                                .map_err(|e| format!("NGX Vulkan init failed: {e}"))
+                        }
+                        Err(e) => Err(format!("NGX ProjectId error: {e}")),
+                    }
+                }
+                None => Err("NGX DLSS requires CUDA + Vulkan interop".to_string()),
+            };
+            self.ngx_vulkan = Some(init);
+        }
+        match self.ngx_vulkan.as_ref() {
+            Some(Ok(ngx)) => Ok(ngx),
+            Some(Err(msg)) => Err(RenderError::Backend(msg.clone())),
+            None => Err(RenderError::Backend("NGX state missing".into())),
+        }
     }
 
     fn new_batch_slot(&self, tiles: usize) -> Result<BatchSlot, RenderError> {
@@ -953,6 +1638,8 @@ impl CudaEngine {
             linear_normal: None,
             denoised_beauty: None,
             interop: None,
+            dlss: None,
+            prev_cam: None,
         })
     }
 
@@ -1134,6 +1821,8 @@ pub struct CudaTarget {
     linear_normal: Option<DeviceBuffer<[f32; 4]>>,
     denoised_beauty: Option<DeviceBuffer<[f32; 4]>>,
     interop: Option<InteropFrameTargets>,
+    dlss: Option<NgxDlssPass>,
+    prev_cam: Option<DlssCam>,
 }
 
 impl CudaTarget {
@@ -1887,12 +2576,28 @@ impl ComputeEngine for WarpBroComputeEngine {
         width: usize,
         height: usize,
         denoised: bool,
+        scene: &Scene,
+        out_size: (u32, u32),
     ) -> Result<Option<wgpu::TextureView>, RenderError> {
+        let dlss_quality = scene.render.denoise.dlss;
         if backend != Backend::Cuda || width == 0 || height == 0 {
+            if dlss_quality != DlssQuality::Off {
+                return Err(RenderError::Backend(
+                    "DLSS Super Resolution requires CUDA + Vulkan interop".into(),
+                ));
+            }
             return Ok(None);
+        }
+        if dlss_quality != DlssQuality::Off {
+            let _ = self.cuda_mut()?.ensure_ngx()?;
         }
         let cuda = self.cuda_mut()?;
         let Some(paired) = cuda.paired.as_ref() else {
+            if dlss_quality != DlssQuality::Off {
+                return Err(RenderError::Backend(
+                    "DLSS Super Resolution requires CUDA/Vulkan interop".into(),
+                ));
+            }
             return Ok(None);
         };
         let w = u32::try_from(width)
@@ -1949,15 +2654,127 @@ impl ComputeEngine for WarpBroComputeEngine {
             cuda.last_reinhard,
             cuda.last_luma,
         )?;
+
+        if dlss_quality == DlssQuality::Off {
+            ct.dlss = None;
+            ct.prev_cam = None;
+            interop
+                .wait_wgpu_for_cuda(&cuda.stream)
+                .map_err(|e| device("wait_wgpu_for_cuda", e))?;
+            let view = interop
+                .preview()
+                .ok_or_else(|| RenderError::Device("Interop preview surface missing".into()))?
+                .wgpu_view()
+                .clone();
+            return Ok(Some(view));
+        }
+
+        let ngx = match cuda.ngx_vulkan.as_ref() {
+            Some(Ok(ngx)) => ngx,
+            Some(Err(msg)) => return Err(RenderError::Backend(msg.clone())),
+            None => return Err(RenderError::Backend("NGX state missing".into())),
+        };
+        let interop_ctx = paired.interop();
+        let out_w = out_size.0.max(1);
+        let out_h = out_size.1.max(1);
+        let needs_new = match ct.dlss.as_ref() {
+            Some(d) => {
+                d.render_w != w
+                    || d.render_h != h
+                    || d.out_w != out_w
+                    || d.out_h != out_h
+                    || d.quality != dlss_quality
+            }
+            None => true,
+        };
+        if needs_new {
+            ct.dlss = None;
+            ct.prev_cam = None;
+            ct.dlss = Some(NgxDlssPass::new(
+                interop_ctx,
+                ngx,
+                w,
+                h,
+                out_w,
+                out_h,
+                dlss_quality,
+            )?);
+        }
+        let dlss = ct
+            .dlss
+            .as_mut()
+            .ok_or_else(|| RenderError::Backend("DLSS pass missing".into()))?;
+        let cur_cam = DlssCam::from_scene(scene, w, h);
+        cuda.module.launch_dlss_depth_motion(
+            &cuda.stream,
+            &ct.accum,
+            &ct.stats,
+            dlss.depth_buf.cu_deviceptr(),
+            dlss.motion_buf.cu_deviceptr(),
+            w,
+            h,
+            dlss.depth_pitch_bytes / 4,
+            dlss.motion_pitch_bytes / 8,
+            cur_cam,
+            ct.prev_cam,
+        )?;
         interop
             .wait_wgpu_for_cuda(&cuda.stream)
             .map_err(|e| device("wait_wgpu_for_cuda", e))?;
-        let view = interop
+
+        let preview_tex = interop
             .preview()
             .ok_or_else(|| RenderError::Device("Interop preview surface missing".into()))?
-            .wgpu_view()
-            .clone();
-        Ok(Some(view))
+            .wgpu_texture();
+        let mut copy_enc =
+            interop_ctx
+                .device()
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("dlss-copy"),
+                });
+        let extent = wgpu::Extent3d {
+            width: w,
+            height: h,
+            depth_or_array_layers: 1,
+        };
+        copy_enc.copy_texture_to_texture(
+            preview_tex.as_image_copy(),
+            dlss.color_in.wgpu_texture().as_image_copy(),
+            extent,
+        );
+        let copy_buf = |enc: &mut wgpu::CommandEncoder,
+                        buf: &wgpu::Buffer,
+                        pitch: u32,
+                        tex: &wgpu::Texture| {
+            enc.copy_buffer_to_texture(
+                wgpu::TexelCopyBufferInfo {
+                    buffer: buf,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(pitch),
+                        rows_per_image: Some(h),
+                    },
+                },
+                tex.as_image_copy(),
+                extent,
+            );
+        };
+        copy_buf(
+            &mut copy_enc,
+            dlss.depth_buf.wgpu_buffer(),
+            dlss.depth_pitch_bytes,
+            dlss.depth_in.wgpu_texture(),
+        );
+        copy_buf(
+            &mut copy_enc,
+            dlss.motion_buf.wgpu_buffer(),
+            dlss.motion_pitch_bytes,
+            dlss.motion_in.wgpu_texture(),
+        );
+        interop_ctx.queue().submit(Some(copy_enc.finish()));
+        dlss.evaluate(interop_ctx, [0.0, 0.0], 0.0)?;
+        ct.prev_cam = Some(cur_cam);
+        Ok(Some(dlss.output_view.clone()))
     }
 
     fn tonemap_display_fast(

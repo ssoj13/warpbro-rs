@@ -2465,3 +2465,50 @@ fn cuda_zero_copy_vram_denoise_and_present_skips_host_roundtrip() {
         );
     }
 }
+
+#[test]
+fn cuda_dlss_sr_smoke() {
+    use sl_studio::denoise::DlssQuality;
+
+    let _gpu_test = crate::test_gpu::lock();
+    let (out_w, out_h) = (320_usize, 180_usize);
+    let (rw, rh) = DlssQuality::Balanced.scaled_extent(out_w, out_h);
+    assert!(rw > 0 && rw < out_w && rh > 0 && rh < out_h);
+
+    let mut gpu = new_gpu().unwrap();
+    let mut scene = quiet(Scene::preset_fractal(
+        Formula::PRESETS[crate::params::FAMILY_BULB as usize],
+    ));
+    scene.render.backend = Backend::Cuda;
+    scene.render.denoise.dlss = DlssQuality::Balanced;
+    scene.colour.on = false;
+
+    let mut target = Target::new(rw, rh);
+    target.allow_zero_copy = true;
+    target.display_size = Some((out_w as u32, out_h as u32));
+
+    let res = gpu.advance(&mut target, &scene, 1, SEED, Batch::Fixed(1));
+    match res {
+        Ok(_) => {
+            let view = target
+                .shared_view
+                .as_ref()
+                .expect("DLSS present must produce a shared_view");
+            let size = view.texture().size();
+            assert_eq!((size.width as usize, size.height as usize), (out_w, out_h));
+            assert!(
+                target.pixels.is_empty() && target.light.is_empty(),
+                "DLSS zero-copy present must not populate CPU display buffers"
+            );
+        }
+        Err(err) => {
+            // Headless tests without a shared Vulkan interop device or NGX runtime must fail
+            // explicitly rather than silently falling back when DLSS is requested.
+            let msg = err.to_string();
+            assert!(
+                msg.contains("DLSS") || msg.contains("NGX"),
+                "unexpected DLSS error: {msg}"
+            );
+        }
+    }
+}

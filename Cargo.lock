@@ -1727,7 +1727,7 @@ dependencies = [
 [[package]]
 name = "burn-device"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#edb9e01d31918a3612d6005f5cfc87ed6ae96cee"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#f8a41fe8404cbff70699e500bf91dc1322ed8268"
 dependencies = [
  "burn",
  "cubecl-runtime",
@@ -3312,7 +3312,7 @@ dependencies = [
 [[package]]
 name = "cuda-core-ext"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/nv-rs.git?branch=main#f5498358fd11bc9cb49c2443639788c25af545d1"
+source = "git+ssh://git@github.com/ssoj13/nv-rs.git?branch=main#d3dbb7d8fcb711804e775d57d1d79322612e58a5"
 dependencies = [
  "cuda-bindings 0.5.0 (git+https://github.com/NVIDIA/cuda-rust.git?branch=main)",
  "cuda-core 0.5.0 (git+https://github.com/NVIDIA/cuda-rust.git?branch=main)",
@@ -3375,7 +3375,7 @@ source = "git+ssh://git@github.com/ssoj13/cuda-rust_b.git?branch=main#42cc04edaa
 [[package]]
 name = "cuda-tex-device"
 version = "0.0.0"
-source = "git+ssh://git@github.com/ssoj13/nv-rs.git?branch=main#f5498358fd11bc9cb49c2443639788c25af545d1"
+source = "git+ssh://git@github.com/ssoj13/nv-rs.git?branch=main#d3dbb7d8fcb711804e775d57d1d79322612e58a5"
 dependencies = [
  "cuda-device",
 ]
@@ -4564,7 +4564,7 @@ dependencies = [
 [[package]]
 name = "fractal-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#39531d64a9aa37f50f0ccf33b5f1fc7ffe6df1db"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#a2fb710cc4131ed2305ca77d807b935a0ff5f108"
 dependencies = [
  "pt-integrator",
  "standard-surface-bsdf",
@@ -4573,7 +4573,7 @@ dependencies = [
 [[package]]
 name = "fractal-kernels"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#39531d64a9aa37f50f0ccf33b5f1fc7ffe6df1db"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#a2fb710cc4131ed2305ca77d807b935a0ff5f108"
 dependencies = [
  "cuda-core 0.5.0 (git+ssh://git@github.com/ssoj13/cuda-rust_b.git?branch=main)",
  "cuda-device",
@@ -4955,7 +4955,7 @@ dependencies = [
 [[package]]
 name = "gpu-info-rs"
 version = "0.1.1"
-source = "git+ssh://git@github.com/ssoj13/gpu-info-rs.git?branch=main#53af9e2ef32386bd732c8e472b239c1806f4a200"
+source = "git+ssh://git@github.com/ssoj13/gpu-info-rs.git?branch=main#efab866c7afeda5fcbb66b019f23a4422d913f22"
 dependencies = [
  "ash",
  "bytemuck",
@@ -6618,6 +6618,23 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
+name = "ngx"
+version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/nv-rs.git?branch=main#d3dbb7d8fcb711804e775d57d1d79322612e58a5"
+dependencies = [
+ "ngx-sys",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "ngx-sys"
+version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/nv-rs.git?branch=main#d3dbb7d8fcb711804e775d57d1d79322612e58a5"
+dependencies = [
+ "nv-bindgen",
+]
+
+[[package]]
 name = "no_std_io2"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6767,7 +6784,7 @@ dependencies = [
 [[package]]
 name = "nv-bindgen"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/nv-rs.git?branch=main#f5498358fd11bc9cb49c2443639788c25af545d1"
+source = "git+ssh://git@github.com/ssoj13/nv-rs.git?branch=main#d3dbb7d8fcb711804e775d57d1d79322612e58a5"
 dependencies = [
  "bindgen 0.72.1",
  "prettyplease 0.2.37",
@@ -6784,7 +6801,7 @@ dependencies = [
 [[package]]
 name = "nv-loader"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/nv-rs.git?branch=main#f5498358fd11bc9cb49c2443639788c25af545d1"
+source = "git+ssh://git@github.com/ssoj13/nv-rs.git?branch=main#d3dbb7d8fcb711804e775d57d1d79322612e58a5"
 dependencies = [
  "libloading 0.8.9",
  "thiserror 2.0.21",
@@ -6794,7 +6811,7 @@ dependencies = [
 [[package]]
 name = "nv-wgpu"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/nv-rs.git?branch=main#f5498358fd11bc9cb49c2443639788c25af545d1"
+source = "git+ssh://git@github.com/ssoj13/nv-rs.git?branch=main#d3dbb7d8fcb711804e775d57d1d79322612e58a5"
 dependencies = [
  "ash",
  "bytemuck",
@@ -7294,7 +7311,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 [[package]]
 name = "optix"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/nv-rs.git?branch=main#f5498358fd11bc9cb49c2443639788c25af545d1"
+source = "git+ssh://git@github.com/ssoj13/nv-rs.git?branch=main#d3dbb7d8fcb711804e775d57d1d79322612e58a5"
 dependencies = [
  "cuda-core 0.5.0 (git+https://github.com/NVIDIA/cuda-rust.git?branch=main)",
  "optix-sys",
@@ -7304,7 +7321,7 @@ dependencies = [
 [[package]]
 name = "optix-sys"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/nv-rs.git?branch=main#f5498358fd11bc9cb49c2443639788c25af545d1"
+source = "git+ssh://git@github.com/ssoj13/nv-rs.git?branch=main#d3dbb7d8fcb711804e775d57d1d79322612e58a5"
 dependencies = [
  "cuda-bindings 0.5.0 (git+https://github.com/NVIDIA/cuda-rust.git?branch=main)",
  "libloading 0.8.9",
@@ -7994,7 +8011,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ad9c5423459fa2f729b8d9235fab810aa29628b171467744fc86d21460ad70d"
 dependencies = [
  "anyhow",
- "itertools 0.13.0",
+ "itertools 0.15.0",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -8003,7 +8020,7 @@ dependencies = [
 [[package]]
 name = "pt-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#edb9e01d31918a3612d6005f5cfc87ed6ae96cee"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#f8a41fe8404cbff70699e500bf91dc1322ed8268"
 dependencies = [
  "bytemuck",
  "glam",
@@ -8013,7 +8030,7 @@ dependencies = [
 [[package]]
 name = "pt-denoise-oidn"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#edb9e01d31918a3612d6005f5cfc87ed6ae96cee"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#f8a41fe8404cbff70699e500bf91dc1322ed8268"
 dependencies = [
  "anyhow",
  "burn",
@@ -8030,7 +8047,7 @@ dependencies = [
 [[package]]
 name = "pt-integrator"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#edb9e01d31918a3612d6005f5cfc87ed6ae96cee"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#f8a41fe8404cbff70699e500bf91dc1322ed8268"
 dependencies = [
  "half",
  "pt-core",
@@ -8526,7 +8543,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "render-color"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#edb9e01d31918a3612d6005f5cfc87ed6ae96cee"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#f8a41fe8404cbff70699e500bf91dc1322ed8268"
 dependencies = [
  "log",
  "serde",
@@ -8537,7 +8554,7 @@ dependencies = [
 [[package]]
 name = "render-color-gpu"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#edb9e01d31918a3612d6005f5cfc87ed6ae96cee"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#f8a41fe8404cbff70699e500bf91dc1322ed8268"
 dependencies = [
  "bytemuck",
  "gpu-info-rs",
@@ -8549,7 +8566,7 @@ dependencies = [
 [[package]]
 name = "render-env"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#edb9e01d31918a3612d6005f5cfc87ed6ae96cee"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#f8a41fe8404cbff70699e500bf91dc1322ed8268"
 dependencies = [
  "bytemuck",
  "image",
@@ -8560,7 +8577,7 @@ dependencies = [
 [[package]]
 name = "render-settings"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#edb9e01d31918a3612d6005f5cfc87ed6ae96cee"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#f8a41fe8404cbff70699e500bf91dc1322ed8268"
 dependencies = [
  "serde",
 ]
@@ -9077,7 +9094,7 @@ dependencies = [
 [[package]]
 name = "sl-app"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "appbus-rs",
  "box-rs",
@@ -9099,7 +9116,7 @@ dependencies = [
 [[package]]
 name = "sl-chrome"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "egui",
  "indexmap",
@@ -9113,7 +9130,7 @@ dependencies = [
 [[package]]
 name = "sl-config"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "egui",
  "serde",
@@ -9123,7 +9140,7 @@ dependencies = [
 [[package]]
 name = "sl-controls"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "curves",
  "egui",
@@ -9134,7 +9151,7 @@ dependencies = [
 [[package]]
 name = "sl-dataview"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "egui",
  "serde",
@@ -9144,7 +9161,7 @@ dependencies = [
 [[package]]
 name = "sl-dev"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "appbus-rs",
  "crashdump-rs",
@@ -9162,7 +9179,7 @@ dependencies = [
 [[package]]
 name = "sl-panels"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "box-rs",
  "egui",
@@ -9174,9 +9191,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "sl-plot"
+version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
+dependencies = [
+ "egui",
+ "egui-wgpu",
+ "sl-config",
+ "sl-panels",
+ "viz-core",
+ "wgpu",
+ "wgpu-plot",
+]
+
+[[package]]
 name = "sl-splash"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "egui",
  "epaint_default_fonts",
@@ -9191,7 +9222,7 @@ dependencies = [
 [[package]]
 name = "sl-studio"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "anyhow",
  "appbus-rs",
@@ -9216,6 +9247,7 @@ dependencies = [
  "sl-controls",
  "sl-panels",
  "sl-studio-browser",
+ "sl-studio-calibration",
  "sl-studio-core",
  "sl-studio-doc",
  "sl-studio-export",
@@ -9243,7 +9275,7 @@ dependencies = [
 [[package]]
 name = "sl-studio-browser"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "appbus-rs",
  "egui",
@@ -9255,9 +9287,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "sl-studio-calibration"
+version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
+dependencies = [
+ "appbus-rs",
+ "egui",
+ "serde",
+ "sl-app",
+ "sl-config",
+ "sl-controls",
+ "sl-plot",
+ "sl-studio-core",
+]
+
+[[package]]
 name = "sl-studio-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "animation",
  "bytemuck",
@@ -9286,7 +9333,7 @@ dependencies = [
 [[package]]
 name = "sl-studio-doc"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "animation",
  "appbus-rs",
@@ -9302,7 +9349,7 @@ dependencies = [
 [[package]]
 name = "sl-studio-export"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "appbus-rs",
  "bytemuck",
@@ -9328,7 +9375,7 @@ dependencies = [
 [[package]]
 name = "sl-studio-inspector"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "appbus-rs",
  "egui",
@@ -9345,7 +9392,7 @@ dependencies = [
 [[package]]
 name = "sl-studio-jobs"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "appbus-rs",
  "egui",
@@ -9360,7 +9407,7 @@ dependencies = [
 [[package]]
 name = "sl-studio-materials"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "appbus-rs",
  "egui",
@@ -9375,7 +9422,7 @@ dependencies = [
 [[package]]
 name = "sl-studio-node-editor"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "appbus-rs",
  "egui",
@@ -9391,7 +9438,7 @@ dependencies = [
 [[package]]
 name = "sl-studio-outliner"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "appbus-rs",
  "egui",
@@ -9408,7 +9455,7 @@ dependencies = [
 [[package]]
 name = "sl-studio-profiler"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "appbus-rs",
  "egui",
@@ -9419,7 +9466,7 @@ dependencies = [
 [[package]]
 name = "sl-studio-project"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "appbus-rs",
  "egui",
@@ -9434,7 +9481,7 @@ dependencies = [
 [[package]]
 name = "sl-studio-render"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "bytemuck",
  "crashdump-rs",
@@ -9458,7 +9505,7 @@ dependencies = [
 [[package]]
 name = "sl-studio-scene"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "animation",
  "appbus-rs",
@@ -9477,7 +9524,7 @@ dependencies = [
 [[package]]
 name = "sl-studio-settings"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "appbus-rs",
  "egui",
@@ -9492,7 +9539,7 @@ dependencies = [
 [[package]]
 name = "sl-studio-takes"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "appbus-rs",
  "egui",
@@ -9506,7 +9553,7 @@ dependencies = [
 [[package]]
 name = "sl-studio-timeline"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "appbus-rs",
  "curves",
@@ -9524,7 +9571,7 @@ dependencies = [
 [[package]]
 name = "sl-studio-viewport"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "appbus-rs",
  "camera",
@@ -9541,7 +9588,7 @@ dependencies = [
 [[package]]
 name = "sl-timeline"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "egui",
  "exr-core",
@@ -9559,7 +9606,7 @@ dependencies = [
 [[package]]
 name = "sl-viewport"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "anyhow",
  "bytemuck",
@@ -9585,7 +9632,7 @@ dependencies = [
 [[package]]
 name = "sl-window"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "appbus-rs",
  "crashdump-rs",
@@ -9780,7 +9827,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 [[package]]
 name = "standard-surface-bsdf"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#edb9e01d31918a3612d6005f5cfc87ed6ae96cee"
+source = "git+ssh://git@github.com/ssoj13/render-rs.git?branch=main#f8a41fe8404cbff70699e500bf91dc1322ed8268"
 dependencies = [
  "cuda-device",
  "libm",
@@ -10802,7 +10849,7 @@ dependencies = [
 [[package]]
 name = "usd-ar"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#3d2420126a0c764be626fb12447bd722d0a8196e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#4e75d02c8389400e04af6f0422734e307642c87f"
 dependencies = [
  "log",
  "once_cell",
@@ -10816,7 +10863,7 @@ dependencies = [
 [[package]]
 name = "usd-arch"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#3d2420126a0c764be626fb12447bd722d0a8196e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#4e75d02c8389400e04af6f0422734e307642c87f"
 dependencies = [
  "libc",
  "web-time",
@@ -10825,7 +10872,7 @@ dependencies = [
 [[package]]
 name = "usd-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#3d2420126a0c764be626fb12447bd722d0a8196e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#4e75d02c8389400e04af6f0422734e307642c87f"
 dependencies = [
  "once_cell",
  "ordered-float",
@@ -10848,7 +10895,7 @@ dependencies = [
 [[package]]
 name = "usd-geom"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#3d2420126a0c764be626fb12447bd722d0a8196e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#4e75d02c8389400e04af6f0422734e307642c87f"
 dependencies = [
  "log",
  "once_cell",
@@ -10864,7 +10911,7 @@ dependencies = [
 [[package]]
 name = "usd-gf"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#3d2420126a0c764be626fb12447bd722d0a8196e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#4e75d02c8389400e04af6f0422734e307642c87f"
 dependencies = [
  "half",
  "num-traits",
@@ -10875,7 +10922,7 @@ dependencies = [
 [[package]]
 name = "usd-js"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#3d2420126a0c764be626fb12447bd722d0a8196e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#4e75d02c8389400e04af6f0422734e307642c87f"
 dependencies = [
  "serde_json",
 ]
@@ -10883,7 +10930,7 @@ dependencies = [
 [[package]]
 name = "usd-kind"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#3d2420126a0c764be626fb12447bd722d0a8196e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#4e75d02c8389400e04af6f0422734e307642c87f"
 dependencies = [
  "log",
  "usd-plug",
@@ -10893,7 +10940,7 @@ dependencies = [
 [[package]]
 name = "usd-pcp"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#3d2420126a0c764be626fb12447bd722d0a8196e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#4e75d02c8389400e04af6f0422734e307642c87f"
 dependencies = [
  "bitflags 2.13.2",
  "log",
@@ -10911,7 +10958,7 @@ dependencies = [
 [[package]]
 name = "usd-plug"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#3d2420126a0c764be626fb12447bd722d0a8196e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#4e75d02c8389400e04af6f0422734e307642c87f"
 dependencies = [
  "glob",
  "log",
@@ -10924,7 +10971,7 @@ dependencies = [
 [[package]]
 name = "usd-sdf"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#3d2420126a0c764be626fb12447bd722d0a8196e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#4e75d02c8389400e04af6f0422734e307642c87f"
 dependencies = [
  "alembic-rs",
  "bitflags 2.13.2",
@@ -10956,7 +11003,7 @@ dependencies = [
 [[package]]
 name = "usd-tf"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#3d2420126a0c764be626fb12447bd722d0a8196e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#4e75d02c8389400e04af6f0422734e307642c87f"
 dependencies = [
  "crashdump-rs",
  "glob",
@@ -10970,7 +11017,7 @@ dependencies = [
 [[package]]
 name = "usd-trace"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#3d2420126a0c764be626fb12447bd722d0a8196e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#4e75d02c8389400e04af6f0422734e307642c87f"
 dependencies = [
  "once_cell",
  "parking_lot",
@@ -10983,7 +11030,7 @@ dependencies = [
 [[package]]
 name = "usd-ts"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#3d2420126a0c764be626fb12447bd722d0a8196e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#4e75d02c8389400e04af6f0422734e307642c87f"
 dependencies = [
  "num-traits",
  "usd-gf",
@@ -10994,7 +11041,7 @@ dependencies = [
 [[package]]
 name = "usd-vt"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#3d2420126a0c764be626fb12447bd722d0a8196e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#4e75d02c8389400e04af6f0422734e307642c87f"
 dependencies = [
  "usd-gf",
  "usd-tf",
@@ -11003,7 +11050,7 @@ dependencies = [
 [[package]]
 name = "usd-work"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#3d2420126a0c764be626fb12447bd722d0a8196e"
+source = "git+ssh://git@github.com/ssoj13/usd-rs.git?branch=main#4e75d02c8389400e04af6f0422734e307642c87f"
 dependencies = [
  "crashdump-rs",
  "log",
@@ -11372,7 +11419,7 @@ dependencies = [
 [[package]]
 name = "video-io-egui"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#ee4d03de82eb9f6cb2cd4b2de1605ab530b17efb"
+source = "git+ssh://git@github.com/ssoj13/egui-widgets-rs.git?branch=main#f03c48a8a4ab79e3f4d0e7f92cc282bf2918c522"
 dependencies = [
  "egui",
  "serde",
@@ -11381,6 +11428,11 @@ dependencies = [
  "sl-controls",
  "video-io",
 ]
+
+[[package]]
+name = "viz-core"
+version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/wgpu-widgets-rs.git?branch=main#6a7b1d860d0b248e51f85b553c6cbbb7ac4ecd12"
 
 [[package]]
 name = "void"
@@ -11417,6 +11469,7 @@ dependencies = [
  "glam",
  "gpu-info-rs",
  "log",
+ "ngx",
  "nv-wgpu",
  "optix",
  "pt-nv-interop",
@@ -11852,6 +11905,27 @@ checksum = "44a62ead68aad7cd40ac9e2cd2b8ec64f32dfbad2765f429b9fb74b8b735869f"
 dependencies = [
  "naga",
  "wgpu-types",
+]
+
+[[package]]
+name = "wgpu-pick"
+version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/wgpu-widgets-rs.git?branch=main#6a7b1d860d0b248e51f85b553c6cbbb7ac4ecd12"
+dependencies = [
+ "log",
+ "wgpu",
+]
+
+[[package]]
+name = "wgpu-plot"
+version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/wgpu-widgets-rs.git?branch=main#6a7b1d860d0b248e51f85b553c6cbbb7ac4ecd12"
+dependencies = [
+ "bytemuck",
+ "thiserror 2.0.21",
+ "viz-core",
+ "wgpu",
+ "wgpu-pick",
 ]
 
 [[package]]
