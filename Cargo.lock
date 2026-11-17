@@ -4564,7 +4564,7 @@ dependencies = [
 [[package]]
 name = "fractal-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#748a9bef84a86fbca235acb7a6d152f82406cf21"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#799a5c8a1d7ffb63e2a0559eefacc2b3694ed740"
 dependencies = [
  "pt-integrator",
  "standard-surface-bsdf",
@@ -4573,7 +4573,98 @@ dependencies = [
 [[package]]
 name = "fractal-kernels"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#748a9bef84a86fbca235acb7a6d152f82406cf21"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#799a5c8a1d7ffb63e2a0559eefacc2b3694ed740"
+dependencies = [
+ "cuda-core 0.5.0 (git+ssh://git@github.com/ssoj13/cuda-rust_b.git?branch=main)",
+ "cuda-device",
+ "cuda-host",
+ "fractal-core",
+ "fractal-kernels-g0",
+ "fractal-kernels-g1",
+ "fractal-kernels-g2",
+ "fractal-kernels-g3",
+ "fractal-kernels-g4",
+ "fractal-kernels-g5",
+ "fractal-kernels-g6",
+ "standard-surface-bsdf",
+]
+
+[[package]]
+name = "fractal-kernels-g0"
+version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#799a5c8a1d7ffb63e2a0559eefacc2b3694ed740"
+dependencies = [
+ "cuda-core 0.5.0 (git+ssh://git@github.com/ssoj13/cuda-rust_b.git?branch=main)",
+ "cuda-device",
+ "cuda-host",
+ "fractal-core",
+ "standard-surface-bsdf",
+]
+
+[[package]]
+name = "fractal-kernels-g1"
+version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#799a5c8a1d7ffb63e2a0559eefacc2b3694ed740"
+dependencies = [
+ "cuda-core 0.5.0 (git+ssh://git@github.com/ssoj13/cuda-rust_b.git?branch=main)",
+ "cuda-device",
+ "cuda-host",
+ "fractal-core",
+ "standard-surface-bsdf",
+]
+
+[[package]]
+name = "fractal-kernels-g2"
+version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#799a5c8a1d7ffb63e2a0559eefacc2b3694ed740"
+dependencies = [
+ "cuda-core 0.5.0 (git+ssh://git@github.com/ssoj13/cuda-rust_b.git?branch=main)",
+ "cuda-device",
+ "cuda-host",
+ "fractal-core",
+ "standard-surface-bsdf",
+]
+
+[[package]]
+name = "fractal-kernels-g3"
+version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#799a5c8a1d7ffb63e2a0559eefacc2b3694ed740"
+dependencies = [
+ "cuda-core 0.5.0 (git+ssh://git@github.com/ssoj13/cuda-rust_b.git?branch=main)",
+ "cuda-device",
+ "cuda-host",
+ "fractal-core",
+ "standard-surface-bsdf",
+]
+
+[[package]]
+name = "fractal-kernels-g4"
+version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#799a5c8a1d7ffb63e2a0559eefacc2b3694ed740"
+dependencies = [
+ "cuda-core 0.5.0 (git+ssh://git@github.com/ssoj13/cuda-rust_b.git?branch=main)",
+ "cuda-device",
+ "cuda-host",
+ "fractal-core",
+ "standard-surface-bsdf",
+]
+
+[[package]]
+name = "fractal-kernels-g5"
+version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#799a5c8a1d7ffb63e2a0559eefacc2b3694ed740"
+dependencies = [
+ "cuda-core 0.5.0 (git+ssh://git@github.com/ssoj13/cuda-rust_b.git?branch=main)",
+ "cuda-device",
+ "cuda-host",
+ "fractal-core",
+ "standard-surface-bsdf",
+]
+
+[[package]]
+name = "fractal-kernels-g6"
+version = "0.1.0"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#799a5c8a1d7ffb63e2a0559eefacc2b3694ed740"
 dependencies = [
  "cuda-core 0.5.0 (git+ssh://git@github.com/ssoj13/cuda-rust_b.git?branch=main)",
  "cuda-device",
