@@ -4564,7 +4564,7 @@ dependencies = [
 [[package]]
 name = "fractal-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#a2fb710cc4131ed2305ca77d807b935a0ff5f108"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#748a9bef84a86fbca235acb7a6d152f82406cf21"
 dependencies = [
  "pt-integrator",
  "standard-surface-bsdf",
@@ -4573,7 +4573,7 @@ dependencies = [
 [[package]]
 name = "fractal-kernels"
 version = "0.1.0"
-source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#a2fb710cc4131ed2305ca77d807b935a0ff5f108"
+source = "git+ssh://git@github.com/ssoj13/fractal-rs.git?branch=main#748a9bef84a86fbca235acb7a6d152f82406cf21"
 dependencies = [
  "cuda-core 0.5.0 (git+ssh://git@github.com/ssoj13/cuda-rust_b.git?branch=main)",
  "cuda-device",
@@ -7738,7 +7738,7 @@ dependencies = [
  "combine",
  "downcast-rs 2.0.2",
  "dyn-clone",
- "hashbrown 0.17.1",
+ "hashbrown 0.13.2",
  "hi_sparse_bitset 0.10.0",
  "indexmap",
  "inventory",

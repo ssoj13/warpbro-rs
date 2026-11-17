@@ -688,12 +688,20 @@ fn zeroed<T: DeviceCopy>(
     DeviceBuffer::zeroed(stream, len).map_err(|e| device(what, e))
 }
 
-/// Thin zero-copy raw-handle bridge over `fractal-kernels`' embedded PTX module using
+struct KernelModuleSlot {
+    bundle: cuda_core::embedded::EmbeddedModule,
+    params_symbol: String,
+    loaded: Option<(Arc<CudaModule>, ConstantHandle)>,
+}
+
+/// Thin zero-copy raw-handle bridge over `fractal-kernels`' modular embedded PTX bundles using
 /// `NVIDIA/cuda-rust` (`cuda_core::Module`, `Function`, `ConstantHandle`) plus the M3/M4
 /// `POST_PTX` helper module.
 struct FractalModule {
-    module: Arc<CudaModule>,
-    params_const: ConstantHandle,
+    ctx: Arc<CudaContext>,
+    slots: Vec<KernelModuleSlot>,
+    entry_to_slot: HashMap<String, usize>,
+    last_params: [f32; P_COUNT],
     params_pinned: [PinnedHostBuffer<f32>; 2],
     params_slot: usize,
     functions: HashMap<&'static str, CudaFunction>,
@@ -723,7 +731,7 @@ fn find_ptx_const_symbol<'a>(ptx: &'a [u8], suffix: &str) -> Option<&'a str> {
         let Some(sym) = decl.split_whitespace().last() else {
             continue;
         };
-        if sym == suffix || sym.ends_with(&format!("_{suffix}")) {
+        if sym == suffix || sym.contains(&format!("_{suffix}")) {
             return Some(sym);
         }
     }
@@ -734,61 +742,34 @@ impl FractalModule {
     fn load(ctx: &Arc<CudaContext>) -> Result<Self, String> {
         let embedded = cuda_core::embedded::embedded_modules_from_current_exe()
             .map_err(|e| format!("embedded CUDA modules: {e:?}"))?;
-        let bundle = embedded
-            .iter()
-            .find(|m| {
-                m.bundle()
-                    .entries
-                    .iter()
-                    .any(|e| e.symbol == "world_fast_f0")
-            })
-            .ok_or_else(|| {
-                "no embedded fractal-kernels CUDA module found (missing world_fast_f0)".to_string()
-            })?;
-        let ptx = bundle
-            .payload(cuda_core::embedded::ArtifactPayloadKind::Ptx)
-            .ok_or_else(|| format!("embedded module '{}' has no PTX payload", bundle.name()))?;
-        let params_symbol = find_ptx_const_symbol(ptx, "PARAMS").ok_or_else(|| {
-            format!(
-                "PARAMS constant symbol not found in embedded module '{}'",
-                bundle.name()
-            )
-        })?;
-        log::info!(
-            "CUDA startup: loading module '{}' (PARAMS = '{}')",
-            bundle.name(),
-            params_symbol
-        );
-        let module = bundle
-            .load(ctx)
-            .map_err(|e| format!("load fractal-kernels module: {e:?}"))?;
-        let (params_dptr, params_size) = module
-            .get_global(params_symbol)
-            .map_err(|e| format!("resolve {params_symbol} global: {e:?}"))?;
-        let expected_bytes = std::mem::size_of::<[f32; P_COUNT]>();
-        if params_size != expected_bytes {
-            return Err(format!(
-                "PARAMS size mismatch: device has {params_size} B, host expects {expected_bytes} B"
-            ));
+        let mut slots = Vec::new();
+        let mut entry_to_slot = HashMap::new();
+        for bundle in embedded {
+            let Some(ptx) = bundle.payload(cuda_core::embedded::ArtifactPayloadKind::Ptx) else {
+                continue;
+            };
+            let Some(params_symbol) = find_ptx_const_symbol(ptx, "PARAMS").map(str::to_owned)
+            else {
+                continue;
+            };
+            let slot_idx = slots.len();
+            for entry in &bundle.bundle().entries {
+                entry_to_slot.insert(entry.symbol.clone(), slot_idx);
+            }
+            slots.push(KernelModuleSlot {
+                bundle,
+                params_symbol,
+                loaded: None,
+            });
         }
-        // SAFETY: `params_dptr` was just resolved from `module`'s `"PARAMS"` constant symbol and
-        // its driver-reported byte size equals `size_of::<[f32; P_COUNT]>()`.
-        let params_const = unsafe { ConstantHandle::from_raw(params_dptr) };
+        let world_slot = *entry_to_slot.get("adapt").ok_or_else(|| {
+            "no embedded fractal-kernels CUDA module found (missing adapt)".to_string()
+        })?;
+
         let params_pinned_0 = PinnedHostBuffer::<f32>::zeroed(ctx, P_COUNT)
             .map_err(|e| format!("pinned params 0: {e:?}"))?;
         let params_pinned_1 = PinnedHostBuffer::<f32>::zeroed(ctx, P_COUNT)
             .map_err(|e| format!("pinned params 1: {e:?}"))?;
-        // SAFETY: `params_pinned_0` holds `P_COUNT * 4 == expected_bytes` readable zeroed bytes
-        // and `module` stays loaded for the lifetime of `FractalModule`.
-        unsafe {
-            module
-                .copy_bytes_to_device_global_sync(
-                    params_dptr,
-                    params_pinned_0.as_ptr().cast(),
-                    expected_bytes,
-                )
-                .map_err(|e| format!("init PARAMS: {e:?}"))?;
-        }
 
         let post_module = ctx
             .load_module_from_image(POST_PTX.as_bytes())
@@ -803,9 +784,11 @@ impl FractalModule {
             .load_function("dlss_depth_motion")
             .map_err(|e| format!("load dlss_depth_motion: {e:?}"))?;
 
-        Ok(Self {
-            module,
-            params_const,
+        let mut this = Self {
+            ctx: Arc::clone(ctx),
+            slots,
+            entry_to_slot,
+            last_params: [0.0; P_COUNT],
             params_pinned: [params_pinned_0, params_pinned_1],
             params_slot: 0,
             functions: HashMap::new(),
@@ -813,7 +796,60 @@ impl FractalModule {
             untile_fn,
             tonemap_surf_fn,
             dlss_dm_fn,
-        })
+        };
+        this.ensure_slot_loaded(world_slot)
+            .map_err(|e| format!("load world module: {e}"))?;
+        Ok(this)
+    }
+
+    fn ensure_slot_loaded(&mut self, slot_idx: usize) -> Result<&Arc<CudaModule>, RenderError> {
+        if self.slots[slot_idx].loaded.is_none() {
+            let slot = &self.slots[slot_idx];
+            let started = Instant::now();
+            log::info!(
+                "CUDA: loading kernel module '{}' (PARAMS = '{}')",
+                slot.bundle.name(),
+                slot.params_symbol
+            );
+            let module = slot
+                .bundle
+                .load(&self.ctx)
+                .map_err(|e| device("load fractal-kernels module", e))?;
+            let (params_dptr, params_size) = module
+                .get_global(&slot.params_symbol)
+                .map_err(|e| device(&slot.params_symbol, e))?;
+            let expected_bytes = std::mem::size_of::<[f32; P_COUNT]>();
+            if params_size != expected_bytes {
+                return Err(RenderError::Device(format!(
+                    "PARAMS size mismatch: device has {params_size} B, host expects {expected_bytes} B"
+                )));
+            }
+            // SAFETY: `params_dptr` was just resolved from `module`'s `"PARAMS"` constant symbol
+            // and its driver-reported byte size equals `size_of::<[f32; P_COUNT]>()`.
+            let params_const = unsafe { ConstantHandle::from_raw(params_dptr) };
+            // SAFETY: `self.last_params` has `P_COUNT * 4 == expected_bytes` readable bytes and
+            // `module` stays loaded for the lifetime of `FractalModule`.
+            unsafe {
+                module
+                    .copy_bytes_to_device_global_sync(
+                        params_dptr,
+                        self.last_params.as_ptr().cast(),
+                        expected_bytes,
+                    )
+                    .map_err(|e| device("init PARAMS", e))?;
+            }
+            log::info!(
+                "CUDA: module '{}' ready in {:?}",
+                slot.bundle.name(),
+                started.elapsed()
+            );
+            self.slots[slot_idx].loaded = Some((module, params_const));
+        }
+        self.slots[slot_idx]
+            .loaded
+            .as_ref()
+            .map(|(m, _)| m)
+            .ok_or_else(|| RenderError::Device("loaded kernel module missing".into()))
     }
 
     fn set_params_async(
@@ -821,30 +857,34 @@ impl FractalModule {
         stream: &CudaStream,
         params: &[f32; P_COUNT],
     ) -> Result<(), RenderError> {
+        self.last_params = *params;
         let slot = self.params_slot;
         self.params_slot = (slot + 1) % 2;
         self.params_pinned[slot].copy_from_slice(params);
-        // SAFETY: `params_pinned[slot]` is page-locked host memory of `P_COUNT` `f32`s and
-        // `params_const` points to `PARAMS` in `self.module` of identical size; 2-slot rotation
-        // prevents overwriting an in-flight batch's staging buffer.
-        unsafe {
-            self.params_const.write_async(
-                stream,
-                self.params_pinned[slot].as_ptr().cast(),
-                std::mem::size_of::<[f32; P_COUNT]>(),
-            )
+        let ptr = self.params_pinned[slot].as_ptr().cast();
+        let bytes = std::mem::size_of::<[f32; P_COUNT]>();
+        for s in &self.slots {
+            if let Some((_, params_const)) = &s.loaded {
+                // SAFETY: `params_pinned[slot]` is page-locked host memory of `P_COUNT` `f32`s and
+                // `params_const` points to `PARAMS` in `s`'s loaded module of identical size;
+                // 2-slot rotation prevents overwriting an in-flight batch's staging buffer.
+                unsafe { params_const.write_async(stream, ptr, bytes) }
+                    .map_err(|e| device("CUDA parameter upload", e))?;
+            }
         }
-        .map_err(|e| device("CUDA parameter upload", e))
+        Ok(())
     }
 
     fn function(&mut self, name: &'static str) -> Result<CudaFunction, RenderError> {
         if let Some(f) = self.functions.get(name) {
             return Ok(f.clone());
         }
-        let f = self
-            .module
-            .load_function(name)
-            .map_err(|e| device(name, e))?;
+        let slot_idx = *self
+            .entry_to_slot
+            .get(name)
+            .ok_or_else(|| RenderError::Device(format!("CUDA kernel '{name}' not found")))?;
+        let module = self.ensure_slot_loaded(slot_idx)?;
+        let f = module.load_function(name).map_err(|e| device(name, e))?;
         self.functions.insert(name, f.clone());
         Ok(f)
     }
