@@ -389,6 +389,7 @@ def build(args: argparse.Namespace) -> int:
     if code != 0 or not RELEASE_BIN.is_file():
         err("Build failed")
         return code or 1
+    stage_ngx_dlls(RELEASE_BIN.parent)
     if not (no_gpu or getattr(args, "skip_warmup", False)):
         # Prime the CUDA JIT cache and open the WGPU device for this exact executable, on
         # the same GPU the workspace uses. Fail here if a module or pipeline cannot initialize.
@@ -402,6 +403,32 @@ def build(args: argparse.Namespace) -> int:
     step(f"Binary: {RELEASE_BIN}")
     print()
     return 0
+
+
+def stage_ngx_dlls(dest_dir: Path) -> None:
+    """Ensure nvngx_dlss.dll is staged next to the executable on Windows when available."""
+    if os.name != "nt":
+        return
+    dll_name = "nvngx_dlss.dll"
+    dest = dest_dir / dll_name
+    candidates: list[Path] = [RELEASE_BIN.parent / dll_name]
+    for env_key in ("NGX_SDK_ROOT", "DLSS_ROOT", "NVSDK_NGX_ROOT"):
+        val = os.environ.get(env_key, "").strip()
+        if val:
+            root = Path(val)
+            candidates.extend([
+                root / "lib" / "Windows_x86_64" / "rel" / dll_name,
+                root / "bin" / dll_name,
+                root / dll_name,
+            ])
+    candidates.append(ROOT_DIR.parent / "nv-rs" / "target" / "release" / dll_name)
+    for src in candidates:
+        if src.is_file():
+            if src.resolve() != dest.resolve():
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dest)
+                step(f"Staged {dll_name} -> {dest_dir}")
+            return
 
 
 def run_build(args: argparse.Namespace) -> int:
@@ -497,6 +524,7 @@ def run_install(args: argparse.Namespace) -> int:
     INSTALL_DIR.mkdir(parents=True, exist_ok=True)
     dest = INSTALL_DIR / BIN_NAME
     shutil.copy2(RELEASE_BIN, dest)
+    stage_ngx_dlls(INSTALL_DIR)
     ok(f"Installed {dest}")
     if str(INSTALL_DIR) not in os.environ.get("PATH", "").split(os.pathsep):
         warn(f"{INSTALL_DIR} is not on PATH")

@@ -551,11 +551,7 @@ impl sl_studio::StudioModule for WarpBroFractalModule {
         vec![std::sync::Arc::new(crate::fractal_node::FractalNodeSpec)]
     }
 
-    fn on_register(
-        &self,
-        _bus: &sl_studio::EventBus,
-        _hotkeys: &mut sl_studio::HotkeyRegistry,
-    ) {
+    fn on_register(&self, _bus: &sl_studio::EventBus, _hotkeys: &mut sl_studio::HotkeyRegistry) {
         init_warpbro();
     }
 }
