@@ -1,6 +1,14 @@
 # Changelog
 
-## Unreleased - 2026-11-08
+## 2026-11-18
+
+- **Studio UI, Dock Layout, Bottom Toolbar & DLSS Runtime (`egui-widgets-rs@9b14666`, `nv-rs@887b786`)**:
+  - **Unified Color-Coded Sections & `SlimSlider`**: Adopted `sl_config::section_color` / `SECTION_TINT` (`0.28`), `CollapsingSection::show_persisted`, compact `SlimSlider` (`CTRL_W = 220.0`), concise tooltips, and shared `render_attr_inactive_reason` SSOT across `Attribute Editor` and `Settings`.
+  - **Bottom Zero-Jump Viewport Toolbar**: Anchored the viewport toolbar to the bottom edge, removed the left empty gap and width-feedback jitter, ordered controls logically (`Active Node | Tools | Settings | ... | CamClip` pinned right), and added concise tooltips.
+  - **Canonical 3-Column Default Layout (`LAYOUT_FILE_VERSION = 2`)**: `Left (320 px)`: `Tabs[Outliner, Materials, Gallery]` over `Takes (340 px)`; `Center`: `Viewport` over `Timeline (220 px)`; `Right (390 px)`: full-height `Tabs[Attribute Editor, Settings]`.
+  - **DLSS Initialization & Progressive Display**: Populated `NVSDK_NGX_PathListInfo` in `ngx` (`SDK_BIN`, exe dir, env roots), staged `nvngx_dlss.dll` next to `WarpBro.exe` on `bootstrap.py b`/`i`, and unblocked `present_shared` from sample 1 when DLSS is enabled.
+
+## 2026-11-08
 
 - **Ecosystem Upgrade (`render-rs@23c01af`, `fractal-rs@21c3f4e`, `egui-widgets-rs@1a621308`)**:
   - Enabled `ThinFilmEnergy::Conserving` by default for non-OFX scenes across both `fractal-kernels` (CUDA) and `sl-studio-render` (WGPU), backed by the 69 curated `standard_surface_bsdf::presets` SSOT and `pt_integrator::studio_abi` / `render_env::studio`.

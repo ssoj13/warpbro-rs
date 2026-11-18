@@ -5,13 +5,11 @@
 The Outliner, Materials gallery, Timeline, and Attribute Editor share UUID-based node selection. Fractals, cameras, lights, environments, groups, and materials belong to the same World document. Material edits use the same Attribute Editor as other node types.
 
 By default, the dock workspace is arranged into three columns:
-- **Left (`390 px`)**: **Outliner** on top and **Materials** (`582 px`) below.
-- **Center**: **Viewport** on top and a bottom strip (`216 px`) split horizontally into **Timeline** and **Takes** (`490 px`).
-- **Right (`437 px`)**: **Attribute Editor** on top and a tabbed pane (`415 px`) below containing **Gallery**, **Material Library**, **Settings**, and **Render / Encode** (active by default).
+- **Left (`320 px`)**: **Outliner**, **Materials**, and **Gallery** (tabbed) on top and **Takes** (`340 px`) below.
+- **Center**: **Viewport** on top and **Timeline** (`220 px`) below. The viewport toolbar sits along the bottom edge with fixed-width controls (`Active Node` badge, `Tools`, `Render / Colour` settings, and `CamClip: 1..5` pinned on the right) so controls never shift during interaction.
+- **Right (`390 px`)**: full-height tabbed **Attribute Editor** and **Settings** (`Display`, `Color`, `Controls`, `Fonts`, `Animation`, `Render & Viewport`). Both panels use color-coded collapsible sections (`CollapsingSection`) and compact `SlimSlider` controls with shared enable/disable rules.
 
 Translate, Rotate, and Scale edit the node's authored transform. Viewport navigation edits the active Camera node: when the camera has no keyframes and Auto Key is off, navigation updates its static pose; once the camera has keyframes on its spatial pose (`/transform/position`, `/transform/rotation_degrees`, `/camera/distance`) or Auto Key is enabled, navigating at another frame keys the new pose (including orbit distance) at that frame. Numeric dragging updates the preview during the gesture and creates one Undo transaction when the gesture completes.
-
-The Attribute Editor retains Playa-style collapsible sections and the existing shared attribute grid. Settings → Controls owns compact row, icon, and numeric-field metrics. The shared layout aligns value columns and preserves the saved label divider when a panel narrows.
 
 ### Pluggable "Fractal" scene node
 

@@ -13,7 +13,7 @@ OutputSettings, их каталог (Profile / Template), маршрутизац
 
 | Вид узла | Собственные параметры | Связи |
 | --- | --- | --- |
-| `RenderSettings` | **Sampling:** samples, resolution scale, adaptive sampling и его параметры.<br>**Denoise:** OIDN denoise.<br>**Limits:** max bounces, max steps, hit epsilon, step factor, glass probes.<br>**Render:** вычислительный бэкенд `Auto / CUDA / WGPU` (`/render/backend`), метод `Fast / Full`, режим отображения `PathTraced / Direct / Bounds` (`/render/display`), `/render/thinning`.<br>**Direct:** `/render/direct/*` (AO, тени, блики, отражения окружения, Fresnel). | Без ссылок |
+| `RenderSettings` | **Sampling:** samples, resolution scale, adaptive sampling и его параметры.<br>**Denoise & Upscaling:** OIDN / OptiX denoise (`enabled`, `engine`, `mode`, `quality`, `interval`) и NVIDIA DLSS Super Resolution (`/render/denoise/dlss`, для CUDA).<br>**Limits:** max bounces, max steps, hit epsilon, step factor, glass probes.<br>**Render:** вычислительный бэкенд `Auto / CUDA / WGPU` (`/render/backend`), метод `Fast / Full`, режим отображения `PathTraced / Direct / Bounds` (`/render/display`), `/render/thinning`.<br>**Direct:** `/render/direct/*` (AO, тени, блики, отражения окружения, Fresnel). | Без ссылок |
 | `ViewportSettings` | **Color (Look SSOT):** exposure (`/render/exposure_stops`), saturation (`/render/saturation`), Reinhard (`/render/reinhard`).<br>**Viewport:** `Auto / Locked`, target FPS, settle delay, batch budget, pause, freeze, видимость и выбираемость по видам объектов (`/viewport/show\|select/<kind>`), `/viewport/extras`. | Moving, Still, Manual → RenderSettings |
 | `OutputSettings` | Формат (EXR / PNG / Video), encoder, ширина и высота, QP / CRF, denoise at completion, PNG encoding, HDR peak, видео из PNG, override OCIO display / view | Без ссылок |
 
@@ -44,8 +44,7 @@ UUID или неподходящий вид узла, недопустимый �
 
 ## Создание и именованные кнопки
 
-Откройте **Settings → Render & Viewport**. Панель показывает назначение Moving, Still, Manual
-и Output, затем каталог render-настроек. В каждой строке слота (**Moving**, **Still**, **Manual**, **Output**) рядом с селектором профиля находится инлайн-селектор **Backend** (`Auto / CUDA / WGPU`), привязанный к `/render/backend` на соответствующем узле `RenderSettings`. Смена бэкенда записывается в узел за один шаг Undo.
+Откройте **Settings → Render & Viewport**. Панель разбита на цветовые сворачиваемые секции (`Profile bindings`, `Render profiles and templates`, `Output file profiles and templates`, `Quality`, `Denoise & Upscaling`, `Viewport pacing`) с едиными правилами активности атрибутов, общими с **Attribute Editor**. В каждой строке слота (**Moving**, **Still**, **Manual**, **Output**) рядом с селектором профиля находится инлайн-селектор **Backend** (`Auto / CUDA / WGPU`), привязанный к `/render/backend` на соответствующем узле `RenderSettings`. Смена бэкенда записывается в узел за один шаг Undo.
 
 Параметры редактируются существующим **Attribute Editor**: те же диапазоны, enums, UUID choices, reset и анимация. Кнопка шестерёнки рядом с назначением открывает нужный узел. Внутри `RenderSettings` секция **Quality** идёт первой и упорядочена по частоте использования (**Sampling** → **Denoise** → **Limits**), за ней следует секция **Render** (**Render** с выбором бэкенда `/render/backend`, метода `Fast / Full`, режима отображения `/render/display` и `/render/thinning` → **Direct**). Внутри `ViewportSettings` секция **Color** (exposure, saturation, Reinhard) расположена над секцией **Viewport**.
 
