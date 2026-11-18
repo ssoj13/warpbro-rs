@@ -553,7 +553,7 @@ impl sl_studio::StudioModule for WarpBroFractalModule {
 
     fn on_register(
         &self,
-        _bus: &sl_studio::node_editor_panel::EventBus,
+        _bus: &sl_studio::EventBus,
         _hotkeys: &mut sl_studio::HotkeyRegistry,
     ) {
         init_warpbro();
