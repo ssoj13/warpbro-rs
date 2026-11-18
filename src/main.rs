@@ -38,7 +38,7 @@ mod test_gpu;
 use std::sync::Arc;
 use std::time::Instant;
 
-use fractal_node::{Bulb, Formula, FractalSceneExt};
+use fractal_node::{Bulb, Formula, FractalSceneExt, Quat};
 use sl_studio::color::{BT2408_SDR_WHITE_NITS, HDR_VIEW};
 use sl_studio::core::fs_name;
 use sl_studio::render::{Batch, Target, validate_size};
@@ -298,7 +298,12 @@ fn main() -> anyhow::Result<()> {
         _ => {
             let bulb = Scene::fractal_preset(Formula::Mandelbulb(Bulb::PRESET))
                 .map_err(anyhow::Error::msg)?;
-            let swatch = bulb.clone();
+            // Quaternion Julia with c = [0; 4] is an exact smooth unit ball, matching `da7ddfa:src/app.rs::material_preview_scene`.
+            let swatch = Scene::fractal_preset(Formula::QuaternionJulia(Quat {
+                constant: [0.0; 4],
+                ..Quat::PRESET
+            }))
+            .map_err(anyhow::Error::msg)?;
             sl_studio::run_with(sl_studio::StudioConfig {
                 title: "WarpBro".into(),
                 initial_scene: Some(bulb),
